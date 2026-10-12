@@ -4,7 +4,7 @@
 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，MIT）打包成**能直接装在
 手机上常驻运行**的安卓 App：内置网关二进制 + 管理面板 + 看门狗 + 保活。
 
-* 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34，当前 **v1.19.0**（versionCode 7）
+* 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34，当前 **v1.20.0**（versionCode 8）
 * 下载：见 [Releases](../../releases) —— 直接装 APK，覆盖安装即升级（账号与 api_key 保留）
 * 一台手机 = 一个 OpenAI 兼容网关：`http://127.0.0.1:7863/v1`（局域网把 127.0.0.1 换成手机 IP）
 
@@ -74,6 +74,8 @@ bash patches/apply_panel_mobile.sh # 改了面板 CSS 之后要重跑（面板�
 * **防冻结三件套**：常驻图层（1×1 全透明悬浮窗，让系统不把我判成缓存态 → 不进 app-freezer，
   治"过一会儿连不上、拉回前台就好"）+ Wi-Fi 高性能锁（局域网场景）+ 冻结自检（顶栏「冻过 N」）
 * **`stopWithTask="false"`**：任务列表划掉不等于停服务（只有通知里的"停止"才真停）
+* **任务中心不再"点了没效果"**：没待办时说明原因（拉取失败 / 每日锁定 / 已领 / 本版无自动化
+  动作），拉取失败在扫描结果里是**红行 + 上游报错**，而不是一句绿色的"没有待办任务"
 * **状态判定按事实**：后台线程探 `127.0.0.1:7863`，端口在服务就是「运行中」；没起来就在第三行
   直接写明原因（不再靠猜中文状态串）
 * **前台服务用 `specialUse`**：`dataSync` 在 Android 15+ 有 6 小时/天上限，对 7×24 网关是致命的

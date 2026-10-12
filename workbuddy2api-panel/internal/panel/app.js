@@ -1671,7 +1671,8 @@ $('btnRunQueue').onclick = async () => {
   b.disabled = true; b.textContent = '启动中…';
   try {
     const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc }) });
-    if (!r.started) { toast(r.message || '没有待办任务', 'ok'); return; }
+    // level=err 时服务端已判定"确实出问题了"（如账号拉取失败）→ 弹红，别再伪装成"没有待办"
+    if (!r.started) { toast(r.message || '没有待办任务', r.level === 'err' ? 'err' : 'ok'); return; }
     lastQueueSeq = r.seq || 0;
     toast('队列已启动：' + r.total + ' 项（并发 ' + conc + '）', 'ok');
     startQueuePolling();
@@ -1683,6 +1684,11 @@ function groupItems(d) {
   const groups = [];
   for (const a of (d.accounts || [])) {
     const rows = [];
+    // 拉取失败以前完全不显示 → 点「扫描待办」看着啥事没有。现在是一条红行 + 原因。
+    if (a.growth_error) {
+      rows.push({ kind: 'growth', code: '', title: '拉取任务失败', prog: '—',
+                  status: 'error', message: a.growth_error });
+    }
     for (const t of (a.growth || [])) {
       GROWTH_TITLES[t.task_code] = t.title || t.task_code;
       rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan' });
@@ -1694,11 +1700,11 @@ function groupItems(d) {
 const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行' };
 function qrowHTML(it) {
   const isSchool = it.kind === 'school';
-  const title = isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code);
+  const title = it.title || (isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code));
   const dotCls = it.status === 'scan' ? 'wait' : it.status === 'running' ? 'run' : it.status === 'error' ? 'err' : it.status === 'skipped' ? 'skip' : it.status === 'done' ? 'done' : 'wait';
   const stWord = it.status === 'scan' ? '待执行' : (ST_WORDS[it.status] || it.status);
   return '<div class="qrow" title="' + esc(it.message || '') + '">' +
-    '<span class="code">' + esc(it.code) + '</span>' +
+    '<span class="code">' + esc(it.code || '—') + '</span>' +
     '<span class="name"><span class="t">' + esc(title) + '</span>' + (isSchool ? '<span class="tag mute">开学季</span>' : '') + '</span>' +
     '<span class="prog">' + esc(it.prog || '') + '</span>' +
     '<span class="st"><span class="qdot ' + dotCls + '"></span>' + stWord + '</span>' +

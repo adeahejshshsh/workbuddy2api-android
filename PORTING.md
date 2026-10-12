@@ -501,6 +501,71 @@ Android 12+ 引入了 app-freezer：系统把处于**缓存态**的 App 整组�
 3. 若仍会被冻：把 App 从最近任务里"锁定"（各 ROM 叫法不同），或干脆把屏幕常亮关掉后
    用「屏幕关闭时保持 Wi-Fi 连接」系统选项配合
 
+---
+
+# 十二、任务中心"执行待办没效果"（v1.20.0）
+
+## 12.1 根因：队列路径把错误吞了，还伪装成"没有待办"
+
+`startGrowthQueue`（`执行全部待办` 与每日调度器共用同一个核心）里，拉取任务列表**失败**的账号
+被静默跳过：
+
+```go
+if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {   // ← err != nil 时什么都不做
+```
+
+于是"上游挂了/token 失效"与"确实没事可做"走同一个出口 `全部账号没有待办任务`，而前端
+`if (!r.started)` 把它弹成**绿色 ok** —— 用户看到的就是"点了没效果"，且无从得知到底是
+token 失效、每日锁（Sequential 族零点解锁）、已领过，还是**本移植版没有该任务码的自动化动作**
+（`growthPending` 要求 `autoActionFor(code) != nil`，不满足的直接从列表消失）。
+
+另外 `扫描待办`（`tasksScanAll`）**是**返回每账号 `growth_error` 的，但前端 `groupItems()`
+只渲染 `a.growth` —— 错误同样看不见。
+
+## 12.2 改法
+
+| 位置 | 改动 |
+|---|---|
+| `internal/panel/taskcenter.go` | 新增 `queueDiag{errs,locked,claimed,noauto,gated}` + `explain()`：扫描时顺手记账，无待办时拼成人话；`startGrowthQueue` 多返回一个 `level` |
+| 同上（HTTP） | `run_queue` 响应加 `level`：`err` = 真有账号拉取失败，其余 `ok` |
+| `internal/panel/app.js` | 按 `level` 选弹窗颜色；`groupItems()` 把 `growth_error` 渲染成**红行 + 原因**；`qrowHTML` 支持 `it.title` 覆盖标题 |
+| `taskcenter.go` | `errBrief()` 压平空白 + 截断 140 字 —— 上游报错常是 HTML，换行会把提示撑成多行 |
+
+**为什么必须在服务端判定**：把"没事可做"和"出错了"分开是**语义**问题，前端只能照 `level` 上色；
+否则换个前端又退化成一种颜色，"点了没效果"复发。
+
+## 12.3 怎么复现/验证（不需要真账号）
+
+```bash
+S=$PREFIX; D=$S/tmp/tc; rm -rf $D; mkdir -p $D/auths
+cd $D && timeout 3 /system/bin/linker64 $S/lib/workbuddy2api/server -config config.json   # 生成推荐配置
+sed -i 's/:7863/:7999/' config.json
+cat > auths/workbuddy-fake.json <<'J'
+{"auth":{"accessToken":"bogus-token","refreshToken":"r","expiresAt":1900000000,"domain":""},
+ "account":{"uid":"fake-uid-0001","nickname":"测试账号（坏token）"}}
+J
+/system/bin/linker64 $S/lib/workbuddy2api/server -config config.json &
+KEY=$(python3 -c "import json;print(json.load(open('config.json'))['api_key'])")
+curl -sS -XPOST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{}' \
+     localhost:7999/panel/api/tasks/run_queue
+# 期望：{"started":false,"level":"err",
+#       "message":"没有可执行待办 —— 1 个账号拉取任务失败：测试账号（坏token）：upstream client (http 401)…"}
+curl -sS -XPOST -H "Authorization: Bearer $KEY" localhost:7999/panel/api/tasks/scan_all
+# 期望：accounts[0].growth_error 带同样的 401（前端会渲染成红行）
+```
+
+⚠️ **端口一律别用 7863**：那是用户自己跑着的实例，任何测试另起端口（本仓统一用 7999）。
+
+## 12.4 面板 JS 怎么自检（本机 node 不能直接 exec）
+
+`go test ./internal/panel/` 里那批 `TestAppJS*` 在本机全挂，原因是 `fork/exec .../node:
+permission denied`（SELinux 不让 DSH uid 直接 exec node），**不是 JS 语法问题**。自检走 linker 代跑：
+
+```bash
+/system/bin/linker64 $PREFIX/bin/node --check internal/panel/app.js   # 语法 ✓
+```
+
+
 
 
 

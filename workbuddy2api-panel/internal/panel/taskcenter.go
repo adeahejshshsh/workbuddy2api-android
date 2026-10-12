@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,62 @@ func growthPending(t upstream.Task) bool {
 		return autoActionFor(t.TaskCode) != nil
 	}
 	return autoActionFor(t.TaskCode) != nil
+}
+
+// queueDiag 「执行全部待办」扫描阶段的诊断账：为什么某项没进待办。
+//
+// 为什么要有它：这些原因以前全被吞掉，界面上只剩一句「全部账号没有待办任务」——
+// 用户看到的就是"点了没效果"，既不知道是**拉取失败**、还是被**每日锁**、
+// 还是这个任务码本移植版**没有对应的自动化动作**（后两种都不该被当成故障）。
+type queueDiag struct {
+	errs    []string // 拉取任务列表失败（账号名 + 错误摘要）
+	locked  int      // 上游今日锁定（Sequential 族零点解锁一环）
+	claimed int      // 已领取
+	noauto  int      // 本移植版暂无该任务码的自动化动作
+	gated   int      // 不参与：已停用 / global / 企业版账号
+}
+
+// explain 出人话原因 + 给前端定弹窗颜色（"err" = 确实出问题了，"ok" = 单纯没事可做）。
+func (d queueDiag) explain() (string, string) {
+	level := "ok"
+	var parts []string
+	if n := len(d.errs); n > 0 {
+		level = "err"
+		if n <= 3 {
+			parts = append(parts, fmt.Sprintf("%d 个账号拉取任务失败：%s", n, strings.Join(d.errs, "；")))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d 个账号拉取任务失败：%s 等", n, strings.Join(d.errs[:3], "；")))
+		}
+	}
+	if d.locked > 0 {
+		parts = append(parts, fmt.Sprintf("%d 项处于每日锁定（Sequential 族零点解锁，建议 0 点后再点）", d.locked))
+	}
+	if d.claimed > 0 {
+		parts = append(parts, fmt.Sprintf("%d 项已领取", d.claimed))
+	}
+	if d.noauto > 0 {
+		parts = append(parts, fmt.Sprintf("%d 项本移植版暂无自动化动作（可在账号页手动处理）", d.noauto))
+	}
+	if d.gated > 0 {
+		parts = append(parts, fmt.Sprintf("%d 个账号不参与（停用 / global / 企业版）", d.gated))
+	}
+	if len(parts) == 0 {
+		return "全部账号没有待办任务", level
+	}
+	return "没有可执行待办 —— " + strings.Join(parts, "；"), level
+}
+
+// errBrief 错误摘要：压平空白（上游报错常带 HTML/JSON，换行会把提示撑成多行）
+// 并截断到 140 字符。
+func errBrief(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := strings.Join(strings.Fields(err.Error()), " ")
+	if len(s) > 140 {
+		s = s[:140] + "…"
+	}
+	return s
 }
 
 // tasksScanAll 扫描全部账号：成长任务（未完成+可自动化，含 mp 口径合并）。
@@ -166,22 +223,25 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	if body.Concurrency > 4 {
 		body.Concurrency = 4
 	}
-	started, total, seq, msg := p.startGrowthQueue(body.Concurrency, body.Growth)
+	started, total, seq, msg, lvl := p.startGrowthQueue(body.Concurrency, body.Growth)
 	switch {
 	case seq == -1:
 		writeErr(w, http.StatusConflict, msg)
 	case !started:
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": msg})
+		// level 让前端把"真出错"和"单纯没事可做"弹成两种颜色（以前全是绿色 ok，
+		// 拉取失败也显示成"没有待办任务" —— 那才是"点了没效果"的观感来源）。
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": msg, "level": lvl})
 	default:
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": total, "seq": seq})
 	}
 }
 
 // startGrowthQueue 扫描全部账号待办并启动队列（HTTP「执行全部待办」与调度器
-// growth 时点共用核心）。返回 (started, total, seq, msg)：seq==-1 表示队列
-// 已在执行（冲突）；started=false 时 msg 为无可执行待办的说明。并发夹取
+// growth 时点共用核心）。返回 (started, total, seq, msg, level)：seq==-1 表示队列
+// 已在执行（冲突）；started=false 时 msg 为**讲清楚为什么**的说明（level 供前端
+// 决定弹窗颜色：err=确实出问题了，ok=单纯没事可做）。并发夹取
 // [1,4]；growth 开关同 HTTP 入参语义。
-func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, total int, seq int, msg string) {
+func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, total int, seq int, msg string, level string) {
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -192,7 +252,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	q.mu.Lock()
 	if q.running {
 		q.mu.Unlock()
-		return false, 0, -1, "队列正在执行中（可在任务中心查看进度）"
+		return false, 0, -1, "队列正在执行中（可在任务中心查看进度）", "ok"
 	}
 	// 先占位：扫描（数秒级网络耗时）期间若并发再次触发，直接命中上面的 running
 	// 判拒，避免两个 goroutine 同时启动互相覆盖 q.items/q.seq。无待办时回滚。
@@ -206,12 +266,19 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	var accts []queueAccount
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var dg queueDiag
 	for _, st := range states {
 		if st.Disabled {
+			mu.Lock()
+			dg.gated++
+			mu.Unlock()
 			continue
 		}
 		a := p.cfg.Pool.AuthByUID(st.UID)
 		if a == nil {
+			mu.Lock()
+			dg.gated++
+			mu.Unlock()
 			continue
 		}
 		wg.Add(1)
@@ -220,18 +287,42 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 			one := queueAccount{a: a}
 			// D4 门控：global 账号无 CN 成长任务体系，不发起任何上游调用。
 			if a.IsGlobal() {
+				mu.Lock()
+				dg.gated++
+				mu.Unlock()
 				return
 			}
 			// 企业版门控：同上（企业版无个人成长体系，任务端点上游一律 403）。
 			if a.IsEnterprise() {
+				mu.Lock()
+				dg.gated++
+				mu.Unlock()
 				return
 			}
 			if growth {
-				if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
+				tasks, err := p.cfg.Upstream.ListTasks(a)
+				if err != nil {
+					// 关键：以前这里静默吞掉 → 界面只会说"没有待办任务"，
+					// 看着就像按钮没生效。现在记进诊断账，会原样报给用户。
+					mu.Lock()
+					dg.errs = append(dg.errs, a.Nickname+"："+errBrief(err))
+					mu.Unlock()
+				} else {
 					for _, t := range tasks {
 						if growthPending(t) {
 							one.grow = append(one.grow, t)
+							continue
 						}
+						mu.Lock()
+						switch {
+						case t.Claimed:
+							dg.claimed++
+						case t.Locked:
+							dg.locked++
+						case autoActionFor(t.TaskCode) == nil:
+							dg.noauto++
+						}
+						mu.Unlock()
 					}
 					// 合并小程序口径待办（与 tasksScanAll 同口径：mp 列表是默认口径
 					// 超集，按 code 去重；失败静默）。此前此处漏合并——扫描显示
@@ -269,12 +360,13 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 		}
 	}
 	if len(items) == 0 {
-		log.Printf("panel: 队列启动：无可执行待办（全部账号任务已完成）")
+		msg, level = dg.explain()
+		log.Printf("panel: 队列启动：无可执行待办（%s）", msg)
 		q.mu.Lock()
 		q.running = false
 		q.startedAt = time.Time{}
 		q.mu.Unlock()
-		return false, 0, 0, "全部账号没有待办任务"
+		return false, 0, 0, msg, level
 	}
 
 	q.mu.Lock()
@@ -286,7 +378,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 
 	go p.runQueueItems(accts, items, concurrency)
 	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v）", len(items), concurrency, growth)
-	return true, len(items), seq, ""
+	return true, len(items), seq, "", "ok"
 }
 
 // RunGrowthQueueOnce 调度器 growth 时点回调（sch.SetGrowthHook 挂载）：与
@@ -294,7 +386,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 // 每日零点解锁一环，此前只能手动扫描推进；此回调让链条每天自动走一环。
 // 异步执行（startGrowthQueue 启动 goroutine 即返），已在跑/无待办安全跳过。
 func (p *Panel) RunGrowthQueueOnce() {
-	started, total, _, _ := p.startGrowthQueue(1, true)
+	started, total, _, _, _ := p.startGrowthQueue(1, true)
 	if started {
 		log.Printf("panel: 定时成长任务队列已启动（%d 项）", total)
 	}
