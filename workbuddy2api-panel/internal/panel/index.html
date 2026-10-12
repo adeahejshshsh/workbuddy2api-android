@@ -69,11 +69,6 @@ body {
 .ln .lch.c-chat { background: var(--ok-soft); color: var(--ok); }
 .ln .lch.c-sys { background: var(--surface-2); color: var(--ink-3); }
 
-/* 任务中心 */
-.tc-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 42px 16px; color: var(--ink-3); }
-.tc-empty svg { width: 42px; height: 42px; opacity: .55; margin-bottom: 6px; }
-.tc-empty .t { font-weight: 550; color: var(--ink-2); }
-.tc-empty .d { font-size: 12.5px; max-width: 34em; text-align: center; }
 .sel-note { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); white-space: nowrap; flex: none; }
 .sel-note select {
   appearance: none; -webkit-appearance: none;
@@ -81,37 +76,6 @@ body {
   border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
   font: 550 12px var(--sans); padding: 3px 24px 3px 9px; cursor: pointer;
 }
-.qprog { display: flex; align-items: center; gap: 12px; padding: 12px 16px 0; }
-.qprog .qbar { flex: 1; height: 4px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
-.qprog .qbar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .5s ease; }
-.qprog .note { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.qgroup { padding: 4px 0 10px; }
-.qgroup + .qgroup { border-top: 1px solid var(--line-soft); }
-.qgroup header {
-  display: flex; align-items: baseline; gap: 9px; padding: 10px 16px 6px;
-  background: none; border: none; box-shadow: none;
-}
-.qgroup header .nm { font-weight: 600; font-size: 13.5px; }
-.qgroup header .cnt { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.qrow {
-  display: grid; grid-template-columns: 118px 1fr 52px 84px minmax(120px, 240px);
-  gap: 10px; align-items: center; padding: 7.5px 16px; font-size: 13px;
-}
-.qrow:hover { background: var(--surface-2); }
-.qrow .code { font: 11.5px/1.35 var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.qrow .name { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.qrow .name .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.qrow .prog { font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; }
-.qrow .st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.qrow .msg { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.qdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-.qdot.done { background: var(--ok); }
-.qdot.run { background: var(--accent); animation: qpulse 1.2s ease-in-out infinite; }
-.qdot.wait { background: none; border: 1.5px solid var(--ink-3); }
-.qdot.err { background: var(--bad); }
-.qdot.skip { background: var(--ink-3); }
-@keyframes qpulse { 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) { .qdot.run { animation: none; } }
 .srow { display: grid; grid-template-columns: minmax(150px, 210px) 1fr auto; gap: 14px; align-items: center; padding: 13px 16px; }
 .srow + .srow { border-top: 1px solid var(--line-soft); }
 .srow .who .nm { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -348,29 +312,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .dots::after { content: "…"; animation: blink 1.2s steps(4) infinite; }
 @keyframes blink { 0% { opacity: 1; } 50% { opacity: .3; } 100% { opacity: 1; } }
 
-/* ── 券码弹窗（票券式卡片，类名全部 vc- 前缀防越界）────────────────── */
-.vc-acct { display: flex; align-items: baseline; gap: 7px; margin: 18px 2px 8px;
-  font-size: 12px; color: var(--ink-3); }
-.vc-acct:first-child { margin-top: 4px; }
-.vc-acct .nm { font-weight: 650; font-size: 13px; color: var(--ink-2); }
-.vc { border: 1px solid var(--line); border-radius: 11px; overflow: hidden; margin: 0 0 10px;
-  background: var(--surface); transition: border-color .15s; }
-.vc:hover { border-color: var(--accent); }
-.vc .hd { display: flex; align-items: center; gap: 8px; padding: 12px 14px 4px; }
-.vc .hd .nm { font-weight: 640; font-size: 14px; }
-.vc .hd .tag { margin-left: auto; }
-.vc .meta { padding: 2px 14px 10px; font-size: 11.5px; color: var(--ink-3); }
-.vc .sep { border-top: 1px dashed var(--line); margin: 0 12px; }
-.vc .ft { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
-.vc .ft .lab { font-size: 11.5px; color: var(--ink-3); flex: none; }
-.vc .ft code { font: 600 15px/1 var(--mono); letter-spacing: 1.2px; user-select: all;
-  background: var(--surface-2); border: 1px solid var(--line-soft);
-  border-radius: 7px; padding: 7px 12px; }
-.vc .ft .acts { margin-left: auto; display: flex; gap: 8px; flex: none; }
-.vc .vc-qr { border-top: 1px dashed var(--line); padding: 14px; display: flex; justify-content: center; }
-.vc .vc-qr svg { border-radius: 6px; }
-/* 过期态：只淡标题与元信息（保持券码可读），边框改虚线示意作废 */
-.vc.expired { border-style: dashed; }
 .vc.expired .hd, .vc.expired .meta { opacity: .55; }
 
 /* ── Toast ───────────────────────────────────────────────────────── */
@@ -596,7 +537,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
      ① .nav 的 7 个 tab 只露出 4 个，另外 3 个 off-screen（要横滑才够得着）
      ② .nav 窄屏被改成 position:static → 页面往下滚就没了入口
      ③ button 高 34px、button.xs 高 26px → 手指点不准（目标 ≥40/32px）
-     ④ .qrow(118px 1fr 52px 84px minmax(120,240)) 与 .srow/.shead(150px 1fr auto)
+     .srow/.shead(150px 1fr auto)
         是固定列宽网格，且**不在横向滚动容器里** → 把整页撑出横向滚动条
      ⑤ .view 左右各 24px + .acc min-width 640px → 360px 屏白扔 13% 宽度
      ⑥ .veil.on 居中 + 20px 内边距，弹层在手机上偏窄 → 改底部抽屉更顺手 */
@@ -625,8 +566,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   select.xs { min-height: 32px; padding: 6px 10px; }
 
   /* ④ 固定列宽网格 → 能收缩的两列，别再撑出横向滚动条 */
-  .qrow { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; padding: 9px 12px; }
-  .qrow .code, .qrow .msg { grid-column: 1 / -1; }
   .srow, .shead { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; padding: 11px 12px; }
   .shead .stasks, .srow .stasks { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
@@ -651,11 +590,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
   .dlg header, .dlg .body, .dlg footer { padding-left: 14px; padding-right: 14px; }
+  .acts, .savebar { flex-wrap: wrap; }
 }
 
 @media (max-width: 560px) {
   .nav a { font-size: 12px; padding: 7px 7px; }
-  .qprog, .acts, .savebar { flex-wrap: wrap; }
   .dlg .tabs { margin-left: 0; }
 }
 /* ══ DSH-MOBILE-PATCH-END ══ */
@@ -678,9 +617,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#packages" data-view="packages">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/></svg>
         积分构成</a></li>
-      <li><a href="#taskscenter" data-view="taskscenter">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v9H8l-3 3v-3H3z"/><path d="M6 6.5h4M6 9h2.5"/></svg>
-        任务中心</a></li>
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
@@ -772,51 +708,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
     </section>
 
-    <!-- 任务中心 -->
-    <section class="view" id="view-taskscenter" hidden>
-      <div class="box">
-        <header>
-          <h3>成长任务队列 <span class="hint" id="qcSummary"></span></h3>
-          <span class="grow"></span>
-          <button class="xs" id="btnSchoolVouchers" title="开学季抽奖抽中的第三方券码（活动已结束，历史券码仍可查）">查询券码</button>
-          <label class="sel-note">并发
-            <select id="qcConc"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select>
-          </label>
-          <button class="xs" id="btnScanAll">扫描待办</button>
-          <button class="xs primary" id="btnRunQueue">执行全部待办</button>
-        </header>
-        <!-- 跳过名单（v1.22.0）：任务中心只做"能做得了的"。尝试型=上游未证实可点亮，
-             默认不执行；反复无效的 (账号,任务码) 自动跳过（7 天后自动重试）。 -->
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 0 8px">
-          <label class="sel-note" title="尝试型 = 上游未证实可点亮（Sequential 预留项、夜猫子等）；默认不执行，避免“跑了也没效果”">
-            <input type="checkbox" id="qcAttempt"> 包含尝试型任务
-          </label>
-          <span class="note" id="qcSkipInfo">跳过名单：—</span>
-          <span class="grow"></span>
-          <button class="xs" id="btnSkipClear" title="清空“反复执行仍无进展”的跳过记录，让它们重新进待办再试一轮">清空跳过名单</button>
-        </div>
-        <div class="qprog" id="qProg" hidden>
-          <div class="qbar"><i id="qBarFill"></i></div>
-          <span class="note" id="qProgText"></span>
-        </div>
-        <div class="tc-empty" id="tcEmpty">
-          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <rect x="8" y="6" width="24" height="36" rx="3"/>
-            <path d="M14 16h12M14 24h12M14 32h7" opacity=".45"/>
-            <circle cx="35" cy="33" r="8"/><path d="m40 38 5 5"/>
-          </svg>
-          <div class="t">还没有扫描过</div>
-          <div class="d">扫描所有账号的成长任务与开学季待办，把没做的排成一列，一键执行。</div>
-        </div>
-        <div id="qcList"></div>
-      </div>
-    </section>
-
     <!-- 模型与档位 -->
     <section class="view" id="view-models" hidden>
       <div class="box">
-        <header>
-          <h3>模型能力 <span class="hint">max_tokens bug已修复目前可以正常透传最大输出,但是官方返回的最大输出仅为参考，不保证完全正确
           </span></h3>
           <span class="grow"></span>
           <span class="note" id="mdNote">实时查询上游</span>
@@ -1035,14 +929,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="balance_refresh_minutes" type="number" min="1" placeholder="5"></label>
             </div>
             <div class="hr"></div>
-            <div class="grid2">
-              <div class="switch"><span class="lb">成长任务自动执行</span>
-                <input type="checkbox" name="growth_enabled" checked></div>
-              <label class="fld"><span class="lb">执行时点（小时，逗号分隔）</span>
-                <input name="growth_hours" placeholder="1">
-                <span class="hint">每日到点自动「扫描 + 执行全部待办」（Sequential 任务链零点解锁后自动推进，建议零点后）</span></label>
-            </div>
-            <div class="hr"></div>
             <div class="switch"><span class="lb">保号任务覆盖已禁用账号</span>
               <input type="checkbox" name="include_disabled_in_tasks"></div>
             <div class="hint">禁用只关选号：打开后已禁用的账号仍会签到 / 活跃上报 / 保活 / 刷新余额（依旧不参与选号）。适合「一次只放开一个账号、用禁用做流量开关」的轮换养号用法，默认关闭。<br>若只想让<b>单个</b>账号临时退出选号但保留保号，直接用账号行的「<b>暂停选号</b>」按钮（账号级，无需打开本开关）。</div>
@@ -1249,23 +1135,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button id="btnTaskAutoAll" class="primary">一键完成可自动任务</button>
       <button id="btnTaskReload">重新查询</button>
       <button id="btnCloseTask">关闭</button>
-    </footer>
-  </div>
-</div>
-
-<!-- 开学季券码 -->
-<div class="veil" id="vcVeil">
-  <div class="dlg">
-    <header>
-      <h3>开学季 · 我的券码</h3>
-      <div class="hint">抽奖抽中的第三方券（KFC / 瑞幸 / 酷狗等），券码到店到对应app/小程序兑换。</div>
-    </header>
-    <div class="body" id="vcBody"></div>
-    <footer>
-      <span class="hint" id="vcNote"></span>
-      <span class="grow"></span>
-      <button class="xs" id="btnVcRefresh">刷新</button>
-      <button class="xs primary" id="btnVcClose">关闭</button>
     </footer>
   </div>
 </div>

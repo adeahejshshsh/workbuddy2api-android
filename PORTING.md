@@ -503,6 +503,8 @@ Android 12+ 引入了 app-freezer：系统把处于**缓存态**的 App 整组�
 
 ---
 
+> **v1.23.0 起任务中心已整体下线**（本节为当时的诊断记录）。
+
 # 十二、任务中心"执行待办没效果"（v1.20.0）
 
 ## 12.1 根因：队列路径把错误吞了，还伪装成"没有待办"
@@ -580,7 +582,7 @@ permission denied`（SELinux 不让 DSH uid 直接 exec node），**不是 JS �
 | 文件 | 谁写 | 内容 | 轮转 |
 |---|---|---|---|
 | `files/logs/app.log` | `GatewayService.appLog()` | **只有 App 知道的事**：服务启动 startId、App 进程被杀次数、前台服务被拒启动的原因、拉起网关的 mode/pid、网关退出码、**冻结检测**（冻了 N 秒）、看门狗自愈、常驻图层失败、onTaskRemoved、FGS 超时回收、JobScheduler 触发、保活三件套状态 | 512KB → `app.log.1` |
-| `files/gateway/data/server.log` | 网关进程自己（stdout+stderr） | 任务中心每个动作、上游 HTTP 状态、chat 流水行、账号 token 失效、队列启动/结束 | 每次拉起前若 >4MB → `server.log.1` |
+| `files/gateway/data/server.log` | 网关进程自己（stdout+stderr） | 成长任务每个动作、上游 HTTP 状态、chat 流水行、账号 token 失效、队列启动/结束 | 每次拉起前若 >4MB → `server.log.1` |
 
 **为什么必须分两个**：网关日志能说明"任务做了什么、上游回了什么"，但"系统什么时候冻了我/杀了我、
 前台服务有没有被拒"只有 App 进程知道 —— 分开写才不会互相冲掉。
@@ -611,6 +613,9 @@ adb shell run-as com.dsh.wb2api cat files/gateway/data/server.log | tail -80
 ```
 
 ---
+
+> **v1.23.0 起本节功能已从面板整体下线**（视图 / 路由 / 每日自动执行钩子全删，见变更记录）。
+> 下面保留为实现记录，需要时可按本节把接线接回去。
 
 # 十四、任务中心：只做能做得了的（v1.22.0）
 
