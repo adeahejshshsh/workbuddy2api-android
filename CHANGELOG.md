@@ -1,6 +1,15 @@
 # 变更记录
 
-## v1.22.0（当前）
+## v1.22.1（当前）
+
+* **拆掉「日志」芯片**：动作条恢复成 4 个胶囊（重启网关 / 复制密钥 / 保活设置 / 重载面板），
+  日志入口与日志页（`openLog` / `tailOf` / `mask` / 复制按钮）一并删除，横向滚动容器也撤了 ——
+  界面回到 v1.20.0 的样子。
+  * **后端日志照旧写**（不占界面、不额外耗电）：网关 stdout/stderr →
+    `files/gateway/data/server.log`（超 4MB 翻代），App 事件 → `files/logs/app.log`（超 512KB 翻代）。
+    要看得走 adb：`adb shell run-as com.dsh.wb2api cat files/gateway/data/server.log | tail -80`。
+
+## v1.22.0
 
 * **任务中心只做"能做得了的"** —— 以前「执行全部待办」里混着一批**上游未证实能点亮**的任务
   （`Sequential_Tasks_4~7` 预留项、`black_cat` 夜猫子），跑完不完成、还天天出现在待办里，

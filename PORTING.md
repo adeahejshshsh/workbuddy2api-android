@@ -585,12 +585,13 @@ permission denied`（SELinux 不让 DSH uid 直接 exec node），**不是 JS �
 **为什么必须分两个**：网关日志能说明"任务做了什么、上游回了什么"，但"系统什么时候冻了我/杀了我、
 前台服务有没有被拒"只有 App 进程知道 —— 分开写才不会互相冲掉。
 
-## 13.3 日志页怎么实现的（几个要点）
+## 13.3 日志页（v1.21.0 有、**v1.22.1 已按用户要求拆掉**）
 
-* 只读**尾部**：`RandomAccessFile.seek(len - want)` + 丢掉首个残行，最多 512KB / 600 行。
-  不整读 —— 网关日志能到几 MB，整读会 OOM。
-* **脱敏**：复制出去前把 `Bearer …` / `wb2api-…` / `sk-…` 打码，用户可以把日志直接贴到公开处。
-* 动作条包进 `HorizontalScrollView`：芯片加到 5 个也不会被窄屏裁掉。
+* v1.21.0 加了顶栏「日志」芯片：一页看全 ① App 事件 + ② 网关日志尾部，带「复制全部」+ 自动脱敏。
+* **v1.22.1 删除**：动作条回到 4 个胶囊，`openLog` / `copyText` / `tailOf` / `mask` 与
+  `HorizontalScrollView` 容器一并移除。**文件照旧写**（不占界面）：
+  `files/logs/app.log`（512KB 翻代）、`files/gateway/data/server.log`（4MB 翻代）。
+  要看得用 adb：`adb shell run-as com.dsh.wb2api cat files/logs/app.log`。
 
 ## 13.4 "执行过了但还是未完成"该在日志里找什么
 
@@ -606,7 +607,7 @@ permission denied`（SELinux 不让 DSH uid 直接 exec node），**不是 JS �
 
 ```bash
 adb shell run-as com.dsh.wb2api cat files/gateway/data/server.log | tail -80
-# 没 adb 就在 App 里点顶栏「日志」→「复制全部」，直接发给作者
+# App 事件日志（冻/杀/拒启动/兜底）：files/logs/app.log
 ```
 
 ---
