@@ -27,20 +27,22 @@ VER=$(grep -o 'android:versionName="[^"]*"' "$WS/apk-src/AndroidManifest.xml" | 
 echo "== 目标仓库: $OWNER/$NAME    版本: v$VER"
 
 echo "== 1/5 暂存到 $STAGE（排除密钥/运行数据/日志/成品 APK）"
-if [ -d "$STAGE/.git" ]; then
-  find "$STAGE" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-else
-  mkdir -p "$STAGE"
-fi
-cp -a "$WS/." "$STAGE/"
-rm -rf "$STAGE/.git" \
-       "$STAGE/workbuddy2api-panel/.git" \
-       "$STAGE/workbuddy2api-panel/data" \
-       "$STAGE/workbuddy2api-panel/auths" \
-       "$STAGE/workbuddy2api-panel/config.json" \
-       "$STAGE/apk-src/wb2api.keystore" \
-       "$STAGE/WorkBuddy2API.apk" "$STAGE/WorkBuddy2API.apk.idsig" \
-       "$STAGE/.panel-ip"
+mkdir -p "$STAGE"
+# 清掉上一轮的普通文件，但**必须留住 .git**（留住才能累加历史、不用每次强推）
+[ -d "$STAGE/.git" ] && find "$STAGE" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+# 用 tar 拷（--exclude 排除工作区里可能存在的 .git，别把暂存库的 .git 冲掉）
+tar -C "$WS" \
+    --exclude=./.git \
+    --exclude=./workbuddy2api-panel/.git \
+    --exclude=./workbuddy2api-panel/data \
+    --exclude=./workbuddy2api-panel/auths \
+    --exclude=./workbuddy2api-panel/config.json \
+    --exclude=./apk-src/wb2api.keystore \
+    --exclude=./WorkBuddy2API.apk \
+    --exclude=./WorkBuddy2API.apk.idsig \
+    --exclude=./.panel-ip \
+    -cf - . | tar -C "$STAGE" -xf -
+[ -d "$STAGE/.git" ] && echo "  （沿用已有 .git，历史可累加）"
 
 echo "== 1.5/5 敏感串扫描（命中就中止）"
 TOKEN="$TOKEN" STAGE="$STAGE" python3 - <<'PY'
