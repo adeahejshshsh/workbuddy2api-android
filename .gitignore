@@ -1,0 +1,31 @@
+# 本机跑出来的东西一律不进库（本机数据、密钥、日志、成品 APK）
+# 上游 workbuddy2api-panel/.gitignore 已经排除了 auths/ data/ config.json *.key
+# 这里再加严一层。
+
+# 本机运行数据（日志里有 IP/UA/账号信息）
+workbuddy2api-panel/data/
+workbuddy2api-panel/auths/
+workbuddy2api-panel/config.json
+workbuddy2api-panel/backups/
+
+# 密钥与签名
+apk-src/wb2api.keystore
+*.keystore
+*.jks
+*.idsig
+
+# 成品与构建中间物（APK 走 Releases 分发，不进 git 历史）
+WorkBuddy2API.apk
+*.apk
+*.apk.unsigned
+classes.dex
+test-out/
+build/
+
+# 本机临时/杂物
+.panel-ip
+*.tmp
+*.log
+*.pid
+data/
+docs/*.tmp

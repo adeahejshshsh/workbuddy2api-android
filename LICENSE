@@ -1,0 +1,34 @@
+MIT License
+
+Copyright (c) 2026 Sliverkiss (original project: https://github.com/Sliverkiss/workbuddy2api)
+Copyright (c) 2026 WorkBuddy2API Android port
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+本仓库内容分两部分，同以 MIT 授权：
+
+* `workbuddy2api-panel/` —— 上游服务端与面板源码（来自
+  https://github.com/linguo2625469/workbuddy2api-panel，
+  原作者 https://github.com/Sliverkiss/workbuddy2api），另见该目录内的 `LICENSE`。
+* `apk-src/`、`patches/`、`run.sh`、`rebuild.sh`、`watchdog.sh`、`PORTING.md`
+  —— 安卓自托管移植部分。
+
+本仓库不含任何账号凭据、签名密钥或本机运行数据。

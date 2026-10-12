@@ -1,0 +1,71 @@
+/* ══ 手机端补丁（DSH 移植）════════════════════════════════════════════
+   上游本身已经有 viewport meta + 五组 media query（作者是适配过的），
+   所以这里**不是重写**：只补窄屏实测会出问题的六处，一行都不碰 JS，
+   也完全不影响桌面端（全部包在 ≤760px / ≤560px 里）。
+
+   实测依据（360px 视口打开 /panel/ 的 DOM 快照 + CSS 逐条比对）：
+     ① .nav 的 7 个 tab 只露出 4 个，另外 3 个 off-screen（要横滑才够得着）
+     ② .nav 窄屏被改成 position:static → 页面往下滚就没了入口
+     ③ button 高 34px、button.xs 高 26px → 手指点不准（目标 ≥40/32px）
+     ④ .qrow(118px 1fr 52px 84px minmax(120,240)) 与 .srow/.shead(150px 1fr auto)
+        是固定列宽网格，且**不在横向滚动容器里** → 把整页撑出横向滚动条
+     ⑤ .view 左右各 24px + .acc min-width 640px → 360px 屏白扔 13% 宽度
+     ⑥ .veil.on 居中 + 20px 内边距，弹层在手机上偏窄 → 改底部抽屉更顺手 */
+
+@media (max-width: 760px) {
+  /* ①② 导航：sticky 常驻 + 换行铺满（7 个 tab 全部可见，不必横滑） */
+  .nav {
+    position: sticky; top: 0; z-index: 30; flex-flow: row wrap; gap: 0 4px; align-items: center;
+    padding: 6px 8px; padding-top: calc(6px + env(safe-area-inset-top, 0px));
+    border-right: none; border-bottom: 1px solid var(--line);
+  }
+  .nav .brand { flex: 1 1 auto; display: flex; align-items: baseline; gap: 8px; padding: 2px 2px 7px; border-bottom: none; }
+  .nav .brand .name { font-size: 14px; }
+  .nav .brand .sub { margin: 0; }
+  .nav .sig { flex: 0 0 auto; padding: 0 2px 7px; border-top: none; }
+  .nav .sig .row { justify-content: flex-end; }
+  .nav .sig .row + .row { display: none; }        /* 版本/redis 那行手机上省掉 */
+  .nav ul { flex: 1 1 100%; flex-wrap: wrap; gap: 2px; padding: 0; }
+  .nav ul li { flex: 1 1 auto; }
+  .nav a { justify-content: center; gap: 7px; margin: 0; padding: 8px 9px; font-size: 12.5px; }
+  .nav a svg { width: 14px; height: 14px; }
+
+  /* ③ 触控目标抬到手指大小 */
+  button { min-height: 40px; padding: 9px 14px; }
+  button.xs { min-height: 32px; padding: 6px 10px; font-size: 12.5px; }
+  select.xs { min-height: 32px; padding: 6px 10px; }
+
+  /* ④ 固定列宽网格 → 能收缩的两列，别再撑出横向滚动条 */
+  .qrow { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; padding: 9px 12px; }
+  .qrow .code, .qrow .msg { grid-column: 1 / -1; }
+  .srow, .shead { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; padding: 11px 12px; }
+  .shead .stasks, .srow .stasks { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  /* ⑤ 密度：360px 的屏幕别白扔在 padding 上 */
+  .view { padding: 14px 12px calc(72px + env(safe-area-inset-bottom, 0px)); }
+  .topbar { position: static; flex-wrap: wrap; gap: 8px 10px; padding: 10px 12px; }
+  .topbar h2 { font-size: 15px; }
+  .box > header { flex-wrap: wrap; gap: 8px; padding: 11px 12px; }
+  .box > header h3, .box > header .note { white-space: normal; }
+  .box .pad { padding: 12px; }
+  .tbl-wrap { -webkit-overflow-scrolling: touch; }
+  .acc { min-width: 560px; font-size: 12.5px; }
+  .acc th { padding: 8px 9px; }
+  .acc td { padding: 9px; }
+  .stat { padding: 12px 13px; }
+  .stat .v { font-size: 22px; }
+
+  /* ⑥ 弹层 → 底部抽屉（手机上比居中卡片顺手） */
+  .veil.on { align-items: flex-end; padding: 0; }
+  .dlg {
+    width: 100%; max-width: 100%; max-height: 92vh; border-radius: 14px 14px 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .dlg header, .dlg .body, .dlg footer { padding-left: 14px; padding-right: 14px; }
+}
+
+@media (max-width: 560px) {
+  .nav a { font-size: 12px; padding: 7px 7px; }
+  .qprog, .acts, .savebar { flex-wrap: wrap; }
+  .dlg .tabs { margin-left: 0; }
+}

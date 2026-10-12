@@ -1,0 +1,144 @@
+name: go-binaries
+
+# 可运行二进制构建/发布：
+#   - PR / push main → 测试 + 五平台编译验证（产物仅存 artifact，不发布）
+#   - push v* tag    → 同上 + 打包上传到 GitHub Release（zip/tar.gz + checksums）
+# 固化的发布纪律（曾两次人祸，见仓库 HANDOFF）：-s -w 剥离、二进制版本串 == 源码
+# appVersion、tag 版本 == 源码版本（-ci 后缀的测试 tag 豁免，用于演练发布线）。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "config.example.json"
+      - ".github/workflows/go-binaries.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
+      - run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, ext: .zip }
+          - { goos: linux, goarch: amd64, ext: .tar.gz }
+          - { goos: linux, goarch: arm64, ext: .tar.gz }
+          - { goos: darwin, goarch: amd64, ext: .tar.gz }
+          - { goos: darwin, goarch: arm64, ext: .tar.gz }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: 取源码版本号
+        id: ver
+        run: echo "v=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)" >> "$GITHUB_OUTPUT"
+
+      - name: 构建（剥离符号，对齐本地发布口径）
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: go build -ldflags "-s -w" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
+
+      # 版本串断言：二进制必须含源码 appVersion（防交叉编译矩阵里编错树/漏 ldflags）
+      - name: 断言二进制版本串
+        run: |
+          BIN="wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}"
+          if ! grep -qa "${{ steps.ver.outputs.v }}" "$BIN"; then
+            echo "::error::binary missing version string ${{ steps.ver.outputs.v }}"
+            exit 1
+          fi
+          echo "version assert OK: ${{ steps.ver.outputs.v }}"
+
+      - name: 打包（windows=zip 三件套，其余=tar.gz）
+        run: |
+          V="${{ steps.ver.outputs.v }}"
+          V="${V%-panel}"   # 文件名不带 -panel 后缀（wb2api-panel-v1.2.3-... 既有惯例）
+          case "${{ matrix.goos }}" in
+            windows)
+              NAME="wb2api-panel-v${V}-windows-amd64.zip"
+              zip -q "$NAME" wb2api.exe config.example.json README.md
+              ;;
+            *)
+              NAME="wb2api-panel-v${V}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+              tar czf "$NAME" wb2api config.example.json README.md
+              ;;
+          esac
+          echo "name=$NAME" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.name }}
+          path: ${{ env.name }}
+          retention-days: 7
+
+  # 仅 tag 触发：校验 tag == 源码版本（-ci 演练 tag 豁免）→ 汇总资产 → 建 Release
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 取历史 tag 算 compare 链接
+      - name: tag 与源码版本一致性断言
+        run: |
+          SRC=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)
+          SRC="${SRC%-panel}"   # appVersion 带 -panel 后缀，比对前剥掉
+          TAG="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" != *-ci ]]; then
+            if [[ "$TAG" != "$SRC" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME 与源码 appVersion=$SRC 不一致（先提交版本号再打 tag）"
+              exit 1
+            fi
+          else
+            echo "演练 tag（-ci 后缀）跳过一致性断言：tag=$TAG src=$SRC"
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: cd dist && sha256sum *.zip *.tar.gz > checksums.txt && ls -la
+      - name: 上一版 tag（compare 链接用）
+        id: prev
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}-panel
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            CI 自动构建发布（五平台二进制 + checksums）。
+
+            完整变更：https://github.com/${{ github.repository }}/compare/${{ steps.prev.outputs.prev }}...${{ github.ref_name }}
+          files: dist/*
