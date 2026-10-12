@@ -8,6 +8,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
@@ -72,6 +73,23 @@ public class GatewayService extends Service {
     static volatile int restarts = 0;
     static volatile boolean external = false;   // 7863 被别的实例占着（比如 DSH 里那个）
 
+    // ── 被杀诊断：7863 老被杀，光说"又挂了"没用，得知道是谁杀的、杀了几次
+    static final String PREF = "wb2api";
+    static volatile int appRestarts = 0;        // App 进程被系统杀掉后又被拉起来的次数
+    static volatile String lastExit = "";       // 上一次网关退出的原因（跨 App 重启保留）
+    static volatile boolean userStop = false;   // 用户在通知里点了"停止"：那就不再自愈
+    public static int appRestartCount() { return appRestarts; }
+    public static String lastExitText() { return lastExit; }
+
+    /** 退出码翻成人话：137 基本就是被系统强杀（内存不够或清后台），143 是收到停止信号 */
+    static String exitMeaning(int rc) {
+        if (rc == 0) return "rc=0 正常退出";
+        if (rc == 137) return "rc=137 被强杀 SIGKILL（内存不足或系统清后台）";
+        if (rc == 139) return "rc=139 段错误 SIGSEGV";
+        if (rc == 143) return "rc=143 收到停止信号 SIGTERM";
+        return "rc=" + rc + (rc > 128 ? "（信号 " + (rc - 128) + "）" : "");
+    }
+
     // ── 对外状态：机器可读（UI 只读这两个，不解析下面的中文 state）
     public static final int ST_STOPPED = 0, ST_STARTING = 1, ST_RUNNING = 2, ST_EXTERNAL = 3;
     static volatile int status = ST_STOPPED;
@@ -118,8 +136,11 @@ public class GatewayService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {   // 用户主动停：别再自愈
+            userStop = true;
+            try { getSharedPreferences(PREF, MODE_PRIVATE).edit().putBoolean("service_up", false).apply(); } catch (Throwable ignored) {}
             watching = false;
             cancelAlarm(this);
+            ReviveJobService.cancel(this);
             killProc();
             releaseWake();
             stopForegroundCompat();
@@ -127,6 +148,20 @@ public class GatewayService extends Service {
             return START_NOT_STICKY;
         }
         ensureChannel();
+        // 上一次实例没清"运行中"标记，说明是 App 进程被系统杀掉之后又被拉起来的 → 记一笔
+        try {
+            SharedPreferences sp = getSharedPreferences(PREF, MODE_PRIVATE);
+            if (sp.getBoolean("service_up", false)) {
+                appRestarts = sp.getInt("app_restarts", 0) + 1;
+                sp.edit().putInt("app_restarts", appRestarts).apply();
+            }
+            lastExit = sp.getString("last_exit", "");
+            sp.edit().putBoolean("service_up", true).apply();
+            if (!lastExit.isEmpty())
+                reason = "上次网关退出：" + lastExit + (appRestarts > 0 ? "（服务被系统杀过 " + appRestarts + " 次）" : "");
+        } catch (Throwable ignored) {}
+        userStop = false;
+        ReviveJobService.schedule(this);   // 第五层：JobScheduler，系统托管，跨重启仍在
         String fgsErr = startForegroundCompat();
         if (fgsErr != null) {   // 起不来就别赖着，否则等 5s 被系统判 ANR 崩掉
             setState(ST_STOPPED, "前台服务起不来", fgsErr);
@@ -157,6 +192,19 @@ public class GatewayService extends Service {
         watching = false;      // 系统杀我时 alarm 还挂着 → 5 分钟内自己回来
         killProc();
         releaseWake();
+        if (!userStop) {       // 不是用户点的停止 → alarm + job 两条路把服务拉回来
+            armAlarm(this);
+            ReviveJobService.schedule(this);
+        }
+    }
+
+    /** 任务列表被划掉：stopWithTask="false" 时服务还活着，但兜底要重挂一遍 */
+    @Override public void onTaskRemoved(Intent root) {
+        setState(status, "任务被划掉，服务继续",
+                 "App 任务被划掉（stopWithTask=false 服务继续跑），已重挂 alarm/job 兜底");
+        armAlarm(this);
+        ReviveJobService.schedule(this);
+        super.onTaskRemoved(root);
     }
 
     // ---------- 看门狗 ----------
@@ -263,9 +311,13 @@ public class GatewayService extends Service {
             reader.start();
             final Process me = p;
             waiter = new Thread(() -> {
-                try { int rc = me.waitFor(); setState(ST_STOPPED, "已退出 rc=" + rc,
-                        "网关进程退出了（rc=" + rc + "），看门狗会按退避重拉"); }
-                catch (Exception e) { setState(ST_STOPPED, "等待异常 " + e, "等待网关进程出错：" + e); }
+                try {
+                    int rc = me.waitFor();
+                    lastExit = exitMeaning(rc);
+                    try { getSharedPreferences(PREF, MODE_PRIVATE).edit().putString("last_exit", lastExit).apply(); } catch (Throwable ignored) {}
+                    setState(ST_STOPPED, "已退出 " + lastExit,
+                             "网关进程退出：" + lastExit + "，看门狗按退避重拉");
+                } catch (Exception e) { setState(ST_STOPPED, "等待异常 " + e, "等待网关进程出错：" + e); }
                 if (proc == me) proc = null;      // 只清自己那个句柄，别把看门狗刚拉起的顶掉
                 refreshNotification();
             });
@@ -369,7 +421,11 @@ public class GatewayService extends Service {
             int fl = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= 23) fl |= PendingIntent.FLAG_IMMUTABLE;
             PendingIntent pi = PendingIntent.getService(c, ALARM_REQ, i, fl);
-            am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + ALARM_MS, pi);
+            long due = SystemClock.elapsedRealtime() + ALARM_MS;
+            // 能精确就精确：Doze 里 setAndAllowWhileIdle 会被从 5 分钟拖到 ~9 分钟一次
+            boolean exact = Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms();
+            if (exact) am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, due, pi);
+            else am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, due, pi);
         } catch (Throwable ignored) {}
     }
 

@@ -45,11 +45,14 @@ rm -f "$GOROOT/src/runtime/asm_arm64.s.bak-apkbuild"
 
 echo "== 2/6 资源 =="
 cd "$B"
-rm -rf res.zip base.apk gen classes dex
+rm -rf res.zip base.apk gen classes dex res      # res：踩过 —— 构建目录里那份陈旧副本
 mkdir -p gen classes dex
-aapt2 compile --dir res -o res.zip
+# 资源目录必须写绝对路径！曾经写成 --dir res（相对），aapt2 就去编译了 $B/res 这份老副本，
+# 结果图标/字符串一直是旧的，还一声不响。set -e 也救不了这种"编译了错目录"。
+[ -d "$SRC/res" ] || { echo "❌ 找不到资源目录 $SRC/res"; exit 1; }
+aapt2 compile --dir "$SRC/res" -o res.zip
 aapt2 link -I "$AJ" --manifest "$SRC/AndroidManifest.xml" -A "$SRC/assets" --java gen \
-  --min-sdk-version 24 --target-sdk-version 34 --version-code 5 --version-name 1.17.0 \
+  --min-sdk-version 24 --target-sdk-version 34 --version-code 6 --version-name 1.18.0 \
   -o base.apk res.zip
 
 echo "== 3/6 javac + 自检 =="

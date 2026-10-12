@@ -4,7 +4,7 @@
 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，MIT）打包成**能直接装在
 手机上常驻运行**的安卓 App：内置网关二进制 + 管理面板 + 看门狗 + 保活。
 
-* 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34，当前 **v1.17.0**（versionCode 5）
+* 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34，当前 **v1.18.0**（versionCode 6）
 * 下载：见 [Releases](../../releases) —— 直接装 APK，覆盖安装即升级（账号与 api_key 保留）
 * 一台手机 = 一个 OpenAI 兼容网关：`http://127.0.0.1:7863/v1`（局域网把 127.0.0.1 换成手机 IP）
 
@@ -24,6 +24,7 @@ apk-src/                 App 源码（无 Gradle：AndroidManifest + java + res 
   test/                  WatchdogSelfCheck（纯 JVM 自检：退避序列）
 patches/
   build_apk.sh           一键重打包（aapt2 + javac + d8 + apksigner）
+  make_icons.py          纯标准库缩图器 → 五档 mipmap 图标（本机没有 PIL/ImageMagick）
   panel-mobile.css       面板手机端补丁（≤760px 生效）
   apply_panel_mobile.sh  把上面的 CSS 幂等注入面板 index.html
 workbuddy2api-panel/     上游服务端源码（Go，已内含手机端 CSS 补丁；未含 .git）
@@ -63,9 +64,13 @@ bash patches/apply_panel_mobile.sh # 改了面板 CSS 之后要重跑（面板�
 
 ## App 里多出来的东西（相对上游）
 
-* **看门狗四层**：进程级（10s tick，退避 2/4/8/16/32/60s）/ 健康级（`/healthz` 45s 无响应判僵死）/
-  系统级（AlarmManager 每 5 分钟兜底）/ 保活级（**partial wakelock**，否则锁屏 CPU 一睡，
+* **看门狗五层**：进程级（10s tick，退避 2/4/8/16/32/60s）/ 健康级（`/healthz` 45s 无响应判僵死）/
+  系统级（AlarmManager 兜底，能精确就精确）/ **JobScheduler 周期兜底**（系统托管、
+  `setPersisted` 跨重启仍在）/ 保活级（**partial wakelock**，否则锁屏 CPU 一睡，
   线程和 Go 定时器全冻住 —— 这就是"只有前台才生效"的真因）
+* **被杀诊断**：网关退出码翻成人话写进状态条第三行（`rc=137` = 被强杀 SIGKILL /
+  内存不足或系统清后台），顶栏显示「系统重启 N」= App 进程被系统杀过几次 —— 再被杀不用猜
+* **`stopWithTask="false"`**：任务列表划掉不等于停服务（只有通知里的"停止"才真停）
 * **状态判定按事实**：后台线程探 `127.0.0.1:7863`，端口在服务就是「运行中」；没起来就在第三行
   直接写明原因（不再靠猜中文状态串）
 * **前台服务用 `specialUse`**：`dataSync` 在 Android 15+ 有 6 小时/天上限，对 7×24 网关是致命的

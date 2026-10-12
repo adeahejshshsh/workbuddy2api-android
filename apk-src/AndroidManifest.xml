@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.dsh.wb2api"
-    android:versionCode="5"
-    android:versionName="1.17.0">
+    android:versionCode="6"
+    android:versionName="1.18.0">
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
 
@@ -15,6 +15,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 精确 alarm：能精确就精确（Doze 里 setAndAllowWhileIdle 会被从 5 分钟拖到 ~9 分钟一次）。
+         用户没授予"闹钟与提醒"时，代码自动回落非精确，不会崩。 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- 申请"忽略电池优化"：不申请的话 Doze 会掐网络、把 alarm 推后到 9 分钟以上 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
@@ -40,15 +43,23 @@
         </activity>
 
         <!-- 类型用 specialUse 而不是 dataSync：dataSync 在 Android 15+ 有 6 小时/天上限，
-             对一个要 7×24 常驻的自托管网关是致命的（到点被系统掐掉） -->
+             对一个要 7×24 常驻的自托管网关是致命的（到点被系统掐掉）
+             stopWithTask=false：任务列表被划掉也不停服务（不然一划就没） -->
         <service
             android:name=".GatewayService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="self-hosted local API gateway (workbuddy2api) must run continuously" />
         </service>
+
+        <!-- 看门狗第五层：JobScheduler 周期兜底（系统托管、跨重启仍在） -->
+        <service
+            android:name=".ReviveJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!-- 看门狗第三层：开机/更新后自启（BOOT_COMPLETED 是受保护广播，只有系统能发） -->
         <receiver

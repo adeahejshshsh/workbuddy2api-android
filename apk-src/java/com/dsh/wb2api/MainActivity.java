@@ -270,6 +270,7 @@ public class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder(GatewayService.wakeHeld() ? "保活中" : "未保活");
         sb.append(" · ").append(exemptNow() ? "省电白名单" : "省电未白名单");
         if (GatewayService.restartCount() > 0) sb.append(" · 自愈 ").append(GatewayService.restartCount());
+        if (GatewayService.appRestartCount() > 0) sb.append(" · 系统重启 ").append(GatewayService.appRestartCount());
         String mode = GatewayService.modeText();
         sb.append(" · ").append(mode.isEmpty() ? ":7863" : mode);
         info.setText(sb.toString());
@@ -283,7 +284,10 @@ public class MainActivity extends Activity {
             logLine.setText(l.isEmpty() ? "等待日志…" : l);
             logLine.setTextColor(INK3);
         } else {
-            logLine.setText(GatewayService.reasonText());
+            String why = GatewayService.reasonText();
+            String ex = GatewayService.lastExitText();
+            if (!ex.isEmpty() && !why.contains(ex)) why = why + " ｜ 上次：" + ex;
+            logLine.setText(why);
             logLine.setTextColor(WARN);
         }
 

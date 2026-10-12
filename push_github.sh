@@ -112,7 +112,7 @@ echo "  已推送 → https://github.com/$OWNER/$NAME"
 [ "${1:-}" = "release" ] || { echo "（要发 Release 就加参数 release）"; exit 0; }
 
 echo "== 5/5 Release v$VER + 上传 APK"
-OWNER="$OWNER" NAME="$NAME" VER="$VER" APK="$APK" TOKEN="$TOKEN" python3 - <<'PY'
+OWNER="$OWNER" NAME="$NAME" VER="$VER" APK="$APK" TOKEN="$TOKEN" WS="$WS" python3 - <<'PY'
 import json, os, pathlib, urllib.request, urllib.error
 
 o, r, ver = os.environ["OWNER"], os.environ["NAME"], os.environ["VER"]
@@ -133,24 +133,30 @@ def call(url, method="GET", data=None, ctype="application/json", raw=False):
     except urllib.error.HTTPError as e:
         return e.code, e.read(), e.headers
 
-body = f"""安卓自托管移植版第一版（APK v{ver}）。
+# Release 说明直接取 CHANGELOG.md 里对应版本那一节 —— 一处维护，别两处写
+sec, grab = [], False
+try:
+    txt = (pathlib.Path(os.environ["WS"]) / "CHANGELOG.md").read_text(encoding="utf-8")
+    for ln in txt.splitlines():
+        if ln.startswith("## v" + ver):
+            grab = True; continue
+        if grab and ln.startswith("## "):
+            break
+        if grab:
+            sec.append(ln)
+except Exception as e:
+    print("  （读 CHANGELOG 失败，Release 说明退回简版）:", e)
+changes = "\n".join(sec).strip()
 
-**装完就能用**：一台手机 = 一个 OpenAI 兼容网关 `http://127.0.0.1:7863/v1`（局域网换成手机 IP）。
+body = (changes or f"APK v{ver}") + """
 
-### 相对上游多出来的
-- **看门狗四层**：进程级（10s tick，退避 2/4/8/16/32/60s）/ 健康级（`/healthz` 45s 无响应判僵死）/
-  系统级（AlarmManager 每 5 分钟兜底）/ 保活级（partial wakelock —— 不持它锁屏后 CPU 一睡，
-  线程和 Go 定时器全冻住，这就是"只有前台才生效"的真因）
-- **状态按事实判定**：后台线程探 127.0.0.1:7863，端口在服务就是「运行中」；没起来第三行直接写明原因
-- **前台服务 `specialUse`**：`dataSync` 在 Android 15+ 有 6 小时/天上限，对 7×24 网关是致命的
-- **面板手机端适配**：导航换行铺满（7 个 tab 全可见）、触控目标 ≥40px、
-  固定列宽网格改可收缩（不再整页横滚）、弹层改底部抽屉
-- **壳与网页同一套配色**（抄面板 `:root` 暗色令牌）+ 加载进度线
+---
 
 ### 安装
-1. 下载下方 `WorkBuddy2API.apk` 安装（覆盖安装即升级，账号与 api_key 保留）
+1. 下载下方 `WorkBuddy2API.apk` 覆盖安装即升级（账号与 api_key 保留）
 2. 打开 App → 顶栏点「省电白名单」允许
 3. 国产 ROM 再放行：自启动 / 省电策略无限制 / 任务列表锁定后台
+4. 客户端接入：Base URL `http://<手机IP>:7863/v1`，Key 用面板里的（点「复制密钥」）
 
 ### 说明
 - 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34；本包用作者自备密钥签名
@@ -162,6 +168,9 @@ st, b, _ = call(api + "/releases/tags/" + tag)
 rel = None
 if st == 200:
     rel = json.loads(b); print(f"  Release {tag} 已存在，复用")
+    if rel.get("body") != body:                      # 说明以 CHANGELOG 为准，同步一份
+        call(api + f"/releases/{rel['id']}", "PATCH", json.dumps({"body": body}).encode())
+        print("  已同步 Release 说明（取自 CHANGELOG.md）")
 else:
     payload = json.dumps({"tag_name": tag, "name": f"WorkBuddy2API Android v{ver}",
                           "body": body, "draft": False, "prerelease": False}).encode()

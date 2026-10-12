@@ -380,5 +380,80 @@ if (st.contains("失败") || st.contains("未启动")) return "已停止";   // 
 ⚠️ 仍未验证：`specialUse` 在国产 ROM 的省电策略下是否能一直活 —— 这版装完，状态条第三行会直接告诉你
 "为什么不在跑"（把那一行发我即可定位）。
 
+---
+
+# 十、图标与"被杀"防治（v1.18.0）
+
+## 10.1 图标
+
+源图 `docs/WorkBuddy.png`（800×800 RGBA，取自 <https://github.com/DGZSbot/ai-icon>）。
+本机 Termux **没有 PIL**（Pillow 要现场编译，装不上）也没有 ImageMagick，所以自写纯标准库缩图器：
+
+```bash
+python3 patches/make_icons.py docs/WorkBuddy.png apk-src/res
+#   → mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png（48/72/96/144/192）
+```
+
+实现要点：自己解 PNG（非交错、位深 8/16、色彩类型 0/2/3/4/6，含 5 种扫描线过滤器还原）→
+**面积平均**缩放（每个目标像素按覆盖面积加权），且全程在**预乘 alpha** 空间做平均 ——
+图省事用最近邻、或直接平均 RGBA，都会在这张图的圆角/半透明边缘出灰边。
+
+## 10.2 差点白干半天的坑：aapt2 编译了"错目录"
+
+`build_apk.sh` 原来是 `aapt2 compile --dir res -o res.zip`（**相对路径**），而脚本前面先
+`cd "$PREFIX/build/apk"` → aapt2 编译的是 `$PREFIX/build/apk/res`，一份 15:52 留下的老副本
+（只有旧图标 + `strings.xml`）。
+
+症状极具欺骗性：**换了图标没变化、新增 res 目录完全不生效，而且一声不响** —— aapt2 正常退出，
+`set -e` 也救不了"成功编译了错误的目录"。更迷惑的是那份老 res 一直没变，于是**每次打出来的
+APK 字节数一模一样**（3,891,817），一度让我以为"文件根本没重新生成"。
+
+修法三件套：
+
+```bash
+rm -rf ... res                                   # 构建前清掉那份陈旧副本
+[ -d "$SRC/res" ] || { echo "❌ 找不到资源目录 $SRC/res"; exit 1; }
+aapt2 compile --dir "$SRC/res" -o res.zip        # 资源输入一律绝对路径
+```
+
+识别特征：APK 里 `res/mipmap-*/` 的条目数与大小跟 `apk-src/res` 对不上。
+一行自查：`unzip -l WorkBuddy2API.apk | grep mipmap`（本版应恰好 5 条）。
+修好后 APK 从 3,891,817 → 3,969,965 字节（+78KB 就是图标）。
+
+## 10.3 7863 老被杀：先让它能说话，再加一层兜底
+
+被杀是系统行为（内存回收 / ROM 清后台 / 用户划掉任务），没 root 禁不掉；能做的是三件事：
+**降低概率、被杀后更快回来、知道是谁杀的**。
+
+* **第五层兜底 `ReviveJobService`**：JobScheduler 周期任务（15 分钟 —— Android 8+ 的最小值），
+  `setPersisted(true)` 让它在**重启手机后**依然被系统记着。为什么 alarm 之外还要它：
+  两者是**互不相干的调度机制**（Doze 里 alarm 会被拖，job 走系统维护窗口），互为补位；
+  且只在"端口不在服务"时才动作（`portUp()` 已存在就不打扰）。
+* **`stopWithTask="false"` + `onTaskRemoved()`**：任务列表被划掉 ≠ 停服务（划掉后服务继续跑，
+  并重挂 alarm/job）；只有通知里的"停止"才置 `userStop` 并取消 alarm/job。
+* **alarm 能精确就精确**：`SCHEDULE_EXACT_ALARM` + `canScheduleExactAlarms()`；
+  未授权时自动回落 `setAndAllowWhileIdle`（不会 SecurityException 崩）。
+* **诊断（关键）**：以前只能说"又挂了"。现在网关退出码翻成人话写进状态条第三行，并跨 App 重启保留：
+
+  | 退出码 | 含义 |
+  |---|---|
+  | `rc=137` | 被强杀 SIGKILL —— **内存不足或系统清后台**（最常见） |
+  | `rc=143` | 收到 SIGTERM（正常停止流程） |
+  | `rc=139` | 段错误 SIGSEGV |
+  | `rc=0` | 自己正常退出 |
+
+  同时 App 侧用 `SharedPreferences` 记「App 进程被系统杀过几次」（顶栏显示「系统重启 N」）。
+  **下次再被杀，界面那一行就是证据。**
+
+## 10.4 换图标/改资源后的自查清单
+
+```bash
+bash patches/build_apk.sh                     # 重打包（8 秒）
+unzip -l WorkBuddy2API.apk | grep mipmap      # 应有 5 条
+aapt2 dump xmltree --file AndroidManifest.xml WorkBuddy2API.apk | grep -E "ReviveJobService|stopWithTask"
+python3 -c "import zipfile;d=zipfile.ZipFile('WorkBuddy2API.apk').read('classes.dex');print(b'ReviveJobService' in d)"
+```
+
+
 
 
