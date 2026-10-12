@@ -131,8 +131,8 @@ public class MainActivity extends Activity {
         bar.addView(chip("复制密钥", new View.OnClickListener() {
             public void onClick(View v) { copyApi(); }
         }));
-        bar.addView(chip("省电白名单", new View.OnClickListener() {
-            public void onClick(View v) { requestExempt(); }
+        bar.addView(chip("保活设置", new View.OnClickListener() {
+            public void onClick(View v) { keepAliveWizard(); }
         }));
         bar.addView(chip("重载面板", new View.OnClickListener() {
             public void onClick(View v) { injected = false; web.reload(); }
@@ -268,7 +268,9 @@ public class MainActivity extends Activity {
         dot.setBackground(oval(c));
 
         StringBuilder sb = new StringBuilder(GatewayService.wakeHeld() ? "保活中" : "未保活");
-        sb.append(" · ").append(exemptNow() ? "省电白名单" : "省电未白名单");
+        sb.append(" · ").append(exemptNow() ? "省电✓" : "省电✗");
+        sb.append(overlayOk() ? " 图层✓" : " 图层✗");
+        if (GatewayService.freezeCount() > 0) sb.append(" · 冻过 ").append(GatewayService.freezeCount());
         if (GatewayService.restartCount() > 0) sb.append(" · 自愈 ").append(GatewayService.restartCount());
         if (GatewayService.appRestartCount() > 0) sb.append(" · 系统重启 ").append(GatewayService.appRestartCount());
         String mode = GatewayService.modeText();
@@ -389,6 +391,58 @@ public class MainActivity extends Activity {
     }
 
     void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+
+    /** 「显示在其他应用上层」= 能不能挂常驻图层（挂了系统才不会把我当缓存进程冻住） */
+    boolean overlayOk() {
+        try { return Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this); }
+        catch (Throwable t) { return false; }
+    }
+
+    /** 精确 alarm 能用吗（Android 12+ 的「闹钟与提醒」特殊权限） */
+    boolean exactOk() {
+        try {
+            if (Build.VERSION.SDK_INT < 31) return true;
+            android.app.AlarmManager am = (android.app.AlarmManager) getSystemService(Context.ALARM_SERVICE);
+            return am == null || am.canScheduleExactAlarms();
+        } catch (Throwable t) { return true; }   // 判定不了就别拦着用户
+    }
+
+    /**
+     * 保活设置：缺哪补哪，按顺序一次点一下。
+     *
+     * 为什么需要三项：它们是**三条不同的系统通道**，缺任何一条都能让"过一会儿连不上"重现 ——
+     * ① 省电白名单：不被 Doze 掐网络 / 推后 alarm；
+     * ② 常驻图层：让系统认为我有可见窗口 → 不把我判成缓存态 → 不进 app-freezer（本轮主因）；
+     * ③ 精确闹钟：兜底 alarm 不被 Doze 从 5 分钟拖到 ~9 分钟。
+     */
+    void keepAliveWizard() {
+        if (!exemptNow()) {
+            toast("① 先允许「忽略电池优化」，回来再点一次");
+            requestExempt();
+            return;
+        }
+        if (!overlayOk()) {
+            toast("② 开「显示在其他应用上层」→ 常驻图层让系统不把我冻住");
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:" + getPackageName())));
+            } catch (Throwable t) {
+                try { startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)); }
+                catch (Throwable t2) { toast("请到 设置→应用→特殊权限 里给「显示在其他应用上层」"); }
+            }
+            return;
+        }
+        if (!exactOk()) {
+            toast("③ 允许「闹钟与提醒」→ 兜底 alarm 才精确（可选，推荐）");
+            try {
+                startActivity(new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                        Uri.parse("package:" + getPackageName())));
+            } catch (Throwable t) { toast("请到 设置→应用→特殊权限 里允许「闹钟与提醒」"); }
+            return;
+        }
+        GatewayService.start(this);     // 立刻把锁和图层挂上（onStartCommand → holdWake）
+        toast("保活三项齐了：省电白名单 + 常驻图层 + 精确闹钟 ✓");
+    }
 
     void askNotifPermission() {
         if (Build.VERSION.SDK_INT >= 33) {

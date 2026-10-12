@@ -10,6 +10,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
+import android.graphics.PixelFormat;
+import android.net.wifi.WifiManager;
+import android.provider.Settings;
+import android.view.View;
+import android.view.WindowManager;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
 import android.net.Network;
@@ -80,6 +85,15 @@ public class GatewayService extends Service {
     static volatile boolean userStop = false;   // 用户在通知里点了"停止"：那就不再自愈
     public static int appRestartCount() { return appRestarts; }
     public static String lastExitText() { return lastExit; }
+
+    // ── 保活：三个锁（CPU / Wi-Fi）+ 一个"常驻图层"，还有一个"我被冻过多久"的账
+    static volatile WifiManager.WifiLock wifiLock;
+    static volatile View overlay;               // 1x1 全透明的常驻窗口（见 installOverlay）
+    static volatile int freezes = 0;            // 心跳断了（= 被系统冻过）的次数
+    static volatile String freezeText = "";
+    static volatile long lastTickAt = 0;
+    public static int freezeCount() { return freezes; }
+    public static String freezeText() { return freezeText; }
 
     /** 退出码翻成人话：137 基本就是被系统强杀（内存不够或清后台），143 是收到停止信号 */
     static String exitMeaning(int rc) {
@@ -222,6 +236,17 @@ public class GatewayService extends Service {
             if (!watching) return;
             try {
                 long now = SystemClock.elapsedRealtime();
+                // 心跳断了 30s 以上 = 这期间整个进程（连看门狗线程一起）被系统冻住了。
+                // 症状正是"过一会儿连不上，把 App 拉回前台立刻就好" —— 记下来，别让人猜。
+                if (lastTickAt > 0 && now - lastTickAt > 3 * TICK_MS) {
+                    freezes++;
+                    long gap = (now - lastTickAt) / 1000;
+                    freezeText = "系统冻了我 " + gap + " 秒（"
+                            + new java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
+                                    .format(new java.util.Date()) + " 恢复）";
+                    setState(status, freezeText, freezeText + " —— 拉回前台/放进白名单后已恢复");
+                }
+                lastTickAt = now;
                 if (!alive()) {
                     if (portUp()) {        // 端口有主但没有我的孩子 → 外部实例，不插手
                         external = true;
@@ -388,10 +413,10 @@ public class GatewayService extends Service {
         if (p != null) { try { p.destroy(); } catch (Throwable ignored) {} }
     }
 
-    // ---------- 保活：partial wakelock ----------
+    // ---------- 保活三件套 ----------
     /**
-     * 为什么必须有：看门狗是用户态定时器。屏幕一灭 SoC 进 suspend，10s 的 tick 直接停摆，
-     * Go 里的签到/保活定时器同理 —— 症状就是"只有 App 在前台（屏幕亮着）时才生效"。
+     * 为什么必须有 partial wakelock：看门狗是用户态定时器。屏幕一灭 SoC 进 suspend，
+     * 10s 的 tick 直接停摆，Go 里的签到/保活定时器同理 —— 症状就是"只有 App 在前台时才生效"。
      * 代价是耗电（CPU 不睡）。不想常驻就在通知栏点「停止」，会一并释放。
      */
     void holdWake() {
@@ -403,10 +428,73 @@ public class GatewayService extends Service {
             }
             if (!wake.isHeld()) wake.acquire();
         } catch (Throwable ignored) {}
+        holdWifi();
+        installOverlay();
+    }
+
+    /**
+     * Wi-Fi 高性能锁：从电脑/别的设备经局域网连过来时，屏幕一灭 Wi-Fi 就进省电甚至休眠，
+     * 表现同样是"连不上"。127.0.0.1 本机连不受影响，所以这条是给局域网场景的。
+     */
+    void holdWifi() {
+        try {
+            if (wifiLock == null) {
+                WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wm == null) return;
+                try { wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "wb2api:wifi"); }
+                catch (Throwable t) { wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL, "wb2api:wifi"); }
+                wifiLock.setReferenceCounted(false);
+            }
+            if (!wifiLock.isHeld()) wifiLock.acquire();
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 「常驻图层」：一个 1×1、全透明、不接收触摸的悬浮窗。
+     *
+     * 为什么它可以治"过一会儿连不上"：系统按进程的**可见性**分级调度 —— 有可见窗口的进程
+     * 不会被判定为缓存态，也就不会被 app-freezer 冻住（被冻住的进程连线程都停摆，
+     * 看门狗自然也救不了自己）。代价是需要在系统设置里给「显示在其他应用上层」权限；
+     * 没给就静默跳过，不影响任何其它功能。
+     */
+    void installOverlay() {
+        if (overlay != null) return;
+        try {
+            if (Build.VERSION.SDK_INT < 23 || !Settings.canDrawOverlays(this)) return;
+            int type = Build.VERSION.SDK_INT >= 26
+                    ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                    : WindowManager.LayoutParams.TYPE_PHONE;
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    1, 1, type,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                    PixelFormat.TRANSLUCENT);
+            View v = new View(this);
+            v.setAlpha(0f);
+            WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            if (wm == null) return;
+            wm.addView(v, lp);
+            overlay = v;
+        } catch (Throwable t) {
+            reason = "常驻图层没加上（" + t.getClass().getSimpleName() + "），系统可能仍会冻住我";
+        }
+    }
+
+    static void removeOverlay() {
+        final View v = overlay;
+        overlay = null;
+        if (v == null) return;
+        try {
+            WindowManager wm = (WindowManager) v.getContext().getSystemService(Context.WINDOW_SERVICE);
+            if (wm != null) wm.removeView(v);
+        } catch (Throwable ignored) {}
     }
 
     static void releaseWake() {
         try { if (wake != null && wake.isHeld()) wake.release(); } catch (Throwable ignored) {}
+        try { if (wifiLock != null && wifiLock.isHeld()) wifiLock.release(); } catch (Throwable ignored) {}
+        removeOverlay();
     }
 
     static boolean wakeHeld() {

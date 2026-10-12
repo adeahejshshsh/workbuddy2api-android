@@ -454,6 +454,54 @@ aapt2 dump xmltree --file AndroidManifest.xml WorkBuddy2API.apk | grep -E "Reviv
 python3 -c "import zipfile;d=zipfile.ZipFile('WorkBuddy2API.apk').read('classes.dex');print(b'ReviveJobService' in d)"
 ```
 
+---
+
+# 十一、"过一会儿连不上，拉回前台就好"（v1.19.0）
+
+## 11.1 现象与判据
+
+症状：App 启动一会儿后 7863 连不上；把 App 拉到前台立刻恢复。
+
+**"拉回前台就好"这句话本身就是判据** —— 它说明进程**没死**，是被**冻结**了：
+
+| 状态 | 表现 | 能不能自救 |
+|---|---|---|
+| 被杀（LMK / ROM 清理） | 端口不通，但看门狗线程还活着 → 10s 内自动重拉 | ✅ 不需要人工 |
+| **被冻结**（app-freezer / cgroup freezer） | **连看门狗线程和 Go 定时器一起停摆** | ❌ 自己的定时器也冻着，救不了自己 |
+
+Android 12+ 引入了 app-freezer：系统把处于**缓存态**的 App 整组冻结以省电；
+国产 ROM 的省电策略更激进。所以"需要人工拉前台"= 缓存态冻结，而不是内存被杀。
+
+## 11.2 为什么"常驻图层"能治它
+
+系统的进程重要性分级看的是**有没有可见窗口**：有可见窗口的进程 oom_adj 更高、不会被判成缓存态，
+而**只有缓存态才会进 freezer**。所以挂一个：
+
+```
+1×1 像素、alpha=0、TYPE_APPLICATION_OVERLAY、FLAG_NOT_TOUCHABLE|FLAG_NOT_FOCUSABLE|FLAG_NOT_TOUCH_MODAL
+```
+
+对用户完全不可见、也绝不抢触摸，但让系统认为"这个 App 在显示东西" → 不冻它。
+代价是要用户在系统设置里授予「显示在其他应用上层」（`Settings.canDrawOverlays`）；
+没授权就静默跳过，功能照旧（只是可能再被冻）。
+
+## 11.3 另外两件：Wi-Fi 锁 + 冻结自检
+
+* **Wi-Fi 高性能锁**（`WIFI_MODE_FULL_HIGH_PERF`）：屏幕一灭 Wi-Fi 可能进省电/休眠，
+  从电脑或别的设备连过来就断（本机 `127.0.0.1` 不受影响）。这是"局域网连不上"的另一半原因。
+  创建失败自动回落 `WIFI_MODE_FULL`。
+* **冻结自检**：看门狗每次 tick（10s）写一次 `elapsedRealtime`；下次发现间隔 >30s，
+  就说明这中间被整体冻过 → `冻过 N` 计数 +1，并把「系统冻了我 N 秒（HH:mm 恢复）」
+  写进状态条。没有 root 时，这是唯一能拿到"到底是不是被冻、冻了多久"的证据。
+
+## 11.4 用户侧还要做什么（ROM 权限，App 改不了）
+
+1. App 顶栏点 **「保活设置」**，按提示依次点完：省电白名单 → 显示在其他应用上层 → 闹钟与提醒
+2. 国产 ROM 再放行四处：**自启动 / 省电策略「无限制」/ 任务列表加锁 / 允许后台弹窗**
+3. 若仍会被冻：把 App 从最近任务里"锁定"（各 ROM 叫法不同），或干脆把屏幕常亮关掉后
+   用「屏幕关闭时保持 Wi-Fi 连接」系统选项配合
+
+
 
 
 

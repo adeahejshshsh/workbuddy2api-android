@@ -52,7 +52,7 @@ mkdir -p gen classes dex
 [ -d "$SRC/res" ] || { echo "❌ 找不到资源目录 $SRC/res"; exit 1; }
 aapt2 compile --dir "$SRC/res" -o res.zip
 aapt2 link -I "$AJ" --manifest "$SRC/AndroidManifest.xml" -A "$SRC/assets" --java gen \
-  --min-sdk-version 24 --target-sdk-version 34 --version-code 6 --version-name 1.18.0 \
+  --min-sdk-version 24 --target-sdk-version 34 --version-code 7 --version-name 1.19.0 \
   -o base.apk res.zip
 
 echo "== 3/6 javac + 自检 =="

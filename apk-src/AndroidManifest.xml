@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.dsh.wb2api"
-    android:versionCode="6"
-    android:versionName="1.18.0">
+    android:versionCode="7"
+    android:versionName="1.19.0">
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
 
@@ -14,6 +14,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Wi-Fi 高性能锁：局域网连过来的场景，屏灭后 Wi-Fi 省电/休眠会把连接掐掉 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- 「显示在其他应用上层」：用来挂 1x1 全透明的常驻图层 → 系统不把我判成缓存态、不进
+         app-freezer（"过一会儿连不上、拉回前台就好"的那个坑） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- 精确 alarm：能精确就精确（Doze 里 setAndAllowWhileIdle 会被从 5 分钟拖到 ~9 分钟一次）。
          用户没授予"闹钟与提醒"时，代码自动回落非精确，不会崩。 -->
