@@ -35,6 +35,7 @@ public class ReviveJobService extends JobService {
                     .setPeriodic(PERIOD_MS);
             b.setBackoffCriteria(6 * 60_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL);
             js.schedule(b.build());
+            GatewayService.appLog(c, "第五层 JobScheduler 兜底已排（15 分钟周期，重启手机仍在）");
         } catch (Throwable ignored) {}
     }
 
@@ -42,17 +43,22 @@ public class ReviveJobService extends JobService {
         try {
             JobScheduler js = (JobScheduler) c.getSystemService(Context.JOB_SCHEDULER_SERVICE);
             if (js != null) js.cancel(JOB_ID);
+            GatewayService.appLog(c, "第五层 JobScheduler 兜底已取消（用户主动停止）");
         } catch (Throwable ignored) {}
     }
 
     @Override public boolean onStartJob(JobParameters p) {
-        if (!GatewayService.portUp()) {          // 7863 不在服务 → 把服务叫起来（它自己去拉起网关）
+        boolean up = GatewayService.portUp();
+        GatewayService.appLog(this, "JobScheduler 触发：7863 " + (up ? "在服务，不打扰" : "不在服务 → 拉起服务"));
+        if (!up) {                               // 7863 不在服务 → 把服务叫起来（它自己去拉起网关）
             try {
                 Intent i = new Intent(this, GatewayService.class);
                 if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
                 else startService(i);
             } catch (Throwable t) {              // 后台起前台服务被拒 → 退回普通 startService
-                try { startService(new Intent(this, GatewayService.class)); } catch (Throwable ignored) {}
+                GatewayService.appLog(this, "JobScheduler 起前台服务被拒：" + t.getClass().getSimpleName());
+                try { startService(new Intent(this, GatewayService.class)); }
+                catch (Throwable t2) { GatewayService.appLog(this, "JobScheduler 拉起服务失败：" + t2); }
             }
         }
         return false;                            // 同步干完，不用系统再等我

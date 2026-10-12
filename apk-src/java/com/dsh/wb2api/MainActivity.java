@@ -1,6 +1,7 @@
 package com.dsh.wb2api;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -28,12 +29,15 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.ScrollView;
+import android.widget.HorizontalScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.RandomAccessFile;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -137,7 +141,15 @@ public class MainActivity extends Activity {
         bar.addView(chip("重载面板", new View.OnClickListener() {
             public void onClick(View v) { injected = false; web.reload(); }
         }));
-        root.addView(bar);
+        bar.addView(chip("日志", new View.OnClickListener() {
+            public void onClick(View v) { openLog(); }
+        }));
+        // 动作条改成横向可滚：芯片再多也不会被窄屏裁掉
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.setBackgroundColor(SURFACE);
+        hs.addView(bar);
+        root.addView(hs);
 
         // ── 加载进度线（2dp，加载完自动收起）
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
@@ -392,6 +404,116 @@ public class MainActivity extends Activity {
 
     void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
 
+    // ───────────────────────── 详细日志 ─────────────────────────
+    /**
+     * 日志页：App 事件（系统什么时候冻/杀/拒启动，只有 App 知道）+ 网关 stdout/stderr 尾部
+     *（任务中心执行了什么、上游回了什么，全在里面）。
+     *
+     * 为什么要有这一页：日志其实一直在写（`getFilesDir()/gateway/data/server.log`），
+     * 但手机上既没入口也没复制按钮 —— 等于没有日志。
+     */
+    void openLog() {
+        final StringBuilder sb = new StringBuilder();
+        sb.append("=== ① App 事件（").append(stat(GatewayService.appLogFile(this))).append("）===\n");
+        sb.append(tailOf(GatewayService.appLogFile(this), 256 * 1024, 300)).append('\n');
+        sb.append("\n=== ② 网关日志（").append(stat(GatewayService.gwLogFile(this))).append("）===\n");
+        sb.append(tailOf(GatewayService.gwLogFile(this), 512 * 1024, 600));
+        final String text = mask(sb.toString().trim());
+
+        TextView tv = txt(text.isEmpty() ? "（还没有日志：网关还没跑起来过，或日志刚被清）" : text, 10.5f, INK2);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextIsSelectable(true);
+        tv.setPadding(dp(10), dp(8), dp(10), dp(8));
+
+        ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(BG);
+        sv.addView(tv, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                                  ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackgroundColor(SURFACE);
+        box.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(LinearLayout.HORIZONTAL);
+        btns.setPadding(dp(9), dp(8), dp(9), dp(8));
+        btns.setBackgroundColor(SURFACE);
+        btns.addView(chip("复制全部", new View.OnClickListener() {
+            public void onClick(View v) { copyText(text); }
+        }));
+        final Dialog d = new Dialog(this);
+        btns.addView(chip("刷新", new View.OnClickListener() {
+            public void onClick(View v) { d.dismiss(); openLog(); }
+        }));
+        btns.addView(chip("关闭", new View.OnClickListener() {
+            public void onClick(View v) { d.dismiss(); }
+        }));
+        box.addView(btns);
+
+        d.setTitle("详细日志（复制后可直接发给作者）");
+        d.setContentView(box);
+        d.show();
+    }
+
+    /** 复制到剪贴板 */
+    void copyText(String s) {
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(ClipData.newPlainText("wb2api", s));
+            toast("已复制 " + s.length() + " 字符");
+        } catch (Throwable t) { toast("复制失败：" + t); }
+    }
+
+    /** 文件摘要（名字 + 大小）：一眼看出日志到底有没有在写 */
+    static String stat(File f) {
+        try { return f.getName() + "，" + (f.length() / 1024) + " KB"; }
+        catch (Throwable t) { return f.getName(); }
+    }
+
+    /**
+     * 读文件尾部（最多 maxBytes 字节、maxLines 行）。不整个读进内存 ——
+     * 网关日志能到几 MB，整读会 OOM。
+     */
+    static String tailOf(File f, int maxBytes, int maxLines) {
+        RandomAccessFile raf = null;
+        try {
+            if (!f.exists() || f.length() == 0) return "（空）";
+            raf = new RandomAccessFile(f, "r");
+            long len = raf.length();
+            int want = (int) Math.min(len, maxBytes);
+            long from = len - want;
+            byte[] buf = new byte[want];
+            raf.seek(from);
+            raf.readFully(buf);
+            String s = new String(buf, "UTF-8");
+            if (from > 0) {                       // 从半行开始 → 丢掉残行
+                int nl = s.indexOf('\n');
+                if (nl >= 0) s = s.substring(nl + 1);
+            }
+            String[] lines = s.split("\n", -1);
+            if (lines.length > maxLines) {
+                StringBuilder out = new StringBuilder();
+                for (int i = lines.length - maxLines; i < lines.length; i++) out.append(lines[i]).append('\n');
+                return out.toString();
+            }
+            return s;
+        } catch (Throwable t) {
+            return "（读取失败：" + t + "）";
+        } finally {
+            try { if (raf != null) raf.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 脱敏：日志里可能带 api_key / Authorization —— 复制出去前一律打码 */
+    static String mask(String s) {
+        if (s == null) return "";
+        s = s.replaceAll("(?i)(bearer\\s+)[A-Za-z0-9._\\-]{6,}", "$1***");
+        s = s.replaceAll("(wb2api-)[A-Za-z0-9]{6,}", "$1***");
+        s = s.replaceAll("(sk-)[A-Za-z0-9_\\-]{6,}", "$1***");
+        return s;
+    }
+
     /** 「显示在其他应用上层」= 能不能挂常驻图层（挂了系统才不会把我当缓存进程冻住） */
     boolean overlayOk() {
         try { return Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this); }
@@ -418,11 +540,13 @@ public class MainActivity extends Activity {
     void keepAliveWizard() {
         if (!exemptNow()) {
             toast("① 先允许「忽略电池优化」，回来再点一次");
+            GatewayService.appLog(this, "保活①：请求忽略电池优化");
             requestExempt();
             return;
         }
         if (!overlayOk()) {
             toast("② 开「显示在其他应用上层」→ 常驻图层让系统不把我冻住");
+            GatewayService.appLog(this, "保活②：请求「显示在其他应用上层」（防冻结关键）");
             try {
                 startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                         Uri.parse("package:" + getPackageName())));
@@ -434,6 +558,7 @@ public class MainActivity extends Activity {
         }
         if (!exactOk()) {
             toast("③ 允许「闹钟与提醒」→ 兜底 alarm 才精确（可选，推荐）");
+            GatewayService.appLog(this, "保活③：请求「闹钟与提醒」（精确 alarm）");
             try {
                 startActivity(new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
                         Uri.parse("package:" + getPackageName())));
@@ -441,6 +566,7 @@ public class MainActivity extends Activity {
             return;
         }
         GatewayService.start(this);     // 立刻把锁和图层挂上（onStartCommand → holdWake）
+        GatewayService.appLog(this, "保活三项齐：省电白名单 + 常驻图层 + 精确闹钟");
         toast("保活三项齐了：省电白名单 + 常驻图层 + 精确闹钟 ✓");
     }
 

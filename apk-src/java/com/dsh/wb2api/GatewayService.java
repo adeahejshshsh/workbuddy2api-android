@@ -95,6 +95,51 @@ public class GatewayService extends Service {
     public static int freezeCount() { return freezes; }
     public static String freezeText() { return freezeText; }
 
+    // ── 详细日志：App 侧事件落盘，和网关自己的 server.log 拼成完整证据链 ──
+    /** App 事件日志（超过 512KB 翻成 app.log.1，只留两代） */
+    public static File appLogFile(Context c) {
+        File dir = new File(c.getFilesDir(), "logs");
+        try { dir.mkdirs(); } catch (Throwable ignored) {}
+        return new File(dir, "app.log");
+    }
+
+    /** 网关自己的日志：App 把它的 stdout+stderr 追加写到这里（redirectErrorStream） */
+    public static File gwLogFile(Context c) {
+        File dir = new File(c.getFilesDir(), "gateway/data");
+        try { dir.mkdirs(); } catch (Throwable ignored) {}
+        return new File(dir, "server.log");
+    }
+
+    /**
+     * 记一条 App 事件。为什么必须单独记：网关日志能看出"任务做了什么、上游回了什么"，
+     * 但"系统什么时候冻了我/杀了我、前台服务有没有被拒启动、alarm 精不精确"只有 App 知道。
+     */
+    static void appLog(Context c, String s) {
+        try {
+            File f = appLogFile(c);
+            if (f.length() > 512 * 1024) {
+                File old = new File(f.getParentFile(), "app.log.1");
+                if (old.exists()) old.delete();
+                f.renameTo(old);
+                f = appLogFile(c);
+            }
+            String ts = new java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US)
+                    .format(new java.util.Date());
+            try (Writer w = new OutputStreamWriter(new FileOutputStream(f, true), "UTF-8")) {
+                w.write(ts + "  " + s + "\n");
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    /** 精确 alarm 权限在不在（Android 12+ 的「闹钟与提醒」特殊权限） */
+    static boolean exactAlarmOk(Context c) {
+        try {
+            if (Build.VERSION.SDK_INT < 31) return true;
+            AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+            return am == null || am.canScheduleExactAlarms();
+        } catch (Throwable t) { return false; }
+    }
+
     /** 退出码翻成人话：137 基本就是被系统强杀（内存不够或清后台），143 是收到停止信号 */
     static String exitMeaning(int rc) {
         if (rc == 0) return "rc=0 正常退出";
@@ -158,6 +203,7 @@ public class GatewayService extends Service {
             killProc();
             releaseWake();
             stopForegroundCompat();
+            appLog(this, "用户主动停止 → 释放保活、取消 alarm/job，不再自愈");
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -175,14 +221,20 @@ public class GatewayService extends Service {
                 reason = "上次网关退出：" + lastExit + (appRestarts > 0 ? "（服务被系统杀过 " + appRestarts + " 次）" : "");
         } catch (Throwable ignored) {}
         userStop = false;
+        appLog(this, "服务启动 startId=" + startId
+                + (appRestarts > 0 ? "，App 进程已被系统杀过 " + appRestarts + " 次" : "")
+                + (lastExit.isEmpty() ? "" : "，上次网关退出：" + lastExit));
         ReviveJobService.schedule(this);   // 第五层：JobScheduler，系统托管，跨重启仍在
         String fgsErr = startForegroundCompat();
         if (fgsErr != null) {   // 起不来就别赖着，否则等 5s 被系统判 ANR 崩掉
             setState(ST_STOPPED, "前台服务起不来", fgsErr);
+            appLog(this, "前台服务起不来：" + fgsErr);
             stopSelf();
             return START_NOT_STICKY;
         }
         holdWake();   // 保活：不持它，后台时看门狗线程与 Go 定时器都会被冻住
+        appLog(this, "保活状态：wakelock=" + wakeHeld() + "，常驻图层=" + (overlay != null)
+                + "，alarm=" + (exactAlarmOk(this) ? "精确" : "非精确（未授予「闹钟与提醒」）") + "，任务列表=划掉也不停");
         if (intent != null && intent.getBooleanExtra(EXTRA_RESTART, false)) killProc();
         if (!alive()) {
             if (portUp()) {               // 本机已有实例在跑（比如 DSH 里那个），复用不抢
@@ -207,6 +259,7 @@ public class GatewayService extends Service {
         killProc();
         releaseWake();
         if (!userStop) {       // 不是用户点的停止 → alarm + job 两条路把服务拉回来
+            appLog(this, "服务被销毁（非用户操作）→ 已重挂 alarm + JobScheduler 兜底");
             armAlarm(this);
             ReviveJobService.schedule(this);
         }
@@ -216,6 +269,7 @@ public class GatewayService extends Service {
     @Override public void onTaskRemoved(Intent root) {
         setState(status, "任务被划掉，服务继续",
                  "App 任务被划掉（stopWithTask=false 服务继续跑），已重挂 alarm/job 兜底");
+        appLog(this, "任务列表被划掉：服务继续跑（stopWithTask=false），已重挂兜底");
         armAlarm(this);
         ReviveJobService.schedule(this);
         super.onTaskRemoved(root);
@@ -245,6 +299,7 @@ public class GatewayService extends Service {
                             + new java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
                                     .format(new java.util.Date()) + " 恢复）";
                     setState(status, freezeText, freezeText + " —— 拉回前台/放进白名单后已恢复");
+                    appLog(this, freezeText);
                 }
                 lastTickAt = now;
                 if (!alive()) {
@@ -278,6 +333,7 @@ public class GatewayService extends Service {
     void selfHeal(String why) {
         int n = ++restarts;
         setState(ST_STARTING, "看门狗自愈 #" + n + "：" + why, "看门狗正在重拉网关：" + why);
+        appLog(this, "看门狗自愈 #" + n + "：" + why + "（退避 " + (backoffMs(n) / 1000) + "s）");
         killProc();
         refreshNotification();
         sleep(backoffMs(n));            // 退避，别打连环炮
@@ -330,7 +386,14 @@ public class GatewayService extends Service {
             setState(ST_RUNNING,
                      mode + " pid=" + pid + " 运行中" + (restarts > 0 ? "（自愈 " + restarts + " 次）" : ""),
                      null);
-            final File logFile = new File(gwDir, "data/server.log");
+            appLog(this, "拉起网关：" + mode + " pid=" + pid + "，工作目录 " + gwDir.getAbsolutePath());
+            File lf = new File(gwDir, "data/server.log");
+            if (lf.length() > 4 * 1024 * 1024) {        // 超 4MB 翻一代：日志页读得快，也不撑爆存储
+                File old = new File(gwDir, "data/server.log.1");
+                if (old.exists()) old.delete();
+                lf.renameTo(old);
+            }
+            final File logFile = lf;
             reader = new Thread(() -> pump(p.getInputStream(), logFile));
             reader.setDaemon(true);
             reader.start();
@@ -339,6 +402,7 @@ public class GatewayService extends Service {
                 try {
                     int rc = me.waitFor();
                     lastExit = exitMeaning(rc);
+                    appLog(this, "网关进程退出：" + lastExit);
                     try { getSharedPreferences(PREF, MODE_PRIVATE).edit().putString("last_exit", lastExit).apply(); } catch (Throwable ignored) {}
                     setState(ST_STOPPED, "已退出 " + lastExit,
                              "网关进程退出：" + lastExit + "，看门狗按退避重拉");
@@ -478,6 +542,7 @@ public class GatewayService extends Service {
             overlay = v;
         } catch (Throwable t) {
             reason = "常驻图层没加上（" + t.getClass().getSimpleName() + "），系统可能仍会冻住我";
+            appLog(this, "常驻图层失败：" + t + "（系统可能仍会冻结本进程）");
         }
     }
 
@@ -625,12 +690,14 @@ public class GatewayService extends Service {
     @Override public void onTimeout(int startId) {
         setState(ST_STARTING, "前台服务超时被系统回收",
                  "系统按 FGS 时限回收了前台服务，已挂 5 分钟 alarm 兜回来自启");
+        appLog(this, "前台服务被系统按 FGS 时限回收，已挂 alarm 兜底");
         armAlarm(this);
     }
 
     @Override public void onTimeout(int startId, int fgsType) {
         setState(ST_STARTING, "前台服务超时被系统回收",
                  "系统按 FGS 时限回收了前台服务（type=" + fgsType + "），已挂 5 分钟 alarm 兜回来自启");
+        appLog(this, "前台服务被系统按 FGS 时限回收（type=" + fgsType + "），已挂 alarm 兜底");
         armAlarm(this);
     }
 

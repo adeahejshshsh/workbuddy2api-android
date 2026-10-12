@@ -565,6 +565,51 @@ permission denied`（SELinux 不让 DSH uid 直接 exec node），**不是 JS �
 /system/bin/linker64 $PREFIX/bin/node --check internal/panel/app.js   # 语法 ✓
 ```
 
+---
+
+# 十三、App 详细日志（v1.21.0）
+
+## 13.1 之前为什么"没日志"
+
+日志其实**一直在写**：`GatewayService.pump()` 把网关进程的 stdout 追加到
+`files/gateway/data/server.log`（`redirectErrorStream(true)` → stderr 也在里面）。
+问题是没有入口：手机上看不到、也复制不出来，等于没有。
+
+## 13.2 两个日志文件（分工不同）
+
+| 文件 | 谁写 | 内容 | 轮转 |
+|---|---|---|---|
+| `files/logs/app.log` | `GatewayService.appLog()` | **只有 App 知道的事**：服务启动 startId、App 进程被杀次数、前台服务被拒启动的原因、拉起网关的 mode/pid、网关退出码、**冻结检测**（冻了 N 秒）、看门狗自愈、常驻图层失败、onTaskRemoved、FGS 超时回收、JobScheduler 触发、保活三件套状态 | 512KB → `app.log.1` |
+| `files/gateway/data/server.log` | 网关进程自己（stdout+stderr） | 任务中心每个动作、上游 HTTP 状态、chat 流水行、账号 token 失效、队列启动/结束 | 每次拉起前若 >4MB → `server.log.1` |
+
+**为什么必须分两个**：网关日志能说明"任务做了什么、上游回了什么"，但"系统什么时候冻了我/杀了我、
+前台服务有没有被拒"只有 App 进程知道 —— 分开写才不会互相冲掉。
+
+## 13.3 日志页怎么实现的（几个要点）
+
+* 只读**尾部**：`RandomAccessFile.seek(len - want)` + 丢掉首个残行，最多 512KB / 600 行。
+  不整读 —— 网关日志能到几 MB，整读会 OOM。
+* **脱敏**：复制出去前把 `Bearer …` / `wb2api-…` / `sk-…` 打码，用户可以把日志直接贴到公开处。
+* 动作条包进 `HorizontalScrollView`：芯片加到 5 个也不会被窄屏裁掉。
+
+## 13.4 "执行过了但还是未完成"该在日志里找什么
+
+1. **队列视图那一行**（不用挖日志）：`✅ 进度 +N` / `⚠️ 进度未变化…` / `✓ 已领取` / `还差 N 次` ✓
+2. `panel: 队列 growth uid=… code=…: …`（v1.21.0 起带进度判定）
+3. `autotask …: accept 尝试N …` / `… 未登记生效（回读=…）` → **上游没把任务标成已接受**
+   （未接受的任务不计数，这是"跑了没效果"最常见的原因）
+4. `panel: 任务动作 uid=… code=… progress A -> B claimable=… claimed=…` → 进度有没有真的动
+5. chat 流水行（`internal/server/logging.go`）：那次"行为"请求上游到底回了什么
+6. 若队列行是 `skipped 该账号有其它任务动作在执行` → 同一账号在跑别的（串行锁）
+
+## 13.5 自查（不用装 App 也能看）
+
+```bash
+adb shell run-as com.dsh.wb2api cat files/gateway/data/server.log | tail -80
+# 没 adb 就在 App 里点顶栏「日志」→「复制全部」，直接发给作者
+```
+
+
 
 
 

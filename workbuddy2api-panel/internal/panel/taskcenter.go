@@ -547,6 +547,19 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	}
 	if after != nil {
 		msg += "（进度 " + taskProgressText(after) + "）"
+		// 「执行过了，但还是未完成」的判据就是这三行：进度有没有动、够不够领、领到没有。
+		// 以前只印一个进度快照，于是"跑完了进度没动"看起来和"没事可做"一样。
+		switch {
+		case after.Claimed:
+			msg += " ✓ 已领取"
+		case after.Current > before.Current:
+			msg += fmt.Sprintf(" ✅ 进度 +%d", after.Current-before.Current)
+			if after.Target > 0 && after.Current < after.Target {
+				msg += fmt.Sprintf("，还差 %d 次", after.Target-after.Current)
+			}
+		case after.Current == before.Current:
+			msg += " ⚠️ 进度未变化：上游没有计入这次行为（可能未到结算时间 / 行为未被认可），建议过几分钟再扫一次"
+		}
 	}
 	log.Printf("panel: 队列 growth uid=%s code=%s: %s", a.UID, code, msg)
 	return msg, nil
