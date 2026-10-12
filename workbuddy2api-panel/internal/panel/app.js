@@ -1661,6 +1661,7 @@ $('btnScanAll').onclick = async () => {
   try {
     const d = await api('tasks/scan_all', { method: 'POST' });
     renderQueue(groupItems(d), null, '没有待办任务 🎉', '全部账号的成长任务与开学季活动都已完成，明日再来。');
+    loadSkip();   // 扫描会暴露"做不了"的项，顺手刷新跳过名单计数
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; b.textContent = '扫描待办'; }
 };
@@ -1676,9 +1677,41 @@ $('btnRunQueue').onclick = async () => {
     lastQueueSeq = r.seq || 0;
     toast('队列已启动：' + r.total + ' 项（并发 ' + conc + '）', 'ok');
     startQueuePolling();
+    loadSkip();
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; b.textContent = '执行全部待办'; }
 };
+/* ── 跳过名单（v1.22.0）：任务中心只做"能做得了的" ─────────────────────
+   ① 尝试型任务（上游未证实可点亮：Sequential 预留项、夜猫子）默认不进待办；
+   ② 反复执行仍无进展的 (账号,任务码) 自动跳过（7 天后自动重试）。
+   这里给它开关 + 一键清空重试；所有原因都会在扫描结果里写明，不静默过滤。 */
+async function loadSkip() {
+  try {
+    const d = await api('tasks/skip');
+    $('qcAttempt').checked = !!d.allow_attempt;
+    const blocked = (d.entries || []).filter(e => e.blocked).length;
+    const pending = (d.entries || []).length - blocked;
+    $('qcSkipInfo').textContent = '跳过名单：' + (blocked ? blocked + ' 项已跳过' : '空') +
+      (pending ? '（' + pending + ' 项在计数中）' : '');
+  } catch (e) { $('qcSkipInfo').textContent = '跳过名单：读取失败'; }
+}
+async function postSkip(body) {
+  try { return await api('tasks/skip', { method: 'POST', body: JSON.stringify(body) }); }
+  catch (e) { toast(e.message, 'err'); return null; }
+}
+$('qcAttempt').onchange = async (ev) => {
+  const on = ev.target.checked;
+  await postSkip({ allow_attempt: on });
+  await loadSkip();
+  toast(on ? '已包含尝试型任务（可能跑了也不点亮）' : '只做有把握的任务 ✓', 'ok');
+};
+$('btnSkipClear').onclick = async () => {
+  if (!confirm('清空跳过名单？\n这些任务会重新出现在待办里再试一轮；仍反复无效的会再次被跳过。')) return;
+  const d = await postSkip({ clear: true });
+  await loadSkip();
+  toast(d && d.cleared ? ('已清空 ' + d.cleared + ' 条，重新扫描即可重试') : '跳过名单本来就是空的', 'ok');
+};
+loadSkip();
 // 扫描结果 → 分组条目（无执行状态）
 function groupItems(d) {
   const groups = [];
@@ -1692,6 +1725,13 @@ function groupItems(d) {
     for (const t of (a.growth || [])) {
       GROWTH_TITLES[t.task_code] = t.title || t.task_code;
       rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan' });
+    }
+    // 本版判定"做不了"的任务（无自动化动作 / 尝试型 / 反复无效）也列出来 ——
+    // 静默过滤会让用户以为按钮没生效；这里给一行 + 明写原因（v1.22.0）。
+    for (const s of (a.skipped || [])) {
+      GROWTH_TITLES[s.code] = s.title || s.code;
+      rows.push({ kind: 'growth', code: s.code, title: s.title || s.code, prog: '—',
+                  status: 'skipped', message: s.reason });
     }
     if (rows.length) groups.push({ uid: a.uid, nick: a.nickname, rows });
   }
@@ -1723,13 +1763,16 @@ function renderQueue(groups, progress, emptyTitle, emptyDesc) {
   }
   empty.style.display = 'none';
   empty.style.display = 'none';
-  let total = 0;
+  let total = 0, totalSkipped = 0;
   list.innerHTML = groups.map(g => {
-    total += g.rows.length;
-    return '<div class="qgroup"><header><span class="nm">' + esc(g.nick || g.uid.slice(0, 12)) + '</span><span class="cnt">' + g.rows.length + ' 项待办</span></header>' +
+    const pend = g.rows.filter(r => r.status !== 'skipped').length;
+    const sk = g.rows.length - pend;
+    total += pend; totalSkipped += sk;
+    return '<div class="qgroup"><header><span class="nm">' + esc(g.nick || g.uid.slice(0, 12)) + '</span><span class="cnt">' + pend + ' 项待办' +
+      (sk ? '，' + sk + ' 项已跳过' : '') + '</span></header>' +
       g.rows.map(qrowHTML).join('') + '</div>';
   }).join('');
-  $('qcSummary').textContent = total + ' 项';
+  $('qcSummary').textContent = total + ' 项待办' + (totalSkipped ? '，' + totalSkipped + ' 项已跳过（做不了）' : '');
   updateProgress(progress);
 }
 function updateProgress(q) {

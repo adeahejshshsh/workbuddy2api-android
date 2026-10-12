@@ -157,21 +157,25 @@ var autoActions = []autoAction{
 	{
 		TaskCode: "Sequential_Tasks_4",
 		Desc:     "小程序定时任务（预留，每日零点解锁一环）：accept → 定时任务创建事件（PC 同源）→ 领奖（判据待解锁验证）",
+		Attempt:  true, // 判据未验证：跑了可能不点亮 → 默认不进待办（v1.22.0）
 		run:      runSequentialAutomation,
 	},
 	{
 		TaskCode: "Sequential_Tasks_5",
 		Desc:     "小程序使用 GLM5.2（预留）：accept → 带模型字段的 mini 对话上报 → 领奖（判据待解锁验证）",
+		Attempt:  true, // 同上
 		run:      runSequentialModelChat,
 	},
 	{
 		TaskCode: "Sequential_Tasks_6",
 		Desc:     "小程序十次对话（预留）：accept → mini 对话上报 ×target（自动补差额）→ 领奖",
+		Attempt:  true, // 同上
 		run:      runSequentialChat10,
 	},
 	{
 		TaskCode: "Sequential_Tasks_7",
 		Desc:     "体验灵感功能（预留，疑 PC 口径 +500c+5e）：accept → 灵感事件组（PC+mp 双形态）→ 领奖（判据待解锁验证）",
+		Attempt:  true, // 同上
 		run:      runSequentialPlaybook,
 	},
 }
@@ -634,6 +638,19 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented,
 			"该任务需要客户端内交互（无对应接口），无法自动完成；请按任务说明在官方客户端操作")
 		return
+	}
+	// 被判"做不了"的任务不再白跑一遍（v1.22.0）：直接说清原因，避免"点了没效果"。
+	if act.Attempt && !p.attemptAllowed() {
+		writeErr(w, http.StatusConflict,
+			"该任务是尝试型（上游未证实可点亮），默认不执行；如要试请在任务中心勾选「包含尝试型任务」")
+		return
+	}
+	if a != nil {
+		if blocked, why := p.skipBlocked(a.UID, act.TaskCode); blocked {
+			writeErr(w, http.StatusConflict, "该任务已被判定做不了并跳过："+why+
+				"；如要重试请点任务中心「清空跳过名单」")
+			return
+		}
 	}
 	// per-account 互斥：同账号的任务动作正在跑（单任务或全量）时直接 409，
 	// 不并发重跑（动作幂等但 expert/skill 系含真实对话，重跑浪费配额）。
@@ -1183,6 +1200,20 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		if before.Claimed || before.Current >= before.Target && before.Target > 0 {
 			item["status"] = "skipped"
 			item["message"] = "已完成（" + taskProgressText(before) + "）"
+			out = append(out, item)
+			continue
+		}
+		// 跳过名单门控（v1.22.0）：尝试型默认不跑；反复无效的也不跑 —— 省下的
+		// 上游额度比"再试一次"值钱。
+		if act.Attempt && !p.attemptAllowed() {
+			item["status"] = "skipped"
+			item["message"] = "尝试型任务（上游未证实可点亮），默认不执行"
+			out = append(out, item)
+			continue
+		}
+		if blocked, why := p.skipBlocked(a.UID, act.TaskCode); blocked {
+			item["status"] = "skipped"
+			item["message"] = "已跳过（判定做不了）：" + why
 			out = append(out, item)
 			continue
 		}

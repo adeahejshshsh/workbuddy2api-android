@@ -33,10 +33,23 @@ type scanAccountItem struct {
 	Nickname  string          `json:"nickname"`
 	Growth    []upstream.Task `json:"growth,omitempty"`
 	GrowthErr string          `json:"growth_error,omitempty"`
+	// Skipped 本版判定"做不了、已跳过"的任务（无自动化动作 / 尝试型 / 反复无效）。
+	// 为什么列出来而不是过滤掉：静默过滤会让用户以为"按钮没生效"（v1.20.0 的教训）。
+	Skipped []skipRow `json:"skipped,omitempty"`
 }
 
-// growthPending 任务是否"未完成且可自动化"。
-func growthPending(t upstream.Task) bool {
+// skipRow 扫描页里"做不了、已跳过"的一行。
+type skipRow struct {
+	Code   string `json:"code"`
+	Title  string `json:"title,omitempty"`
+	Reason string `json:"reason"`
+}
+
+// growthPending 任务是否"未完成 + 可自动化 + 没被判做不了"。
+//
+// v1.22.0 起是**方法**：判定要带账号 —— "反复无效"是按 (账号,任务码) 记的，
+// 同一个任务码在 A 账号能做、在 B 账号上游不计数。
+func (p *Panel) growthPending(a *auth.Auth, t upstream.Task) bool {
 	if t.Claimed {
 		return false
 	}
@@ -47,12 +60,43 @@ func growthPending(t upstream.Task) bool {
 	if t.Locked {
 		return false
 	}
-	if t.Target > 0 && t.Current >= t.Target {
-		// 达标未领：也入队（队列执行后会自动领）——但仅限有自动化动作的任务，
-		// 否则队列执行时会因 autoActionFor 为 nil 直接报错。
-		return autoActionFor(t.TaskCode) != nil
+	act := autoActionFor(t.TaskCode)
+	if act == nil {
+		// 达标未领也入队（队列执行后会自动领），但必须真有动作——否则队列执行
+		// 时会因 autoActionFor 为 nil 直接报错。
+		return false
 	}
-	return autoActionFor(t.TaskCode) != nil
+	if act.Attempt && !p.attemptAllowed() {
+		// 尝试型（上游未证实可点亮）默认不排：它们正是"执行了也没效果"的来源。
+		return false
+	}
+	if a != nil {
+		if blocked, _ := p.skipBlocked(a.UID, t.TaskCode); blocked {
+			return false
+		}
+	}
+	return true
+}
+
+// skipReason 任务进不了待办、且**该让用户知道**的原因（空 = 不必提，如已领取/上游锁定）。
+func (p *Panel) skipReason(a *auth.Auth, t upstream.Task) string {
+	if t.Claimed || t.Locked {
+		return ""
+	}
+	act := autoActionFor(t.TaskCode)
+	switch {
+	case act == nil:
+		return "本移植版没有该任务的自动化动作，需在官方客户端完成"
+	case act.Attempt && !p.attemptAllowed():
+		return "尝试型任务（上游未证实可点亮），默认不执行；需要可在任务中心勾选「包含尝试型任务」"
+	}
+	if a != nil {
+		if blocked, why := p.skipBlocked(a.UID, t.TaskCode); blocked {
+			return "反复执行仍无进展，已跳过：" + why +
+				"（7 天后自动重试，或点「清空跳过名单」立即重试）"
+		}
+	}
+	return ""
 }
 
 // queueDiag 「执行全部待办」扫描阶段的诊断账：为什么某项没进待办。
@@ -66,6 +110,7 @@ type queueDiag struct {
 	claimed int      // 已领取
 	noauto  int      // 本移植版暂无该任务码的自动化动作
 	gated   int      // 不参与：已停用 / global / 企业版账号
+	skipped int      // 本版判定做不了而跳过：尝试型（默认不排）+ 反复无效自动跳过
 }
 
 // explain 出人话原因 + 给前端定弹窗颜色（"err" = 确实出问题了，"ok" = 单纯没事可做）。
@@ -91,6 +136,10 @@ func (d queueDiag) explain() (string, string) {
 	}
 	if d.gated > 0 {
 		parts = append(parts, fmt.Sprintf("%d 个账号不参与（停用 / global / 企业版）", d.gated))
+	}
+	if d.skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d 项已跳过（尝试型 / 反复执行仍无进展）—— 只做有把握的，"+
+			"要重试请点任务中心「清空跳过名单」", d.skipped))
 	}
 	if len(parts) == 0 {
 		return "全部账号没有待办任务", level
@@ -143,8 +192,13 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 				it.GrowthErr = err.Error()
 			} else {
 				for _, t := range tasks {
-					if growthPending(t) {
+					if p.growthPending(a, t) {
 						it.Growth = append(it.Growth, t)
+						continue
+					}
+					// 做不了的（无动作 / 尝试型 / 反复无效）不静默消失：列出来并写明原因
+					if r := p.skipReason(a, t); r != "" {
+						it.Skipped = append(it.Skipped, skipRow{Code: t.TaskCode, Title: t.Title, Reason: r})
 					}
 				}
 			}
@@ -157,8 +211,16 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 					seen[t.TaskCode] = true
 				}
 				for _, t := range mpTasks {
-					if growthPending(t) && !seen[t.TaskCode] {
+					if seen[t.TaskCode] {
+						continue
+					}
+					seen[t.TaskCode] = true
+					if p.growthPending(a, t) {
 						it.Growth = append(it.Growth, t)
+						continue
+					}
+					if r := p.skipReason(a, t); r != "" {
+						it.Skipped = append(it.Skipped, skipRow{Code: t.TaskCode, Title: t.Title, Reason: r})
 					}
 				}
 			}
@@ -309,7 +371,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 					mu.Unlock()
 				} else {
 					for _, t := range tasks {
-						if growthPending(t) {
+						if p.growthPending(a, t) {
 							one.grow = append(one.grow, t)
 							continue
 						}
@@ -321,6 +383,8 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 							dg.locked++
 						case autoActionFor(t.TaskCode) == nil:
 							dg.noauto++
+						case p.skipReason(a, t) != "":
+							dg.skipped++ // 尝试型 / 反复无效：本版判定做不了
 						}
 						mu.Unlock()
 					}
@@ -333,8 +397,18 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 							seen[t.TaskCode] = true
 						}
 						for _, t := range mpTasks {
-							if growthPending(t) && !seen[t.TaskCode] {
+							if seen[t.TaskCode] {
+								continue
+							}
+							seen[t.TaskCode] = true
+							if p.growthPending(a, t) {
 								one.grow = append(one.grow, t)
+								continue
+							}
+							if p.skipReason(a, t) != "" {
+								mu.Lock()
+								dg.skipped++
+								mu.Unlock()
 							}
 						}
 					}
@@ -432,15 +506,38 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				}
 				p.queueMarkAt(i, "running", "")
 				var msg string
+				var progressed bool
 				var err error
 				switch kind {
 				case "growth":
-					msg, err = p.runGrowthQueued(one.a, code)
+					msg, progressed, err = p.runGrowthQueued(one.a, code)
 				}
 				if err != nil {
 					p.queueMarkAt(i, "error", err.Error())
 				} else {
 					p.queueMarkAt(i, "done", msg)
+				}
+				// 执行了但没进展 → 记一笔；连续 skipFailLimit 次就把该 (账号,任务码)
+				// 砍出待办，别再天天"做了也没用"（7 天后自动放回，或一键清空）。
+				if err != nil || !progressed {
+					why := "进度未变化（上游未计入这次行为）"
+					if err != nil {
+						why = errBrief(err)
+					}
+					added, n := p.skipNote(one.a.UID, code, why)
+					note := fmt.Sprintf("（连续无效 %d/%d）", n, skipFailLimit)
+					if added {
+						note = fmt.Sprintf("（连续 %d 次无效 → 已跳过：不再出现在待办里，7 天后自动重试，"+
+							"或点「清空跳过名单」立即重试）", n)
+					}
+					if err != nil {
+						p.queueMarkAt(i, "error", err.Error()+note)
+					} else {
+						p.queueMarkAt(i, "done", msg+note)
+					}
+					log.Printf("panel: 任务无效 uid=%s code=%s %s（%s）", one.a.UID, code, note, why)
+				} else {
+					p.skipReset(one.a.UID, code) // 有效 → 清掉历史失败计数
 				}
 				time.Sleep(reportGap) // 项间节流
 			}
@@ -506,26 +603,29 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 
 // runGrowthQueued 执行单个成长任务（动作 + 回读 + 自动领奖；与
 // accountTaskAuto 同语义，结果以文字返回）。
-func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
+// runGrowthQueued 执行一项队列任务。
+// v1.22.0 起多返回一个 progressed：本次执行到底有没有换来进展（进度前进 / 领到奖）。
+// 调用方用它喂跳过名单 —— "执行了但没进展"正是要把该任务砍出待办的判据。
+func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, bool, error) {
 	act := autoActionFor(code)
 	if act == nil {
-		return "", fmt.Errorf("任务 %s 无自动动作", code)
+		return "", false, fmt.Errorf("任务 %s 无自动动作", code)
 	}
 	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
 	before, err := p.taskByCode(a, code)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if before == nil {
-		return "该账号无此任务", nil
+		return "该账号无此任务", false, nil
 	}
 	isMP := isMPTaskCode(code)
 	if before.Claimed {
-		return "已完成（已领取）", nil
+		return "已完成（已领取）", true, nil
 	}
 	msg, err := act.run(p, a)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	var after *upstream.Task
 	if isMP {
@@ -533,6 +633,7 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	} else {
 		after, _ = p.taskByCodeWaiting(a, code)
 	}
+	claimed := false
 	if after != nil && after.Claimable {
 		var credit, energy int64
 		var cerr error
@@ -543,8 +644,10 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 		}
 		if cerr == nil && (credit > 0 || energy > 0) {
 			msg += fmt.Sprintf("；自动领奖 +%d 分 +%d 能", credit, energy)
+			claimed = true
 		}
 	}
+	progressed := claimed
 	if after != nil {
 		msg += "（进度 " + taskProgressText(after) + "）"
 		// 「执行过了，但还是未完成」的判据就是这三行：进度有没有动、够不够领、领到没有。
@@ -552,17 +655,19 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 		switch {
 		case after.Claimed:
 			msg += " ✓ 已领取"
+			progressed = true
 		case after.Current > before.Current:
 			msg += fmt.Sprintf(" ✅ 进度 +%d", after.Current-before.Current)
 			if after.Target > 0 && after.Current < after.Target {
 				msg += fmt.Sprintf("，还差 %d 次", after.Target-after.Current)
 			}
+			progressed = true
 		case after.Current == before.Current:
-			msg += " ⚠️ 进度未变化：上游没有计入这次行为（可能未到结算时间 / 行为未被认可），建议过几分钟再扫一次"
+			msg += " ⚠️ 进度未变化：上游没有计入这次行为（可能未到结算时间 / 行为未被认可）"
 		}
 	}
-	log.Printf("panel: 队列 growth uid=%s code=%s: %s", a.UID, code, msg)
-	return msg, nil
+	log.Printf("panel: 队列 growth uid=%s code=%s progressed=%v: %s", a.UID, code, progressed, msg)
+	return msg, progressed, nil
 }
 
 // tasksQueueStatus 队列状态（轮询用）。

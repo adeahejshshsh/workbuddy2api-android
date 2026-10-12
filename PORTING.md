@@ -609,6 +609,72 @@ adb shell run-as com.dsh.wb2api cat files/gateway/data/server.log | tail -80
 # 没 adb 就在 App 里点顶栏「日志」→「复制全部」，直接发给作者
 ```
 
+---
+
+# 十四、任务中心：只做能做得了的（v1.22.0）
+
+## 14.1 症状与证据
+
+用户原话："任务中心执行待办无效果 —— 做不了就直接砍掉，或者留下能做的。"
+
+代码里对得上的证据有两条：
+
+1. `autoAction.Attempt`（注释："上游未证实可脚本化，跑了可能不点亮"）**只被序列化给前端**
+   （`autotask.go` 里那唯一的 `"attempt": act.Attempt`），**从不参与待办筛选** —— 于是
+   `black_cat` 这类动作照旧进队列、照旧执行、照旧不点亮。
+2. `Sequential_Tasks_4~7` 的注释自己写着"**预留**""判据待解锁验证"，但它们**没被标 Attempt** ——
+   即被测者眼中的"做不了的任务"，天天出现在待办里。
+
+## 14.2 设计（三种状态，全部可见）
+
+| 状态 | 判据 | 行为 |
+|---|---|---|
+| **能做** | 有动作 + `!Attempt`（或开关打开）+ 不在跳过名单 | 进待办，执行 |
+| **尝试型** | `Attempt == true` 且开关关闭（**默认**） | 不进待办；扫描结果里列出原因；单任务路径 409 |
+| **已跳过** | 同 (uid,code) 连续 `skipFailLimit=3` 次无进展/报错 | 不进待办（落盘，`skipCooldown=7d` 后自动放回，或一键清空） |
+
+"无进展"的判据来自 `runGrowthQueued` 的返回值 `progressed`：`after.Claimed` / 领到奖 /
+`after.Current > before.Current` 三者之一为真才算有进展 —— 这正是"执行过了但还是未完成"的机器判据。
+
+## 14.3 数据结构与接口
+
+* `data/task_skip.json`（路径 = `stateSibling(cfg.StateFile, "task_skip.json")`）
+  ```json
+  { "allow_attempt": false,
+    "entries": { "<uid>|<task_code>": { "fails": 3, "why": "进度未变化（上游未计入这次行为）",
+                                        "last": "…", "until": "…" } } }
+  ```
+* `GET /panel/api/tasks/skip` → `{allow_attempt, limit, entries:[{uid,code,fails,why,last,until,blocked}]}`
+* `POST /panel/api/tasks/skip` → `{allow_attempt?:bool, clear?:bool, uid?, code?}`
+* 扫描项新增 `skipped:[{code,title,reason}]`（前端渲染成"跳过"行，**不静默过滤**）
+* 队列诊断账新增 `skipped` 计数（`explain()` 里出声）
+
+## 14.4 怎么验证（本机实测命令）
+
+```bash
+# 单测（跳过门控/冷却/清空/开关/坏文件容错）
+go test -c -o /tmp/panel.test ./internal/panel/
+/system/bin/linker64 /tmp/panel.test -test.run 'TestSkip|TestAttempt' -test.v   # 5/5 PASS
+
+# 端到端（临时实例，绝不动用户运行中的 7863）
+cp apk-src/assets/config.json /tmp/tc/config.json   # listen→:7999，api_key→sk-scratch-e2e
+$PREFIX/lib/workbuddy2api/server -config /tmp/tc/config.json &
+K=sk-scratch-e2e
+curl -sH "Authorization: Bearer $K"  http://127.0.0.1:7999/panel/api/tasks/skip
+curl -s -X POST -H "Authorization: Bearer $K" -d '{"allow_attempt":true}' \
+     http://127.0.0.1:7999/panel/api/tasks/skip      # → 落盘 data/task_skip.json
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7999/panel/api/tasks/skip   # 无鉴权 → 401
+```
+
+## 14.5 没验证的部分（如实说明）
+
+* **每个尝试型任务"到底能不能点亮"**：没有真实账号、也不能拿用户账号做实验，所以只能按
+  上游注释与既有实测记录标（"三账号点亮"的保持非 Attempt）。若某个被标 Attempt 的其实能点亮，
+  勾上「包含尝试型任务」即可，不影响它进队列。
+* **`skipped` 行在真实任务列表下的渲染**：本机临时实例没有真实任务，只验证到接口字段与
+  前端渲染代码路径（`groupItems` 的 `a.skipped` 分支）；0 账号/坏 token 路径已实测。
+
+
 
 
 

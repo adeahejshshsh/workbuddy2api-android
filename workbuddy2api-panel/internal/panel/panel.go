@@ -65,6 +65,10 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// SkipFile 任务跳过名单落盘路径（v1.22.0，默认 <state 同目录>/task_skip.json）。
+	// 记 attempt 开关与"反复执行仍无进展"的 (账号,任务码)；空 = 只存内存（不落盘）。
+	SkipFile string
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -90,6 +94,10 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// 任务跳过名单（taskgate.go）：attempt 开关 + 反复无效的 (账号,任务码) 跳过。
+	skipOnce sync.Once
+	skip     *skipStore
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -174,6 +182,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
 	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
+	// 任务跳过名单：查看 / 改「包含尝试型任务」开关 / 清空（v1.22.0）
+	p.mux.HandleFunc("GET /panel/api/tasks/skip", p.withAuth(p.tasksSkipState))
+	p.mux.HandleFunc("POST /panel/api/tasks/skip", p.withAuth(p.tasksSkipState))
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
