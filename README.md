@@ -4,7 +4,7 @@
 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，MIT）打包成**能直接装在
 手机上常驻运行**的安卓 App：内置网关二进制 + 管理面板 + 看门狗 + 保活。
 
-* 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34，当前 **v1.23.0**（versionCode 12）
+* 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34，当前 **v1.24.0**（versionCode 13）
 * 下载：见 [Releases](../../releases) —— 直接装 APK，覆盖安装即升级（账号与 api_key 保留）
 * 一台手机 = 一个 OpenAI 兼容网关：`http://127.0.0.1:7863/v1`（局域网把 127.0.0.1 换成手机 IP）
 

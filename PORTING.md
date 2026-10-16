@@ -614,6 +614,33 @@ adb shell run-as com.dsh.wb2api cat files/gateway/data/server.log | tail -80
 
 ---
 
+# 十五、本机 Go 工具链被重装后怎么修（v1.24.0）
+
+症状：`go` 任何调用都回 `go <自身绝对路径>: unknown command`，`gofmt` 报
+`illegal character U+007F`；`$GOROOT/src/runtime/asm_arm64.s.orig-dsh` / `.patched-dsh` 都不存在。
+
+原因：本机 targetSdk≥29，app 私有目录里的二进制**不能直接 exec**，必须由
+`/system/bin/linker64` 代跑；此时内核栈多出 2 格（`[发起方 argv0, 程序绝对路径, 真实参数…]`），
+bionic 会自行修正 1 格，Go 的 `_rt0_arm64` 不会 → `os.Args` 永久错位一格。
+工具链重装会抹掉这两处补丁（二进制 rt0 补丁 + 源码 asm 补丁）。
+
+修法（两步，都是幂等的）：
+```bash
+python3 patches/patch_rt0.py "$PREFIX/lib/go/bin/go" "$PREFIX/lib/go/bin/gofmt" \
+        $PREFIX/lib/go/pkg/tool/android_arm64/*      # 二进制等长替换，补回 _rt0 取参修正
+bash patches/patch_source.sh                            # 源码补丁：asm rt0 + dns resolv.conf
+export GOFLAGS="-toolexec=/system/bin/linker64"         # 之后正常 go build / rebuild.sh
+```
+验证：新建一个打印 `os.Args` 的小程序，用 `/system/bin/linker64` 跑，参数应原样输出（不多出自身路径）。
+
+> 顺带：`$PREFIX/lib/wbapi-tools/`（android.jar / r8.jar / apksigner.jar）也可能被重装抹掉。
+> `d8.jar` 与 `apksigner.jar` 用 `$PREFIX/share/java/` 里的软链即可；**`android.jar` 只能从 SDK 重新取**。
+> 在补回来之前，`build_apk.sh` 会走降级路径：aapt2 用 `/system/framework/framework-res.apk` 当框架表，
+> 并从上一版 APK 复用 `classes.dex` —— **仅当本次没改 `apk-src/java/**` 才安全**（脚本里已写明告警）。
+
+> 注意：`patches/build_apk.sh` 会**临时**把 asm 换回未打补丁版（APK 里的 `.so` 由 App 自己
+> 加载，argv 不移位，必须用未打补丁版）；跑完它之后要再执行一次 `patch_source.sh` 复原。
+
 > **v1.23.0 起本节功能已从面板整体下线**（视图 / 路由 / 每日自动执行钩子全删，见变更记录）。
 > 下面保留为实现记录，需要时可按本节把接线接回去。
 

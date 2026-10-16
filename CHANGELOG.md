@@ -1,6 +1,28 @@
 # 变更记录
 
-## v1.23.0（当前）
+## v1.24.0（当前）
+
+* **合并上游 main `6b31db6`**（本地此前停在 `8461419`，净变化 6 文件 +295/−4）：
+  * **修线上 11133**：出站请求体里 `function.name` 为空（含纯空白）的 `tool_call` 一律剔除
+    —— 上游对这类条目直接判 `11133 model_param_invalid`，带不带配对结果都会被拒。
+    新增 `internal/upstream/tool_pairing.go`(+30) 与配套测试(+91)
+  * **`prompt_cache_key` 回退**：没有 `conversation_id` 的客户端（Anthropic / Claude Code 这类）
+    此前会退化成「每账号一个常量 key」，同账号所有客户端抢同一个前缀缓存槽；现在回退到会话 key
+  * **积分到期提醒卡片默认可见**：修 issue #137/#145 的「卡片 hidden → 检查按钮也看不见 → 死锁」，
+    进页面即用 `/overview` 快照渲染（零上游请求），「检查」降级为逐包明细的增强入口
+  * 新增 `internal/panel/frontend_test.go`(+103)
+* **配置表单 ⇄ CFG_MAP 一致性**：v1.23.0 删掉配置页「成长任务自动执行 / 执行时点」两行后，
+  `CFG_MAP` 里还留着这两个键，被上游的 `TestConfigFormMatchesCFGMap` 抓出来 → 一并清掉
+* **APK 打包降级**（环境侧）：`$PREFIX/lib/wbapi-tools/` 整个被重装抹掉，`android.jar` 无法离线重建
+  （SDK 的 stub jar）→ 本次 aapt2 的框架表改用系统 `framework-res.apk`、**复用上一版 `classes.dex`**
+  （Java 源码零改动，dex 仍为 44,060 字节），并跳过 javac/d8 与看门狗自检。副作用：APK 的
+  `compileSdkVersion` 元数据记为 36（跟着设备框架）而非 35，其余（minSdk 24 / targetSdk 34）不变。
+  ⚠ 下次改 `apk-src/java/**` 前必须先补回 `android.jar`。
+* **本机 Go 工具链修复**（环境侧，不影响产物）：工具链被重装后丢了 rt0 补丁，`go` 全线报
+  `go <自身路径>: unknown command`；用 `patches/patch_rt0.py` 补回 `$GOROOT/bin/{go,gofmt}` 与
+  `pkg/tool/android_arm64/*`，再 `bash patches/patch_source.sh` 重打源码补丁后恢复。
+
+## v1.23.0
 
 * **任务中心整个下线**：面板侧边栏入口、整个视图（扫描待办 / 执行全部待办 / 并发 /
   跳过名单 / 开学季券码）、对应前端逻辑（`groupItems` / `renderQueue` / `qrowHTML` / 队列轮询 /

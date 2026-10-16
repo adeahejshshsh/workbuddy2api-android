@@ -658,7 +658,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
       </div>
 
-      <div class="box" id="expBox" hidden>
+      <!-- 卡片默认可见：此前 hidden + 「仅点检查才渲染」形成死锁（按钮藏在隐藏卡片里，
+           用户看不到也就点不到，issue #137）。现在进页面即用 /overview 的到期快照渲染
+           （数据来自 state.json，不经上游），「检查」按钮改为拉取逐包明细的增强入口。 -->
+      <div class="box" id="expBox">
         <header>
           <h3>积分到期提醒<span class="hint">按最近到期批次估算 · 日均需耗 = 批次剩余 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
           <span class="grow"></span>

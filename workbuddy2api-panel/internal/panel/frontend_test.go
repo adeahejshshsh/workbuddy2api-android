@@ -837,6 +837,109 @@ process.stdout.write(JSON.stringify(names));`
 	}
 }
 
+// TestAppJSExpirySnapshotRenders 到期卡片用 overview 快照即可渲染（issue #137）。
+//
+// 此前的死锁：卡片在 index.html 上写死 hidden，而唯一解除隐藏的语句在
+// renderExpiry() 末尾——该函数只有点「检查」才被调用。按钮本身就在隐藏卡片里，
+// 用户看不见也点不到，于是"积分到期提醒"这个功能等于不存在。
+//
+// 修复引入 renderExpirySnapshot()：吃 /overview 响应里的 credits_earliest_expiry /
+// credits_earliest_remaining（state.json 现成数据，零上游请求），并显式设
+// expBox.hidden = false。本用例钉住两件事：
+//  1. 只给 overview 形态的输入（没有 packages 字段）也能出内容；
+//  2. 渲染后 expBox.hidden 必须为 false——把这句删掉（还原 bug）测试就必须 FAIL。
+func TestAppJSExpirySnapshotRenders(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry snapshot test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function renderExpirySnapshot');
+const end = src.indexOf('async function loadExpiry');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry snapshot region not found');
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', textContent: '', hidden: true });
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: id => (sinks[id] || mk(id)),
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+const day = n => {
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
+  return d.toISOString();
+};
+// overview 形态：没有 packages 数组，只有到期快照字段。
+const d = { accounts: [
+  { uid: 'aaaaaaaa-1', nickname: '秋',     credits: 4099,
+    credits_earliest_expiry: day(2),  credits_earliest_remaining: 499 },
+  { uid: 'bbbbbbbb-2', nickname: '秋千易', credits: 3243,
+    credits_earliest_expiry: day(30), credits_earliest_remaining: 43 },
+  { uid: 'cccccccc-3', nickname: '长期包', credits: 900,
+    credits_earliest_expiry: null,    credits_earliest_remaining: 0 },
+] };
+ctx.renderExpirySnapshot(d);
+const html = sinks['expList'] ? sinks['expList'].innerHTML : '';
+const names = [...html.matchAll(/<span class="exp-nm">([^<]*)<\/span>/g)].map(m => m[1]);
+// 2 天到期的应排最前（红），30 天其次，无到期信息的排最后。
+const wantNames = JSON.stringify(['秋', '秋千易', '长期包']);
+const gotNames = JSON.stringify(names);
+process.stdout.write(JSON.stringify({
+  visible: sinks['expBox'] ? sinks['expBox'].hidden === false : false,
+  rows: names.length,
+  order: gotNames === wantNames,
+  got: gotNames,
+  want: wantNames,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expsnap-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry snapshot node test failed: %v\n%s", err, out)
+	}
+	const want = `{"visible":true,"rows":3,"order":true,"got":"[\"秋\",\"秋千易\",\"长期包\"]","want":"[\"秋\",\"秋千易\",\"长期包\"]"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("expiry snapshot=%s\nwant %s（visible 必须为 true，否则卡片仍隐藏）",
+			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestPanelIndexExpiryBoxNotHidden 到期卡片在 HTML 骨架里不得带 hidden 属性（issue #137）。
+//
+// 与上一个用例互补：app.js 侧有 renderExpirySnapshot 兜底，HTML 侧若仍写死 hidden，
+// 用户在首次 overview 返回前（以及 JS 加载失败时）看到的依然是空白。这个断言就是
+// 那个曾经卡住整个功能的属性——把它加回去测试必须 FAIL。
+func TestPanelIndexExpiryBoxNotHidden(t *testing.T) {
+	b, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 定位到期卡片那一行，只检查它自己，避免误伤其他合法的 hidden 元素。
+	idx := strings.Index(string(b), `id="expBox"`)
+	if idx < 0 {
+		t.Fatal(`index.html missing id="expBox"`)
+	}
+	lineStart := strings.LastIndex(string(b[:idx]), "\n") + 1
+	lineEnd := strings.Index(string(b[idx:]), "\n")
+	if lineEnd < 0 {
+		lineEnd = len(b) - idx
+	}
+	line := string(b[lineStart : idx+lineEnd])
+	if strings.Contains(line, "hidden") {
+		t.Fatalf(`expBox 元素不得带 hidden（issue #137 死锁根因），实际行：%s`, strings.TrimSpace(line))
+	}
+}
+
 // TestAppJSChartTooltipInsideBar 图表 tooltip 必须挂在每根柱子内部（issue #128）。
 //
 // <title> 在 SVG 里描述的是**父元素**。此前它被平铺在 <svg> 根下（<rect> 是自闭合的，

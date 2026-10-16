@@ -24,6 +24,16 @@ SRC="$WS/apk-src"
 REPO="$WS/workbuddy2api-panel"
 TOOLS="$PREFIX/lib/wbapi-tools"
 AJ="$TOOLS/android.jar"; R8="$TOOLS/r8.jar"; SIGNER="$TOOLS/apksigner.jar"
+# android.jar 缺失时的降级路径（本机环境曾把整个 wbapi-tools/ 抹掉；SDK 的 stub jar 无法离线重建）：
+#   - aapt2 的框架资源表改用系统 /system/framework/framework-res.apk；
+#   - Java 源码没动时，直接从上一版 APK 取 classes.dex 复用（并跳过 javac/d8 与看门狗自检）。
+#   ⚠ 只要本次改过 apk-src/java/**，必须先补回 android.jar 再构建，否则 dex 会是旧的那份。
+AJ_FALLBACK="/system/framework/framework-res.apk"
+if [ -f "$AJ" ]; then AAPT_INCLUDE="$AJ"
+else
+  echo "⚠ 缺 $AJ → aapt2 改用 $AJ_FALLBACK；dex 复用上一版（本次必须无 Java 改动）"
+  AAPT_INCLUDE="$AJ_FALLBACK"
+fi
 OUTDIR="${1:-$WS}"
 B="$PREFIX/build/apk"
 KS_TARGET="$SRC/wb2api.keystore"; KS_PASS=wb2api2026
@@ -51,20 +61,32 @@ mkdir -p gen classes dex
 # 结果图标/字符串一直是旧的，还一声不响。set -e 也救不了这种"编译了错目录"。
 [ -d "$SRC/res" ] || { echo "❌ 找不到资源目录 $SRC/res"; exit 1; }
 aapt2 compile --dir "$SRC/res" -o res.zip
-aapt2 link -I "$AJ" --manifest "$SRC/AndroidManifest.xml" -A "$SRC/assets" --java gen \
-  --min-sdk-version 24 --target-sdk-version 34 --version-code 12 --version-name 1.23.0 \
+aapt2 link -I "$AAPT_INCLUDE" --manifest "$SRC/AndroidManifest.xml" -A "$SRC/assets" --java gen \
+  --min-sdk-version 24 --target-sdk-version 34 --version-code 13 --version-name 1.24.0 \
   -o base.apk res.zip
 
-echo "== 3/6 javac + 自检 =="
-javac --release 11 -encoding UTF-8 -cp "$AJ" -d classes gen/com/dsh/wb2api/R.java "$SRC"/java/com/dsh/wb2api/*.java
-# 看门狗退避序列自检：宿主 JVM 就能跑，不需要真机（打进 dex 就不必了，单独放 test-out）
-rm -rf test-out && mkdir -p test-out
-javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$SRC"/test/WatchdogSelfCheck.java
-java -cp "$AJ:classes:test-out" WatchdogSelfCheck
+if [ -f "$AJ" ]; then
+  echo "== 3/6 javac + 自检 =="
+  javac --release 11 -encoding UTF-8 -cp "$AJ" -d classes gen/com/dsh/wb2api/R.java "$SRC"/java/com/dsh/wb2api/*.java
+  # 看门狗退避序列自检：宿主 JVM 就能跑，不需要真机（打进 dex 就不必了，单独放 test-out）
+  rm -rf test-out && mkdir -p test-out
+  javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$SRC"/test/WatchdogSelfCheck.java
+  java -cp "$AJ:classes:test-out" WatchdogSelfCheck
 
-echo "== 4/6 dex (d8) =="
-java -cp "$R8" com.android.tools.r8.D8 --min-api 24 --lib "$AJ" --output dex \
-  $(find classes -name '*.class' | tr '\n' ' ')
+  echo "== 4/6 dex (d8) =="
+  java -cp "$R8" com.android.tools.r8.D8 --min-api 24 --lib "$AJ" --output dex \
+    $(find classes -name '*.class' | tr '\n' ' ')
+else
+  echo "== 3-4/6 复用上一版 classes.dex（缺 android.jar，跳过 javac/d8/自检） =="
+  PREV="$OUTDIR/WorkBuddy2API.apk"
+  [ -f "$PREV" ] || { echo "❌ 既无 android.jar 也无上一版 APK，产出不了 dex"; exit 1; }
+  python3 - "$PREV" <<'PYEOF'
+import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+open('dex/classes.dex', 'wb').write(z.read('classes.dex'))
+print("  复用 %s 的 classes.dex：%d 字节" % (sys.argv[1], z.getinfo('classes.dex').file_size))
+PYEOF
+fi
 
 echo "== 5/6 组装 APK =="
 cp base.apk wb2api-unsigned.apk
