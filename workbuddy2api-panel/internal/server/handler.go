@@ -883,11 +883,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 不再改写成网关固定文案——客户端必须看到真实错误才能排查。
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
-				msg := string(respBody)
-				if strings.TrimSpace(msg) == "" {
-					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
-					msg = "content blocked by upstream content firewall"
-				}
+				msg := briefBodyOr(string(respBody), "content blocked by upstream content firewall")
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
 					h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
@@ -914,10 +910,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrImageInvalid {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
-				msg := string(respBody)
-				if strings.TrimSpace(msg) == "" {
-					msg = "image request was rejected by upstream"
-				}
+				msg := briefBodyOr(string(respBody), "image request was rejected by upstream")
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
 					h.hintOf(upstream.ErrImageInvalid, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
@@ -932,10 +925,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrBadParams {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
-				msg := string(respBody)
-				if strings.TrimSpace(msg) == "" {
-					msg = "chat request body was rejected by upstream"
-				}
+				msg := briefBodyOr(string(respBody), "chat request body was rejected by upstream")
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "bad_params", msg,
 					h.hintOf(upstream.ErrBadParams, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
@@ -1132,9 +1122,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
+	// 域信息：单域部署里「池子没号」与「你要的这个域没号」是两件事——例如 global: 前缀
+	// 的模型打到只有 CN 号的池子（或反过来），客户端只看 no_healthy_account 会以为是
+	// 服务端过载而无限重试。把域可用性直接写进 hint（realm=="" 即裸名=CN，不赘述）。
+	if realm != "" && h.cfg.Pool != nil && !h.cfg.Pool.ServableForRealm(realm) {
+		hint = fmt.Sprintf("realm %s has no servable account (cn=%v, global=%v); %s",
+			realm, h.cfg.Pool.ServableForRealm("cn"), h.cfg.Pool.ServableForRealm("global"), hint)
+	}
 	// upstreamMsgPassed 记录 error.message 是否已被上游原文占据：模型级阻塞分支
 	// 据此决定要不要覆盖 msg（上游原文优先，含 requestId）。
 	upstreamMsgPassed := false
+	var upBrief *upstream.ErrorBrief
 	var ue *upstream.Error
 	if errors.As(lastErr, &ue) {
 		hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
@@ -1160,9 +1158,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusBadRequest
 		}
 		if s := strings.TrimSpace(ue.Msg); s != "" {
-			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
-			msg = s
+			// 上游 body 是一份 JSON 文档；整段塞进 message 会让客户端看到满屏
+			// `\"` 转义（用户可见的"大量转义符"）。这里压成一句话，code /
+			// requestId / 本地化文案改成并列的结构化字段透出——原文信息一个不丢。
+			br := upstream.BriefError(s)
+			msg = br.Brief
+			upBrief = &br
 			upstreamMsgPassed = true
+		}
+		// 11158：账号等级不支持该模型 —— 不是"服务端过载"，别让客户端按 503 重试。
+		if upstream.IsModelNotAllowedForUserType(ue.Msg) {
+			code = "model_not_allowed_for_account_type"
+			status = http.StatusBadRequest
 		}
 	}
 	// 模型级阻塞覆盖上面的通用文案（放在最后 = 优先级最高）。
@@ -1189,7 +1196,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		status = http.StatusBadRequest
 	}
-	writeOpenAIErrorHint(w, status, code, msg, hint)
+	writeOpenAIErrorFull(w, status, code, msg, hint, upBrief)
 	st.status = status
 	st.outcome = reqlog.OutcomeHTTPError
 }
@@ -1437,6 +1444,46 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)
+}
+
+// briefBodyOr 把上游 body 压成一句话；空体返回 fallback（本地文案，不编造原文）。
+func briefBodyOr(body, fallback string) string {
+	if strings.TrimSpace(body) == "" {
+		return fallback
+	}
+	if b := upstream.BriefError(body).Brief; b != "" {
+		return b
+	}
+	return fallback
+}
+
+// writeOpenAIErrorFull 同 writeOpenAIErrorHint，另把上游结构化信息（code /
+// requestId / 本地化文案）作为并列字段透出——message 保持一句人话，客户端既能显示
+// 也能编程取字段，谁都不必再解析一串转义 JSON。
+func writeOpenAIErrorFull(w http.ResponseWriter, status int, code, msg, hint string, br *upstream.ErrorBrief) {
+	errObj := map[string]any{
+		"message": msg,
+		"type":    "api_error",
+		"code":    code,
+	}
+	if hint != "" {
+		errObj["gateway_hint"] = hint
+	}
+	if br != nil {
+		if br.Code != "" {
+			errObj["upstream_code"] = br.Code
+		}
+		if br.RequestID != "" {
+			errObj["upstream_request_id"] = br.RequestID
+		}
+		if br.Display != "" {
+			errObj["upstream_display"] = br.Display
+		}
+		if br.Msg != "" {
+			errObj["upstream_message"] = br.Msg
+		}
+	}
+	writeJSON(w, status, map[string]any{"error": errObj})
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {

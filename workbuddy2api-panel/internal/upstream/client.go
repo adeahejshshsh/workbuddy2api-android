@@ -494,6 +494,13 @@ func Classify(status int, body string) ErrKind {
 	if IsModelBlocked(status, body) {
 		return ErrModelBlocked
 	}
+	// 11158「该模型不允许当前账号类型」：与 11102 同属"这个号对这个模型没用"，
+	// 同样走 (账号,模型) 负缓存避让、继续轮转别的号；但终端文案必须说清是"
+	// 账号等级不支持"——客户端据此换模型/换号，而不是把它当可重试的 503 无限重试。
+	// 只认结构化 code（不拿整段文本匹配，避免撞在 requestId 上误判）。
+	if IsModelNotAllowedForUserType(body) {
+		return ErrModelBlocked
+	}
 	// 402：真正的计费余额耗尽状态码，最严、最不可自愈，最先判。
 	if status == http.StatusPaymentRequired {
 		return ErrHardCredit

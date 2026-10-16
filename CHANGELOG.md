@@ -1,6 +1,31 @@
 # 变更记录
 
-## v1.24.1（当前）
+## v1.24.2（当前）
+
+* **修「API 返回给 agent 的 JSON 里满屏转义符」**：上游错误体本身就是一份 JSON 文档，
+  此前按「原文透传」整段塞进 `error.message` → 客户端看到的是
+  `"message":"{\"code\":11158,\"msg\":\"...\"}"` 这种一坨反斜杠。现在把 body 压成
+  **一句话**（新增 `internal/upstream/errbrief.go`：优先中文 `displayMsg`，非 JSON 体
+  折叠空白 + 按 rune 截断），并把 `code` / `requestId` / 本地化文案改成**并列结构化字段**：
+  ```json
+  {"error":{
+    "message": "当前账号类型暂不支持该模型。 ｜ model [gpt-6-astra] is not allowed for user type [personal_free_user]（上游 code=11158）",
+    "type": "api_error", "code": "model_not_allowed_for_account_type",
+    "upstream_code": "11158", "upstream_request_id": "3c1e...",
+    "upstream_display": "当前账号类型暂不支持该模型。", "gateway_hint": "..."}}
+  ```
+  原文信息一个不丢，转义符一个不留；`content_blocked` / `image_invalid` / `bad_params`
+  三条早退路径同样改用摘要。
+* **11158「该模型不允许当前账号类型」单列**：以前落进通用错误 → 客户端按 503 无限重试。
+  现在：该号对该模型走 (账号,模型) 负缓存避让、继续轮转别的号；全池都不行时返回
+  **400 + `code=model_not_allowed_for_account_type`**（不可重试语义），文案说清"账号等级不支持"。
+* **选号失败时 hint 带域信息**：请求的 realm 无可用账号时附加
+  `realm global has no servable account (cn=true, global=false)` —— 单域部署里
+  「池子没号」与「你要的这个域没号」一眼可分，不再都报一句笼统的 no_healthy_account。
+* 测试：新增 `internal/upstream/errbrief_test.go`（真实 11158 体 / 嵌套形态 / HTML 体 /
+  截断 / 误判防护）。全绿：上游包 **319 PASS**、server **102 PASS**、面板 **37 PASS**。
+
+## v1.24.1
 
 * **修「装完新版后调用任何模型都 503，跟着连败降权」** —— v1.24.0 的回归，真凶定位到字节级：
   APK 里的 Go 进程跑在 `com.dsh.wb2api` 下，**读不到 DSH 的 `$PREFIX`**；Java 侧
