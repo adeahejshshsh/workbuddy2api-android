@@ -91,16 +91,35 @@ if [ "$CODE" = "200" ]; then echo "  已存在"; else
 fi
 
 echo "== 4/5 推送"
-URL="https://$TOKEN@github.com/$OWNER/$NAME.git"
 mask() { sed "s#$TOKEN#***#g"; }   # git 的输出可能带 token，一律抹掉再打出来
+# 认证方式（踩过）：把 token 写进 URL（https://TOKEN@github.com/...）会被 GitHub 重定向到
+# 带斜杠的规范地址，而**重定向会把 URL 里的 auth 丢掉** → push 报
+# "could not read Username for 'https://github.com'"。改用「无凭据 URL + Authorization 头」，
+# http.extraHeader 会跟着重定向一起走（实测 push 成功）。
+B64=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+PURL="https://github.com/$OWNER/$NAME.git"
+gpush() { git -c http.extraHeader="Authorization: Basic $B64" push "$@" "$PURL" "$BRANCH:$BRANCH"; }
+# 暂存目录（$STAGE）可能被环境清理成"全新历史"：先 fetch 远端，把本轮提交接到远端之后，
+# 保证是快进推送（不丢远端历史、也不依赖强推）。
 set +e
-OUT=$(git push "$URL" "$BRANCH:$BRANCH" 2>&1); rc=$?
+git fetch -q "$PURL" "$BRANCH" 2>/dev/null; frc=$?
+set -e
+if [ $frc -eq 0 ] && git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1; then
+  if ! git merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
+    git reset --soft FETCH_HEAD
+    git -c user.name "$OWNER" -c user.email "$OWNER@users.noreply.github.com" \
+        commit -qm "WorkBuddy2API Android 移植版 v$VER" || true
+    echo "  已把本轮提交接到远端 $BRANCH 之后（保留远端历史 → 快进）"
+  fi
+fi
+set +e
+OUT=$(gpush 2>&1); rc=$?
 set -e
 if [ $rc -ne 0 ]; then
   printf '%s\n' "$OUT" | mask | tail -4
-  echo "  普通推送不行（远端有本地没有的东西），改强推："
+  echo "  普通推送被拒，改强推："
   set +e
-  OUT=$(git push --force "$URL" "$BRANCH:$BRANCH" 2>&1); rc=$?
+  OUT=$(gpush --force 2>&1); rc=$?
   set -e
   if [ $rc -ne 0 ]; then
     printf '%s\n' "$OUT" | mask | tail -4
