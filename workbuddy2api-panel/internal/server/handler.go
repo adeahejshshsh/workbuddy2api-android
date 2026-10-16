@@ -360,8 +360,9 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
-		// 账号等级闸门：池内**每个**号都已知用不了该模型 → 不列出（避免客户端挑中必失败）。
-		if h.cfg.Pool.ModelDeniedForAllAccounts(mi.ID) {
+		// 账号等级闸门：该域**每个**号都已知用不了该模型 → 不列出（避免客户端挑中必失败）。
+		// 必须分域：CN 条目只会派给 CN 号，拿全池判定会被"另一个域等级未知的号"放过。
+		if h.cfg.Pool.ModelDeniedForAllAccountsInRealm(mi.ID, "cn") {
 			continue
 		}
 		entry := map[string]any{
@@ -407,8 +408,8 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
-			// 同上：等级闸门对 global 域同样生效。
-			if h.cfg.Pool.ModelDeniedForAllAccounts(id) {
+			// 同上，且按 global 域判定（global 条目只会派给 global 号）。
+			if h.cfg.Pool.ModelDeniedForAllAccountsInRealm(id, "global") {
 				continue
 			}
 			entry := map[string]any{
@@ -1136,7 +1137,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(hint, upstream.NoHealthyAccountHint()) {
 		total, healthy, cooling, disabled, paused, inFlightFull := h.cfg.Pool.CountsDetailedWithPaused()
 		now := time.Now()
-		degraded, modelCooled := 0, 0
+		degraded, modelCooled, realmCandidates := 0, 0, 0
 		var parts []string
 		for _, st := range h.cfg.Pool.List() {
 			deg := !st.DegradeUntil.IsZero() && now.Before(st.DegradeUntil)
@@ -1153,10 +1154,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if cooled {
 				modelCooled++
 			}
+			// 该号是否属于本次请求的域：跨域号即使健康也不会被选中（选号有 realm 谓词），
+			// 必须显式标出来，否则"有个号显示 ok 却依然 503"读不懂（用户实测）。
+			inRealm := realm == "" || st.Realm == realm
+			if inRealm && !st.Disabled && !st.Paused && !deg && !cooled {
+				realmCandidates++
+			}
 			if len(parts) < 4 {
 				short := st.UID
 				if len(short) > 8 {
 					short = short[:8]
+				}
+				if st.Realm != "" {
+					short += "/" + st.Realm
 				}
 				switch {
 				case st.Disabled:
@@ -1174,8 +1184,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		hint = fmt.Sprintf("%s [pool: total=%d healthy=%d cooling=%d degraded=%d paused=%d disabled=%d in_flight_full=%d model_cooled(%s)=%d realm=%s | %s]",
-			hint, total, healthy, cooling, degraded, paused, disabled, inFlightFull, bareModel, modelCooled, realm,
+		extra := ""
+		if realm != "" && realmCandidates == 0 {
+			extra = "; no candidate in realm " + realm + " (cross-realm accounts are not selectable for it)"
+		}
+		hint = fmt.Sprintf("%s [pool: total=%d healthy=%d cooling=%d degraded=%d paused=%d disabled=%d in_flight_full=%d model_cooled(%s)=%d realm=%s realm_candidates=%d%s | %s]",
+			hint, total, healthy, cooling, degraded, paused, disabled, inFlightFull, bareModel, modelCooled, realm, realmCandidates, extra,
 			strings.Join(parts, ", "))
 	}
 

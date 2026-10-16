@@ -1,6 +1,24 @@
 # 变更记录
 
-## v1.24.6（当前）
+## v1.24.7（当前）
+
+* **修「`global:` 模型列表里留着、一发就 503」**（用户贴出的自解释 hint 直接定位）：
+  hint 显示 `healthy=3, model_cooled(gpt-6-astra)=2, realm=global | 第三个号 ok` ——
+  两个 **global 号**早被判定"等级不支持该模型"，而池里还有一个 **CN 号**等级未知，于是
+  v1.24.4 的「全池」判据放过了它；可 `global:` 前缀的模型**永远选不到 CN 号**（选号带
+  realm 谓词），客户端挑中必然失败。
+  * 等级闸门改为**分域判定**：新增 `ModelDeniedForAllAccountsInRealm(model, realm)` ——
+    CN 条目只看 CN 号、global 条目只看 global 号；该域没有账号 → 不下结论（保守不变）。
+    `/v1/models` 与面板模型页两条路径都改用它。
+  * 503 hint 增加域信息：逐号标出 `uid/realm`，并给出 `realm_candidates=N`；该域一个候选
+    都没有时明确写 `no candidate in realm global (cross-realm accounts are not selectable for it)`。
+  * 测试：`internal/pool/modeltier_realm_test.go`（global 域两号已知不支持 → 隐藏；CN 域
+    等级未知 → 不隐藏；无账号的域 → 不下结论；两域事实互不影响）。
+    全绿：pool **184 PASS**、upstream 198、server 87、panel 24。
+  * 实测：临时实例打 `global:gpt-6-astra`，hint 中出现
+    `realm_candidates=0; no candidate in realm global (cross-realm accounts are not selectable for it)` ✓。
+
+## v1.24.6
 
 * **让「503 no_healthy_account」自己讲清原因**（用户实测：反复 503，而 hint 只有一句
   "check /status"，等于没说）。现在这句 hint 会带上**池子实况 + 每个号的状态与剩余时间**：

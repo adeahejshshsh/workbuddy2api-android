@@ -147,6 +147,34 @@ func (t *tierFacts) deniedFor(uid, model string) bool {
 	return t.Deny[typeName][model]
 }
 
+// ModelDeniedForAllAccountsInRealm 同 ModelDeniedForAllAccounts，但只看该 realm 的账号。
+//
+// 为什么必须分域：`global:` 前缀的模型只会派给 global 号（选号有 realm 谓词），所以
+// 「全池都判得出来用不了」是过宽的判据 —— 一个 CN 号等级未知就会让 global 模型继续显示，
+// 而它实际上永远选不到号（用户实测：列表里留着 global:gpt-6-astra，一发就 503）。
+// 该 realm 内没有任何账号 → false（无信息不下结论）。
+func (p *Pool) ModelDeniedForAllAccountsInRealm(model, realm string) bool {
+	if model == "" {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.tier == nil || len(p.byUID) == 0 {
+		return false
+	}
+	matched := 0
+	for uid, e := range p.byUID {
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		matched++
+		if !p.tier.deniedFor(uid, model) {
+			return false
+		}
+	}
+	return matched > 0
+}
+
 // TierDenyStats 观测用：已学到多少个等级、多少条 (等级,模型) 否定、多少个账号等级。
 func (p *Pool) TierDenyStats() (types, pairs, uids int) {
 	p.mu.RLock()

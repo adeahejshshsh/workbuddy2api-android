@@ -337,7 +337,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				fetchErrs = append(fetchErrs, "cn: "+err.Error())
 			} else {
 				for _, mi := range infos {
-					if skip, tag := p.tierHidden(mi.ID, showHidden); skip {
+					if skip, tag := p.tierHidden(mi.ID, "cn", showHidden); skip {
 						continue
 					} else if tag {
 						e := panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP)
@@ -362,7 +362,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				} else {
 					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
 					for _, mi := range infos {
-						if skip, tag := p.tierHidden(mi.ID, showHidden); skip {
+						if skip, tag := p.tierHidden(mi.ID, "global", showHidden); skip {
 							continue
 						} else if tag {
 							e := panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP)
@@ -393,8 +393,8 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 // EffortListing（远端权威 ∪ 静态兜底表）——与 /v1/models 同一口径，两侧不再漂移。
 // tierHidden 账号等级闸门判定（给 p.models 用）：
 // 返回 (是否跳过, 是否需要打 tier_denied 标记)。
-func (p *Panel) tierHidden(model string, showHidden bool) (skip bool, tag bool) {
-	if p.cfg.Pool == nil || !p.cfg.Pool.ModelDeniedForAllAccounts(model) {
+func (p *Panel) tierHidden(model, realm string, showHidden bool) (skip bool, tag bool) {
+	if p.cfg.Pool == nil || !p.cfg.Pool.ModelDeniedForAllAccountsInRealm(model, realm) {
 		return false, false
 	}
 	if showHidden {
