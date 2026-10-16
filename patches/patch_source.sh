@@ -70,6 +70,51 @@ else
   echo "  无需处理/已处理: $U"
 fi
 
+# ---------- 3) net 包：resolv.conf 路径改成「环境变量优先」----------
+# ⚠ 这一条是 APK 工况的命门，别再丢：
+#   APK 里的 Go 进程跑在 com.dsh.wb2api 下，读不到 DSH 的 $PREFIX；GatewayService
+#   通过环境变量 WB2API_RESOLV_CONF 把它自己写的 files/gateway/resolv.conf 传进来。
+#   若只做上一步的硬编码路径替换，App 内 DNS 全挂 → 上游全失败 → 全 503 + 连败降权
+#   （v1.24.0 真实踩过：两版 .so 对照，旧版含 WB2API_RESOLV_CONF 1 处，新版 0 处）。
+python3 - <<'PYEOF'
+import os
+G = os.path.join(os.environ.get("PREFIX", "/data/data/com.dsharnessmobile.shell/files/usr"), "lib/go/src/net")
+HARD = "/data/data/com.dsharnessmobile.shell/files/usr/etc/resolv.conf"
+HELPER = """
+// wb2apiResolvConfPath 返回本机应读的 resolv.conf 路径（DSH/Android 移植补丁）。
+// 顺序：WB2API_RESOLV_CONF 环境变量（APK 注入）→ APK 固定私有路径 → DSH $PREFIX → /etc。
+func wb2apiResolvConfPath() string {
+	if p := os.Getenv("WB2API_RESOLV_CONF"); p != "" {
+		return p
+	}
+	for _, p := range []string{
+		"/data/data/com.dsh.wb2api/files/gateway/resolv.conf",
+		"/data/data/com.dsharnessmobile.shell/files/usr/etc/resolv.conf",
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return "/etc/resolv.conf"
+}
+"""
+for f in ("dnsclient_android.go", "dnsclient_unix.go"):
+    p = os.path.join(G, f)
+    if not os.path.exists(p):
+        continue
+    s = open(p, encoding="utf-8").read()
+    if "func wb2apiResolvConfPath" in s:
+        print("  已是环境变量优先:", f)
+        continue
+    s = s.replace('getSystemDNSConfigNamed("%s")' % HARD, "getSystemDNSConfigNamed(wb2apiResolvConfPath())")
+    s = s.replace('dnsReadConfig("%s")' % HARD, "dnsReadConfig(wb2apiResolvConfPath())")
+    if '"os"' not in s:
+        s = s.replace("import (\n", 'import (\n\t"os"\n', 1)
+    s = s.rstrip("\n") + "\n" + HELPER
+    open(p, "w", encoding="utf-8").write(s)
+    print("  已改为环境变量优先:", f)
+PYEOF
+
 echo "== resolv.conf 内容（Go 将读它） =="
 cat "$RESOLV" 2>/dev/null || echo "  (缺失！请写入: nameserver 8.8.8.8)"
 echo

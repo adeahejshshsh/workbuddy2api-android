@@ -633,6 +633,10 @@ export GOFLAGS="-toolexec=/system/bin/linker64"         # 之后正常 go build 
 ```
 验证：新建一个打印 `os.Args` 的小程序，用 `/system/bin/linker64` 跑，参数应原样输出（不多出自身路径）。
 
+> ⚠ **最容易漏、也最致命的一条**：`net/dnsclient_{android,unix}.go` 里「resolv.conf 走
+> `WB2API_RESOLV_CONF` 环境变量」的定制补丁（APK 的 Java 靠它注入路径；只做硬编码替换的话，
+> App 内 DNS 全挂 → 全 503 + 连败降权）。`patch_source.sh` 第 3 步已内置，只需跑一次。
+
 > 顺带：`$PREFIX/lib/wbapi-tools/`（android.jar / r8.jar / apksigner.jar）也可能被重装抹掉。
 > `d8.jar` 与 `apksigner.jar` 用 `$PREFIX/share/java/` 里的软链即可；**`android.jar` 只能从 SDK 重新取**。
 > 在补回来之前，`build_apk.sh` 会走降级路径：aapt2 用 `/system/framework/framework-res.apk` 当框架表，

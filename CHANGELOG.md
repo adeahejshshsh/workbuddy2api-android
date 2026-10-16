@@ -1,6 +1,22 @@
 # 变更记录
 
-## v1.24.0（当前）
+## v1.24.1（当前）
+
+* **修「装完新版后调用任何模型都 503，跟着连败降权」** —— v1.24.0 的回归，真凶定位到字节级：
+  APK 里的 Go 进程跑在 `com.dsh.wb2api` 下，**读不到 DSH 的 `$PREFIX`**；Java 侧
+  （`GatewayService`）是靠环境变量 **`WB2API_RESOLV_CONF`** 把它自己写的
+  `files/gateway/resolv.conf` 传进去的。本机 Go 工具链被重装后，源码里「读该环境变量」的
+  定制补丁丢了，而 `patch_source.sh` 只补回了「硬编码路径替换」→ v1.24.0 的 `.so` 固定去读
+  DSH 私有路径 → **App 内 DNS 全挂 → 上游全失败 → 全 503**，随后三个号被连败降权
+  （阈值 3 次；降权时长 10 分钟 ~ 2 小时，见 `defaultDegradeCooldown`）。
+  * 证据：两版 `.so` 对照 —— v1.23.0（好用）含 `WB2API_RESOLV_CONF` **1 处**，
+    v1.24.0（坏）**0 处**；两版其余 DNS 字符串一致。
+  * 修复：`dnsclient_{android,unix}.go` 的 resolv.conf 路径改为
+    **环境变量优先 → APK 固定私有路径 → DSH `$PREFIX` → `/etc/resolv.conf`**。
+  * 该补丁已**写进 `patches/patch_source.sh`**（幂等），重装工具链后再跑一次即可复原，不会重演。
+  * 实验验证：`WB2API_RESOLV_CONF` 指向坏 DNS 文件 → 解析按预期失败；指向好文件 → 立刻成功。
+
+## v1.24.0
 
 * **合并上游 main `6b31db6`**（本地此前停在 `8461419`，净变化 6 文件 +295/−4）：
   * **修线上 11133**：出站请求体里 `function.name` 为空（含纯空白）的 `tool_call` 一律剔除
