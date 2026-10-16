@@ -92,6 +92,12 @@ func (p *Pool) Revive(uid string) bool {
 	e.fails = 0
 	e.retryCount = 0
 	e.breakerUntil = time.Time{}
+	// 连败降权（issue #114）必须一并清：healthy() 在 degradeUntil 未到期时恒 false，
+	// 漏清它就会出现「点了面板解冻、提示已解冻，号却依然不可选」——用户实测到的
+	// "解冻没效果"。这两个字段还会落盘（persist.go），不重启都甩不掉。
+	// Revive 的口径本就是「运维无条件恢复」，与 disabled/冷却/熔断一致。
+	e.consecutiveFails = 0
+	e.degradeUntil = time.Time{}
 	p.dirty.Store(true)
 	return true
 }

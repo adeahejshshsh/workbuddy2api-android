@@ -1,6 +1,20 @@
 # 变更记录
 
-## v1.24.2（当前）
+## v1.24.3（当前）
+
+* **修「点了解冻没效果」**（用户实测）：`Pool.Revive`（面板「解冻」按钮，`POST
+  /panel/api/accounts/{uid}/revive`）清了 disabled / paused / 账号冷却 / 软限流退避 /
+  模型级冷却 / sessionDeadFails / fails / retryCount / 熔断 —— **偏偏漏了连败降权的两个字段**
+  `consecutiveFails` 与 `degradeUntil`（`internal/pool/entry.go` 第 245/249 行）。
+  而 `entry.healthy()` 在 `degradeUntil` 未到期时恒为 false → 面板提示「已解冻」、号却依然
+  不可选（healthy 计数仍是 0，账号行仍挂「连败降权 · 剩余 xx」）。这两个字段还会落盘
+  （`persist.go`），**重启网关也甩不掉**，只能等 10 分钟 ~ 2 小时自然过期。
+  * 修复：Revive 与 NoteSuccess 口径对齐，一并清 `consecutiveFails` / `degradeUntil`
+    （Revive 的语义本就是「运维无条件恢复」）。
+  * 回归测试 `internal/pool/revive_degrade_test.go`：连败到阈值 → 断言 healthy=0 →
+    Revive → 断言字段清零且 healthy=1。**撤掉修复该测试即 FAIL**（已验证），pool 包 179 PASS / 0 FAIL。
+
+## v1.24.2
 
 * **修「API 返回给 agent 的 JSON 里满屏转义符」**：上游错误体本身就是一份 JSON 文档，
   此前按「原文透传」整段塞进 `error.message` → 客户端看到的是
