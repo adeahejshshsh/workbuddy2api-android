@@ -627,7 +627,10 @@ async function loadModels() {
   tb.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
   try {
     // 探测数据是可选增强：拉取失败不影响模型列表本身
-    const [d, pr] = await Promise.all([api('models'), api('model_probes').catch(() => ({}))]);
+      const showTier = !!($('mdTier') && $('mdTier').checked);
+      const [d, pr] = await Promise.all([
+        api('models' + (showTier ? '?all=1' : '')),
+        api('model_probes').catch(() => ({}))]);
     mdAll = d.models || [];
     mdProbes = pr.probes || {};
     if (!mdAll.length) {
@@ -640,7 +643,7 @@ async function loadModels() {
     const probeKeys = Object.keys(mdProbes);
     mdProbeOf = id => mdProbes[id] || mdProbes[probeKeys.find(k => k.endsWith(':' + id))];
     const hit = mdAll.filter(m => mdProbeOf(m.id)).length;
-    $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
+    $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '') + ((d.hidden_tier && !showTier) ? ' · 已按账号等级隐藏 ' + d.hidden_tier + ' 个（勾选左侧开关可显示）' : (showTier && mdAll.some(m => m.tier_denied) ? ' · 其中 ' + mdAll.filter(m => m.tier_denied).length + ' 个标记为等级不支持' : ''));
     renderModels();
   } catch (e) {
     mdAll = [];
@@ -756,6 +759,7 @@ $('mdQ').oninput = () => {
   clearTimeout(mdQTimer);
   mdQTimer = setTimeout(() => { mdFilter.q = $('mdQ').value.trim(); renderModels(); }, 120);
 };
+$('mdTier').onchange = () => loadModels(true);
 for (const [id, key] of [['mdRealm', 'realm'], ['mdCap', 'cap'], ['mdEffort', 'effort'], ['mdPromo', 'promo'], ['mdSort', 'sort']]) {
   const el = $(id);
   if (!el) continue;

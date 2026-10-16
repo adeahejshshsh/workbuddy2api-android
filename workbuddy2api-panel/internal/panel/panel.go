@@ -323,6 +323,10 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0)
 	var fetchErrs []string
+	// 账号等级闸门（modeltier.go）：默认把"池内每个号都用不了"的模型摘掉；
+	// ?all=1 时保留并打 tier_denied 标记（面板上有个开关）。hiddenTier 供前端提示。
+	showHidden := r.URL.Query().Get("all") == "1"
+	hiddenTier := 0
 
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
@@ -333,6 +337,14 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				fetchErrs = append(fetchErrs, "cn: "+err.Error())
 			} else {
 				for _, mi := range infos {
+					if skip, tag := p.tierHidden(mi.ID, showHidden); skip {
+						continue
+					} else if tag {
+						e := panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP)
+						e["tier_denied"] = true
+						out = append(out, e)
+						continue
+					}
 					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
 				}
 			}
@@ -350,6 +362,14 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				} else {
 					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
 					for _, mi := range infos {
+						if skip, tag := p.tierHidden(mi.ID, showHidden); skip {
+							continue
+						} else if tag {
+							e := panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP)
+							e["tier_denied"] = true
+							out = append(out, e)
+							continue
+						}
 						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
 					}
 				}
@@ -365,12 +385,24 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out, "hidden_tier": hiddenTier})
 }
 
 // panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），
 // context_length / max_output_tokens 走四级查找链，effort 档位按 realm 域取
 // EffortListing（远端权威 ∪ 静态兜底表）——与 /v1/models 同一口径，两侧不再漂移。
+// tierHidden 账号等级闸门判定（给 p.models 用）：
+// 返回 (是否跳过, 是否需要打 tier_denied 标记)。
+func (p *Panel) tierHidden(model string, showHidden bool) (skip bool, tag bool) {
+	if p.cfg.Pool == nil || !p.cfg.Pool.ModelDeniedForAllAccounts(model) {
+		return false, false
+	}
+	if showHidden {
+		return false, true
+	}
+	return true, false
+}
+
 func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string, remoteDefault string, httpc *http.Client) map[string]any {
 	entry := map[string]any{
 		"id":                   realm + ":" + mi.ID,

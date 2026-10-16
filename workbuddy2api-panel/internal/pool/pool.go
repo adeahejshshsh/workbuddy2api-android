@@ -42,6 +42,9 @@ type Pool struct {
 	degradeThreshold   int
 	degradeCooldown    time.Duration
 	degradeCooldownMax time.Duration
+	// tierFile / tier：账号等级闸门（modeltier.go）。tier 惰性加载，nil = 还没读过。
+	tierFile string
+	tier     *tierFacts
 	// creditFloor 积分保底（SetCreditFloor 注入；0 = 关闭，缺省即现状）。
 	// 账号 credits < floor 时不再参与选号——防止收费请求把余额打穿、连免费模型都
 	// 402 冷却到次日签到。签到回血（SetCreditsDetailed）越过 floor 即自动恢复。
@@ -84,6 +87,8 @@ type Pool struct {
 
 // defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
 func New(stateFp string) *Pool {
+	// 账号等级闸门（modeltier.go）：与 state 文件同目录的独立小文件，不动 state schema。
+	tierFile := tierFilePath(stateFp)
 	p := &Pool{
 		byUID:              map[string]*entry{},
 		stateFp:            stateFp,
@@ -105,6 +110,10 @@ func New(stateFp string) *Pool {
 		p.load()
 		p.startFlusher()
 	}
+	p.tierFile = tierFile
+	// 构造时就把等级事实读进内存（文件很小、每进程一次）：ModelDeniedForAllAccounts
+	// 在 /v1/models 与面板模型页的热路径上被调用，不该在那里做惰性 IO。
+	p.loadTierLocked()
 	return p
 }
 

@@ -200,3 +200,28 @@ func sortStrings(s []string) {
 		}
 	}
 }
+
+// UserTypeFromError 从上游报文中取「账号等级」字样，例如
+//
+//	model [gpt-6-astra] is not allowed for user type [personal_free_user]
+//
+// → "personal_free_user"。上游目录不提供任何权限/等级字段，等级只能从这条报文里学。
+// 找不到返回空串（调用方不得据此做任何否定推断）。
+func UserTypeFromError(body string) string {
+	low := strings.ToLower(body)
+	for _, key := range []string{"user type [", "usertype [", "account type [", "user type: ", "usertype: "} {
+		i := strings.Index(low, key)
+		if i < 0 {
+			continue
+		}
+		rest := body[i+len(key):]
+		end := strings.IndexAny(rest, "]\n\r\t ,;")
+		if end < 0 {
+			end = len(rest)
+		}
+		if v := strings.TrimSpace(rest[:end]); v != "" {
+			return v
+		}
+	}
+	return ""
+}

@@ -1,6 +1,25 @@
 # 变更记录
 
-## v1.24.3（当前）
+## v1.24.4（当前）
+
+* **修「账号用不了的模型照样显示在模型列表里」**：上游模型目录（CN `/console` 与 global `/v2`
+  同构）**不提供任何权限/等级字段**（`upstream.ModelInfo` 全字段核对过；账号 profile 只有
+  uid/nickname），此前网关把平台全量目录直接透出 → 免费档账号照样看到 `gpt-6-astra` 这类
+  只对高等级开放的模型，挑中必失败（还要吃一条 503）。
+  * **做法（从报文里学事实）**：11158 报文里明确写着
+    `model [gpt-6-astra] is not allowed for user type [personal_free_user]` →
+    据此记下 (账号→等级) 与 (等级→该模型不可用)，落盘到与 `state.json` 同目录的
+    `model_tier.json`（独立文件，不动 state schema）。
+  * **只在事实确凿时隐藏**：当且仅当**池内每个账号**都能被判定"用不了该模型"，
+    才从 `/v1/models` 与面板模型页摘掉它；任一账号判不出来（等级未知且无该号自己的记录）
+    → 保持可见。宁可多显示一个，也不把一个其实能用的模型藏起来。
+  * **面板**：模型页新增开关「显示等级不支持的模型」（`GET /panel/api/models?all=1`
+    保留并打 `tier_denied` 标记），提示栏显示「已按账号等级隐藏 N 个」。
+  * 测试：`internal/pool/modeltier_test.go` —— 无事实不隐藏 / 只有部分账号等级未知不隐藏 /
+    池内全部判得出来才隐藏 / 别的等级的事实不影响本池 / 落盘与重启恢复。
+    全绿：pool **181 PASS**、upstream 198、server 87、panel 24。
+
+## v1.24.3
 
 * **修「点了解冻没效果」**（用户实测）：`Pool.Revive`（面板「解冻」按钮，`POST
   /panel/api/accounts/{uid}/revive`）清了 disabled / paused / 账号冷却 / 软限流退避 /

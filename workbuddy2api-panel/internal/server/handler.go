@@ -360,6 +360,10 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
+		// 账号等级闸门：池内**每个**号都已知用不了该模型 → 不列出（避免客户端挑中必失败）。
+		if h.cfg.Pool.ModelDeniedForAllAccounts(mi.ID) {
+			continue
+		}
 		entry := map[string]any{
 			"id":       "cn:" + mi.ID,
 			"object":   "model",
@@ -403,6 +407,10 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
+			// 同上：等级闸门对 global 域同样生效。
+			if h.cfg.Pool.ModelDeniedForAllAccounts(id) {
+				continue
+			}
 			entry := map[string]any{
 				"id":       "global:" + id,
 				"object":   "model",
@@ -1338,6 +1346,12 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 // 携带的模型名。uerr 是 ChatStreamContext 返回的分类信封（可携带 RetryAfter）；
 // 零值/防御路径下为 nil，冷却时长回落既有计算。
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) {
+	// 11158「该模型不允许当前账号类型」：上游目录不提供权限字段，只能从报文里学事实
+	// ——记下 (账号 → 等级) 与 (等级 → 不能用该模型)，供 /v1/models 与面板模型页把
+	// "这个池子根本用不了的模型"从列表里摘掉（用户实测：号不能用却照样显示）。
+	if upstream.IsModelNotAllowedForUserType(body) {
+		h.cfg.Pool.NoteModelTierDenied(uid, upstream.UserTypeFromError(body), model)
+	}
 	switch kind {
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
