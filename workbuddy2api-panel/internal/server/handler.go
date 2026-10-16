@@ -1130,6 +1130,55 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
+	// 通用 503 自解释：把池子实况 + 每个号的当前状态写进 hint。此前只有一句
+	// "check /status"，用户拿到 503 只能干瞪眼（用户实测：反复 503，不知是号在冷却、
+	// 被连败降权、还是满载）。这一句让 503 自己讲清"哪个维度空了、还要等多久"。
+	if strings.HasPrefix(hint, upstream.NoHealthyAccountHint()) {
+		total, healthy, cooling, disabled, paused, inFlightFull := h.cfg.Pool.CountsDetailedWithPaused()
+		now := time.Now()
+		degraded, modelCooled := 0, 0
+		var parts []string
+		for _, st := range h.cfg.Pool.List() {
+			deg := !st.DegradeUntil.IsZero() && now.Before(st.DegradeUntil)
+			if deg {
+				degraded++
+			}
+			cooled := false
+			for _, m := range st.RateLimitedModels {
+				if m.Model == bareModel {
+					cooled = true
+					break
+				}
+			}
+			if cooled {
+				modelCooled++
+			}
+			if len(parts) < 4 {
+				short := st.UID
+				if len(short) > 8 {
+					short = short[:8]
+				}
+				switch {
+				case st.Disabled:
+					parts = append(parts, short+":disabled")
+				case st.Paused:
+					parts = append(parts, short+":paused")
+				case deg:
+					parts = append(parts, short+":degraded "+time.Until(st.DegradeUntil).Truncate(time.Second).String())
+				case cooled:
+					parts = append(parts, short+":model_cooled")
+				case st.InFlight > 0:
+					parts = append(parts, short+":in_flight="+fmt.Sprintf("%d", st.InFlight))
+				default:
+					parts = append(parts, short+":ok")
+				}
+			}
+		}
+		hint = fmt.Sprintf("%s [pool: total=%d healthy=%d cooling=%d degraded=%d paused=%d disabled=%d in_flight_full=%d model_cooled(%s)=%d realm=%s | %s]",
+			hint, total, healthy, cooling, degraded, paused, disabled, inFlightFull, bareModel, modelCooled, realm,
+			strings.Join(parts, ", "))
+	}
+
 	// 域信息：单域部署里「池子没号」与「你要的这个域没号」是两件事——例如 global: 前缀
 	// 的模型打到只有 CN 号的池子（或反过来），客户端只看 no_healthy_account 会以为是
 	// 服务端过载而无限重试。把域可用性直接写进 hint（realm=="" 即裸名=CN，不赘述）。

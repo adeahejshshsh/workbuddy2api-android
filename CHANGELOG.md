@@ -1,6 +1,25 @@
 # 变更记录
 
-## v1.24.5（当前）
+## v1.24.6（当前）
+
+* **让「503 no_healthy_account」自己讲清原因**（用户实测：反复 503，而 hint 只有一句
+  "check /status"，等于没说）。现在这句 hint 会带上**池子实况 + 每个号的状态与剩余时间**：
+
+  ```
+  ... no healthy account available in pool; check /status or retry later
+      [pool: total=3 healthy=1 cooling=1 degraded=1 paused=0 disabled=0 in_flight_full=0
+       model_cooled(gpt-6-astra)=1 realm=cn | u1a2b3c4:cooling 2m30s, e5f6a7b8:degraded 8m, c9d0e1f2:ok]
+  ```
+
+  域不可服务时照旧前置 `realm cn has no servable account (cn=..., global=...)`。
+  * 顺带核实「在途名额泄漏」的怀疑：**没有泄漏** —— 轮转循环外有 `defer` 统一 `Release`、
+    循环内提前释放走 `releaseHeld()`（handler.go:593-605 / 883），所以这类 503 属真实瞬态
+    （号在冷却 / 连败降权 / 满载），会自愈；现在能一眼看出是哪个维度、还要等多久。
+  * 验证：起临时实例（7999，独立 state）实打一次 chat，返回体的 `gateway_hint` 里确实出现
+    `[pool: total=0 healthy=0 cooling=0 degraded=0 paused=0 disabled=0 in_flight_full=0
+    model_cooled(gpt-6-astra)=0 realm=cn | ]` ✓（用户 7863 全程未碰）。
+
+## v1.24.5
 
 * **修「模型等级不支持，却被报成 503」**（用户实测："你改成 503 了"）：
   v1.24.2 把 11158 归类成"模型级避让"后，**第二次请求就不会再打到上游了** —— 该模型已被
