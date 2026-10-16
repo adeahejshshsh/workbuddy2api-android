@@ -288,7 +288,9 @@ func (p *Pool) BlockModelClear(uid, model string) {
 		return
 	}
 	mc, exists := e.modelCooldowns[model]
-	if !exists || !strings.HasPrefix(mc.Reason, "11102") {
+	// 11102（模型不存在）与 11158（账号等级不够）都是"官方确定、重试无意义"的负缓存：
+	// 该模型实测又通了就一起清。6004 仍不动（有自身上游重置墙钟语义）。
+	if !exists || !(strings.HasPrefix(mc.Reason, "11102") || strings.HasPrefix(mc.Reason, "11158")) {
 		return
 	}
 	delete(e.modelCooldowns, model)

@@ -1203,6 +1203,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			hint += "; upstream: " + s
 		}
 		status = http.StatusBadRequest
+		// 阻塞原因若来自 11158（等级不够），把 code 从笼统的 model_unavailable 换成精确的
+		// model_not_allowed_for_account_type：客户端据此知道"换模型，别换号"。
+		if strings.HasPrefix(modelBlock.Reason, "11158") {
+			code = "model_not_allowed_for_account_type"
+			hint = "model tier denied: every account is known not to support this model (upstream 11158); pick another model"
+		}
+	}
+	// 等级闸门兜底：全池都被判定"用不了这个模型"、但本轮一个上游请求都没打（号已被负缓存
+	// 避开，lastErr 为空）→ 此前会退回默认的 503 no_healthy_account，用户看到的就是
+	// "明明写了不支持，却报 503"。等级事实是确凿的，直接给精确 code + 400。
+	if !modelBlock.Blocked && h.cfg.Pool.ModelDeniedForAllAccounts(bareModel) {
+		code = "model_not_allowed_for_account_type"
+		status = http.StatusBadRequest
+		if !upstreamMsgPassed {
+			msg = "this model is not available for the account type of every account in the pool; pick another model"
+		}
+		hint = "model tier denied: every account in the pool is known not to support this model (learned from upstream 11158)"
 	}
 	writeOpenAIErrorFull(w, status, code, msg, hint, upBrief)
 	st.status = status
@@ -1434,10 +1451,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 已 fail-fast 400 透传原文、终止轮转——「换号可能有不同模型权限」属 11102
 		// （ErrModelBlocked）的分类域，与本类无关。
 	case upstream.ErrModelBlocked:
-		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
-		// （与 6004 同域），选号侧 healthyForModel 对该账号自动避开该模型。
-		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
-		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason)
+		// 11102「该后端无此模型」/ 11158「该模型不允许当前账号类型」：(账号, 模型)
+		// 负缓存避让。复用 modelCooldowns 机制（与 6004 同域），选号侧 healthyForModel
+		// 对该账号自动避开该模型。立即换号（本轮 continue）。
+		// reason 分开记：11158 是"等级不够"，末端据此给出精确 code 与文案，不再混成
+		// 一句 no_healthy_account 的 503（用户实测："你改成 503 了"）。
+		reason := upstream.ModelBlockReason
+		if upstream.IsModelNotAllowedForUserType(body) {
+			reason = upstream.ModelNotAllowedReason
+		}
+		h.cfg.Pool.BlockModelBackoff(uid, model, reason)
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 		// ErrClient（未知 4xx）喂连败计数（issue #114）：连续 N 次该形态失败 →

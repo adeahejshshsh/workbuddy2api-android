@@ -250,6 +250,11 @@ const modelBlockMsgMarker = "service info not found"
 // （与 6004 条目的 "6004 model rate limit" reason 互不干扰）。
 const ModelBlockReason = "11102 model not available"
 
+// ModelNotAllowedReason 11158「该模型不允许当前账号类型」负缓存条目的 reason 前缀。
+// 与 11102 分开记：11102 是"模型不存在"，11158 是"账号等级不够"——后者换号可能有用、
+// 换模型一定有用，给客户端的文案与处置都不同（见 handler 末端 model_unavailable 分支）。
+const ModelNotAllowedReason = "11158 model not allowed for account type"
+
 // IsModelBlocked 报告 body 是否是「该后端无此模型」(11102) 的确定性答复。
 //
 // 只比对 code/msg 等独立字段，绝不做整段文本子串匹配：错误体还带 requestId 等字段，

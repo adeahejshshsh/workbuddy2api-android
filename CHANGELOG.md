@@ -1,6 +1,22 @@
 # 变更记录
 
-## v1.24.4（当前）
+## v1.24.5（当前）
+
+* **修「模型等级不支持，却被报成 503」**（用户实测："你改成 503 了"）：
+  v1.24.2 把 11158 归类成"模型级避让"后，**第二次请求就不会再打到上游了** —— 该模型已被
+  (账号,模型) 负缓存避开，末端 `lastErr` 为空、拿不到任何上游原文，于是退回默认的
+  `503 no_healthy_account`，把"你的等级不够"读成了"服务端过载"。
+  * `BlockModelBackoff` 的 reason 分开记：11102「模型不存在」 vs 新增
+    `upstream.ModelNotAllowedReason = "11158 model not allowed for account type"`；
+    `BlockModelClear` 两种前缀都清（6004 有自己的上游重置墙钟，仍不动）。
+  * 末端两处收紧：① `modelBlock.Reason` 以 `11158` 开头 → `code` 换成精确的
+    **`model_not_allowed_for_account_type`**（仍 400、明确不可重试）；② 全池被等级闸门
+    判定"用不了该模型"但本轮一个上游请求都没打 → 直接给精确 code + 400，不再退回笼统 503。
+  * 测试：`internal/pool/modelblock_reason_test.go`（11158 reason 保留 / 两个号都挡才报模型级
+    阻塞 / 清 11102+11158 两种前缀 / 6004 不被误清 / 负缓存与等级事实组合判定）。
+    全绿：pool **183 PASS**、upstream 198、server 87、panel 24。
+
+## v1.24.4
 
 * **修「账号用不了的模型照样显示在模型列表里」**：上游模型目录（CN `/console` 与 global `/v2`
   同构）**不提供任何权限/等级字段**（`upstream.ModelInfo` 全字段核对过；账号 profile 只有
