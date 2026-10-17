@@ -1137,7 +1137,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(hint, upstream.NoHealthyAccountHint()) {
 		total, healthy, cooling, disabled, paused, inFlightFull := h.cfg.Pool.CountsDetailedWithPaused()
 		now := time.Now()
-		degraded, modelCooled, realmCandidates := 0, 0, 0
+		degraded, modelCooled, realmHealthy := 0, 0, 0
 		var parts []string
 		for _, st := range h.cfg.Pool.List() {
 			deg := !st.DegradeUntil.IsZero() && now.Before(st.DegradeUntil)
@@ -1158,7 +1158,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 必须显式标出来，否则"有个号显示 ok 却依然 503"读不懂（用户实测）。
 			inRealm := realm == "" || st.Realm == realm
 			if inRealm && !st.Disabled && !st.Paused && !deg && !cooled {
-				realmCandidates++
+				realmHealthy++
 			}
 			if len(parts) < 4 {
 				short := st.UID
@@ -1185,11 +1185,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		extra := ""
-		if realm != "" && realmCandidates == 0 {
+		if realm != "" && realmHealthy == 0 {
 			extra = "; no candidate in realm " + realm + " (cross-realm accounts are not selectable for it)"
 		}
-		hint = fmt.Sprintf("%s [pool: total=%d healthy=%d cooling=%d degraded=%d paused=%d disabled=%d in_flight_full=%d model_cooled(%s)=%d realm=%s realm_candidates=%d%s | %s]",
-			hint, total, healthy, cooling, degraded, paused, disabled, inFlightFull, bareModel, modelCooled, realm, realmCandidates, extra,
+		hint = fmt.Sprintf("%s [pool: total=%d healthy=%d cooling=%d degraded=%d paused=%d disabled=%d in_flight_full=%d model_cooled(%s)=%d realm=%s realm_healthy=%d%s | %s]",
+			hint, total, healthy, cooling, degraded, paused, disabled, inFlightFull, bareModel, modelCooled, realm, realmHealthy, extra,
 			strings.Join(parts, ", "))
 	}
 
@@ -1243,6 +1243,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusBadRequest
 		}
 	}
+	// 传输层失败（一个上游 HTTP 响应都没拿到）：此前一律落到 no_healthy_account ——
+	// 语义完全错（那是"池子没号"），实际是"网关连不上上游"。典型场景：切了境外
+	// 代理/VPN 出口去跑 CN 模型 —— copilot.tencent.com / codebuddy.cn 是境内服务，
+	// 境外出口连不上，网关却报"没有可用号"，把人引去查账号（用户实测）。
+	if code == "no_healthy_account" && lastErr != nil && ue == nil {
+		code = "upstream_unreachable"
+		status = http.StatusBadGateway
+		msg = "gateway could not reach upstream " + upstreamBaseForRealm(realm) + ": " + transportBrief(lastErr)
+		hint = fmt.Sprintf(
+			"upstream transport error (no HTTP response at all); realm=%s base=%s. "+
+				"If you switched a proxy/VPN exit: cn upstreams are mainland-only — use a mainland exit for cn models, "+
+				"or call a global: model with a global account (base %s). [%s]",
+			realm, upstreamBaseForRealm(realm), upstreamBaseForRealm("global"), hint)
+	}
+
 	// 模型级阻塞覆盖上面的通用文案（放在最后 = 优先级最高）。
 	//
 	// 为什么能覆盖 code 而不丢信息：modelBlock.Reason 就是 BlockModelBackoff 存下的
@@ -1544,6 +1559,28 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)
+}
+
+// upstreamBaseForRealm 返回该域的上游 chat base —— 只用于错误文案与提示，不参与路由
+// （真实 base 由 upstream.Client 按账号 realm 决定，见 client.go ChatBaseCN / defaultGlobalBase）。
+func upstreamBaseForRealm(realm string) string {
+	if realm == "global" {
+		return "https://www.workbuddy.ai"
+	}
+	return "https://copilot.tencent.com"
+}
+
+// transportBrief 把传输层错误压成一句话（折叠空白 + 截断），用于 502 的 message。
+// 不截断会把整条 URL/证书链/httptrace 全塞进客户端界面。
+func transportBrief(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := strings.Join(strings.Fields(err.Error()), " ")
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200]) + "…"
+	}
+	return s
 }
 
 // briefBodyOr 把上游 body 压成一句话；空体返回 fallback（本地文案，不编造原文）。

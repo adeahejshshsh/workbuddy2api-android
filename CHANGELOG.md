@@ -1,6 +1,22 @@
 # 变更记录
 
-## v1.24.7（当前）
+## v1.24.8（当前）
+
+* **修「换境外代理后 CN 模型报 503 no_healthy_account」的误诊**（用户实测：hint 里明明
+  `healthy=3`、`realm_healthy=1`，却报"没有可用号"）。真相是**传输层失败**：号选出来了，
+  但请求连不上上游（`copilot.tencent.com` / `codebuddy.cn` 是境内服务，境外出口连不上），
+  网关一个 HTTP 响应都没拿到，末端于是退回默认的 `no_healthy_account` —— 语义完全错，
+  把人引去查账号。
+  * 新增末端分支：`code == no_healthy_account && lastErr != nil && 非上游 *Error` →
+    **502 + `upstream_unreachable`**；`message` 带上游 base 与实际错误（折叠空白 + 截断），
+    `gateway_hint` 明确写「cn 上游是境内服务：换了代理/VPN 出口就用境内出口跑 cn 模型，
+    或改用 `global:` 模型配 global 号」，并保留池子实况。
+  * 顺带把 hint 里的 `realm_candidates` 改名 `realm_healthy`（它没算积分保底，不能宣称"候选"）。
+  * 测试：新增 `internal/server/transport_err_test.go`（域→base 映射、传输层文案折叠/截断）；
+    `TestChatTransportErrorDoesNotPenalize` 断言更新为 502 + `upstream_unreachable` + 文案含
+    上游 base。全绿：server **89 PASS**、pool 184、upstream 198、panel 24。
+
+## v1.24.7
 
 * **修「`global:` 模型列表里留着、一发就 503」**（用户贴出的自解释 hint 直接定位）：
   hint 显示 `healthy=3, model_cooled(gpt-6-astra)=2, realm=global | 第三个号 ok` ——

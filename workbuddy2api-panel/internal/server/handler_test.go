@@ -795,8 +795,17 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	// v1.24.8：传输层失败（一个上游 HTTP 响应都没拿到）不再伪装成
+	// 503 no_healthy_account —— 那是"池子没号"的语义，会把人引去查账号。
+	// 现在给 502 + upstream_unreachable，并在 hint 里点名上游 base 与代理/网络提示。
+	if rec.Code != 502 {
+		t.Fatalf("transport error 应为 502，实际 code=%d body=%s", rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"upstream_unreachable", "copilot.tencent.com", "could not reach upstream"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("502 文案缺少 %q: %s", want, body)
+		}
 	}
 	st, _ := p.Status("u1")
 	if st.Cooling || st.ErrTotal != 0 {
