@@ -27,8 +27,13 @@ cd "$REPO" || exit 1
 
 if [ "${1:-build}" = "test" ]; then
   echo "== go test ./... =="
+  # 退出码必须来自 go test 而不是 tail：`go test | tail` 的 $? 是 tail 的，
+  # 后面再接一个 exit 0 就等于「测试红了也报成功」，CI 和人都被骗。
+  set +e
   go test -buildvcs=false ./... 2>&1 | tail -30
-  exit 0
+  rc=${PIPESTATUS[0]}
+  set -e
+  exit "$rc"
 fi
 
 echo "== 编译 cmd/* =="

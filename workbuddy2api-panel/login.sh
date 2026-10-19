@@ -120,6 +120,12 @@ except Exception as e:
 PYEOF
 
 # ─── 落盘 auth 文件（与 internal/auth 读取格式一致）─────────────────
+# uid 来自上游响应，未经校验就拼路径 = 路径穿越（uid 里塞 ../../ 就能写到 auths/
+# 之外任意可写位置）。白名单与 Go 侧 validUID 同口径：字母数字下划线连字符。
+case "$USER_ID" in
+  ""|*[!A-Za-z0-9_-]*) echo "❌ uid 含非法字符（$(printf %q "$USER_ID")），拒绝落盘"; exit 1 ;;
+esac
+[ "${#USER_ID}" -le 64 ] || { echo "❌ uid 过长（${#USER_ID} 字符），拒绝落盘"; exit 1; }
 AUTH_FILE="$AUTH_DIR/workbuddy-${USER_ID}.json"
 if [[ -f "$AUTH_FILE" ]]; then
     echo "账号已存在（uid=${USER_ID}），将覆盖更新凭证"
@@ -153,8 +159,13 @@ auth = {
         "domain": os.environ["WB2A_LOGIN_DOMAIN"],
     },
 }
-with open(os.environ["WB2A_LOGIN_AUTH_FILE"], "w") as f:
+# 0600 + tmp→rename：accessToken/refreshToken 对同机其他应用不可读，且不会写半截。
+path = os.environ["WB2A_LOGIN_AUTH_FILE"]
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(auth, f, indent=1)
+os.replace(tmp, path)
 print(f"已保存（{os.environ['WB2A_LOGIN_ACTION']}）: {os.environ['WB2A_LOGIN_AUTH_FILE']}")
 PYEOF
 

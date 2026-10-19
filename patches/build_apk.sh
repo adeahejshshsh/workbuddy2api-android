@@ -21,8 +21,10 @@ export GOPROXY="file://$PREFIX/lib/workbuddy2api/goproxy,off"
 
 # 版本号集中在这里：aapt2 路径写进清单；无 aapt2 的降级路径就地把旧清单里的版本串
 # 等长改写（AXML 字符串池是 UTF-16LE，等长替换不破坏结构）。
-VERCODE=24
-VERNAME="1.26.0"
+VERNAME="1.26.1"
+# versionCode 由 versionName 派生（major*10000 + minor*100 + patch），不再手工同步。
+# 手工同步过一次就错位（versionName 1.26.0 配 versionCode 24），升级判断全靠运气。
+VERCODE=$(( $(echo "$VERNAME" | cut -d. -f1) * 10000 + $(echo "$VERNAME" | cut -d. -f2) * 100 + $(echo "$VERNAME" | cut -d. -f3) ))
 
 WS="/storage/emulated/0/新建文件夹/workbuddy2api"
 SRC="$WS/apk-src"
@@ -47,7 +49,18 @@ else
 fi
 OUTDIR="${1:-$WS}"
 B="$PREFIX/build/apk"
-KS_TARGET="$SRC/wb2api.keystore"; KS_PASS=wb2api2026
+KS_TARGET="$SRC/wb2api.keystore"
+# 口令不进仓库、也不进命令行明文（pass:xxx 会出现在 ps 里）。
+# 顺序：环境变量 WB2API_KS_PASS → $WS/.kspass（0600，已 gitignore）→ 报错。
+KS_PASS="${WB2API_KS_PASS:-}"
+if [ -z "$KS_PASS" ] && [ -f "$WS/.kspass" ]; then
+  KS_PASS=$(tr -d ' \r\n' < "$WS/.kspass")
+fi
+[ -n "$KS_PASS" ] || {
+  echo "❌ 缺签名口令：设 WB2API_KS_PASS，或把口令写进 $WS/.kspass（chmod 600）"
+  echo "   （口令必须与已有 keystore 一致，否则新包无法覆盖升级旧包）"
+  exit 1
+}
 mkdir -p "$B/jni/lib/arm64-v8a" "$OUTDIR"
 
 echo "== 1/6 生成 App 用的服务端二进制（未打 rt0 补丁） =="
@@ -97,15 +110,21 @@ else
   PREV="$OUTDIR/WorkBuddy2API.apk"
   [ -f "$PREV" ] || { echo "❌ 既无可用 aapt2 也无上一版 APK，生成不了清单与资源"; exit 1; }
   python3 - "$PREV" base.apk "$VERNAME" <<'PYAXML'
-import sys, zipfile, re
+import sys, zipfile, re, os
 prev, out, newver = sys.argv[1], sys.argv[2], sys.argv[3]
 src = zipfile.ZipFile(prev)
 man = src.read("AndroidManifest.xml")
 # AXML 的字符串池是 UTF-16LE：把 "1.25.0" 这样的版本串按 UTF-16LE 找出来。
-pat = re.compile(rb"(?:1\x00\.\x00\d\x00\d\x00\.\x00\d\x00)")
-hits = set(pat.findall(man))
-assert len(hits) == 1, "版本串定位失败（命中 %d 处）" % len(hits)
-old = hits.pop().decode("utf-16-le")
+# 通用版本串（任意位数的 x.y.z，UTF-16LE）：写死 "1.xx.y" 的话，升到 2.0.0 或
+# 1.100.0 时这里会直接中断构建（一年后必踩的定时炸弹）。
+pat = re.compile(rb"(?:(?:[0-9]\x00)+\.\x00(?:[0-9]\x00)+\.\x00(?:[0-9]\x00)+)")
+hits = sorted(set(pat.findall(man)))
+ov = os.environ.get("OLD_VERSION", "").strip()
+if ov:
+    hits = [ov.encode("utf-16-le")]
+assert len(hits) == 1, "版本串不唯一（%r）：设 OLD_VERSION=<旧版本号> 指定" % [
+    h.decode("utf-16-le") for h in hits]
+old = hits[0].decode("utf-16-le")
 if old != newver:
     assert len(old) == len(newver), "版本串长度必须一致：%s → %s" % (old, newver)
     man = man.replace(old.encode("utf-16-le"), newver.encode("utf-16-le"))

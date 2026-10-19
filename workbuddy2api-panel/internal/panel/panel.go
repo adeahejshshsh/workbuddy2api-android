@@ -82,7 +82,9 @@ type Panel struct {
 	// logins 进行中的 OAuth 设备授权会话（state → 会话信息）。
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
 	loginMu sync.Mutex
-	logins  map[string]loginSession
+	// 注意必须是**指针** map：loginSession 带可变字段（consumed），值类型 map 里
+	// 取出来的是副本，改副本不会回写 —— 防重入标记会永远失效（review H1）。
+	logins  map[string]*loginSession
 
 	// taskMu/taskLocks 一键完成任务的 per-account 互斥：同一账号的任务动作
 	// （单任务 / 全量）同时只允许一条在跑。重复点击直接返回 409"仍在执行"，
@@ -150,7 +152,7 @@ func New(cfg Config) *Panel {
 		mux:     http.NewServeMux(),
 		started: time.Now(),
 		logs:    NewRing(500),
-		logins:  map[string]loginSession{},
+		logins:  map[string]*loginSession{},
 	}
 	p.routes()
 	return p

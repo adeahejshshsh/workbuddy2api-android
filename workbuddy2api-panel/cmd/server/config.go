@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -233,7 +234,10 @@ type Config struct {
 // Default 默认配置。
 func Default() *Config {
 	c := &Config{
-		Listen:    ":7863",
+		// 默认只监听回环（review H7）：默认值决定绝大多数部署的实际暴露面，
+		// ":7863" + 空密钥 = 同网段任何人都能白嫖账号、调面板接口、读日志。
+		// 要对外提供服务必须显式改成 0.0.0.0:7863 **并**配置 api_key（见 checkListenKey）。
+		Listen:    "127.0.0.1:7863",
 		APIKey:    "",
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
@@ -305,7 +309,7 @@ func Load(path string) (*Config, error) {
 		if st, statErr := os.Stat(path); statErr == nil && st.IsDir() {
 			return nil, fmt.Errorf("config %s 是目录而非文件——"+
 				"Docker 部署时若宿主机缺少 config.json，bind mount 会创建同名目录。"+
-				"请先 `cp config.example.json config.json` 或删除该目录（程序会自动生成配置）", path)
+				"请删除该目录（程序会自动生成带随机 api_key 的配置），或手工放一份自己的 config.json", path)
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -451,8 +455,49 @@ func applyEnv(c *Config) {
 	}
 }
 
+// placeholderKeys 已知的占位密钥：示例配置里的值，等于没有密钥。
+var placeholderKeys = map[string]bool{"test_key": true, "CHANGE_ME": true, "changeme": true}
+
+// checkListenKey 拒绝「非回环监听 + 空/占位密钥」的组合（review H7）。
+func (c *Config) checkListenKey() error {
+	if isLoopbackListen(c.Listen) {
+		return nil // 只给本机用：裸奔可接受（也正是 APK 内的形态）
+	}
+	k := strings.TrimSpace(c.APIKey)
+	if k == "" || placeholderKeys[k] {
+		shown := k
+		if shown == "" {
+			shown = "（空）"
+		}
+		return fmt.Errorf("api_key: listen=%q 不是回环地址，必须配置非空且非占位的 api_key（当前 %s）。"+
+			"生成一个：openssl rand -hex 24；或把 listen 改成 127.0.0.1:7863 只给本机用", c.Listen, shown)
+	}
+	return nil
+}
+
+// isLoopbackListen 判断监听地址是否只对本机开放。
+// 解析不出来的（"7863"、""、"0.0.0.0:7863"）一律按「对外」处理——宁可多要一个密钥。
+func isLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr // 没有端口段时 SplitHostPort 报错，直接拿整串判
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (c *Config) normalize() error {
 	var err error
+	// 监听面 × 密钥一致性守卫（review H7）：默认 listen ":7863" 是**全网卡**，
+	// 配默认空密钥/示例 test_key 时，同网段任何人都能白嫖账号积分、调面板接口
+	// （含移除账号）、读日志里的昵称/UID/来源 IP。只允许回环监听裸奔。
+	if err := c.checkListenKey(); err != nil {
+		return err
+	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}

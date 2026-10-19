@@ -154,7 +154,12 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	r.mu.RUnlock()
 	if found && !expired(e, now, r.cfg.TTL) {
 		if available[e.uid] {
-			r.touch(key, e.uid, now)
+			// 续期节流：滑动过期不需要毫秒精度，而每次 touch 都要拿写锁 + 一次
+			// Redis 镜像写。此前每个命中请求都做一遍 —— 全池并发请求串行在同一把
+			// 写锁上，还把异步写放大成「每请求一次」（review M5/H5）。
+			if now.Sub(e.lastActive) >= minTouchInterval {
+				r.touch(key, e.uid, now)
+			}
 			return e.uid, true
 		}
 		// 绑定号已冷却/占满 → 失效，落入慢路径重分配。
@@ -203,6 +208,9 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
 	return uid, true
 }
+
+// minTouchInterval 快路径滚动 lastActive 的最小间隔（滑动续期节流）。
+const minTouchInterval = 5 * time.Second
 
 // touch 滚动 lastActive 并异步镜像（只在快路径命中时写最后一次）。
 func (r *Router) touch(key, uid string, now time.Time) {

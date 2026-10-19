@@ -1,5 +1,78 @@
 # 变更记录
 
+## v1.26.1（当前）
+
+**本版 = 第二份代码审查报告（CODE-REVIEW-2026-10-19.md）的落地修复。**
+7 条高危全修、9 条中危全修、6 条低危修 5。其中 **H1 是上一版我自己引入的真 bug**
+（防重入标记写在值类型 map 的副本上，等于没写），本版改成指针 map 才真正生效。
+
+### 高危（7/7）
+
+* **H1 面板 OAuth 轮询的「认领」标记从未写回** —— `logins` 是 `map[string]loginSession`
+  （**值类型**），`sess.consumed = true` 只改了栈上副本，defer 里复位同样写副本。
+  上一版加的防重入因此形同虚设。本版把 map 改成 `map[string]*loginSession`，
+  改的就是 map 里那一个（并发两路 poll 现在只有一路进完成路径）。
+* **H2 `run.sh stop` 1 秒后无条件 `kill -9`** —— 服务端要 `Flush()` + `Shutdown(5s)`
+  排空在途 SSE，1 秒就强杀会把最后一次落盘抢走（冷却时间/计数/用量丢一截）。
+  改成最多等 8 秒，超时才强杀，并区分「优雅退出 / 强制终止」两种提示。
+* **H3 「重启网关」不等旧进程退出** —— `destroy()` 是异步的，代码把「句柄清空」当成
+  「进程已死」，新进程必然 `bind: address already in use` 退出，只能等看门狗 10s 一拍。
+  新增 `restartGateway()`：先捕获旧句柄 → 杀掉 → **后台线程** `waitFor(4s)` → 再拉起
+  （不阻塞主线程，避开 ANR 窗口）；`onStartCommand` 的 restart 分支改走它，且不再
+  被后面的 `if (!alive())` 判成「外部实例」。
+* **H4 面板首屏加载失败后永不重试** —— 原来固定 1500ms 硬加载，而 `onPageFinished`
+  连 WebView 错误页都会回调 → 被记成「已注入」，之后再也不试。改成由 tick 里真实
+  的端口探测驱动（`panelLoaded` 只在真落在面板地址上才置真），并补 `onReceivedError`
+  把失败交回 tick 重试（上限 30 次）。
+* **H5 Redis 异步写按 QPS 堆积 goroutine** —— 改成**有界队列 + 固定 worker 池**：
+  入队成功即保证执行（`Close` 排空），队列满（1024）则丢弃并计数（`Dropped()`），
+  关停后提交的直接丢弃。不再有「请求数 × 等待时间」个 goroutine。
+* **H6 `login.sh` 路径穿越 + token 文件权限** —— uid 加白名单（`[A-Za-z0-9_-]`，
+  长度 ≤64）后再拼路径；落盘改 `os.open(..., 0o600)` + tmp→rename，与 Go 侧
+  `SaveAtomic` 的 0600 口径一致。
+* **H7 默认「全网卡监听 + 空密钥」** —— 三道一起改：
+  ① `Default().Listen` 从 `":7863"` 改成 **`127.0.0.1:7863`**（默认只给本机）；
+  ② `normalize()` 新增 `checkListenKey()`：非回环监听 + 空/占位密钥（`test_key`/
+  `CHANGE_ME`）**直接拒绝启动**并给出生成命令；
+  ③ `config.example.json` 与 APK 内模板改成 `CHANGE_ME`，`GatewayService` 的
+  随机 key 替换同步覆盖两个占位符；报错文案不再教用户 `cp config.example.json`。
+
+### 中危（9/9）
+
+* **M1** `rebuild.sh test` 透传 `go test` 的退出码（原来是 `tail` 的 `$?` + 无条件 `exit 0`）。
+* **M2** `patch_source.sh` 第 3 步的锚点跟随 `$PREFIX`，并在替换后断言
+  `wb2apiResolvConfPath()` 真的被调用（否则 exit 1）——自定义 PREFIX 下不再静默失效。
+* **M3** 面板 `tick()` 加可见性闸门：`onStop` 停、`onStart` 恢复（`tickQueued` 防重复投递），
+  后台不再每 2 秒发 socket connect。
+* **M4** `ReviveJobService.onStartJob` 的网络探测与写日志挪到后台线程，返回 `true`
+  由 `jobFinished` 收尾（主线程不再做磁盘 IO）。
+* **M5** 会话粘性命中加续期节流（`minTouchInterval = 5s`）：5 秒内的重复命中不再拿写锁、
+  不再打一次 Redis 写。
+* **M6** `watchdog.sh` 外部实例分支重置 `fail=0`（否则外部实例一挂就按历史次数退避）。
+* **M7** `apply_panel_mobile.sh` 的 `re.sub` 改用 `lambda m: block`（CSS 里的反斜杠
+  不会再被当转义模板解释）。
+* **M8** APK 降级路径的版本串正则改成通用的 `x.y.z`（任意位数），并支持
+  `OLD_VERSION` 环境变量消歧 —— 升到 `2.0.0` / `1.100.0` 不会再中断构建。
+* **M9** 签名口令不再硬编码：`WB2API_KS_PASS` 环境变量 → `$WS/.kspass`（已 gitignore）→ 报错。
+
+### 低危（5/6）
+
+* **L1** `versionCode` 由 `versionName` 派生（`major*10000+minor*100+patch`），不再手工同步。
+* **L2** `BootReceiver` 去掉 `QUICKBOOT_POWERON`（非受保护广播，exported=true 下任何应用
+  都能触发前台服务启动）。
+* **L3** 去掉 `MIXED_CONTENT_ALWAYS_ALLOW`（面板只连 127.0.0.1）。
+* **L4** `task_common.py` 的 `AUTHS` 改成 `WB2A_AUTH_DIR` → 脚本同级 `../auths` → 旧路径兜底。
+* **L5** `tasksScanAll` 加 4 路并发闸门并尊重请求取消（不再按账号数无上限起 goroutine）。
+* **L6** `restartRequiredFields` 改成**真差异**：只有值真的变了才提示需要重启
+  （此前恒返回全量清单，改个热生效字段也喊重启，狼来了）。
+
+### 测试
+
+`upstream 203 / server 89 / pool 184 / panel 24 / session 20 / redisstore 6 / reqlog 7 /
+cmd-server 全绿`，0 FAIL。
+配置默认值变更导致 3 个断言同步更新（`listen` 默认值、`WriteDefault` 生成值、
+目录错误文案）。
+
 ## v1.26.0（当前）
 
 **本版 = 第三方代码审查报告（CODE-REVIEW.md）的落地修复。** 4 条高危全修，10 条中危修 10，

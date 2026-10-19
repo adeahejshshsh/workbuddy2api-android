@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"syscall"
 	"time"
 
@@ -445,6 +447,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
+	// mergeConfigMaps 是**原地**合并（返回的就是 cur），所以先留一份原始快照，
+	// 否则后面拿 cur 做「改了什么」的差异比对时两边永远是同一个对象。
+	var prev map[string]any
+	_ = json.Unmarshal(oldRaw, &prev)
 	merged := mergeConfigMaps(cur, incoming)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
@@ -519,35 +525,48 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
-	return restartRequiredFields(newCfg), nil
+	return restartRequiredFields(prev, merged), nil
 }
 
-// restartRequiredFields 返回本次改动中无法热生效、需要重启进程的字段名。
-// 恒返回完整清单中的"与当前进程装配期依赖相关"的项——面板据此提示用户。
-func restartRequiredFields(c *Config) []string {
+// restartRequiredFields 返回本次改动中**真的变了**、且无法热生效需要重启的字段名。
+//
+// 此前它恒返回全量清单：改个能热生效的字段也照样提示「需要重启」，用户照着重启了
+// 一遍发现没变化，久而久之就无视这条提示了（狼来了）。现在按前后 JSON 快照做差异，
+// 只有值真的变了才列出。
+func restartRequiredFields(prev, next map[string]any) []string {
+	// 这些字段在进程内被监听地址/HTTP client/目录句柄等装配期对象捕获，改完必须重启。
+	keys := []string{
+		"listen", "auth_dir", "state_file",
+		"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
+		"upstream.user_agent",
+		"upstash",
+		"session_sticky.ttl", "session_sticky.gc_interval",
+		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
+		"server.read_timeout",
+	}
 	var out []string
-	// 这些字段在进程内被监听地址/HTTP client/目录句柄等装配期对象捕获。
-	if c.Listen != "" {
-		out = append(out, "listen")
+	for _, k := range keys {
+		if !reflect.DeepEqual(lookupDotted(prev, k), lookupDotted(next, k)) {
+			out = append(out, k)
+		}
 	}
-	if c.AuthDir != "" {
-		out = append(out, "auth_dir")
-	}
-	if c.StateFile != "" {
-		out = append(out, "state_file")
-	}
-	out = append(out, "upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds")
-	// upstream.user_agent 在装配期被写进出站 client（main.go 的 up.UserAgent = ...），
-	// 之后不再读取——不在 livecfg 热快照里，也无法热改。此前漏列，导致面板改完
-	// 显示"已保存"却不提示需要重启，用户以为没生效（issue #102 附带发现 2）。
-	out = append(out, "upstream.user_agent")
-	if c.Upstash.URL != "" || c.Upstash.Token != "" {
-		out = append(out, "upstash")
-	}
-	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
-	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
-	out = append(out, "server.read_timeout")
 	return out
+}
+
+// lookupDotted 按 "a.b.c" 路径取嵌套 map 里的值（缺失返回 nil）。
+func lookupDotted(m map[string]any, path string) any {
+	var cur any = m
+	for _, seg := range strings.Split(path, ".") {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur, ok = mm[seg]
+		if !ok {
+			return nil
+		}
+	}
+	return cur
 }
 
 // mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。

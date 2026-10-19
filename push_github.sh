@@ -52,7 +52,8 @@ pats = [(re.compile(re.escape(tok)), "GitHub token 本人"),
         (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "疑似 GitHub token"),
         (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "疑似细粒度 token"),
         (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "私钥"),
-        (re.compile(r'"api_key"\s*:\s*"(?!\s*")(?!test_key)[^"]{8,}"'), "真实 api_key"),
+        # 占位符（test_key / CHANGE_ME）不算密钥：它们是示例配置里的固定串。
+        (re.compile(r'"api_key"\s*:\s*"(?!\s*")(?!test_key\b)(?!CHANGE_ME\b)[^"]{8,}"'), "真实 api_key"),
         (re.compile(r"BEGIN (RSA|OPENSSH|EC) PRIVATE"), "私钥头")]
 hits = []
 for p in stage.rglob("*"):

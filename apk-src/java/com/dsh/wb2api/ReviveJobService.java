@@ -47,21 +47,37 @@ public class ReviveJobService extends JobService {
         } catch (Throwable ignored) {}
     }
 
-    @Override public boolean onStartJob(JobParameters p) {
-        boolean up = GatewayService.portUp();
-        GatewayService.appLog(this, "JobScheduler 触发：7863 " + (up ? "在服务，不打扰" : "不在服务 → 拉起服务"));
-        if (!up) {                               // 7863 不在服务 → 把服务叫起来（它自己去拉起网关）
-            try {
-                Intent i = new Intent(this, GatewayService.class);
-                if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
-                else startService(i);
-            } catch (Throwable t) {              // 后台起前台服务被拒 → 退回普通 startService
-                GatewayService.appLog(this, "JobScheduler 起前台服务被拒：" + t.getClass().getSimpleName());
-                try { startService(new Intent(this, GatewayService.class)); }
-                catch (Throwable t2) { GatewayService.appLog(this, "JobScheduler 拉起服务失败：" + t2); }
+    @Override public boolean onStartJob(final JobParameters p) {
+        // JobService 回调跑在主线程：portUp() 是 150ms 连接 + appLog() 要开文件写盘，
+        // 慢磁盘/冷启动时命中 StrictMode 违规，极端情况挤进 ANR 窗口。全部丢后台。
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    boolean up = GatewayService.portUp();
+                    GatewayService.appLog(ReviveJobService.this,
+                            "JobScheduler 触发：7863 " + (up ? "在服务，不打扰" : "不在服务 → 拉起服务"));
+                    if (!up) {                   // 7863 不在服务 → 把服务叫起来（它自己去拉起网关）
+                        try {
+                            Intent i = new Intent(ReviveJobService.this, GatewayService.class);
+                            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
+                            else startService(i);
+                        } catch (Throwable t) {  // 后台起前台服务被拒 → 退回普通 startService
+                            GatewayService.appLog(ReviveJobService.this,
+                                    "JobScheduler 起前台服务被拒：" + t.getClass().getSimpleName());
+                            try { startService(new Intent(ReviveJobService.this, GatewayService.class)); }
+                            catch (Throwable t2) {
+                                GatewayService.appLog(ReviveJobService.this, "JobScheduler 拉起服务失败：" + t2);
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                    // 兜底：绝不让后台线程的异常冒到系统
+                } finally {
+                    jobFinished(p, false);       // 干完了，告诉系统别再等我
+                }
             }
-        }
-        return false;                            // 同步干完，不用系统再等我
+        }, "revive-job").start();
+        return true;                             // 有活没干完：由 jobFinished 收尾
     }
 
     @Override public boolean onStopJob(JobParameters p) { return true; }   // 被中断 → 重排

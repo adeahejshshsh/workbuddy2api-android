@@ -21,7 +21,9 @@ END = "/* ══ DSH-MOBILE-PATCH-END ══ */"
 block = f"{BEG}\n{css}{END}\n"
 
 if BEG in html:
-    html2 = re.sub(re.escape(BEG) + r".*?" + re.escape(END) + r"\n?", block, html, flags=re.S)
+    # 替换模板里的反斜杠会被 re 当转义解释（CSS 里的 content: "\201C" 会直接
+    # 抛 bad escape，或内容被悄悄吃掉）。用 lambda 让 block 原样插入。
+    html2 = re.sub(re.escape(BEG) + r".*?" + re.escape(END) + r"\n?", lambda m: block, html, flags=re.S)
     action = "已更新（替换旧块）"
 elif "</style>" in html:
     html2 = html.replace("</style>", block + "</style>", 1)

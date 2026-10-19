@@ -29,6 +29,8 @@ while :; do
     if [ -z "$p" ]; then
       # 端口有主但不是本脚本起的那个 → 复用，绝不抢
       [ "$noted" = 0 ] && { say "7863 上是外部实例（http=$code），复用不干预"; noted=1; }
+      fail=0   # 外部实例在正常服务：历史失败计数必须清零，否则它一挂就要按
+               # 旧计数退避（最长白等 30s 才拉起）
     else
       [ "$fail" -gt 0 ] && say "已恢复正常 http=$code pid=$p"
       fail=0; noted=0

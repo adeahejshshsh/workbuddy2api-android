@@ -12,7 +12,14 @@
 """
 import json, os, time, glob, urllib.request, urllib.error
 
-AUTHS = "/root/workbuddy2api/auths"
+# auths 目录：优先 WB2A_AUTH_DIR，其次脚本同级的 ../auths（本仓库布局），
+# 最后才是历史上的容器路径。硬编码 /root/... 在 Android 工作区必然找不到。
+AUTHS = os.environ.get("WB2A_AUTH_DIR") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "auths")
+if not os.path.isdir(AUTHS):
+    _fallback = "/root/workbuddy2api/auths"
+    if os.path.isdir(_fallback):
+        AUTHS = _fallback
 CHAT_BASE = "https://copilot.tencent.com"   # growth / tasks / buddy / streak / chat
 BILL_BASE = "https://www.codebuddy.cn"      # report / billing
 

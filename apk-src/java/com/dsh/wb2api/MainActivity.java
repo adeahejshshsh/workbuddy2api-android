@@ -159,16 +159,27 @@ public class MainActivity extends Activity {
         s.setBuiltInZoomControls(false);    // 藏掉 +/- 控件，保留双指缩放
         s.setDisplayZoomControls(false);
         s.setTextZoom(100);
-        if (Build.VERSION.SDK_INT >= 21) s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        // 不放开混合内容：面板只连 http://127.0.0.1，允许混合内容只会给将来的
+        // 外部资源留下降级口子。
         web.setBackgroundColor(BG);
         web.setOverScrollMode(View.OVER_SCROLL_NEVER);
         web.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView v, String url) {
                 progress.setVisibility(View.GONE);
-                if (!injected && url != null && url.contains("/panel")) {
+                // 只有真正落在面板地址上才算加载成功：错误页也会回调本方法。
+                if (url == null || !url.startsWith(PANEL_URL)) {
+                    panelLoaded = false;      // 让 tick 的下一拍再试
+                    return;
+                }
+                panelLoaded = true;
+                if (!injected) {
                     injected = true;
                     injectKey();
                 }
+            }
+
+            @Override public void onReceivedError(WebView v, int code, String desc, String failingUrl) {
+                panelLoaded = false;          // 加载失败 → 交回 tick 重试（最多 MAX_LOAD_TRIES 次）
             }
         });
         web.setWebChromeClient(new WebChromeClient() {
@@ -183,7 +194,10 @@ public class MainActivity extends Activity {
 
         GatewayService.start(this);
         apiKey = readApiKey();
-        ui.postDelayed(new Runnable() { public void run() { web.loadUrl(PANEL_URL); } }, 1500);
+        // 不再「固定 1500ms 后硬加载」（H4）：设备慢/网关冷启动/看门狗退避时那一发
+        // 必然打空，而 onPageFinished 连 WebView 的错误页都会回调 —— 于是被记成
+        // 「已注入」，之后再也不自动重试，用户对着错误页只能手点重载。
+        // 改成由 tick 里的真实探测结果驱动（probePort 在后台线程做 connect）。
         tick();
     }
 
@@ -293,8 +307,45 @@ public class MainActivity extends Activity {
             logLine.setTextColor(WARN);
         }
 
+        // 面板加载：端口真的通了才加载（tick 每 2 秒一拍，最多试 MAX_LOAD_TRIES 次）。
+        if (!panelLoaded && portServing && web != null && loadTries < MAX_LOAD_TRIES) {
+            loadTries++;
+            web.loadUrl(PANEL_URL);
+        }
+
         probePort();
-        ui.postDelayed(new Runnable() { public void run() { tick(); } }, 2000);
+    }
+
+    // ── 可见性闸门（M3）：tick 只在界面可见时跑。
+    // 此前循环只在 onDestroy 里停，而按 Home 键只走 onStop、Activity 不销毁 ——
+    // 进程常驻后台期间仍然每 2 秒发一次 socket connect + 两次主线程 post，
+    // 叠加服务端的 partial wakelock 就是实打实的耗电。
+    volatile boolean visible = true;
+    volatile boolean tickQueued = false;
+
+    void scheduleTick() {
+        if (tickQueued) return;
+        tickQueued = true;
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                tickQueued = false;
+                if (!visible) return;      // 已退到后台：不再自投递，onStart 会重新拉起
+                tick();
+                scheduleTick();
+            }
+        }, 2000);
+    }
+
+    @Override protected void onStart() {
+        super.onStart();
+        visible = true;
+        tick();
+        scheduleTick();
+    }
+
+    @Override protected void onStop() {
+        visible = false;
+        super.onStop();
     }
 
     // ── 端口探针：事实来源，且只能在后台线程做（主线程连 150ms 也不能赌）
@@ -302,6 +353,11 @@ public class MainActivity extends Activity {
     volatile boolean portServing = false;
     volatile boolean probing = false;
     volatile boolean probed = false;
+    // 面板加载状态（H4）：panelLoaded 只在真落在面板地址上才置 true；
+    // loadTries 限制自动重试次数，避免死循环打空。
+    volatile boolean panelLoaded = false;
+    volatile int loadTries = 0;
+    static final int MAX_LOAD_TRIES = 30;
 
     void probePort() {
         if (probing) return;

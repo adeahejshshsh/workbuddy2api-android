@@ -83,7 +83,10 @@ fi
 python3 - <<'PYEOF'
 import os
 G = os.path.join(os.environ.get("PREFIX", "/data/data/com.dsharnessmobile.shell/files/usr"), "lib/go/src/net")
-HARD = "/data/data/com.dsharnessmobile.shell/files/usr/etc/resolv.conf"
+# 必须跟随 $PREFIX：第 2 步用的是 $RESOLV（跟随 PREFIX），这里若硬编码默认路径，
+# 自定义 PREFIX 下一条都替换不中 —— 函数被追加但无人调用，WB2API_RESOLV_CONF
+# 静默失效，正是「APK 内 DNS 全挂 → 上游全失败 → 全 503」那个病。
+HARD = os.path.join(os.environ.get("PREFIX", "/data/data/com.dsharnessmobile.shell/files/usr"), "etc/resolv.conf")
 HELPER = """
 // wb2apiResolvConfPath 返回本机应读的 resolv.conf 路径（DSH/Android 移植补丁）。
 // 顺序：WB2API_RESOLV_CONF 环境变量（APK 注入）→ APK 固定私有路径 → DSH $PREFIX → /etc。
@@ -112,6 +115,9 @@ for f in ("dnsclient_android.go", "dnsclient_unix.go"):
         continue
     s = s.replace('getSystemDNSConfigNamed("%s")' % HARD, "getSystemDNSConfigNamed(wb2apiResolvConfPath())")
     s = s.replace('dnsReadConfig("%s")' % HARD, "dnsReadConfig(wb2apiResolvConfPath())")
+    if "wb2apiResolvConfPath()" not in s:
+        print("  ❌ 锚点未命中（%s）：resolv.conf 路径没被改写 —— APK 内 DNS 会全挂", f)
+        sys.exit(1)
     if '"os"' not in s:
         s = s.replace("import (\n", 'import (\n\t"os"\n', 1)
     s = s.rstrip("\n") + "\n" + HELPER

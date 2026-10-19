@@ -166,13 +166,23 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 	states := p.cfg.Pool.List()
 	items := make([]scanAccountItem, len(states))
 	var wg sync.WaitGroup
+	// 并发闸门：账号多时「每账号一个 goroutine」等于同时向上游打几十上百个请求
+	// （上游按账号维度限流，打了也只是排队挨 429）。4 路足够，且尊重请求取消。
+	sem := make(chan struct{}, 4)
+	ctx := r.Context()
 	for i, st := range states {
 		if st.Disabled {
+			continue
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done(): // 客户端走了：不再起新任务（continue 结束本轮 for）
 			continue
 		}
 		wg.Add(1)
 		go func(i int, uid string) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			a := p.cfg.Pool.AuthByUID(uid)
 			if a == nil {
 				return

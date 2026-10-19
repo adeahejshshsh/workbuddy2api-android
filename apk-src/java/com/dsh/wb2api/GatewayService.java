@@ -239,8 +239,15 @@ public class GatewayService extends Service {
         holdWake();   // 保活：不持它，后台时看门狗线程与 Go 定时器都会被冻住
         appLog(this, "保活状态：wakelock=" + wakeHeld() + "，常驻图层=" + (overlay != null)
                 + "，alarm=" + (exactAlarmOk(this) ? "精确" : "非精确（未授予「闹钟与提醒」）") + "，任务列表=划掉也不停");
-        if (intent != null && intent.getBooleanExtra(EXTRA_RESTART, false)) killProc();
-        if (!alive()) {
+        // 重启：必须等旧进程真的退出再拉新的（destroy 是异步的，句柄清空 ≠ 进程已死）。
+        // 否则新进程 bind: address already in use → 直接退出 → 只能等看门狗 10s 一拍
+        // 兜底；有在途 SSE 时（Go 侧要排空最多 5 秒）尤其明显。
+        boolean restarting = false;
+        if (intent != null && intent.getBooleanExtra(EXTRA_RESTART, false)) {
+            restartGateway();
+            restarting = true;
+        }
+        if (!restarting && !alive()) {
             if (portUp()) {               // 本机已有实例在跑（比如 DSH 里那个），复用不抢
                 external = true;
                 mode = "复用";
@@ -332,6 +339,31 @@ public class GatewayService extends Service {
                 // 看门狗自己绝不能死：吞掉一切异常继续下一轮
             }
         }
+    }
+
+    /** 重启用的后台线程：等待旧进程退出不能放在主线程（阻塞 3~4 秒会挤进 ANR 窗口）。 */
+    static final java.util.concurrent.ExecutorService boot =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    /**
+     * 重启网关：先拿到旧句柄、杀掉，再在后台等它真的退出（有界），最后拉起新的。
+     * 与 startGateway 同锁，避免和看门狗线程交叉执行。
+     */
+    void restartGateway() {
+        final Process old;
+        synchronized (this) {
+            old = proc;                 // 先捕获：killProc 会把静态 proc 置 null
+        }
+        killProc();
+        boot.execute(new Runnable() {
+            public void run() {
+                if (old != null) {
+                    try { old.waitFor(4, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }
+                startGateway();   // 用户/系统明确要求重启：无条件拉起（startGateway 内部有锁与 alive 检查）
+            }
+        });
     }
 
     void selfHeal(String why) {
@@ -501,8 +533,11 @@ public class GatewayService extends Service {
             int n;
             while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
             String tpl = (bo.size() > 0) ? new String(bo.toByteArray(), "UTF-8") : "{}";
+            // 模板里的 api_key 是占位符 CHANGE_ME（旧版是 test_key，两个都换）。
+            // 换成随机 key 后网关才肯在非回环监听下启动（config.normalize 的守卫）。
+            tpl = tpl.replace("\"api_key\": \"CHANGE_ME\"", "\"api_key\": \"" + key + "\"");
             tpl = tpl.replace("\"api_key\": \"test_key\"", "\"api_key\": \"" + key + "\"");
-            if (!tpl.contains(key)) tpl = tpl.replace("test_key", key);
+            if (!tpl.contains(key)) tpl = tpl.replace("CHANGE_ME", key).replace("test_key", key);
             try (FileOutputStream os = new FileOutputStream(cfg)) { os.write(tpl.getBytes("UTF-8")); }
         } catch (Throwable t) {
             try (FileOutputStream os = new FileOutputStream(cfg)) {

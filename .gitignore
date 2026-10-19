@@ -10,6 +10,7 @@ workbuddy2api-panel/backups/
 
 # 密钥与签名
 apk-src/wb2api.keystore
+.kspass
 *.keystore
 *.jks
 *.idsig

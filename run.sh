@@ -49,7 +49,24 @@ case "${1:-start}" in
     ;;
   stop)
     p=$(running_pid)
-    if [ -n "$p" ]; then kill "$p" 2>/dev/null; sleep 1; kill -9 "$p" 2>/dev/null; echo "已停止 pid=$p"; else echo "未在运行"; fi
+    if [ -n "$p" ]; then
+      # 优雅停机预算：服务端收到 SIGTERM 后先 Flush，再 srv.Shutdown(5s) 等在途
+      # 请求收尾，之后才执行 defer 里的 Close。原来 sleep 1 就 kill -9，等于把
+      # 最后一次 Flush 抢走 —— 冷却时间/成功计数/用量记录丢一截，重启后表现为
+      # 「刚冷却的号又能用」「用量少了一截」。这里最多等 8 秒，超时才强杀。
+      kill "$p" 2>/dev/null
+      i=0
+      while [ "$i" -lt 80 ] && kill -0 "$p" 2>/dev/null; do
+        sleep 0.1; i=$((i+1))
+      done
+      if kill -0 "$p" 2>/dev/null; then
+        kill -9 "$p" 2>/dev/null; echo "已强制终止 pid=$p（等待 8s 仍未退出）"
+      else
+        echo "已停止 pid=$p（优雅退出）"
+      fi
+    else
+      echo "未在运行"
+    fi
     rm -f "$PIDF"
     ;;
   restart) "$0" stop; sleep 1; "$0" start ;;

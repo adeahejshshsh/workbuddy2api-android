@@ -11,7 +11,8 @@ import (
 
 func TestDefault(t *testing.T) {
 	c := Default()
-	if c.Listen != ":7863" {
+	// 默认只监听回环（review H7）：默认值即暴露面，":7863" + 空密钥等于局域网裸奔。
+	if c.Listen != "127.0.0.1:7863" {
 		t.Errorf("listen=%s", c.Listen)
 	}
 	if err := c.normalize(); err != nil {
@@ -611,7 +612,7 @@ func TestWriteDefault(t *testing.T) {
 	if c.APIKey != key {
 		t.Errorf("api_key=%q want %q", c.APIKey, key)
 	}
-	if c.Listen != ":7863" || c.AuthDir != "./auths" || c.StateFile != "./data/state.json" {
+	if c.Listen != "127.0.0.1:7863" || c.AuthDir != "./auths" || c.StateFile != "./data/state.json" {
 		t.Errorf("generated defaults off: %+v", c)
 	}
 	if len(c.Schedule.CheckinHours) == 0 || !c.Schedule.CheckinEnabled {
@@ -810,8 +811,10 @@ func TestLoadConfigPathIsDirectory(t *testing.T) {
 	if !strings.Contains(msg, "是目录") {
 		t.Errorf("error should explain it is a directory: %v", err)
 	}
-	if !strings.Contains(msg, "config.example.json") {
-		t.Errorf("error should suggest the fix (cp config.example.json): %v", err)
+	// 不再教用户 cp 示例配置（拷过去就是公开已知的 test_key/CHANGE_ME），
+	// 改为「删掉目录，程序自己生成带随机 api_key 的配置」。
+	if !strings.Contains(msg, "自动生成") && !strings.Contains(msg, "config.json") {
+		t.Errorf("error should suggest the fix: %v", err)
 	}
 }
 
