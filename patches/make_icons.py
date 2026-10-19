@@ -9,7 +9,7 @@
   避免半透明边缘发黑；不是最近邻那种锯齿货
 * 输出：mipmap-{mdpi 48,hdpi 72,xhdpi 96,xxhdpi 144,xxxhdpi 192}/ic_launcher.png
 
-为什么自己写：本机 Termux 没有 PIL（装不上，Pillow 要现场编译），也没有 ImageMagick，
+为什么自己写：环境里没有 PIL（Pillow 要现场编译）也没有 ImageMagick，
 而图标缩放的活儿一次性的、逻辑又短，自己写比拉个依赖干净。
 """
 import os

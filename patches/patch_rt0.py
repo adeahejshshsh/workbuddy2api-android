@@ -3,7 +3,7 @@
 """
 patch_rt0.py — 给已编译好的 Go(不区分 GOOS) arm64 可执行文件打「argv 修正」补丁。
 
-背景（本机 Android 的限制）：
+背景（Android 的限制）：
     本 App targetSdk >= 29 → 内核/SELinux 禁止 exec app 私有目录里的任何文件
     （sdcard 是 noexec 挂载，$PREFIX 是 app data，execve 一律 EACCES）。
     唯一出路是让 /system/bin/linker64「代跑」二进制，此时内核栈布局变成：

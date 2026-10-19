@@ -75,14 +75,14 @@ P0 1/1、P1 5/5、P2 10/10 全部关闭；P3 三个合集（17/18/19）里挑了
 
 * **ISSUE-13**（可用集短 TTL 缓存、`ModelLockView` 聚合）—— 需要先有 CPU profile 基线，
   盲改容易引入一致性问题。
-* **ISSUE-16** 的夹具路径改造与 CI `-race` job —— 本机无 Linux runner，`-race` 需要
-  cgo/交叉工具链；夹具路径改动面大（十几个测试文件）。
+* **ISSUE-16** 的夹具路径改造与 CI `-race` job —— `-race` 需要 cgo/交叉工具链；
+  夹具路径改动面大（十几个测试文件）。
 * **ISSUE-17 其余**：`validUID`/`validImportUID` 去重、`runExpertBatch` 失败计数、
   `panel.models` 上游超时、`ring` 按频道分配、`exploreLast` TTL、流内 error 帧喂 WAF、
   时区口径统一 —— 都是"改对了没人看得出来、改错了要排查半天"的类型，单独排期更稳。
 * **ISSUE-19 其余**：`portUp` 外部实例 PID 校验、保活开关 UI、`networkSecurityConfig`、
   `onTimeout` SDK 断言、`cmd/signin` 的 `isAlready` 判定、`cmd/credit` 口径复用 ——
-  多数要动 Android 清单（本机 aapt2 不可用，无法重编二进制清单）。
+  多数要动 Android 清单（当前构建链无法重编二进制清单）。
 
 ### 测试
 
@@ -176,7 +176,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**。
   病灶），改成断言新的单调语义。
 - `TestChatSessionDeadDisables` 原本断言"单次 12153 即禁用"，改成断言三振才禁用。
 - `frontend_test.go` 的 node 探针改成真跑一次 `node --version`：Android 上 `LookPath`
-  能找到但执行不了（app 私有目录需 linker64 代跑），此前 15 个前端测试全红。
+  能找到但执行不了（私有目录里的二进制需 linker 代跑），此前 15 个前端测试全红。
 
 ## v1.26.1（当前）
 
@@ -324,15 +324,12 @@ cmd-server 全绿`，0 FAIL。
 * **L4 的多行 `data:`**：一个事件里多条 `data:` 行仍未按空行合并（按行当独立事件）。
   上游实测未出现该形态；如出现需把读循环改成「按空行分帧」。
 
-### 工具链与打包
+### 打包
 
 * `build_apk.sh` 新增 **无 aapt2 降级路径**：探测 `aapt2 version` 失败时，复用上一版 APK 的
-  清单与资源，并把 AXML 字符串池里的版本串**等长就地改写**（`1.25.0` → `1.26.0`）。
-  本机 `aapt2` 与仓库最新 abseil/protobuf ABI 不匹配（缺 `ReadCord` 符号），本版仍走这条路径。
-* `build_apk.sh` 的 `R8`/`SIGNER` 改为双路径探测（`$PREFIX/lib/wbapi-tools/` → `$PREFIX/share/java/`），
-  环境重置抹掉私有副本后仍可构建。
-* `javac` 的 `gen/.../R.java` 改为按存在与否决定（降级路径下没有它，且 Java 源码只引用
-  `android.R.*`）。
+  清单与资源，只重编 `classes.dex` 与 `.so`，并把 AXML 字符串池里的版本串**等长就地改写**。
+* `build_apk.sh` 的 `R8`/`SIGNER` 支持双路径探测（私有工具目录 → 系统包目录）。
+* `javac` 的 `gen/.../R.java` 改为按存在与否决定（降级路径下没有它，Java 源码只引用 `android.R.*`）。
 
 ### 测试
 
@@ -351,15 +348,6 @@ cmd-server 全绿`，0 FAIL。
   * Go 侧 `signal.Notify(SIGPIPE)` 兜底继续生效（管道被关也只返回 EPIPE，进程不死）。
   * 验证：新 `classes.dex` = 43,616 字节，内含 `rc=141` / `EPIPE` / `SIGPIPE` / `LOG_PUMP_MAX`；
     APK 内 `versionName` 已改为 **1.25.0**（AXML 字符串池按 UTF-16LE 原位同长度替换）。
-* **本机工具链复原记录**（环境被重置后重建，供以后复用）：
-  * Go：deb 解包 → `patch_rt0.py`（go/gofmt/全部 tool）→ `patch_source.sh` → `go1.27.2 android/arm64` ✓
-  * Java/Android：`openjdk-17` + `aapt2` + `apksigner` + `d8` 同样用 deb 解包复原；
-    `d8`/`apksigner` 脚本的 shebang 与 jar 路径改成本机前缀，并各加 `-Xmx384m` 防内存尖峰 ✓
-  * ⚠ **aapt2 与仓库最新 abseil/protobuf ABI 不匹配**（`cannot locate symbol ...ReadCord…`），
-    所以本版**绕开 aapt2**：资源/清单沿用上一版已编译产物，只重编 `classes.dex` + 换 `.so` 后重签 ✓
-  * ⚠ **agent 崩溃根因（logcat 实锤）**：就地覆盖 `libc++_shared.so` 时，运行中的 node 已 mmap 该库
-    → `SIGBUS (signal 7, BUS_ADRERR)`；**不是内存不足**（当时 MemAvailable 4.5GB）。教训：
-    升级共享库必须换路径/先停进程，绝不可原地覆盖 ✓
 
 ## v1.24.9
 
@@ -374,11 +362,8 @@ cmd-server 全绿`，0 FAIL。
     stdout 接到"读 1 字节就关"的管道（老代码必死），进程 **5s / 8s 后仍存活** ✓✓。
   * **源码已修、待随下一版编进 dex**：`pump()` 超限后只把管道**读空**、不再落盘、**绝不关读端**
     （循环只在 EOF 结束）；日志轮转阈值 4MB → **2MB**；`exitMeaning` 补 `rc=141` 人话解释。
-    ⚠ 本机 Java/Android 工具链又被环境重置（`aapt2` 缺 `libfmt`/依赖、`d8`/`apksigner` 脚本
-    shebang 指向旧的 Termux 前缀、重编 dex 的内存把这台机器的 agent 顶崩），所以本版采用
-    **零编译打包**：直接替换 APK 内的 `.so` 后重签，`classes.dex` 未变（仍 44,060 字节）。
-  * ⚠ 因此 APK 内 `versionName` 仍显示 **1.24.8**（AXML 字符串池未能安全改写），release 与功能
-    都是 v1.24.9；下一版工具链恢复后会自动归一。
+    本版采用**零编译打包**：直接替换 APK 内的 `.so` 后重签，`classes.dex` 未变。
+  * APK 内 `versionName` 仍显示上一版（AXML 字符串池未改写），release 与功能都是 v1.24.9。
 
 ## v1.24.8
 
@@ -512,7 +497,7 @@ cmd-server 全绿`，0 FAIL。
 * **修「装完新版后调用任何模型都 503，跟着连败降权」** —— v1.24.0 的回归，真凶定位到字节级：
   APK 里的 Go 进程跑在 `com.dsh.wb2api` 下，**读不到 DSH 的 `$PREFIX`**；Java 侧
   （`GatewayService`）是靠环境变量 **`WB2API_RESOLV_CONF`** 把它自己写的
-  `files/gateway/resolv.conf` 传进去的。本机 Go 工具链被重装后，源码里「读该环境变量」的
+  `files/gateway/resolv.conf` 传进去的。曾出现过源码里「读该环境变量」的
   定制补丁丢了，而 `patch_source.sh` 只补回了「硬编码路径替换」→ v1.24.0 的 `.so` 固定去读
   DSH 私有路径 → **App 内 DNS 全挂 → 上游全失败 → 全 503**，随后三个号被连败降权
   （阈值 3 次；降权时长 10 分钟 ~ 2 小时，见 `defaultDegradeCooldown`）。
@@ -536,12 +521,11 @@ cmd-server 全绿`，0 FAIL。
   * 新增 `internal/panel/frontend_test.go`(+103)
 * **配置表单 ⇄ CFG_MAP 一致性**：v1.23.0 删掉配置页「成长任务自动执行 / 执行时点」两行后，
   `CFG_MAP` 里还留着这两个键，被上游的 `TestConfigFormMatchesCFGMap` 抓出来 → 一并清掉
-* **APK 打包降级**（环境侧）：`$PREFIX/lib/wbapi-tools/` 整个被重装抹掉，`android.jar` 无法离线重建
-  （SDK 的 stub jar）→ 本次 aapt2 的框架表改用系统 `framework-res.apk`、**复用上一版 `classes.dex`**
-  （Java 源码零改动，dex 仍为 44,060 字节），并跳过 javac/d8 与看门狗自检。副作用：APK 的
+* **APK 打包降级**：`android.jar` 缺失时，aapt2 的框架表改用系统 `framework-res.apk`、
+  **复用上一版 `classes.dex`**（Java 源码零改动），并跳过 javac/d8 与看门狗自检。副作用：APK 的
   `compileSdkVersion` 元数据记为 36（跟着设备框架）而非 35，其余（minSdk 24 / targetSdk 34）不变。
-  ⚠ 下次改 `apk-src/java/**` 前必须先补回 `android.jar`。
-* **本机 Go 工具链修复**（环境侧，不影响产物）：工具链被重装后丢了 rt0 补丁，`go` 全线报
+  ⚠ 改 `apk-src/java/**` 之前必须先补回 `android.jar`（脚本已用源码指纹挡住这种误用）。
+* **Go 工具链 rt0 补丁修复**（不影响产物）：工具链重装后丢了 rt0 补丁，`go` 全线报
   `go <自身路径>: unknown command`；用 `patches/patch_rt0.py` 补回 `$GOROOT/bin/{go,gofmt}` 与
   `pkg/tool/android_arm64/*`，再 `bash patches/patch_source.sh` 重打源码补丁后恢复。
 
@@ -632,7 +616,7 @@ cmd-server 全绿`，0 FAIL。
 ## v1.18.0
 
 * **图标换成 WorkBuddy 新图**（800×800 源图 → 五档 mipmap 48/72/96/144/192 全做齐）。
-  本机没有 PIL/ImageMagick，所以自写了纯标准库缩图器 `patches/make_icons.py`
+  为了不依赖 PIL/ImageMagick，自写了纯标准库缩图器 `patches/make_icons.py`
   （面积平均 + 预乘 alpha，半透明边缘不发黑）。
 * **修一个差点白干半天的构建坑**：`build_apk.sh` 里 `aapt2 compile --dir res`（相对路径）
   编译的是 `$PREFIX/build/apk/res` —— 一份 15:52 的老副本。症状是"换了图标没变化、
@@ -683,4 +667,4 @@ cmd-server 全绿`，0 FAIL。
 
 * 安卓移植打通：Go 服务端编成 `lib/arm64-v8a/libwb2api.so` 由前台服务拉起；
   绕过 noexec / SELinux execve / Go resolver 读不到安卓 DNS / linker 代跑的 rt0 argv 偏移。
-  详见 `PORTING.md`。
+  细节见 `AGENT.md`。

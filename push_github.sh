@@ -221,7 +221,7 @@ body = (changes or f"APK v{ver}") + """
 ### 说明
 - 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34；本包用作者自备密钥签名
 - 不含任何账号凭据、签名密钥与本机运行数据（见 `.gitignore`）
-- 移植细节（撞过的墙 / 验证记录 / 踩过的坑）都在仓库 `PORTING.md`
+- 移植细节（撞过的墙 / 验证记录 / 踩过的坑）都在仓库 `AGENT.md`
 """
 
 st, b, _ = call(api + "/releases/tags/" + tag)

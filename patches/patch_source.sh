@@ -1,5 +1,5 @@
 #!/data/data/com.dsharnessmobile.shell/files/usr/bin/bash
-# patch_source.sh — 对 Go 工具链源码打「本机移植」补丁（幂等，自动备份 .orig-dsh）
+# patch_source.sh — 对 Go 工具链源码打「Android 移植」补丁（幂等，自动备份 .orig-dsh）
 #   1) src/runtime/asm_arm64.s → _rt0_arm64 取参修正（argc-1 / argv+16）
 #   2) src/net/dnsclient_android.go / dnsclient_unix.go
 #      → resolv.conf 路径指向本 App 的 $PREFIX/etc/resolv.conf
@@ -41,7 +41,7 @@ f = sys.argv[1]
 s = open(f).read()
 old = "\tMOVD\t0(RSP), R0\t// argc\n\tADD\t$8, RSP, R1\t// argv\n\tJMP\truntime·rt0_go(SB)"
 new = ("\tMOVD\t0(RSP), R0\t// argc\n"
-       "\t// DSH/Android 移植: 本机禁止 exec app 私有目录, 二进制一律经\n"
+       "\t// DSH/Android 移植: 私有目录禁止 exec, 二进制一律经\n"
        "\t// /system/bin/linker64 代跑, 栈顶两格是 [发起方 argv0, 程序绝对路径],\n"
        "\t// 与 bionic libc 的 initial_linker_arg_count(=1) 对齐: argc-1, argv+1。\n"
        "\tSUB\t$1, R0\n"

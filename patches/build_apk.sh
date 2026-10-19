@@ -43,7 +43,7 @@ R8="$TOOLS/r8.jar";              [ -f "$R8" ]     || R8="$PREFIX/share/java/d8.j
 SIGNER="$TOOLS/apksigner.jar";   [ -f "$SIGNER" ] || SIGNER="$PREFIX/share/java/apksigner.jar"
 [ -f "$R8" ]     || { echo "❌ 找不到 d8/r8 jar（$TOOLS/r8.jar 与 $PREFIX/share/java/d8.jar 都不存在）"; exit 1; }
 [ -f "$SIGNER" ] || { echo "❌ 找不到 apksigner jar"; exit 1; }
-# android.jar 缺失时的降级路径（本机环境曾把整个 wbapi-tools/ 抹掉；SDK 的 stub jar 无法离线重建）：
+# android.jar 缺失时的降级路径（SDK 的 stub jar 无法离线重建）：
 #   - aapt2 的框架资源表改用系统 /system/framework/framework-res.apk；
 #   - Java 源码没动时，直接从上一版 APK 取 classes.dex 复用（并跳过 javac/d8 与看门狗自检）。
 #   ⚠ 只要本次改过 apk-src/java/**，必须先补回 android.jar 再构建，否则 dex 会是旧的那份。
@@ -103,7 +103,7 @@ echo "== 2/6 资源 =="
 cd "$B"
 rm -rf res.zip base.apk gen classes dex res      # res：踩过 —— 构建目录里那份陈旧副本
 mkdir -p gen classes dex
-# aapt2 可用性探测：本机 aapt2 与仓库最新 abseil/protobuf ABI 不匹配时（缺
+# aapt2 可用性探测：aapt2 与当前 abseil/protobuf ABI 不匹配时（缺
 # ZeroCopyInputStream::ReadCord 符号）会直接崩，那种情况下走降级路径。
 if aapt2 version >/dev/null 2>&1; then AAPT_OK=1; else AAPT_OK=0; fi
 if [ "$AAPT_OK" = "1" ]; then
@@ -180,7 +180,7 @@ else
   if [ -f "$JAVA_HASH_FILE" ]; then
     OLD_HASH=$(cat "$JAVA_HASH_FILE")
     if [ "$CUR_HASH" != "$OLD_HASH" ]; then
-      echo "❌ apk-src/java 在上次构建后被改过（$OLD_HASH → $CUR_HASH），但本机没有 android.jar。"
+      echo "❌ apk-src/java 在上次构建后被改过（$OLD_HASH → $CUR_HASH），但当前环境没有 android.jar。"
       echo "   复用旧 dex 会产出「新版本号 + 旧 Java 代码」。请先补回 $AJ 再构建。"
       exit 1
     fi

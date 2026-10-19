@@ -16,7 +16,7 @@
 ## 2. 安卓自托管移植部分
 
 `apk-src/`、`patches/`、`run.sh`、`rebuild.sh`、`watchdog.sh`、`push_github.sh`、
-`PORTING.md`、`README.md`、`CHANGELOG.md` —— 同样以 MIT 发布，保留上游版权声明。
+`README.md`、`AGENT.md`、`CHANGELOG.md` —— 同样以 MIT 发布，保留上游版权声明。
 
 ## 不含什么
 
