@@ -15,7 +15,7 @@ OpenAI 兼容端点的「真实输出上限」探测工具
 
 用法：
   # 测某网关全部以给定前缀开头的模型（默认 cn:）
-  python probe_max_tokens.py --base http://211.154.25.123:7863/v1 --key sk-xxx
+  python probe_max_tokens.py --base http://127.0.0.1:7863/v1 --key sk-xxx
 
   # 指定模型 / 多个前缀 / 只看计划
   python probe_max_tokens.py --base ... --key ... --models flash,glm-5.3

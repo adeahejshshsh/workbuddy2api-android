@@ -196,12 +196,20 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 	}
 	// 恒无鉴权（负载均衡/编排探活只需 2xx/503 语义），身份靠 service 字段 + X-Service 头双保险。
 	w.Header().Set("X-Service", ServiceName)
-	writeJSON(w, status, map[string]any{
-		"healthy":        healthy,
-		"total":          total,
-		"service":        ServiceName,
-		"realm_servable": realmServable,
-	})
+	// 匿名响应只给「活着没」，不再暴露池子规模与域可用性（issue ISSUE-06）：
+	// 默认监听曾是全网卡，局域网内任何人都能读到账号数量、healthy/total、版本。
+	// 计数与 realm 维度改到 /status（要 api_key）。带了正确 Bearer 的调用方仍可
+	// 拿到完整详情 —— 运维脚本无需改。
+	body := map[string]any{
+		"ok":      status == http.StatusOK,
+		"service": ServiceName,
+	}
+	if httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+		body["healthy"] = healthy
+		body["total"] = total
+		body["realm_servable"] = realmServable
+	}
+	writeJSON(w, status, body)
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
@@ -449,7 +457,15 @@ func (h *Handler) modelList() []map[string]any {
 // FetchGlobalModels 共享缓存，不会触发第二次上游探测）。
 // GlobalEnabled=false 时 modelList 已不进入本分支（逃生门在调用方 gate）。
 func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
-	acct := h.cfg.Pool.PickExcludingForRealm(nil, "", "global")
+	// 只取一个账号去探测目录，**不要**走 Pick（issue ISSUE-14）：pick() 会写
+	// lastUsed / usedSeq / pickSeq —— 也就是说"看一眼 /v1/models"会改变后续 LRU
+	// 与闲置补偿权重，进而影响真实请求的选号。CN 分支一直用的是
+	// AvailableUIDsForRealm()[0]，这里对齐。
+	uids := h.cfg.Pool.AvailableUIDsForRealm("global")
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	acct := h.cfg.Pool.AuthByUID(uids[0])
 	if acct == nil {
 		return nil, nil
 	}

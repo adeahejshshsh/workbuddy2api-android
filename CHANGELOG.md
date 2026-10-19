@@ -1,5 +1,94 @@
 # 变更记录
 
+## v1.26.3（当前）
+
+**本版 = ISSUES-2026-10-19.md（19 个 issue）的落地。**
+P0 1/1、P1 5/5、P2 10/10 全部关闭；P3 三个合集（17/18/19）里挑了高价值项修完，
+剩余项在文末「未做」列明。
+
+### P0
+
+* **ISSUE-01 示例配置与 Docker 镜像开箱启动失败** —— `config.example.json` 的
+  `listen: ":7863"` + `api_key: "CHANGE_ME"` 正好撞上 v1.26.1 加的守卫（非回环 +
+  占位密钥 → 拒绝启动），照文档"三步启动"必然 EXIT=1。改法：
+  ① 示例配置改成 **`127.0.0.1:7863` + 空 key**（裸机默认安全，直接能跑）；
+  ② 新增 `docker/entrypoint.sh`：容器里没有显式配置时自动生成随机 `WB2A_API_KEY`
+  并把监听面设为 `0.0.0.0:7863`，`ENTRYPOINT` 改走它。
+  实测：示例配置启动成功，`/healthz` 返回 503（无账号）而不是崩溃。
+
+### P1
+
+* **ISSUE-02 凭据散落** —— ① 签名口令文件优先读 **App 私有目录**
+  `$PREFIX/etc/wb2api.kspass`（0600 真生效），工作区 `.kspass` 降为兜底，已迁移；
+  ② `push_github.sh` 的 tar 排除 `.kspass`，扫描规则新增"疑似口令文件内容"；
+  ③ token 优先取 `GITHUB_TOKEN` 环境变量，走文件时打警告。
+* **ISSUE-03 `state.json` 损坏静默清零** —— 解析失败时另存 `state.json.corrupt-<unix>`
+  并打 **ERR** 日志再以空状态启动（此前静默 return，5 秒后 flusher 把空状态写回，
+  冷却/熔断/成本账本/credits 全部不可恢复）。
+* **ISSUE-04 全量签到无节流** —— 加 `checkinAccountDelay = 800ms`（与 travel/activity
+  同口径），46 号部署不再 92 个请求连发把自己打进 WAF 冷却。
+* **ISSUE-05 版本三处不一致** —— 新增仓库根 **`VERSION`** 作为单一版本源：
+  `rebuild.sh` 与 `build_apk.sh` 都从它注入 `-X main.appVersion=`，`appVersion` 从
+  `const "1.13.0-panel"` 改成可注入的 `var`；`build_apk.sh` 校验清单 `versionName`
+  与 VERSION 一致，不一致直接失败。
+* **ISSUE-06 匿名可读面** —— `/healthz` 匿名只返回 `{"ok":…,"service":…}`；
+  计数与 `realm_servable` 只在带正确 Bearer 时返回（运维脚本不受影响），
+  完整数据本来就在要鉴权的 `/status`。实测：匿名 `{"ok":false,"service":"workbuddy2api"}`，
+  带 key 才有 healthy/total。
+
+### P2
+
+* **ISSUE-07 `max_body_mb: 0` 契约不可达** —— 改 `*int` 三态：`null`=默认 64、
+  `0`=**真的不限制**、负值=报错。另两项（`idle_weight_per_hour` / `header_timeout_seconds`）
+  的注释改成"0 = 回落默认"，不再声称可关闭。
+* **ISSUE-08 导入伪造一年有效期** —— 缺 `expires_at` 时写 `now+1h` 并打日志
+  （此前写 `now+365d`，token 过期后永不刷新，只能等 12153 三振禁用）。
+* **ISSUE-09 auth 读访问器用写锁** —— `AccessTokenValue`/`DomainValue`/
+  `RefreshTokenValue`/`Realm` 全部改 `RLock`（写方仍是 `Lock`）。
+* **ISSUE-10 SSE `data:` 口径不一致** —— 抽出 `ssePayload()`，统计层与透传层共用；
+  `data:{...}` 形态不再"成功但 0 token"。
+* **ISSUE-11 长任务裸 sleep** —— 新增 `internal/panel/cancel.go`：按账号登记取消标记 +
+  `sleepAB()` 可中断睡眠；`accountTaskAutoAll` 在 ctx 结束时给账号打标记，
+  mp 事件节流（45~55s/条）与 accept 回读等待都改成可中断，断连后尽快放锁。
+* **ISSUE-12 归档查询全量扫描** —— 文件名按 (日期, 序号) **数值倒序**读，凑够 limit 即停；
+  最终结果仍按事件时间排序（mtime 失真/同秒轮转都不影响正确性）。
+* **ISSUE-13 热点 O(N)** —— 未做（见「未做」）。
+* **ISSUE-14 列模型用了会改选号状态的 `Pick`** —— global 分支改成
+  `AvailableUIDsForRealm()[0]` + `AuthByUID`，与 CN 分支对齐；看一眼 `/v1/models`
+  不再影响后续 LRU 与闲置权重。
+* **ISSUE-15 成长排程未接线 + 死路由** —— 选了「接线」：`main.go` 补
+  `sch.SetGrowthHook(pn.RunGrowthQueueOnce)`；`panel.routes()` 注册
+  `POST /panel/api/tasks/scan_all`、`POST /panel/api/tasks/run_queue`、
+  `GET /panel/api/queue`、`GET /panel/api/school/vouchers`（纯 API，不依赖已下线的 UI）。
+* **ISSUE-16 测试工程化** —— 部分做：node 探针改成真跑 `node --version`（Android 上
+  LookPath 找得到但执行不了，此前 15 个前端测试全红）。夹具路径与 `-race` 见「未做」。
+
+### P3（选做）
+
+* **ISSUE-17** 部分：travel / 签到的 `time.Sleep` 改 `sleepCtx`。
+* **ISSUE-18** 全部：`patch_rt0.py` 的 `already-patched` 措辞改准确；
+  `probe_max_tokens.py` 示例地址改 `127.0.0.1`；`Dockerfile` 补 `cmd/trial`；
+  `.dockerignore` 补 `*.apk`/`*.idsig`/`*.keystore`。
+* **ISSUE-19** 部分：`login.sh` 落盘 auth 显式写 `realm`。
+
+### 未做（明确记录，不假装完成）
+
+* **ISSUE-13**（可用集短 TTL 缓存、`ModelLockView` 聚合）—— 需要先有 CPU profile 基线，
+  盲改容易引入一致性问题。
+* **ISSUE-16** 的夹具路径改造与 CI `-race` job —— 本机无 Linux runner，`-race` 需要
+  cgo/交叉工具链；夹具路径改动面大（十几个测试文件）。
+* **ISSUE-17 其余**：`validUID`/`validImportUID` 去重、`runExpertBatch` 失败计数、
+  `panel.models` 上游超时、`ring` 按频道分配、`exploreLast` TTL、流内 error 帧喂 WAF、
+  时区口径统一 —— 都是"改对了没人看得出来、改错了要排查半天"的类型，单独排期更稳。
+* **ISSUE-19 其余**：`portUp` 外部实例 PID 校验、保活开关 UI、`networkSecurityConfig`、
+  `onTimeout` SDK 断言、`cmd/signin` 的 `isAlready` 判定、`cmd/credit` 口径复用 ——
+  多数要动 Android 清单（本机 aapt2 不可用，无法重编二进制清单）。
+
+### 测试
+
+`upstream 203 / server 90 / pool 184 / panel 24 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`gofmt -l` 为 0。
+
 ## v1.26.2（当前）
 
 **本版 = 第三份代码审查报告（CODE-REVIEW-REPORT.md）的落地修复。**

@@ -24,6 +24,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -236,6 +237,9 @@ func taskDone(t *upstream.Task) bool {
 	return t.Target > 0 && t.Current >= t.Target
 }
 
+// errTaskAborted 任务被中止（客户端断连 / HTTP 超时）。
+var errTaskAborted = errors.New("task aborted: client gone or request timed out")
+
 func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
@@ -311,7 +315,9 @@ func (p *Panel) acceptWithVerifyMP(a *auth.Auth, code string) bool {
 			log.Printf("autotask %s %s: accept 尝试%d: %v", logfmt.Label(a.UID, a.Nickname), code, attempt, err)
 			continue
 		}
-		time.Sleep(mpActionGap)
+		if !sleepAB(a.UID, mpActionGap) {
+			return false
+		}
 		t, err := p.taskByCodeMP(a, code)
 		if err == nil && t != nil && t.AcceptStatus != "not_accepted" && t.AcceptStatus != "" {
 			return true
@@ -385,7 +391,11 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 	// 连发会被上游反作弊判无效（见 mpChatEventGap 注释），宁可慢不可白报。
 	need := target - t.Current
 	for i := int64(0); i < need; i++ {
-		time.Sleep(mpChatEventGap + time.Duration(rand.Int64N(int64(10*time.Second))))
+		// 可中断（issue ISSUE-11）：这是全流程最长的等待（45~55s/条 × 最多 10 条）。
+		// 客户端断连后应尽快退出，别把 8 分钟的流水线跑完还占着账号锁。
+		if !sleepAB(a.UID, mpChatEventGap+time.Duration(rand.Int64N(int64(10*time.Second)))) {
+			return "", errTaskAborted
+		}
 		conv := fmt.Sprintf("wb2api-mp-%d-%d", time.Now().UnixMilli(), i)
 		var ev map[string]any
 		if withActivityId {
@@ -1305,8 +1315,13 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
 	done := make(chan []map[string]any, 1)
+	// 客户端断连/超时 → 给该账号打中止标记，长等待（mp 节流 45s/条）会尽快退出，
+	// 而不是把整条流水线跑完再放锁（issue ISSUE-11）。
+	clearAborted(uid)
+	stopWatch := watchAbort(ctx.Done(), uid)
 	go func() {
 		defer p.unlockAccount(uid) // 流水线真正结束（而非 HTTP 超时返回）才放锁
+		defer stopWatch()
 		done <- p.runAutoAll(a)
 	}()
 	select {

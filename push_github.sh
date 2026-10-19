@@ -19,8 +19,16 @@ TOKEN_FILE="${TOKEN_FILE:-/sdcard/public_repo}"
 STAGE="$PREFIX/tmp/ghrepo"
 APK="$WS/WorkBuddy2API.apk"
 
-[ -f "$TOKEN_FILE" ] || { echo "❌ 找不到 token 文件: $TOKEN_FILE"; exit 1; }
-TOKEN=$(tr -d ' \r\n' < "$TOKEN_FILE")
+# token 来源（issue ISSUE-02）：优先环境变量（不落盘、不进外部存储），
+# 其次才是 /sdcard 上的文件。用完在退出时 unset。
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  TOKEN="$GITHUB_TOKEN"
+  echo "  使用 GITHUB_TOKEN 环境变量"
+else
+  [ -f "$TOKEN_FILE" ] || { echo "❌ 找不到 token：设 GITHUB_TOKEN 或写 $TOKEN_FILE"; exit 1; }
+  TOKEN=$(tr -d ' \r\n' < "$TOKEN_FILE")
+  echo "  ⚠ token 来自 $TOKEN_FILE（外部存储，建议改走 GITHUB_TOKEN 环境变量）"
+fi
 [ -n "$TOKEN" ] || { echo "❌ token 为空"; exit 1; }
 
 VER=$(grep -o 'android:versionName="[^"]*"' "$WS/apk-src/AndroidManifest.xml" | head -1 | sed 's/.*="//; s/"//')
@@ -41,6 +49,7 @@ tar -C "$WS" \
     --exclude=./WorkBuddy2API.apk \
     --exclude=./WorkBuddy2API.apk.idsig \
     --exclude=./.panel-ip \
+    --exclude=./.kspass \
     -cf - . | tar -C "$STAGE" -xf -
 [ -d "$STAGE/.git" ] && echo "  （沿用已有 .git，历史可累加）"
 
@@ -54,7 +63,10 @@ pats = [(re.compile(re.escape(tok)), "GitHub token 本人"),
         (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "私钥"),
         # 占位符（test_key / CHANGE_ME）不算密钥：它们是示例配置里的固定串。
         (re.compile(r'"api_key"\s*:\s*"(?!\s*")(?!test_key\b)(?!CHANGE_ME\b)[^"]{8,}"'), "真实 api_key"),
-        (re.compile(r"BEGIN (RSA|OPENSSH|EC) PRIVATE"), "私钥头")]
+        (re.compile(r"BEGIN (RSA|OPENSSH|EC) PRIVATE"), "私钥头"),
+        # 口令文件本体（issue ISSUE-02）：即便 .gitignore 挡住了提交，暂存目录里
+        # 也不该出现明文口令。
+        (re.compile(r"(?m)^\s*(wb2api\d{4}|sk-[A-Za-z0-9_-]{16,})\s*$"), "疑似口令文件内容")]
 hits = []
 for p in stage.rglob("*"):
     if not p.is_file() or ".git/" in str(p): continue

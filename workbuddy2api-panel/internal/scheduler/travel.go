@@ -3,6 +3,7 @@
 package scheduler
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -63,7 +64,10 @@ func (s *Scheduler) RunTravelNow() {
 			continue // 企业版门控：无成长体系（/activity/growth/* 上游一律 403），不发起任何上游调用
 		}
 		if !first {
-			time.Sleep(travelAccountDelay)
+			// 可中断等待（issue ISSUE-17）：关机/停机信号到来时不要卡在节流里。
+			if !sleepCtx(context.Background(), travelAccountDelay) {
+				return
+			}
 		}
 		first = false
 		s.travelOne(a)

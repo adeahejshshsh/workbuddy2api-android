@@ -62,6 +62,10 @@ func (a *Auth) Lock() { a.mu.Lock() }
 // Unlock 释放 a.Lock 获取的锁。
 func (a *Auth) Unlock() { a.mu.Unlock() }
 
+// 读访问器一律用 RLock（issue ISSUE-09）：这些方法在**每请求出站头构造**与
+// **每次选号**（pool.mu 持锁下调 Realm()）里被调用，用写锁会让同账号并发请求
+// 在写锁上排队。写方（RefreshToken / BackfillRealm）仍是 Lock，语义不变。
+//
 // AccessTokenValue 加锁读取 AccessToken（出站请求头一律经此取值，勿直读字段）。
 //
 // 为什么必须加锁：RefreshToken 在 a.mu 内改写 AccessToken/RefreshToken/Domain/ExpiresAt
@@ -75,8 +79,8 @@ func (a *Auth) AccessTokenValue() string {
 	if a == nil {
 		return ""
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.AccessToken
 }
 
@@ -85,8 +89,8 @@ func (a *Auth) DomainValue() string {
 	if a == nil {
 		return ""
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.Domain
 }
 
@@ -97,8 +101,8 @@ func (a *Auth) RefreshTokenValue() string {
 	if a == nil {
 		return ""
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.RefreshToken
 }
 
@@ -122,8 +126,8 @@ func GlobalEnabled() bool { return globalEnabled.Load() }
 // 全局开关 SetGlobalEnabled(false) 时恒 "cn"（逃生门：纯 CN 锁定，不影响默认行为）。
 // 空 realm + 空 domain → "cn"（老 CN 凭证零回归）。
 func (a *Auth) Realm() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.realmLocked()
 }
 

@@ -192,6 +192,13 @@ func (p *Panel) routes() {
 	// 而 409 文案还指向一个不存在的界面。保留为纯 API 入口（可用 curl 开）。
 	p.mux.HandleFunc("GET /panel/api/tasks/skip", p.withAuth(p.tasksSkipState))
 	p.mux.HandleFunc("POST /panel/api/tasks/skip", p.withAuth(p.tasksSkipState))
+	// 任务中心/队列链路（issue ISSUE-15）：界面已下线，但四个 handler 一直存在且
+	// 没注册路由 —— 等于整条链路是死代码，而调度器的成长排程又依赖其中的
+	// RunGrowthQueueOnce。这里把 API 挂上（纯 curl 可用，不依赖 UI）。
+	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
+	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
+	p.mux.HandleFunc("GET /panel/api/queue", p.withAuth(p.tasksQueueStatus))
+	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
 	p.mux.HandleFunc("POST /panel/api/activity_all", p.withAuth(p.activityAll))

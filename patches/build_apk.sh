@@ -19,14 +19,20 @@ export GOPATH="$HOME/go" GOCACHE="$HOME/.cache/go-build" GOMODCACHE="$HOME/go/pk
 export GOFLAGS="-toolexec=/system/bin/linker64" CGO_ENABLED=0 GOTOOLCHAIN=local GOSUMDB=off
 export GOPROXY="file://$PREFIX/lib/workbuddy2api/goproxy,off"
 
+WS="/storage/emulated/0/新建文件夹/workbuddy2api"
 # 版本号集中在这里：aapt2 路径写进清单；无 aapt2 的降级路径就地把旧清单里的版本串
 # 等长改写（AXML 字符串池是 UTF-16LE，等长替换不破坏结构）。
-VERNAME="1.26.2"
+# 单一版本源（issue ISSUE-05）：仓库根 VERSION 文件。
+VERNAME=$(tr -d ' \r\n' < "$WS/VERSION" 2>/dev/null || true)
+[ -n "$VERNAME" ] || { echo "❌ 缺 $WS/VERSION（版本单一源）"; exit 1; }
 # versionCode 由 versionName 派生（major*10000 + minor*100 + patch），不再手工同步。
-# 手工同步过一次就错位（versionName 1.26.0 配 versionCode 24），升级判断全靠运气。
 VERCODE=$(( $(echo "$VERNAME" | cut -d. -f1) * 10000 + $(echo "$VERNAME" | cut -d. -f2) * 100 + $(echo "$VERNAME" | cut -d. -f3) ))
+# 清单里的 versionName 必须与 VERSION 一致（改一处即可发版；不一致直接失败）
+if ! grep -q "android:versionName=\"$VERNAME\"" "$WS/apk-src/AndroidManifest.xml"; then
+  echo "❌ apk-src/AndroidManifest.xml 的 versionName 与 VERSION($VERNAME) 不一致"
+  exit 1
+fi
 
-WS="/storage/emulated/0/新建文件夹/workbuddy2api"
 SRC="$WS/apk-src"
 REPO="$WS/workbuddy2api-panel"
 TOOLS="$PREFIX/lib/wbapi-tools"
@@ -53,9 +59,12 @@ KS_TARGET="$SRC/wb2api.keystore"
 # 口令不进仓库、也不进命令行明文（pass:xxx 会出现在 ps 里）。
 # 顺序：环境变量 WB2API_KS_PASS → $WS/.kspass（0600，已 gitignore）→ 报错。
 KS_PASS="${WB2API_KS_PASS:-}"
-if [ -z "$KS_PASS" ] && [ -f "$WS/.kspass" ]; then
-  KS_PASS=$(tr -d ' \r\n' < "$WS/.kspass")
-fi
+# 口令文件优先级（issue ISSUE-02）：App 私有目录 > 工作区。
+# 工作区在 /sdcard 上，同机任何持存储权限的应用都能读；私有目录才是 0600 生效的地方。
+for f in "$PREFIX/etc/wb2api.kspass" "$WS/.kspass"; do
+  [ -n "$KS_PASS" ] && break
+  [ -f "$f" ] && KS_PASS=$(tr -d ' \r\n' < "$f")
+done
 [ -n "$KS_PASS" ] || {
   echo "❌ 缺签名口令：设 WB2API_KS_PASS，或把口令写进 $WS/.kspass（chmod 600）"
   echo "   （口令必须与已有 keystore 一致，否则新包无法覆盖升级旧包）"
@@ -85,7 +94,7 @@ trap 'restore_asm' EXIT INT TERM HUP
   echo "❌ 缺 $GOROOT/src/runtime/asm_arm64.s.orig-dsh（先跑 patch_source.sh）"; exit 1; }
 cp "$ASM" "$ASM_BAK"
 cp "$GOROOT/src/runtime/asm_arm64.s.orig-dsh" "$ASM"
-( cd "$REPO" && go build -buildvcs=false -trimpath -ldflags="-s -w" \
+( cd "$REPO" && go build -buildvcs=false -trimpath -ldflags="-s -w -X main.appVersion=$VERNAME" \
     -o "$B/jni/lib/arm64-v8a/libwb2api.so" ./cmd/server )
 restore_asm
 trap - EXIT INT TERM HUP

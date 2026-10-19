@@ -53,9 +53,11 @@ type Config struct {
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
 		// MaxBodyMB /v1/chat/completions 请求体上限（MB，review P1-10）。
-		// 缺省 64：远超真实长上下文（100 万 token 的 JSON 约 4MB），只挡内存炸弹；
-		// 显式 0 = 不限制（保留历史上「对齐上游不设限」的语义）。
-		MaxBodyMB int `json:"max_body_mb"`
+		// 三态（issue ISSUE-07）：null/缺省 = 默认 64（远超真实长上下文，只挡内存炸弹）；
+		// 0 = **不限制**（保留历史上「对齐上游不设限」的语义）；负值 = 报错。
+		// 用指针而不是 int：0 在 Go 里与"没填"不可区分，此前注释承诺 0=不限制、
+		// 实现却把 0 当默认值，用户按注释填 0 仍然被 64MB 挡住。
+		MaxBodyMB *int `json:"max_body_mb"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -523,13 +525,14 @@ func (c *Config) normalize() error {
 	if c.ServerReadTimeoutDur, err = time.ParseDuration(c.Server.ReadTimeout); err != nil {
 		return fmt.Errorf("server.read_timeout: %w", err)
 	}
-	if c.Server.MaxBodyMB < 0 {
-		return fmt.Errorf("server.max_body_mb: 负值 %d 无意义（0 = 不限制）", c.Server.MaxBodyMB)
+	switch {
+	case c.Server.MaxBodyMB == nil:
+		c.ServerMaxBodyMB = 64 // 缺省：远超真实长上下文，只挡内存炸弹
+	case *c.Server.MaxBodyMB < 0:
+		return fmt.Errorf("server.max_body_mb: 负值 %d 无意义（0 = 不限制，null = 默认 64）", *c.Server.MaxBodyMB)
+	default:
+		c.ServerMaxBodyMB = *c.Server.MaxBodyMB // 0 = 不限制
 	}
-	if c.Server.MaxBodyMB == 0 {
-		c.Server.MaxBodyMB = 64 // 默认 64MB：远超真实长上下文，只挡内存炸弹
-	}
-	c.ServerMaxBodyMB = c.Server.MaxBodyMB
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
 	}

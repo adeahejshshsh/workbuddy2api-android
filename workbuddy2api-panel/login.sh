@@ -157,6 +157,9 @@ auth = {
         "refreshToken": os.environ["WB2A_LOGIN_REFRESH"],
         "expiresAt": int(os.environ["WB2A_LOGIN_EXPIRES_AT"]),
         "domain": os.environ["WB2A_LOGIN_DOMAIN"],
+        # 显式写 realm（issue ISSUE-19）：此前依赖 LoadDir 的存量回填，
+        # 一个"看起来没有域"的 auth 文件在排障时极易误判。
+        "realm": "global" if "workbuddy.ai" in os.environ["WB2A_LOGIN_DOMAIN"] else "cn",
     },
 }
 # 0600 + tmp→rename：accessToken/refreshToken 对同机其他应用不可读，且不会写半截。

@@ -37,10 +37,14 @@ if [ "${1:-build}" = "test" ]; then
 fi
 
 echo "== 编译 cmd/* =="
+# 版本从仓库根 VERSION 注入（issue ISSUE-05 单一版本源）
+VER=$(tr -d ' \r\n' < "$(dirname "$0")/VERSION" 2>/dev/null || echo dev)
+LDF="-s -w -X main.appVersion=$VER"
+echo "  版本: $VER"
 for c in server signin login credit trial; do
   [ -d "./cmd/$c" ] || continue
   printf "  %-8s " "$c"
-  if go build -buildvcs=false -trimpath -ldflags="-s -w" -o "$OUT/$c" "./cmd/$c" 2>"$PREFIX/tmp/e_$c.log"; then
+  if go build -buildvcs=false -trimpath -ldflags="$LDF" -o "$OUT/$c" "./cmd/$c" 2>"$PREFIX/tmp/e_$c.log"; then
     echo "OK  $(du -h "$OUT/$c" | cut -f1)"
   else
     echo "FAIL"; tail -6 "$PREFIX/tmp/e_$c.log"

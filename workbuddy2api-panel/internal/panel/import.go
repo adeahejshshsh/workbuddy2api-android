@@ -97,9 +97,14 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		realm := auth.ResolveRealm("", acc.Domain)
 
 		// cockpit tools 的 expires_at 为毫秒时间戳，转为秒。
+		//
+		// 缺失时**不得**伪造远期（issue ISSUE-08）：NeedsRefresh 依据 ExpiresAt 判定，
+		// 写一年后会让 token 过期后永不主动刷新，只能等 chat 401/12153 三振禁用。
+		// 这里写 now+1h —— 留一次刷新窗口，且首次请求后就会进入正常刷新节奏。
 		expiresAt := acc.ExpiresAt / 1000
 		if expiresAt <= 0 {
-			expiresAt = time.Now().Add(365 * 24 * time.Hour).Unix()
+			expiresAt = time.Now().Add(time.Hour).Unix()
+			log.Printf("panel: import uid=%s 缺 expires_at，按 now+1h 处理（首次请求即刷新）", acc.UID)
 		}
 
 		nickname := acc.Nickname

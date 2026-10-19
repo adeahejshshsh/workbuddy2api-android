@@ -540,17 +540,40 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 	// 顺序——同一秒内连续轮转写出的多个文件 mtime 经常完全相同（Linux 文件时间戳粒度粗），
 	// os.ReadDir 的字典序又会把装着最早事件的基准文件 requests-<day>.jsonl 排在
 	// requests-<day>.N.jsonl 之后；目录被整体拷贝 / 恢复备份后 mtime 更不可信。
-	var out []Event
+	// 先按文件名**倒序**（issue ISSUE-12）：文件名里的日期/序号就是时间序，
+	// 从最新往回读，凑够 limit 条即停。此前是「全目录逐文件逐行读 + 全量排序」，
+	// 100MiB 归档下每次面板刷新都要扫上百万行（手机端 CPU 明显）。
+	// 文件名序只用于「先读哪一批」；最终结果仍按事件时间排序（下面 sort），
+	// 所以同秒轮转、目录被拷贝后 mtime 失真这些情况都不影响正确性。
+	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".jsonl") {
 			continue
 		}
+		names = append(names, name)
+	}
+	// 按 (日期, 序号) **数值**倒序：字典序会把 requests-<day>.jsonl（序号 0）
+	// 排在 requests-<day>.10.jsonl 之后（'j' > '1'），直接倒排就变成"先读最旧的"。
+	sort.Slice(names, func(i, j int) bool {
+		di, ii := archiveNameKey(names[i])
+		dj, ij := archiveNameKey(names[j])
+		if di != dj {
+			return di > dj
+		}
+		return ii > ij
+	})
+	var out []Event
+	for _, name := range names {
 		rows, err := readFile(filepath.Join(w.cfg.Dir, name), filter)
 		if err != nil {
 			return out, err
 		}
 		out = append(out, rows...)
+		// 单文件内的事件是追加写的（时间递增），已经凑够 limit 就没必要再往前读。
+		if len(out) >= limit {
+			break
+		}
 	}
 	// 契约：按事件时间倒序返回最近 limit 条（同一时刻用 Stable 保留落盘先后）。
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
@@ -558,6 +581,18 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// archiveNameKey 把 requests-<day>[.<idx>].jsonl 拆成 (day, idx)。
+// idx 缺失 = 0（该日期的第一个文件，装着最早的事件）。
+func archiveNameKey(name string) (day string, idx int) {
+	rest := strings.TrimSuffix(strings.TrimPrefix(name, "requests-"), ".jsonl")
+	if i := strings.LastIndex(rest, "."); i >= 0 {
+		if n, err := strconv.Atoi(rest[i+1:]); err == nil {
+			return rest[:i], n
+		}
+	}
+	return rest, 0
 }
 
 func readFile(path string, filter Filter) ([]Event, error) {

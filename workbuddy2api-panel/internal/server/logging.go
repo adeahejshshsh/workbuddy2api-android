@@ -148,13 +148,26 @@ func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
 	}
 }
 
+// ssePayload 从一行 SSE 里取出 data 负载（"data:" 后空格可选）。
+// 透传层（upstream.Aggregate）与统计层（chatStatsReader）共用同一口径。
+func ssePayload(line string) (string, bool) {
+	line = strings.TrimRight(line, "\r\n")
+	if !strings.HasPrefix(line, "data:") {
+		return "", false
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "), true
+}
+
 // parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
 func (s *chatStatsReader) parseSSELine(line string) {
 	line = strings.TrimRight(line, "\r\n")
-	if !strings.HasPrefix(line, "data: ") {
+	// 与透传层同口径（issue ISSUE-10）：SSE 规范里 "data:" 后的空格是可选的。
+	// 只认 "data: " 时，上游发 data:{...} 会让正文正常透传、但 TTFB/token/credit
+	// 全部统计不到 —— 面板与用量账本表现为"成功但 0 token"。
+	payload, ok := ssePayload(line)
+	if !ok {
 		return
 	}
-	payload := strings.TrimPrefix(line, "data: ")
 	if payload == "[DONE]" {
 		return
 	}

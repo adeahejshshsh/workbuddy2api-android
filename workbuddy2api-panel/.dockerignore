@@ -16,3 +16,7 @@ PLAN.md
 SPEC.md
 LOOP.md
 README.md
+# 构建产物（issue ISSUE-18）：防止有人把 APK 放进构建上下文
+*.apk
+*.idsig
+*.keystore

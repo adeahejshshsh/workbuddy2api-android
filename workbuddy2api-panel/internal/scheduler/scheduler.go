@@ -447,9 +447,16 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // 旅行已从签到剥离为独立排程（travel_hours），不再搭签到便车。
 // 末尾追加连登管家（streak.go）：可兑换档位自动兑换 + 抽奖次数自动抽完——
 // 连登兑换按天数解锁，挂在每日签到后即「到天数那天自动完成兑换→抽奖闭环」。
+// checkinAccountDelay 全量签到的账号间节流（issue ISSUE-04）。
+// 每个号两次上游调用，46 号部署一次签到就是 92 个请求连发 → 上游频控 → WAF 403
+// → 账号软冷却 → 次日再撞，形成自激。与 travel/activity 的 800ms 同口径；
+// 测试把它置 0。
+var checkinAccountDelay = 800 * time.Millisecond
+
 func (s *Scheduler) RunCheckinNow() {
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+	first := true
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
@@ -468,6 +475,13 @@ func (s *Scheduler) RunCheckinNow() {
 		// 400 code 10001「企业账号不支持该操作」。跳过签到，但**不 continue**——
 		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
 		// credit_floor 判定与面板额度展示的唯一数据源）。
+		// 账号间节流：第一个号不等，之后每个号之间等一次。
+		if !first && checkinAccountDelay > 0 {
+			if !sleepCtx(context.Background(), checkinAccountDelay) {
+				return
+			}
+		}
+		first = false
 		if !a.IsEnterprise() {
 			if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
 				// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。

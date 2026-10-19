@@ -33,8 +33,12 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.13.0-panel"
+// appVersion 网关版本，透出到 /panel/api/overview 与 /status。
+//
+// 单一版本源（issue ISSUE-05）：构建时由 -ldflags "-X main.appVersion=$(cat VERSION)"
+// 注入；此处只是未注入时的兜底。此前硬编码 "1.13.0-panel"，与 APK 的 1.26.x 差了
+// 十三个小版本，面板上显示的版本号会让人误判"要不要升级"。
+var appVersion = "dev"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -272,6 +276,9 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
+	// 成长任务排程接线（issue ISSUE-15）：Scheduler 的 growth_hours 到点会调 GrowthHook，
+	// 而全仓从未调用 SetGrowthHook —— growth_hours（默认 01:00）到点什么都不做，
+	// 面板却写着"成长任务自动推进"。panel 在 scheduler 之后构造，所以在这里补挂。
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -300,6 +307,12 @@ func main() {
 	})
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
+
+	// 成长任务排程接线（issue ISSUE-15）：scheduler 的 growth_hours 到点会调
+	// GrowthHook，而全仓从未 SetGrowthHook —— 到点什么都不做，面板却写着
+	// "成长任务自动推进"。panel 构造晚于 scheduler，所以在这里补挂。
+	// 队列内部已按账号串行、账号间并发、并遵守跳过名单与尝试型开关。
+	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 
 	h := server.NewHandler(server.Config{
 		Pool:         p,

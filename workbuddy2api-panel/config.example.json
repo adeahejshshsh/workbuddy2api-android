@@ -1,6 +1,6 @@
 {
-  "listen": ":7863",
-  "api_key": "CHANGE_ME",
+  "listen": "127.0.0.1:7863",
+  "api_key": "",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": {

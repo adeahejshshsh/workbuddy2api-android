@@ -4,6 +4,7 @@ package pool
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -121,10 +122,22 @@ func (p *Pool) Flush() {
 func (p *Pool) load() {
 	raw, err := os.ReadFile(p.stateFp)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("WARN: [pool] state 不可读（以空状态启动）: %v", err)
+		}
 		return
 	}
 	var sf stateFile
 	if json.Unmarshal(raw, &sf) != nil {
+		// 损坏必须留档再启动（issue ISSUE-03）：此前静默 return，5 秒后 flusher 会把
+		// 空状态写回 state.json —— 冷却时长、熔断计数、成本账本、credits、"已签到"
+		// 全部不可恢复。另存一份 .corrupt-<unix> 至少还能人工捞。
+		bak := fmt.Sprintf("%s.corrupt-%d", p.stateFp, time.Now().Unix())
+		if rerr := os.Rename(p.stateFp, bak); rerr != nil {
+			log.Printf("ERR: [pool] state.json 解析失败，且另存失败（%v）；本次以空状态启动，原文件保留", rerr)
+		} else {
+			log.Printf("ERR: [pool] state.json 解析失败，已另存 %s（本次以空状态启动）", bak)
+		}
 		return
 	}
 	p.applyAccountsLocked(sf.Accounts)

@@ -41,7 +41,7 @@ def patch(path):
         idx.append(i)
         i = d.find(PAT, i + 1)
     if len(idx) == 0:
-        return "already-patched (pattern 不存在)"
+        return "pattern 不存在（可能 asm 已打补丁，或 Go 版本变了）"
     if len(idx) != 1:
         return "skip: pattern 命中 %d 次，拒绝盲改" % len(idx)
     o = idx[0]
