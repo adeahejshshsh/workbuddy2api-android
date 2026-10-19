@@ -32,7 +32,10 @@ elif [ ! -f "$F" ]; then
   echo "  缺文件: $F"
 else
   cp "$F" "$F.orig-dsh"
-  python3 - "$F" <<'PY'
+  # 用 if ! ... then 包住（review S-22）：脚本是 set -eu，python 以 2 退出会**立即
+  # 终止整个脚本**，写在 heredoc 之后的 `[ $? -eq 0 ] || ...` 永远执行不到 ——
+  # 那段「退出码必须检查」的注释与实现不符（表现是直接死掉、且没有友好提示）。
+  if ! python3 - "$F" <<'PY'
 import sys
 f = sys.argv[1]
 s = open(f).read()
@@ -49,15 +52,16 @@ if old not in s:
 open(f, 'w').write(s.replace(old, new, 1))
 print("  已修改: " + f)
 PY
-  # 退出码必须检查：锚点未命中时 python 以 2 退出，此前无人看，脚本继续往下跑并
-  # exit 0 —— 随后 rebuild.sh 编出的二进制 argv 错位（-config 被当普通参数），
-  # 启动即退，且没有任何「补丁没打上」的提示。
-  [ $? -eq 0 ] || { echo "❌ rt0 补丁失败（Go 版本变了？请手工核对锚点）"; exit 1; }
+  then
+    echo "❌ rt0 补丁失败（Go 版本变了？请手工核对锚点：$F）"
+    echo "   已备份原文件：$F.orig-dsh"
+    exit 1
+  fi
 fi
 
 # ---------- 2) net resolv.conf 路径 ----------
 A="$GOROOT/src/net/dnsclient_android.go"
-if [ -f "$A" ] && grep -q '/data/data/com.termux/files/usr/etc/resolv.conf' "$A"; then
+if [ -f "$A" ] && ! grep -q 'func wb2apiResolvConfPath' "$A" && grep -q '/data/data/com.termux/files/usr/etc/resolv.conf' "$A"; then
   cp "$A" "$A.orig-dsh"
   sed -i "s|/data/data/com.termux/files/usr/etc/resolv.conf|$RESOLV|g" "$A"
   echo "  已修改: $A"
@@ -66,7 +70,9 @@ else
 fi
 
 U="$GOROOT/src/net/dnsclient_unix.go"
-if [ -f "$U" ] && grep -q '"/etc/resolv.conf"' "$U"; then
+# 幂等守卫：第 3 步追加的 helper 里自带 "/etc/resolv.conf"，重跑时会被下面的 grep
+# 命中，于是又覆盖一次 .orig-dsh —— 备份被写成"已打补丁的版本"，--revert 从此失效。
+if [ -f "$U" ] && ! grep -q 'func wb2apiResolvConfPath' "$U" && grep -q '"/etc/resolv.conf"' "$U"; then
   cp "$U" "$U.orig-dsh"
   sed -i "s|\"/etc/resolv.conf\"|\"$RESOLV\"|g" "$U"
   echo "  已修改: $U"

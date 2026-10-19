@@ -84,7 +84,7 @@ type Panel struct {
 	loginMu sync.Mutex
 	// 注意必须是**指针** map：loginSession 带可变字段（consumed），值类型 map 里
 	// 取出来的是副本，改副本不会回写 —— 防重入标记会永远失效（review H1）。
-	logins  map[string]*loginSession
+	logins map[string]*loginSession
 
 	// taskMu/taskLocks 一键完成任务的 per-account 互斥：同一账号的任务动作
 	// （单任务 / 全量）同时只允许一条在跑。重复点击直接返回 409"仍在执行"，
@@ -657,26 +657,28 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
 }
 
-// accountRemove 移除账号：先出池（立即落盘 state），再删 auth 文件。
+// accountRemove 移除账号：**先删 auth 文件，成功后才出池**。
+//
+// 顺序反过来的话（旧实现），删除失败时账号已经从池里消失并落了盘，下次启动
+// LoadDir 又把文件读回来 —— 账号「复活」成一个状态全空的新号（review P2-15）。
+// 现在删除失败就地 500、池内条目原样保留，用户能看到真实原因。
 func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	a := p.cfg.Pool.Remove(uid)
+	a := p.cfg.Pool.AuthByUID(uid)
 	if a == nil {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	fileMsg := ""
 	if a.FilePath != "" {
 		if err := os.Remove(a.FilePath); err != nil && !os.IsNotExist(err) {
-			fileMsg = err.Error()
+			log.Printf("panel: remove uid=%s 失败（auth 文件删不掉: %v）", uid, err)
+			writeErr(w, http.StatusInternalServerError,
+				"删除凭证文件失败，账号未移除（否则重启会被重新读回）: "+err.Error())
+			return
 		}
 	}
-	if fileMsg != "" {
-		log.Printf("panel: remove uid=%s（auth 文件删除失败: %s）", uid, fileMsg)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "file_error": fileMsg})
-		return
-	}
-	log.Printf("panel: remove uid=%s（已出池并删除凭证文件）", uid)
+	p.cfg.Pool.Remove(uid)
+	log.Printf("panel: remove uid=%s（已删除凭证文件并出池）", uid)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

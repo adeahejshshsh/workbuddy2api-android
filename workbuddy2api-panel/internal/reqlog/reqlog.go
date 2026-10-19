@@ -80,10 +80,10 @@ type Event struct {
 	HasCredit        bool      `json:"credit_known"`
 	// CacheHitTokens / CacheMissTokens 上游前缀缓存命中/未命中 token（issue #92）。
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。
-	CacheHitTokens  int64 `json:"cache_hit_tokens,omitempty"`
-	CacheMissTokens int64 `json:"cache_miss_tokens,omitempty"`
-	ClientIP         string    `json:"client_ip,omitempty"`
-	UserAgent        string    `json:"user_agent,omitempty"`
+	CacheHitTokens  int64  `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
+	ClientIP        string `json:"client_ip,omitempty"`
+	UserAgent       string `json:"user_agent,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），
@@ -248,6 +248,7 @@ type archiveWriter struct {
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
+	closed    atomic.Bool // Close 后置位：enqueue 直接丢弃（review 观察项 3）
 	dropped   atomic.Uint64
 	lastErrMu sync.Mutex
 	lastErr   string
@@ -291,8 +292,17 @@ func newArchiveWriter(cfg Config) *archiveWriter {
 	return w
 }
 
-func (w *archiveWriter) enabled() bool {
+// configured 配置上是否启用归档（与运行期是否已关闭无关）：
+// 读历史与 Snapshot 用它 —— Close 之后仍要能读归档、仍要如实报告 Enabled。
+func (w *archiveWriter) configured() bool {
 	return w != nil && w.cfg.Enabled && w.cfg.Dir != "" && w.done != nil
+}
+
+// enabled 当前还能不能写：配置启用且未关闭。
+// closed 标志（review 观察项 3）：Close 之后 done 通道仍非 nil，只靠 done != nil
+// 判定会让 enqueue 继续往无人读取的 ch 里塞（最多丢 1024 条，语义脏）。
+func (w *archiveWriter) enabled() bool {
+	return w.configured() && !w.closed.Load()
 }
 
 func (w *archiveWriter) enqueue(e Event) {
@@ -513,7 +523,7 @@ func (w *archiveWriter) prune() {
 }
 
 func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
-	if !w.enabled() {
+	if !w.configured() {
 		return nil, nil
 	}
 	if limit <= 0 {
@@ -603,7 +613,10 @@ func containsFold(haystack, needle string) bool {
 }
 
 func (w *archiveWriter) stats() ArchiveStats {
-	s := ArchiveStats{Enabled: w.enabled(), Dir: w.cfg.Dir, DroppedWrites: w.dropped.Load(), LastError: w.errString()}
+	// Enabled 报的是「配置上是否启用」，不是「当前还能不能写」：Close 之后
+	// Snapshot 仍应如实反映归档已启用（否则运维看到 Enabled 变 false 会以为配置错了）。
+	s := ArchiveStats{Enabled: w.configured(), Dir: w.cfg.Dir,
+		DroppedWrites: w.dropped.Load(), LastError: w.errString()}
 	if !s.Enabled {
 		return s
 	}
@@ -629,6 +642,7 @@ func (w *archiveWriter) close() {
 		return
 	}
 	w.closeOnce.Do(func() {
+		w.closed.Store(true) // 先置位：此后 enqueue 直接返回，不再往死通道里塞
 		close(w.stop)
 		<-w.done
 	})

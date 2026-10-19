@@ -52,6 +52,10 @@ type Config struct {
 		// 400 "read body: ... i/o timeout"。缺省 "300s"；"0" = 不限制
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+		// MaxBodyMB /v1/chat/completions 请求体上限（MB，review P1-10）。
+		// 缺省 64：远超真实长上下文（100 万 token 的 JSON 约 4MB），只挡内存炸弹；
+		// 显式 0 = 不限制（保留历史上「对齐上游不设限」的语义）。
+		MaxBodyMB int `json:"max_body_mb"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -229,6 +233,8 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// ServerMaxBodyMB /v1/chat/completions 请求体上限（MB）；0 = 不限制。
+	ServerMaxBodyMB int `json:"-"`
 }
 
 // Default 默认配置。
@@ -460,6 +466,11 @@ var placeholderKeys = map[string]bool{"test_key": true, "CHANGE_ME": true, "chan
 
 // checkListenKey 拒绝「非回环监听 + 空/占位密钥」的组合（review H7）。
 func (c *Config) checkListenKey() error {
+	if strings.TrimSpace(c.Listen) == "" || c.Listen == ":" {
+		// 归一化后仍为空/只有冒号：ListenAndServe 会报 "missing port in address"，
+		// 那条错误指不到"配置漏填 listen"这个真实原因（review 观察项 2）。
+		return fmt.Errorf("listen: 为空（请填 127.0.0.1:7863 或 0.0.0.0:7863）")
+	}
 	if isLoopbackListen(c.Listen) {
 		return nil // 只给本机用：裸奔可接受（也正是 APK 内的形态）
 	}
@@ -492,12 +503,9 @@ func isLoopbackListen(addr string) bool {
 
 func (c *Config) normalize() error {
 	var err error
-	// 监听面 × 密钥一致性守卫（review H7）：默认 listen ":7863" 是**全网卡**，
-	// 配默认空密钥/示例 test_key 时，同网段任何人都能白嫖账号积分、调面板接口
-	// （含移除账号）、读日志里的昵称/UID/来源 IP。只允许回环监听裸奔。
-	if err := c.checkListenKey(); err != nil {
-		return err
-	}
+	// 监听面 × 密钥一致性守卫放在 listen 归一化**之后**（见本函数末尾）：
+	// 归一化会把 "7863" 补成 ":7863"，在此之前判定会把"还没补冒号"的形态当成
+	// 对外地址，报错信息与真实原因错位（review 观察项 2）。
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}
@@ -515,6 +523,13 @@ func (c *Config) normalize() error {
 	if c.ServerReadTimeoutDur, err = time.ParseDuration(c.Server.ReadTimeout); err != nil {
 		return fmt.Errorf("server.read_timeout: %w", err)
 	}
+	if c.Server.MaxBodyMB < 0 {
+		return fmt.Errorf("server.max_body_mb: 负值 %d 无意义（0 = 不限制）", c.Server.MaxBodyMB)
+	}
+	if c.Server.MaxBodyMB == 0 {
+		c.Server.MaxBodyMB = 64 // 默认 64MB：远超真实长上下文，只挡内存炸弹
+	}
+	c.ServerMaxBodyMB = c.Server.MaxBodyMB
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
 	}
@@ -608,6 +623,12 @@ func (c *Config) normalize() error {
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
+	}
+	// 监听面 × 密钥一致性守卫（review H7，位置在归一化之后）：默认 listen 是
+	// 全网卡形态，配空密钥/占位密钥时同网段任何人都能白嫖账号积分、调面板接口
+	// （含移除账号）、读日志里的昵称/UID/来源 IP。只允许回环监听裸奔。
+	if err := c.checkListenKey(); err != nil {
+		return err
 	}
 	// 空数组与 null 反序列化后覆盖掉 Default() 的排程值（键缺席才保留），在此补齐。
 	// 空 = 未配置 → 回落默认；「禁用」一律走 *_enabled=false，两者互不混淆。

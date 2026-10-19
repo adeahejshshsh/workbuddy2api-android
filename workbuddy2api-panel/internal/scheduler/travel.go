@@ -74,7 +74,7 @@ func (s *Scheduler) RunTravelNow() {
 func (s *Scheduler) travelOne(a *auth.Auth) {
 	buddy, err := s.cfg.Upstream.BuddyInfo(a)
 	if err != nil {
-		log.Printf("travel %s: buddy-info: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("travel %s: buddy-info: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return
 	}
 	if buddy == nil {
@@ -83,7 +83,7 @@ func (s *Scheduler) travelOne(a *auth.Auth) {
 	}
 	ts, err := s.cfg.Upstream.TravelStatus(a)
 	if err != nil {
-		log.Printf("travel %s: status: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("travel %s: status: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return
 	}
 	switch ts.State {
@@ -92,37 +92,37 @@ func (s *Scheduler) travelOne(a *auth.Auth) {
 	case travelStateIdle:
 		s.travelDepart(a, ts)
 	case travelStateTraveling:
-		log.Printf("travel %s: skip (traveling record=%d)", logfmt.Label(a.UID, a.Nickname), ts.RecordID)
+		log.Printf("travel %s: skip (traveling record=%d)", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID)
 	default:
-		log.Printf("travel %s: skip (unknown state %q)", logfmt.Label(a.UID, a.Nickname), ts.State)
+		log.Printf("travel %s: skip (unknown state %q)", logfmt.Label(a.UID, a.NicknameValue()), ts.State)
 	}
 }
 
 // travelDepart 空闲且未达当日上限时派出（每日 1 次，自然日 00:00 CST 重置）。
 func (s *Scheduler) travelDepart(a *auth.Auth, ts *upstream.TravelState) {
 	if ts.DailyLimitReached {
-		log.Printf("travel %s: skip (daily limit reached)", logfmt.Label(a.UID, a.Nickname))
+		log.Printf("travel %s: skip (daily limit reached)", logfmt.Label(a.UID, a.NicknameValue()))
 		return
 	}
 	if err := s.cfg.Upstream.TravelDepart(a, travelLocationID); err != nil {
-		log.Printf("travel %s: depart: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("travel %s: depart: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return
 	}
-	log.Printf("travel %s: depart ok location=%d", logfmt.Label(a.UID, a.Nickname), travelLocationID)
+	log.Printf("travel %s: depart ok location=%d", logfmt.Label(a.UID, a.NicknameValue()), travelLocationID)
 }
 
 // travelClaim 到站领奖（必须带 record_id）。
 func (s *Scheduler) travelClaim(a *auth.Auth, ts *upstream.TravelState) {
 	if ts.RecordID == 0 {
-		log.Printf("travel %s: claim skipped (arrived but no record_id)", logfmt.Label(a.UID, a.Nickname))
+		log.Printf("travel %s: claim skipped (arrived but no record_id)", logfmt.Label(a.UID, a.NicknameValue()))
 		return
 	}
 	reward, err := s.cfg.Upstream.TravelClaim(a, ts.RecordID)
 	if err != nil {
-		log.Printf("travel %s: claim record=%d: %v", logfmt.Label(a.UID, a.Nickname), ts.RecordID, err)
+		log.Printf("travel %s: claim record=%d: %v", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID, err)
 		return
 	}
-	log.Printf("travel %s: claim ok record=%d reward=%d", logfmt.Label(a.UID, a.Nickname), ts.RecordID, reward)
+	log.Printf("travel %s: claim ok record=%d reward=%d", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID, reward)
 }
 
 // travelAdopt 无猫时领养，链路：report → agreement → buddy/first。
@@ -138,23 +138,23 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) {
 	}
 	// 前置：解锁 first_buddy 任务（幂等；失败不阻塞，让 buddy/first 按既有错误路径暴露）。
 	if err := s.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli()), ""); err != nil {
-		log.Printf("travel %s: adopt preflight report: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("travel %s: adopt preflight report: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 	} else {
 		time.Sleep(adoptReportGap) // 给上游事件处理留时间（对齐脚本实测的 1.05s 间隔口径）
 	}
 	if err := s.cfg.Upstream.BuddyAgreement(a); err != nil {
-		log.Printf("travel %s: agreement: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("travel %s: agreement: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return
 	}
 	err := s.cfg.Upstream.BuddyFirst(a)
 	switch {
 	case err == nil:
-		log.Printf("travel %s: adopt ok (+300 credits)", logfmt.Label(a.UID, a.Nickname))
+		log.Printf("travel %s: adopt ok (+300 credits)", logfmt.Label(a.UID, a.NicknameValue()))
 	case upstream.IsBuddyTaskIncomplete(err):
 		s.markAdoptTried(a.UID)
-		log.Printf("travel %s: adopt skipped (conversation threshold not reached, retry tomorrow)", logfmt.Label(a.UID, a.Nickname))
+		log.Printf("travel %s: adopt skipped (conversation threshold not reached, retry tomorrow)", logfmt.Label(a.UID, a.NicknameValue()))
 	default:
-		log.Printf("travel %s: adopt: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("travel %s: adopt: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 	}
 }
 

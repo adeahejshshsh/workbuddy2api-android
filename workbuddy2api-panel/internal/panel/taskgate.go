@@ -24,7 +24,7 @@ import (
 // 所以跳过的项在扫描结果里**列出来并写明原因**，队列诊断账里也计入 skipped，
 // 面板上还有「清空跳过名单」一键重试。状态落盘 data/task_skip.json。
 const (
-	skipFailLimit = 3                 // 连续无效几次后跳过
+	skipFailLimit = 3                  // 连续无效几次后跳过
 	skipCooldown  = 7 * 24 * time.Hour // 冷却：到期自动放回待办（"做不了"不该是永久判决）
 )
 

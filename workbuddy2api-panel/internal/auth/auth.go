@@ -21,7 +21,7 @@ import (
 // Auth 是归一化后的账号凭证（来源可以是插件 OAuth 嵌套形或手写扁平形）。
 type Auth struct {
 	// mu 串行化 RefreshToken 写与 SaveAtomic 读，防止并发写回半更新 token。
-	mu sync.Mutex
+	mu sync.RWMutex // 读多写少：日志路径并发读 Nickname/凭证，写只在 refresh 与 SetNickname
 
 	AccessToken  string
 	RefreshToken string
@@ -43,6 +43,17 @@ type Auth struct {
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
+}
+
+// NicknameValue 加锁读取 Nickname。
+//
+// 为什么需要：SetNickname（面板同步昵称）在 a.mu 内改写该字段，而所有日志与状态
+// 快照都在锁外直读 a.Nickname —— 这是真实数据竞争（review P1-9）。AccessToken /
+// RefreshToken / Domain 早已提供加锁读取器，Nickname 当初漏了。
+func (a *Auth) NicknameValue() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Nickname
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -315,19 +326,25 @@ func (a *Auth) SaveAtomic() error {
 	if a.FilePath == "" {
 		return fmt.Errorf("no FilePath set")
 	}
-	doc := map[string]any{
-		"auth": map[string]any{
-			"accessToken":  a.AccessToken,
-			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
-			"domain":       a.Domain,
-			"realm":        a.realm,
-		},
-		"account": map[string]any{
-			"uid":          a.UID,
-			"enterpriseId": a.EnterpriseID,
-			"nickname":     a.Nickname,
-		},
+	// 先读回原文件，保留用户/插件手写的未知键（review P2-14）：此前只重写已知
+	// 字段，第一次 token 刷新后用户在文件里加的键就静默消失了。读取失败（文件
+	// 不存在/损坏）时从空 map 起，行为与旧版一致。
+	doc := map[string]any{}
+	if prevRaw, rerr := os.ReadFile(a.FilePath); rerr == nil {
+		_ = json.Unmarshal(prevRaw, &doc)
+	}
+	// 已知键整组覆盖（不 merge 子键，避免残留旧 token 片段）。
+	doc["auth"] = map[string]any{
+		"accessToken":  a.AccessToken,
+		"refreshToken": a.RefreshToken,
+		"expiresAt":    a.ExpiresAt,
+		"domain":       a.Domain,
+		"realm":        a.realm,
+	}
+	doc["account"] = map[string]any{
+		"uid":          a.UID,
+		"enterpriseId": a.EnterpriseID,
+		"nickname":     a.Nickname,
 	}
 	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。

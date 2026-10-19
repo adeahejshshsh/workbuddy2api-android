@@ -81,8 +81,8 @@ func (p *Pool) RestoreFromSnapshot() {
 	log.Printf("pool: 恢复来源=本地 state.json（较新于 Redis 快照 %s）", snap.SavedAt.Format(time.RFC3339))
 }
 
-// Acquire 为账号占一个在途名额；false 表示该账号已达上限（或不存在）。
-// 必须在成功 Pick 后调用；调用方负责 defer Release。
+// startFlusher 启动周期落盘协程（dirty 时 saveLocked，Close 时停止）。
+// （原先这里贴的是 Acquire 的注释——复制粘贴残留。）
 func (p *Pool) startFlusher() {
 	stopCh := make(chan struct{})
 	// 在启动 goroutine 前同步写入（避免与测试对 flushInterval 的恢复写竞争）；
@@ -116,7 +116,8 @@ func (p *Pool) Flush() {
 	p.mu.Unlock()
 }
 
-// Add 加入账号；已存在则保留原状态、更新凭证（upsert 单账号，不影响其他账号）。
+// load 读取 state.json 到 p.byUID（文件不存在/损坏时静默从空状态开始）。
+// （原先这里贴的是 Add 的注释——复制粘贴残留。）
 func (p *Pool) load() {
 	raw, err := os.ReadFile(p.stateFp)
 	if err != nil {

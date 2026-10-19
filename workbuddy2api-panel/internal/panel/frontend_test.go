@@ -13,6 +13,24 @@ import (
 	"time"
 )
 
+// nodeBin 返回可用的 node 路径；没有或**执行不了**时跳过当前测试。
+//
+// 为什么要真跑一次探针：exec.LookPath 只查 PATH 里有没有这个文件。Android 上
+// app 私有目录里的二进制不能直接 exec（需要经 /system/bin/linker64 代跑），
+// LookPath 成功、执行却 "permission denied" —— 之前这里只在 LookPath 失败时
+// skip，于是 15 个前端测试在这台机器上全红。
+func nodeBin(t *testing.T) string {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available; JS checks skipped")
+	}
+	if out, err := exec.Command(node, "--version").CombinedOutput(); err != nil {
+		t.Skipf("node 不可执行（%v）: %s; JS checks skipped", err, strings.TrimSpace(string(out)))
+	}
+	return node
+}
+
 // TestAppJSSyntax app.js 必须能通过 JS 解析器语法校验。
 //
 // 为什么需要：app.js 是 go:embed 进二进制的静态资源，Go 编译器不检查其内容——
@@ -20,10 +38,7 @@ import (
 // 就让整个面板白屏，而所有 Go 测试依然全绿。此测试把语法校验前移到 CI。
 // 无 node 环境时跳过（不阻塞无 Node 的构建机）。
 func TestAppJSSyntax(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not available; skipping JS syntax check")
-	}
+	node := nodeBin(t)
 	path, err := filepath.Abs("app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -68,10 +83,7 @@ func TestIndexHTMLNoInlineScript(t *testing.T) {
 // 无 node 的环境跳过（CI/精简机不受影响）；harness 与 app.js 同判（app.js 顶层
 // start() 的 setInterval 会让 node 事件循环不退出，故成功路径显式 exit(0)）。
 func TestAppJSTopLevelSmoke(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; JS smoke skipped")
-	}
+	node := nodeBin(t)
 	harness := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -129,10 +141,7 @@ try {
 
 // 积分扣除维度的格式必须稳定，且缺样本/缺匹配 Token 时不能伪造比例。
 func TestAppJSCreditDimensionFormatting(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; credit formatting test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -176,10 +185,7 @@ process.stdout.write(JSON.stringify({
 
 // 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
 func TestAppJSRateLimitMeta(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; rate limit formatting test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -220,10 +226,7 @@ process.stdout.write(JSON.stringify({
 
 // 请求记录行必须紧凑、可读，并带上调用来源（IP / UA）；来源缺失时以 — 兜底。
 func TestAppJSRequestLogFormatting(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; request log formatting test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -273,10 +276,7 @@ process.stdout.write(JSON.stringify({
 
 // 请求记录筛选：IP / UA / 模型 / 账号 / 请求 ID 的包含匹配（空格分词 AND）+ 结果精确匹配。
 func TestAppJSRequestMatch(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; request filter test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -321,10 +321,7 @@ process.stdout.write(JSON.stringify({
 
 // 模型按条件查询：域 / 能力 / 档位 / 价格 / 关键词，以及倍率、上下文、输出排序。
 func TestAppJSModelFilter(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; model filter test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -402,10 +399,7 @@ process.stdout.write(JSON.stringify({
 // height 是 rect 的 CSS 几何属性——同名类会把每根柱子压成 3px 高，图看起来"没数据"。
 // 这个坑只能在浏览器里看出来，所以在这里钉住类名。
 func TestAppJSUsageChartBarClass(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; usage chart test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -464,10 +458,7 @@ process.stdout.write(JSON.stringify({
 //   - 滚动预设 rolling=true 发 hours（服务端整点对齐），rolling=false 折算成 from；
 //   - 「全部历史」两者都不发；「自定义」发用户挑的 from/to。
 func TestAppJSTimeRangeQuery(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; time range test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -606,10 +597,7 @@ func TestConfigFormMatchesCFGMap(t *testing.T) {
 
 // 同到期时间按面额降序；其余未用完包与零/负余额包分别聚合。
 func TestAppJSDetailGroups(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; detail groups test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -662,10 +650,7 @@ process.stdout.write(JSON.stringify({
 
 // 精确剩余天数聚合、账号内按总余额钳制、无到期批次不进入图表。
 func TestAppJSExpirySummary(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; expiry summary test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -720,10 +705,7 @@ process.stdout.write(JSON.stringify({
 // 同时钉住反面：其余文本字段空串仍然不下发。这条同样重要——若哪天为了修上面那个
 // 问题改成"所有空串都发"，表单里任何一个没填的框都会变成"请清空"，静默抹掉配置。
 func TestAppJSCollectConfigClearable(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; collectConfig test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -781,10 +763,7 @@ process.stdout.write(JSON.stringify([
 //
 // 日期按「今天 +N 天」生成而不是写死：写死的话过了那天用例就会自己失效。
 func TestAppJSExpirySortedByExpiry(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; expiry sort test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -849,10 +828,7 @@ process.stdout.write(JSON.stringify(names));`
 //  1. 只给 overview 形态的输入（没有 packages 字段）也能出内容；
 //  2. 渲染后 expBox.hidden 必须为 false——把这句删掉（还原 bug）测试就必须 FAIL。
 func TestAppJSExpirySnapshotRenders(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; expiry snapshot test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -949,10 +925,7 @@ func TestPanelIndexExpiryBoxNotHidden(t *testing.T) {
 // 断言结构：<g> 数量 == 数据点数，且每个 <g> 紧跟一个 <title>；同时确认没有
 // 游离在 <g> 之外的 <title>。
 func TestAppJSChartTooltipInsideBar(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; chart tooltip test skipped")
-	}
+	node := nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');

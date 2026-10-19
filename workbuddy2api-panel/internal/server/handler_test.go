@@ -776,9 +776,21 @@ func TestChatSessionDeadDisables(t *testing.T) {
 	if rec.Code != 503 {
 		t.Errorf("code=%d", rec.Code)
 	}
+	// 三振才判死（review P0-2）：单次 12153 不得把账号永久下线 —— 网络抖动 /
+	// 上游闪断 / refresh 竞态都会返回 12153，单次即 Disable 是历史误杀源。
 	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("single 12153 must not disable the account: %+v", st)
+	}
+	// 连续第 2 次仍不禁用，第 3 次才禁用。
+	for i := 0; i < 2; i++ {
+		rec2 := httptest.NewRecorder()
+		h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	}
+	st, _ = p.Status("u1")
 	if !st.Disabled {
-		t.Errorf("account should be disabled: %+v", st)
+		t.Errorf("account should be disabled after 3 consecutive 12153: %+v", st)
 	}
 }
 

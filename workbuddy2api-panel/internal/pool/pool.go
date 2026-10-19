@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -283,10 +284,8 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 	p.store = s
 }
 
-// RestoreFromSnapshot 择新恢复：比较本地 state.json 与 Redis 快照，采用较新者。
-// 无快照、快照无 savedAt、或本地不存在/不可读时，都会被判定为"本地优先/跳过快照"，
-// 同时打一条恢复来源日志。必须在 SyncToDir 之前调用（SyncToDir 只增删不入值）。
 // Acquire 为 uid 占一个在途名额（会话粘性命中后调用）；池上限内返回 true。
+// （原先这里贴的是 RestoreFromSnapshot 的注释——复制粘贴残留，已归位到 persist.go。）
 // 名额用 entry.inFlight 原子自增，满额返回 false。上限按账号 realm 分档
 // （global 档 maxInFlightGlobal，P1-1；未设置回落 maxInFlight）。
 func (p *Pool) Acquire(uid string) bool {
@@ -353,6 +352,14 @@ func (p *Pool) Add(a *auth.Auth) {
 func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// 防「扫到 0 个账号 → 把整池剔光并立刻落盘」（review P0-4）：
+	// filepath.Glob 对不存在的目录**不报错**，只返回空列表，于是 auth_dir 配错
+	// 或 Docker 卷没挂上时，这里会把 credits/冷却/熔断计数/成本账本一次性清零，
+	// 而且 saveLocked 当场写进 state.json —— 重启也找不回来。
+	if len(auths) == 0 && len(p.byUID) > 0 {
+		log.Printf("WARN: [pool] auth 目录扫描到 0 个账号，但池内有 %d 个 —— 疑似 auth_dir 配错/卷未挂载，跳过剔除以免清空状态", len(p.byUID))
+		return
+	}
 	seen := make(map[string]bool, len(auths))
 	for _, a := range auths {
 		seen[a.UID] = true

@@ -188,6 +188,7 @@ echo "============================================================"
 echo "  登录完成！"
 echo "  UID: $USER_ID"
 echo "  Nickname: ${NICKNAME:-（未获取到）}"
-echo "  Token: ${TOKEN:0:30}..."
+# 只打指纹，不打前缀（review S-23）：前缀同样是凭据的一部分，日志会被分享/归档。
+echo "  Token 指纹: $(printf '%s' "$TOKEN" | sha256sum | cut -c1-8)（已写入 auth 文件）"
 echo "  有效期: $(date -d "@$EXPIRES_AT" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$EXPIRES_AT")"
 echo "============================================================"

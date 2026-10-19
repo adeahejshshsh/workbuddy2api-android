@@ -163,12 +163,18 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 又只在 top5 内转——惊群集中单号的根因）。洗牌用独立的 time-seeded 源，
 	// 只在截断边界制造等权重随机次序，不影响加权抽签本身的确定性。
 	if len(ws) > 5 {
+		// 「存在并列」必须对**全体**权重判重，不能只跟 ws[0] 比：权重形如
+		// [5,3,3,1,1,1] 时 ws[0] 最高且唯一，只比首元素会判定「无并列」→ 不洗牌
+		// → 稳定排序按 uid 字典序截断 top5 → 等权重的 3/3 与 1/1/1 里靠后的号
+		// 被永久饿死（review P1-6，正是这段注释声称修掉的病）。
+		seenW := make(map[float64]bool, len(ws))
 		eq := false
-		for i := 1; i < len(ws); i++ {
-			if ws[i].w == ws[0].w {
+		for _, x := range ws {
+			if seenW[x.w] {
 				eq = true
 				break
 			}
+			seenW[x.w] = true
 		}
 		if eq {
 			shuf := rand.New(rand.NewPCG(uint64(now.UnixNano()), uint64(len(ws))))
@@ -226,7 +232,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		// 毕业结果由相邻的既有日志闭环（免费号无日志、收费号走 NoteModelCost
 		// 常规路径）。
 		log.Printf("[pool] cost explore model=%s realm=%q acct=%s window=%s",
-			reqModel, realm, logfmt.Label(e.a.UID, e.a.Nickname), p.costExploreInterval)
+			reqModel, realm, logfmt.Label(e.a.UID, e.a.NicknameValue()), p.costExploreInterval)
 	}
 	e.lastUsed = now // 锁内即时标记：下一个进入 pick 的 goroutine 立即看到本号已用
 	p.pickSeq++
@@ -327,7 +333,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	if best == nil {
 		return nil
 	}
-	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.Nickname), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
+	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.NicknameValue()), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
 	best.lastUsed = time.Now()
 	// 兜底同样是「选中」，必须与 pick() 正常路径、粘性命中路径（PickByUIDForModel）
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的

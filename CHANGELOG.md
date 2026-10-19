@@ -1,5 +1,94 @@
 # 变更记录
 
+## v1.26.2（当前）
+
+**本版 = 第三份代码审查报告（CODE-REVIEW-REPORT.md）的落地修复。**
+4 条 P0、8 条 P1、8 条 P2 全部处理，脚本类 4 条修 3，观察项 4 条修 3。
+其中 P0-1/P0-2/P0-3 都是「静默把健康号弄坏」这一类，用户侧表现是"明明有号却 503"。
+
+### P0（4/4）
+
+* **P0-1 客户端断连被记成「账号连败」，健康号 5 次即降权** —— Agent 场景频繁取消长任务时，
+  `r.Context()` 取消落进「网络层抖动」分支 → `NoteFailures` 连喂 5 次 → 账号降权 10 分钟。
+  现在传输层错误分支**最先**判 `r.Context().Err() != nil`：不换号、不罚号，只记
+  `OutcomeInterrupted` 并终止轮转。
+* **P0-2 12153 单次即永久禁用，绕过三振规则** —— 聊天主路径与 token 刷新路径原本直接
+  `Disable`，而保活路径早就改成「连续 3 次才判死」。现在两处都改 `NoteSessionDead`，
+  第三次才禁用并打 ERR 日志。一次网络抖动不再把号打进冷宫。
+* **P0-3 短冷却覆盖长冷却：零积分账号 10 分钟后回池继续撞 402** —— `Cooldown` 与
+  `CooldownSoftRate` 此前无条件改写 `until` 与 `coolKind`。现在两条入口都加**单调性**：
+  未到期的 `CoolHard` 不被 `CoolSoft` 缩短或降级，冷却只允许延长。
+* **P0-4 `auth_dir` 配错时启动把 state.json 清空** —— `filepath.Glob` 对不存在的目录
+  不报错、只返回空列表，于是「扫到 0 个账号」被当成「账号全被删了」，credits / 冷却 /
+  熔断计数 / 成本账本一次性清零并落盘。`SyncToDir` 现在遇到「扫到 0 个但池内非空」
+  直接 WARN 并跳过剔除。
+
+### P1（8/8）
+
+* **P1-5** 已核实**不是缺陷**：`candsAll` 在代码里是成本分层**之后**的集合
+  （`cands = cands[:0]` 后只回填 `ws` 的元素），LRU 兜底不会捞到收费号。未改动。
+* **P1-6** 等权重洗牌的「并列」判定只比 `ws[0]`：权重 `[5,3,3,1,1,1]` 时判成"无并列"→
+  不洗牌 → 字典序截断饿死靠后账号。改成对**全体**权重判重。
+* **P1-7** 用量小时桶永不按时间折叠（只在 >40 万桶时触发）→ 每 30s 全量重写 `usage.json`
+  的 O(n) 写放大。补「每小时最多折叠一次」的触发。
+* **P1-8** `flush` 在写盘**之前**就清 dirty，失败后不再重试（磁盘满/权限/rename 跨设备
+  即静默丢一整天用量）。改成失败时把 dirty 放回去。
+* **P1-9** `Auth.Nickname` 真实数据竞争（写加锁、读全裸）→ 新增 `NicknameValue()`（读锁），
+  并把 server/pool/scheduler 里 55 处直读改成走访问器；`auth.mu` 换 `sync.RWMutex`。
+* **P1-10** `/v1/chat/completions` 请求体无上限 → 新增 `server.max_body_mb`（默认 **64**，
+  0 = 不限制保留旧语义），超限回 **413 request_too_large**。
+* **P1-11** 余额刷新每号一个 goroutine（46 号 = 46 路并发打上游）→ 加 `sem=3` 并发闸门。
+* **P1-12** 并发保存配置会互相覆盖同一个 `path.tmp` → `saveConfig` 加包级互斥。
+
+### P2（8/8）
+
+* **P2-13** 空模型名写进 `modelCooldowns[""]` 会让 `modelExempt()` 恒真、带偏 `/healthz`
+  的 `ServableForRealm`。`CooldownSoftForModel` 补守卫（但**不整函数 return**——无重置
+  时间那条路本来就是账号级软冷却，早期改法会把正常冷却一起关掉，已修正）。
+* **P2-14** `SaveAtomic` 静默丢弃 auth 文件里的未知键 → 先读回原文件再覆盖已知键。
+* **P2-15** `accountRemove` 先出池再删文件，删失败则账号重启后"复活" → 改成先删文件、
+  成功才出池，失败回 500 且保留账号。
+* **P2-16** 全仓 `gofmt -l` 归零（此前 import.go 等 15 个文件不合格式）。
+* **P2-17** 三处文档注释错位（`RestoreFromSnapshot` 贴在 `Acquire` 上、`Acquire` 贴在
+  `startFlusher` 上、`Add` 贴在 `load` 上）已归位。
+* **P2-18** 删死代码 `tierDeniedLocked`。
+* **P2-19** 模型目录缓存过期瞬间的惊群 → 拉取路径加互斥 + 锁内二次检查。
+* **P2-20** 启动兜底日志打错错误对象（打的是原始的 not-exist，不是 WriteDefault 的失败原因）。
+
+### 脚本（3/4）
+
+* **S-21** 签名口令以 `pass:xxx` 进 argv（`ps` 可读）→ 改 `--ks-pass file:` 临时文件（0600，
+  退出即删）。
+* **S-22** `patch_source.sh` 的退出码检查是死代码（`set -e` 下 python 非零直接终止脚本，
+  后面的 `[ $? -eq 0 ]` 永远执行不到）→ 改成 `if ! python3 ... then` 包住并给出友好提示。
+* **S-23** 密钥/token 进日志：`run.sh` 改打**指纹**（sha256 前 8 位）；`cfg_val` 的键名
+  改走 `sys.argv`（不再拼进 python 源码）；`login.sh` 不再打 token 前缀。
+* **S-24** `push_github.sh` 的 `mask()` 改走环境变量 + python（不再把 token 拼进 sed 表达式，
+  也不让 sed 命令行进 `ps`）；`git fetch` 补认证头（仓库转私有后不会静默失败）。
+
+### 观察项（3/4）
+
+* **观察项 2** `checkListenKey` 挪到 listen 归一化**之后**，并对空 `listen` 给出明确报错
+  （原来空值会先被当成"对外地址"要求密钥，随后以 `missing port` 失败，信息错位）。
+* **观察项 3** `reqlog` 加 `closed` 标志，`Close` 后 `enqueue` 直接丢弃（不再往死通道里塞）；
+  同时把「配置上启用」与「当前还能写」拆成 `configured()` / `enabled()`，`Close` 之后
+  `ReadArchive` 与 `Snapshot` 仍正常工作。
+* **观察项 4（未改）** `LoadBinds` 的 SCAN+逐 key GET 在绑定数上百时可能超时并返回部分
+  结果（启动期粘性恢复静默缺失）。改成 MGET 需要重写批处理与错误语义，留待下一轮。
+* **观察项 1（未改）** `X-Domain` 头传的是完整 URL 还是纯域名需要实测上游行为，不盲改。
+
+### 测试
+
+`upstream 203 / server 90 / pool 184 / panel 24 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**。
+
+顺带修了两处测试自身的问题：
+- `TestCooldownHardDoesNotAdvanceSoftStreak` 原本断言"软冷却覆盖硬冷却"（正是 P0-3 的
+  病灶），改成断言新的单调语义。
+- `TestChatSessionDeadDisables` 原本断言"单次 12153 即禁用"，改成断言三振才禁用。
+- `frontend_test.go` 的 node 探针改成真跑一次 `node --version`：Android 上 `LookPath`
+  能找到但执行不了（app 私有目录需 linker64 代跑），此前 15 个前端测试全红。
+
 ## v1.26.1（当前）
 
 **本版 = 第二份代码审查报告（CODE-REVIEW-2026-10-19.md）的落地修复。**

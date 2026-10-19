@@ -41,7 +41,9 @@ type Config struct {
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
 	RedisMode    string
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
-	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	// MaxBodyMB /v1/chat/completions 请求体上限（MB）。0 = 不限制（旧语义）。
+	MaxBodyMB   int
+	RefreshSkew time.Duration // token 提前刷新窗口，默认 10m
 
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
@@ -463,6 +465,9 @@ func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
 // 实时拉取 = 每次 2 个上游探测，客户端周期性刷新模型列表会持续打上游；上游故障时
 // 无冷却窗口，客户端重试即放大请求量——负缓存正是为此设计（见 handler_test 吸收
 // 上游 9832283 的注释）；且 cachedModelsSnapshot（gateway_hint 判定）依赖缓存写入。
+// modelsFetchMu 串行化模型目录拉取（防缓存过期瞬间的惊群）。
+var modelsFetchMu sync.Mutex
+
 func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	dynamicModelsCache.RLock()
 	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
@@ -474,6 +479,20 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
 		dynamicModelsCache.RUnlock()
 		return nil
+	}
+	dynamicModelsCache.RUnlock()
+
+	// 过期瞬间的惊群（review P2-19）：双检锁只保证「读到新鲜缓存就返回」，
+	// 缓存刚过期的那一刻 N 个并发请求会各自打一次上游。负缓存只覆盖失败态，
+	// 覆盖不到「同时过期」。这里用一把粗锁把拉取串行化——第二个进入者在锁内
+	// 会再次命中上面的新鲜缓存检查吗？不会（那是锁外检查），所以锁内再查一次。
+	modelsFetchMu.Lock()
+	defer modelsFetchMu.Unlock()
+	dynamicModelsCache.RLock()
+	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
+		out := dynamicModelsCache.ids
+		dynamicModelsCache.RUnlock()
+		return out // 前一个持锁者刚拉完：直接用，不再打上游
 	}
 	dynamicModelsCache.RUnlock()
 
@@ -519,12 +538,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
-	// 请求体无大小上限（max_body_mb 已移除，对齐上游）：完整读入，超限类问题交由
-	// 上游自然返回错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断
-	// 防御语义保留在读错误路径——移除预拦截后，截断只可能来自客户端自己断流，
-	// 读 body 出错就地 400，不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
+	// 请求体上限（review P1-10）：历史上为了「对齐上游」把 max_body_mb 整个移除，
+	// 代价是 listen 一旦配成 0.0.0.0 且 key 泄漏，一个大 body 就能把进程内存打爆
+	// （ReadTimeout 只限时间不限体积）。现在改成可配：MaxBodyMB<=0 表示不限制
+	// （保留旧的「对齐上游」语义），>0 时用 MaxBytesReader 兜底并回 413。
+	// 默认值给 64MB —— 远超任何真实长上下文请求（100 万 token 的 JSON 约 4MB），
+	// 只挡内存炸弹。
+	if h.cfg.MaxBodyMB > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, int64(h.cfg.MaxBodyMB)<<20)
+	}
+	// #41 的截断防御语义保留在读错误路径：截断只可能来自客户端自己断流或上面的
+	// 体积上限，读 body 出错就地 400/413，不把半截 JSON 喂上游 unmarshal。
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		// 体积超限：413 而不是 400 —— 客户端据此知道该缩小请求，而不是重试。
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("request body exceeds server.max_body_mb (%d MB)", h.cfg.MaxBodyMB))
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
@@ -777,7 +810,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
-		st.nick = acct.Nickname
+		st.nick = acct.NicknameValue()
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
@@ -801,7 +834,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+					// 三振才判死（与 scheduler 保活、applyErrorPolicy 同口径）：
+					// 一次网络抖动 / 上游闪断 / refresh 竞态就把账号永久下线太狠，
+					// 只能人工解冻或重登。state.go 的注释早就写明这是已知误杀源。
+					if h.cfg.Pool.NoteSessionDead(acct.UID) {
+						log.Printf("ERR: [server] acct=%s disabled after %d consecutive 12153 (refresh)",
+							logfmt.Label(acct.UID, acct.NicknameValue()), pool.SessionDeadThreshold())
+					}
 				} else {
 					h.cfg.Pool.NoteError(acct.UID)
 				}
@@ -813,7 +852,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := acct.SaveAtomic(); err != nil {
 				// 刷新成功但落盘失败：下次启动会用旧 token，必须暴露
-				log.Printf("ERR: [server] chat refresh acct=%s: save auth failed: %v", logfmt.Label(acct.UID, acct.Nickname), err)
+				log.Printf("ERR: [server] chat refresh acct=%s: save auth failed: %v", logfmt.Label(acct.UID, acct.NicknameValue()), err)
 			}
 		}
 
@@ -828,6 +867,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = uerr.Status
 		}
 		if uerr == nil && terr != nil {
+			// 客户端已断连（点停止 / 关页面 / 切网络）：这是**客户端行为**，与账号
+			// 健康无关。此前它落进下面的「网络层抖动」分支，NoteFailures 连喂 5 次
+			// 就把健康号降权 10 分钟 —— Agent 场景频繁取消长任务时，整池号轮着进
+			// 降权期，表现为「明明有号却 503」，日志还把原因写成 consecutive failures。
+			if r.Context().Err() != nil {
+				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+				st.status = http.StatusServiceUnavailable
+				st.outcome = reqlog.OutcomeInterrupted
+				fail(acct.UID)
+				break
+			}
 			// 上游超时 / 停滞：**不换号、不罚号**。
 			//
 			// 超时不是账号的问题：同一份请求换到别的号，撞上的是同一个慢上游，
@@ -844,7 +894,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusServiceUnavailable
 				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, terr)
 				log.Printf("WARN: [server] upstream timeout acct=%s: %v (rotation stopped, account not penalized)",
-					logfmt.Label(acct.UID, acct.Nickname), terr)
+					logfmt.Label(acct.UID, acct.NicknameValue()), terr)
 				break
 			}
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
@@ -990,7 +1040,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 502 观测没有意义）。
 				st.status = http.StatusBadGateway
 				st.outcome = reqlog.OutcomeStreamError
-				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
+				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.NicknameValue()), bareModel)
 			case errFrame != "":
 				// 上游以 error 帧报错（6004 限流 / 内容拦截 / 审核）：按帧内容分类并
 				// 处置账号——**不记成功、不清 11102 负缓存、不绑粘性**。此前这些动作
@@ -1001,7 +1051,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusServiceUnavailable
 				st.outcome = reqlog.OutcomeStreamError
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
-					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, kind, logfmt.Truncate(errFrame, 200))
 			case sErr != nil:
 				if upstream.IsClientWriteError(sErr) {
 					// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
@@ -1021,7 +1071,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					st.outcome = reqlog.OutcomeStreamError
 					h.cfg.Pool.NoteFailures(acct.UID)
 					log.Printf("WARN: [server] stream acct=%s model=%s: upstream read error: %v",
-						logfmt.Label(acct.UID, acct.Nickname), bareModel, sErr)
+						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, sErr)
 				}
 			default:
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
@@ -1049,12 +1099,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 修复命中：上游本来会把工具调用吐成正文标记，这里已还原成 tool_calls。
 				// 打一行便于运维确认「这次不再空转」以及统计发生率。
 				log.Printf("INFO: [server] stream acct=%s model=%s: repaired %d native tool call(s) from assistant text (tool names known=%d)",
-					logfmt.Label(acct.UID, acct.Nickname), bareModel, n, len(declaredTools))
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, n, len(declaredTools))
 			} else if m := repair.Seen(); m > 0 {
 				// 识别到标记却没还原：说明判定没过（工具名不合规 / 块内夹带正文 /
 				// 参数畸形）。单独记一行，排障时能一眼区分「没识别到」与「识别到但拒绝」。
 				log.Printf("WARN: [server] stream acct=%s model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
-					logfmt.Label(acct.UID, acct.Nickname), bareModel, m, len(declaredTools))
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, m, len(declaredTools))
 			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
@@ -1091,7 +1141,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.applyErrorPolicy(acct.UID, kind, ef.Payload, bareModel, uerr)
 				fail(acct.UID)
 				log.Printf("WARN: [server] non-stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
-					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(ef.Payload, 200))
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, kind, logfmt.Truncate(ef.Payload, 200))
 				// 请求级错误：换任何号都是同一个审核/同一个超限/同一份非法 body，
 				// 轮转只会把无效请求放大 MaxRotate 倍，立即终止交给末端映射。
 				stop := false
@@ -1563,7 +1613,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
-		h.cfg.Pool.Disable(uid, "12153 session dead")
+		// 三振判死，不再单次 Disable：12153 也会被网络抖动/上游闪断触发，
+		// 单次即永久禁用等于把健康号误杀（历史上有过 13 个号全是误判）。
+		if h.cfg.Pool.NoteSessionDead(uid) {
+			log.Printf("ERR: [server] acct=%s disabled after %d consecutive 12153", uid, pool.SessionDeadThreshold())
+		}
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。

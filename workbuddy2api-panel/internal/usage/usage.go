@@ -84,6 +84,9 @@ type Recorder struct {
 	buckets map[string]*bucket // key: scope|realm|uid|model|rate
 	dirty   bool
 	started time.Time
+	// lastRollup 上次折叠时刻（只由 Start 的 tick 协程读写，无需加锁）：
+	// 折叠按「每小时最多一次」触发，避免小时桶无限增长把 flush 的 O(n) 放大。
+	lastRollup time.Time
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -119,11 +122,17 @@ func (r *Recorder) Start() {
 				r.flush(true)
 				return
 			case <-t.C:
+				now := time.Now()
 				r.mu.Lock()
 				n := len(r.buckets)
 				r.mu.Unlock()
-				if n > maxBuckets {
-					r.Rollup(time.Now())
+				// 折叠触发条件（review P1-7）：此前只有「桶数 > 400k」这一条，正常
+				// 部署永远达不到 —— 小时桶只增不减，flush 每 30s 把整个 map 序列化
+				// 重写一次，是持续的 O(n) 写放大。这里补一条按时间的：每小时最多
+				// 折叠一次（单次成本有界），保证 90 天前的小时桶真的会被折叠掉。
+				if n > maxBuckets || now.Sub(r.lastRollup) >= time.Hour {
+					r.lastRollup = now
+					r.Rollup(now)
 				}
 				r.flush(false)
 			}
@@ -149,13 +158,13 @@ type Delta struct {
 	HasCredit        bool
 	ModelRate        string
 	// CacheHitTokens / CacheMissTokens 前缀缓存命中/未命中观测（issue #92）。
-	HasCacheTokens   bool
-	CacheHitTokens   int64
-	CacheMissTokens  int64
-	LatencyMs        int64
-	HasLatency       bool
-	TokensPerSecond  float64
-	HasTPS           bool
+	HasCacheTokens  bool
+	CacheHitTokens  int64
+	CacheMissTokens int64
+	LatencyMs       int64
+	HasLatency      bool
+	TokensPerSecond float64
+	HasTPS          bool
 }
 
 // Add 记录一次请求尝试。
@@ -322,22 +331,32 @@ func (r *Recorder) flush(force bool) {
 	r.dirty = false
 	r.mu.Unlock()
 
+	// 失败时把 dirty 放回去，让下一轮 tick 重试（review P1-8）：此前 dirty 在写盘
+	// 之前就清掉，磁盘满 / 权限 / rename 跨设备任一步失败后，下一轮 tick 因
+	// !r.dirty 直接 return，直到有新请求或进程退出才再落盘 —— 静默丢一整天用量。
+	fail := func(what string, err error) {
+		log.Printf("[usage] %s: %v（下一轮重试）", what, err)
+		r.mu.Lock()
+		r.dirty = true
+		r.mu.Unlock()
+	}
+
 	raw, err := json.Marshal(snap)
 	if err != nil {
-		log.Printf("[usage] 序列化失败: %v", err)
+		fail("序列化失败", err)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
-		log.Printf("[usage] 建目录失败: %v", err)
+		fail("建目录失败", err)
 		return
 	}
 	tmp := r.path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		log.Printf("[usage] 写临时文件失败: %v", err)
+		fail("写临时文件失败", err)
 		return
 	}
 	if err := os.Rename(tmp, r.path); err != nil {
-		log.Printf("[usage] 原子替换失败: %v", err)
+		fail("原子替换失败", err)
 	}
 }
 

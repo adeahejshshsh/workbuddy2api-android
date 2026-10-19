@@ -104,18 +104,6 @@ func (p *Pool) NoteModelTierDenied(uid, userType, model string) {
 	p.saveTierLocked()
 }
 
-// tierDeniedLocked 该账号是否已被判定"用不了该模型"。
-func (p *Pool) tierDeniedLocked(uid, model string) bool {
-	if p.tier == nil {
-		return false
-	}
-	typeName, ok := p.tier.UIDType[uid]
-	if !ok || typeName == "" {
-		return false // 等级未知 → 判不出来（保守：不否定）
-	}
-	return p.tier.Deny[typeName][model]
-}
-
 // ModelDeniedForAllAccounts 报告池内**每个账号**都能被判定为"用不了该模型"。
 // 池空 → false（无信息不下结论）。
 func (p *Pool) ModelDeniedForAllAccounts(model string) bool {

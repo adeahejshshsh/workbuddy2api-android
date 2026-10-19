@@ -542,7 +542,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		first = false
 		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
 		if err := s.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
-			log.Printf("activity %s: %v", logfmt.Label(a.UID, a.Nickname), err)
+			log.Printf("activity %s: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 			continue
 		}
 		s.checkActivityStreak(a) // 上报成功 → 回读 streak 自检
@@ -559,14 +559,14 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 	days, err := s.cfg.Upstream.GrowthStreak(a)
 	if err != nil {
-		log.Printf("activity %s: streak check failed (report OK): %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("activity %s: streak check failed (report OK): %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return true
 	}
 	if days == 0 {
-		log.Printf("activity %s: report OK but streak.days=0 (silent drop?)", logfmt.Label(a.UID, a.Nickname))
+		log.Printf("activity %s: report OK but streak.days=0 (silent drop?)", logfmt.Label(a.UID, a.NicknameValue()))
 		return true
 	}
-	log.Printf("activity %s: streak days=%d", logfmt.Label(a.UID, a.Nickname), days)
+	log.Printf("activity %s: streak days=%d", logfmt.Label(a.UID, a.NicknameValue()), days)
 	return false
 }
 
@@ -613,6 +613,11 @@ func (s *Scheduler) RunKeepaliveNow() {
 // 供两类入口复用：后台周期任务（StartBalanceRefresh）与面板手动全量刷新。
 func (s *Scheduler) RunBalanceRefreshNow() {
 	var wg sync.WaitGroup
+	// 并发闸门（review P1-11）：此前每个账号一个 goroutine，46 个号就是 46 路并发
+	// 打上游；余额刷新默认每 5 分钟一轮，多账号部署下会与 chat 请求争同一个出口
+	// IP 的 WAF 频控窗口（仓库里多处为 WAF 403 做了专门设计，这里却是裸并发）。
+	// 与面板 packages/syncNicknames 的 sem=3 同口径。
+	sem := make(chan struct{}, 3)
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
@@ -624,11 +629,13 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			continue
 		}
 		wg.Add(1)
+		sem <- struct{}{} // 限并发：满 3 路就等，不堆 goroutine
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
 			if err != nil {
-				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
+				log.Printf("balance %s: %v", logfmt.Label(uid, a.NicknameValue()), err)
 				return
 			}
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)

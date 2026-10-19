@@ -34,6 +34,8 @@ func (p *Pool) SetNickname(uid, nickname string) bool {
 	}
 	a := e.a
 	a.Lock()
+	// 已持写锁：这里必须直读字段。RWMutex 不可重入，调 NicknameValue() 会自死锁
+	// （RLock 等自己持有的 Lock —— 上一版批量替换时真踩到过，pool 测试直接挂住）。
 	changed := a.Nickname != nickname
 	if changed {
 		a.Nickname = nickname
@@ -124,7 +126,23 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		e.until = time.Now().Add(d)
+		now := time.Now()
+		// 单调性（review P0-3）：冷却只允许延长，且 CoolHard 不被 CoolSoft 降级。
+		// 真实串：账号 402 → 硬冷却到次日 04:00；同一账号上另一条在途请求返回 429
+		// → 本函数把 until 改短成 10 分钟后、coolKind 从 CoolHard 改成 CoolSoft。
+		// 后果一：零积分账号 10 分钟后回池继续撞 402（402/429 抖动，白打上游）；
+		// 后果二：reviveCoolingLocked 只认 CoolHard 解冻，状态机从此错位。
+		if e.coolKind == CoolHard && kind != CoolHard && now.Before(e.until) {
+			// 未到期的硬冷却：软冷却既不能缩短也不能降级，只做模型豁免清理。
+			clearRoutingModelCooldownsLocked(e)
+			p.dirty.Store(true)
+			return
+		}
+		next := now.Add(d)
+		if next.Before(e.until) {
+			next = e.until // 已有更长的冷却：保留更晚的截止
+		}
+		e.until = next
 		e.coolKind = kind
 		e.reason = reason
 		// 非模型级冷却入口：清空会参与路由的模型级冷却，避免上一次
@@ -151,7 +169,12 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
-		if !resetAt.IsZero() {
+		// 空模型名不得写进模型冷却表（review P2-13）：modelCooldowns[""] 的 Until
+		// 非零且非 AuditOnly 会让 modelExempt() 恒真，把 /healthz 的
+		// ServableForRealm 带偏（账号实际被限流却报可服务）。
+		// 但不能整个 return —— 无重置时间的那条路本来就是「账号级软冷却」，
+		// 与模型名无关（下面 else 分支），早期版本的守卫直接 return 会把它一起关掉。
+		if !resetAt.IsZero() && model != "" {
 			// 有上游重置时间：冷却截止 = min(resetAt, now+softRateMax)，不做指数放大。
 			if e.modelCooldowns == nil {
 				e.modelCooldowns = map[string]modelCooldown{}
@@ -378,8 +401,18 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
+		// 未到期的硬冷却（余额耗尽）不被软限流降级/缩短：否则零积分账号 10 分钟后
+		// 回池继续撞 402，形成 402/429 抖动（review P0-3）。
+		if e.coolKind == CoolHard && now.Before(e.until) {
+			clearRoutingModelCooldownsLocked(e)
+			p.dirty.Store(true)
+			return
+		}
 		if !resetAt.IsZero() {
-			e.until = p.cappedSoftUntilLocked(now, resetAt)
+			next := p.cappedSoftUntilLocked(now, resetAt)
+			if next.After(e.until) || !now.Before(e.until) {
+				e.until = next // 只延长，不缩短
+			}
 		} else if e.coolKind != CoolSoft || !now.Before(e.until) {
 			// 新限流（不在有效软冷却中）：推进有界退避；兜底探测（仍在软冷却中）不翻倍。
 			d := p.softDurationLocked(base, e.softStreak+1)

@@ -21,7 +21,7 @@ export GOPROXY="file://$PREFIX/lib/workbuddy2api/goproxy,off"
 
 # 版本号集中在这里：aapt2 路径写进清单；无 aapt2 的降级路径就地把旧清单里的版本串
 # 等长改写（AXML 字符串池是 UTF-16LE，等长替换不破坏结构）。
-VERNAME="1.26.1"
+VERNAME="1.26.2"
 # versionCode 由 versionName 派生（major*10000 + minor*100 + patch），不再手工同步。
 # 手工同步过一次就错位（versionName 1.26.0 配 versionCode 24），升级判断全靠运气。
 VERCODE=$(( $(echo "$VERNAME" | cut -d. -f1) * 10000 + $(echo "$VERNAME" | cut -d. -f2) * 100 + $(echo "$VERNAME" | cut -d. -f3) ))
@@ -202,7 +202,17 @@ if [ ! -f "$KS" ]; then
     -keyalg RSA -keysize 2048 -validity 10950 -storepass "$KS_PASS" -keypass "$KS_PASS" \
     -dname "CN=WorkBuddy2API, OU=DSH, O=Local, L=Local, ST=Local, C=CN"
 fi
-java -jar "$SIGNER" sign --ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" \
+# 口令走临时文件（review S-21）：`pass:xxx` 会把明文塞进 argv，ps / /proc/*/cmdline
+# 直接可读 —— 与脚本自己那句「口令不进命令行明文」矛盾。文件 0600 且退出时删除。
+KSPF="$B/.kspass.$$"
+# 必须带换行：apksigner 的 PasswordRetriever 按**行**读，没有换行会报
+# "end of file reached"（踩过一次）。
+( umask 077; printf '%s\n' "$KS_PASS" > "$KSPF" )
+trap 'rm -f "$KSPF"' EXIT INT TERM
+# 不再传 --key-pass：apksigner 的 file: 密码源是**按行顺序读**的，同一个文件喂给
+# 两个参数时第二个会读到 EOF（报 "end of file reached"）。PKCS12 的 key 密码与
+# store 密码相同，省略 --key-pass 时 apksigner 直接沿用 store 密码。
+java -jar "$SIGNER" sign --ks "$KS" --ks-pass "file:$KSPF" \
   --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
   --min-sdk-version 24 --out "$OUTDIR/WorkBuddy2API.apk" wb2api-unsigned.apk
 java -jar "$SIGNER" verify "$OUTDIR/WorkBuddy2API.apk"

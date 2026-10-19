@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -59,13 +60,20 @@ func main() {
 		if errors.Is(err, fs.ErrNotExist) {
 			// 首次运行：目录下没有配置 → 自动落一份推荐配置（含随机 api_key）再加载。
 			// 双击 exe / 裸跑 docker 即开，无需先手工复制样例。
-			if key, werr := WriteDefault(*cfgPath); werr == nil {
+			key, werr := WriteDefault(*cfgPath)
+			if werr == nil {
 				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，记录在该文件里，可自行修改）", *cfgPath, key)
 				cfg, err = Load(*cfgPath)
 			}
-			if err != nil {
+			if werr != nil || err != nil {
 				// 生成失败（目录只读等）：退回纯默认 + env（旧行为兜底），不阻塞启动。
-				log.Printf("config %s not found (auto-generate failed), using defaults+env: %v", *cfgPath, err)
+				// 日志必须打**生成失败的原因**（review P2-20）：此前打的是 err（原始的
+				// 「文件不存在」），写着 auto-generate failed 却报 not exist，排障被带偏。
+				why := werr
+				if why == nil {
+					why = err
+				}
+				log.Printf("config %s 自动生成失败（改用默认值+环境变量）: %v", *cfgPath, why)
 				cfg, err = Load("")
 			}
 		}
@@ -278,7 +286,7 @@ func main() {
 		Live:        live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
-		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
+		ProbeFile: stateSibling(cfg.StateFile, "output_probes.json"),
 		// 任务跳过名单（v1.22.0）：attempt 开关 + 反复无效的 (账号,任务码)。
 		// 与 state 同目录，容器/自托管部署跟着 state 卷一起走。
 		SkipFile:   stateSibling(cfg.StateFile, "task_skip.json"),
@@ -301,6 +309,7 @@ func main() {
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
+		MaxBodyMB:    cfg.ServerMaxBodyMB,
 		Panel:        pn,
 		Live:         live,
 		Usage:        rec,
@@ -434,7 +443,14 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
+// saveConfigMu 串行化配置保存：tmp 文件名是固定的 path+".tmp"，两个并发
+// POST /panel/api/config 会同时写同一路径再 rename，可能产出交错的 JSON（损坏）
+// 并互相覆盖结果（review P1-12）。面板是单用户场景，一把包级锁足够。
+var saveConfigMu sync.Mutex
+
 func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+	saveConfigMu.Lock()
+	defer saveConfigMu.Unlock()
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {

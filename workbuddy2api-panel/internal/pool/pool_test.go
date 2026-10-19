@@ -789,11 +789,24 @@ func TestCooldownHardDoesNotAdvanceSoftStreak(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.CooldownUntilTomorrow4AM("u1", "余额不足")
-	if st, _ := p.Status("u1"); st.SoftStreak != 0 {
-		t.Fatalf("hard cooldown must not touch soft_streak, got %d", st.SoftStreak)
+	before, _ := p.Status("u1")
+	if before.SoftStreak != 0 {
+		t.Fatalf("hard cooldown must not touch soft_streak, got %d", before.SoftStreak)
 	}
+	// 软限流不得覆盖/降级未到期的硬冷却（review P0-3）：旧行为是 here 把 until 改成
+	// now+600s、coolKind 从 hard_credit 降成 soft_rate —— 零积分账号 10 分钟后回池
+	// 继续撞 402（402/429 抖动），而且 reviveCoolingLocked 只认 CoolHard，解冻语义错位。
 	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "x")
-	wantCoolSec(t, p, "u1", 600, 3)
+	after, _ := p.Status("u1")
+	if after.CoolKind != before.CoolKind {
+		t.Errorf("soft rate must not downgrade hard cooldown: kind %q → %q", before.CoolKind, after.CoolKind)
+	}
+	if after.Until.Before(before.Until) {
+		t.Errorf("soft rate must not shorten hard cooldown: %v → %v", before.Until, after.Until)
+	}
+	if after.SoftStreak != 0 {
+		t.Errorf("hard cooldown must not advance soft_streak, got %d", after.SoftStreak)
+	}
 }
 
 func TestSoftStreakPersistsAcrossReload(t *testing.T) {

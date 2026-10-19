@@ -27,11 +27,11 @@ const rawMaxRunes = 240
 
 // ErrorBrief 上游错误的可读摘要。
 type ErrorBrief struct {
-	Brief     string `json:"brief"`                // 给人看的一句话（永远非空）
-	Code      string `json:"code,omitempty"`       // 上游业务 code，如 "11158"
+	Brief     string `json:"brief"`          // 给人看的一句话（永远非空）
+	Code      string `json:"code,omitempty"` // 上游业务 code，如 "11158"
 	RequestID string `json:"request_id,omitempty"`
-	Display   string `json:"display,omitempty"`    // 上游本地化文案（优先中文）
-	Msg       string `json:"msg,omitempty"`        // 上游英文 msg
+	Display   string `json:"display,omitempty"` // 上游本地化文案（优先中文）
+	Msg       string `json:"msg,omitempty"`     // 上游英文 msg
 }
 
 // BriefError 解析上游错误体。空体 → 返回空 Brief（调用方自行兜底文案）。

@@ -11,13 +11,26 @@ LOG="$APP_DIR/data/server.log"
 PIDF="$APP_DIR/data/server.pid"
 PORT=7863
 
-cfg_val() { python3 -c "
-import json,sys
-try: print(json.load(open('$APP_DIR/config.json')).get('$1',''))
-except Exception as e: print('')
-"; }
+# 取配置值：键名走 sys.argv（review S-23），不再拼进 python 源码 ——
+# 键名里带引号会让整段变成 SyntaxError，而且拼接本身就容易被当成注入面。
+cfg_val() { python3 - "$APP_DIR/config.json" "$1" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], ""))
+except Exception:
+    print("")
+PY
+}
 
 api_key() { cfg_val api_key; }
+
+# key_fp 只打密钥指纹（sha256 前 8 位）：完整 api_key 会进 server.log，
+# 再经 log 镜像进面板日志环 —— 等于把凭据写进日志文件（review S-23）。
+key_fp() {
+  k=$(api_key)
+  [ -n "$k" ] || { echo "(未配置)"; return; }
+  printf '%s' "$k" | sha256sum | cut -c1-8
+}
 
 running_pid() {
   if [ -f "$PIDF" ]; then
@@ -41,7 +54,7 @@ case "${1:-start}" in
     p=$(running_pid)
     if [ -n "$p" ]; then
       echo "已启动 pid=$p  http://127.0.0.1:$PORT/panel/"
-      echo "api_key=$(api_key)"
+      echo "api_key 指纹=$(key_fp)（完整值见 config.json）"
       echo "日志: $LOG"
     else
       echo "启动失败，日志尾部:"; tail -20 "$LOG"
@@ -88,7 +101,7 @@ case "${1:-start}" in
   log) tail -n "${2:-40}" "$LOG" ;;
   panel)
     echo "面板: http://127.0.0.1:$PORT/panel/"
-    echo "API : http://127.0.0.1:$PORT/v1  (api_key=$(api_key))"
+    echo "API : http://127.0.0.1:$PORT/v1  (api_key 指纹=$(key_fp)，完整值见 config.json)"
     ;;
   *) echo "用法: bash run.sh [start|stop|restart|status|log|panel]"; exit 1 ;;
 esac

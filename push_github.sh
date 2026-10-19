@@ -94,7 +94,15 @@ if [ "$CODE" = "200" ]; then echo "  已存在"; else
 fi
 
 echo "== 4/5 推送"
-mask() { sed "s#$TOKEN#***#g"; }   # git 的输出可能带 token，一律抹掉再打出来
+# 掩码（review S-24）：此前把 token 拼进 sed 表达式，token 里的 #/& 会破坏表达式，
+# 而且 sed 的命令行本身进 ps（等于又泄漏一次）。改成走环境变量 + python 替换：
+# 环境变量只对同 uid 可读，比 argv 安全。
+mask() {
+  MASK_TOKEN="$TOKEN" python3 -c 'import os,sys
+t = os.environ.get("MASK_TOKEN", "")
+d = sys.stdin.read()
+sys.stdout.write(d.replace(t, "***") if t else d)'
+}
 # 认证方式（踩过）：把 token 写进 URL（https://TOKEN@github.com/...）会被 GitHub 重定向到
 # 带斜杠的规范地址，而**重定向会把 URL 里的 auth 丢掉** → push 报
 # "could not read Username for 'https://github.com'"。改用「无凭据 URL + Authorization 头」，
@@ -105,7 +113,8 @@ gpush() { git -c http.extraHeader="Authorization: Basic $B64" push "$@" "$PURL" 
 # 暂存目录（$STAGE）可能被环境清理成"全新历史"：先 fetch 远端，把本轮提交接到远端之后，
 # 保证是快进推送（不丢远端历史、也不依赖强推）。
 set +e
-git fetch -q "$PURL" "$BRANCH" 2>/dev/null; frc=$?
+# fetch 也带认证头（review S-24）：仓库一旦转私有，裸 fetch 会静默失败。
+git -c http.extraHeader="Authorization: Basic $B64" fetch -q "$PURL" "$BRANCH" 2>/dev/null; frc=$?
 set -e
 if [ $frc -eq 0 ] && git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1; then
   if ! git merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
@@ -130,7 +139,7 @@ done
 if [ $push_ok -ne 1 ]; then
   # 只有「远端是本地的祖先」（快进）时强推才等价于正常推送；否则拒绝。
   set +e
-  git fetch -q "$PURL" "$BRANCH" 2>/dev/null
+  git -c http.extraHeader="Authorization: Basic $B64" fetch -q "$PURL" "$BRANCH" 2>/dev/null
   if git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1 \
      && git merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
     echo "  重试 3 次仍失败；已确认是快进关系 → 强推"
