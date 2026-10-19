@@ -146,11 +146,15 @@ public class GatewayService extends Service {
         if (rc == 137) return "rc=137 被强杀 SIGKILL（内存不足或系统清后台）";
         if (rc == 139) return "rc=139 段错误 SIGSEGV";
         if (rc == 143) return "rc=143 收到停止信号 SIGTERM";
+        if (rc == 141) return "rc=141 写 stdout 撞 EPIPE（SIGPIPE）：日志读取端被关掉了 —— 网关本身可能是健康的，问题在日志管道";
         return "rc=" + rc + (rc > 128 ? "（信号 " + (rc - 128) + "）" : "");
     }
 
     // ── 对外状态：机器可读（UI 只读这两个，不解析下面的中文 state）
     public static final int ST_STOPPED = 0, ST_STARTING = 1, ST_RUNNING = 2, ST_EXTERNAL = 3;
+
+    /** server.log 单代上限：pump 超过它就只读空、不落盘（**绝不关读端**，见 pump 注释）。 */
+    static final long LOG_PUMP_MAX = 2L * 1024 * 1024;
     static volatile int status = ST_STOPPED;
     static volatile String reason = "服务尚未启动";
     public static int statusOf() { return status; }
@@ -388,7 +392,7 @@ public class GatewayService extends Service {
                      null);
             appLog(this, "拉起网关：" + mode + " pid=" + pid + "，工作目录 " + gwDir.getAbsolutePath());
             File lf = new File(gwDir, "data/server.log");
-            if (lf.length() > 4 * 1024 * 1024) {        // 超 4MB 翻一代：日志页读得快，也不撑爆存储
+            if (lf.length() > LOG_PUMP_MAX) {           // 与 pump 上限同口径：超了先翻代，重启从小文件起算
                 File old = new File(gwDir, "data/server.log.1");
                 if (old.exists()) old.delete();
                 lf.renameTo(old);
@@ -419,18 +423,55 @@ public class GatewayService extends Service {
         }
     }
 
+    /**
+     * 把网关的 stdout/stderr 灌进 server.log。
+     *
+     * ⚠ 铁律（rc=141 老 bug 的根因）：**任何时候都不能关掉这个管道的读端**。
+     * 旧实现写满 2MB 就 `break` 跳出 try-with-resources → BufferedReader 被关闭 →
+     * 读端消失 → 网关下一次打日志写入 EPIPE，而 Go 运行时对 fd 1/2 的 EPIPE 会
+     * **直接以 SIGPIPE 退出（exit 141）**。更毒的是：重启时 bytes 从 logFile.length()
+     * 起算，文件早已 >2MB → 第一行就 break → **每次拉起几秒内必死**；而日志轮转要到
+     * 4MB 才做，2~4MB 那段就是"看门狗怎么拉都是 rc141"。
+     *
+     * 现在的做法：超限（或写文件出错）之后只**继续把管道读空**、不再落盘；循环只在
+     * EOF（子进程退出/主动关闭 stdout）时结束 —— 那才是唯一安全的关闭时机。
+     */
     void pump(InputStream in, File logFile) {
-        try (BufferedReader r = new BufferedReader(new InputStreamReader(in, "UTF-8"));
-             Writer w = new OutputStreamWriter(new FileOutputStream(logFile, true), "UTF-8")) {
-            String line;
+        BufferedReader r = null;
+        Writer w = null;
+        try {
+            r = new BufferedReader(new InputStreamReader(in, "UTF-8"));
             long bytes = logFile.length();
+            boolean writeOn = bytes <= LOG_PUMP_MAX;
+            if (writeOn) {
+                try { w = new OutputStreamWriter(new FileOutputStream(logFile, true), "UTF-8"); }
+                catch (Throwable t) { writeOn = false; w = null; }
+            }
+            String line;
             while ((line = r.readLine()) != null) {
                 lastLine = line;
-                w.write(line); w.write('\n'); w.flush();
-                bytes += line.length() + 1;
-                if (bytes > 2 * 1024 * 1024) break;   // 简单限长，超了就不再写
+                if (!writeOn) continue;              // 只读空，保持管道通畅
+                try {
+                    w.write(line); w.write('\n'); w.flush();
+                    bytes += line.length() + 1;
+                    if (bytes > LOG_PUMP_MAX) {      // 超限：停写，但**不关读端**
+                        writeOn = false;
+                        try { w.close(); } catch (Throwable ignored) {}
+                        w = null;
+                    }
+                } catch (Throwable t) {
+                    writeOn = false;
+                    try { if (w != null) w.close(); } catch (Throwable ignored) {}
+                    w = null;
+                }
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable ignored) {
+            // 读取线程自身异常：也要把管道读空，别让子进程撞 EPIPE。
+            try { byte[] buf = new byte[8192]; while (in.read(buf) > 0) { /* drain */ } } catch (Throwable ignored2) {}
+        } finally {
+            try { if (w != null) w.close(); } catch (Throwable ignored) {}
+            try { if (r != null) r.close(); } catch (Throwable ignored) {}
+        }
     }
 
     void ensureConfig(File gwDir) {

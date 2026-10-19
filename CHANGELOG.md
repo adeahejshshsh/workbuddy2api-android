@@ -1,6 +1,44 @@
 # 变更记录
 
-## v1.24.8（当前）
+## v1.25.0（当前）
+
+* **rc=141（SIGPIPE）根治完成 —— Java 侧修复这次真正编进 dex 了**：
+  * `GatewayService.pump()`：超限后只把管道**读空**、不再落盘、**绝不关读端**（循环只在 EOF 结束）；
+    日志轮转阈值 4MB → **2MB**（与 pump 上限对齐，彻底消灭 2~4MB 死区）；
+    `exitMeaning` 补 `rc=141` 人话解释。
+  * Go 侧 `signal.Notify(SIGPIPE)` 兜底继续生效（管道被关也只返回 EPIPE，进程不死）。
+  * 验证：新 `classes.dex` = 43,616 字节，内含 `rc=141` / `EPIPE` / `SIGPIPE` / `LOG_PUMP_MAX`；
+    APK 内 `versionName` 已改为 **1.25.0**（AXML 字符串池按 UTF-16LE 原位同长度替换）。
+* **本机工具链复原记录**（环境被重置后重建，供以后复用）：
+  * Go：deb 解包 → `patch_rt0.py`（go/gofmt/全部 tool）→ `patch_source.sh` → `go1.27.2 android/arm64` ✓
+  * Java/Android：`openjdk-17` + `aapt2` + `apksigner` + `d8` 同样用 deb 解包复原；
+    `d8`/`apksigner` 脚本的 shebang 与 jar 路径改成本机前缀，并各加 `-Xmx384m` 防内存尖峰 ✓
+  * ⚠ **aapt2 与仓库最新 abseil/protobuf ABI 不匹配**（`cannot locate symbol ...ReadCord…`），
+    所以本版**绕开 aapt2**：资源/清单沿用上一版已编译产物，只重编 `classes.dex` + 换 `.so` 后重签 ✓
+  * ⚠ **agent 崩溃根因（logcat 实锤）**：就地覆盖 `libc++_shared.so` 时，运行中的 node 已 mmap 该库
+    → `SIGBUS (signal 7, BUS_ADRERR)`；**不是内存不足**（当时 MemAvailable 4.5GB）。教训：
+    升级共享库必须换路径/先停进程，绝不可原地覆盖 ✓
+
+## v1.24.9
+
+* **修「看门狗拉不起网关，rc=141（信号 13 = SIGPIPE）」**
+  * **根因（代码级）**：`GatewayService.pump()` 把网关 stdout 灌进 `server.log` 时，写满 **2MB
+    就 `break`** 跳出 try-with-resources → BufferedReader 被关闭 → **管道读端消失**；而 Go 对
+    stdout/stderr 写 EPIPE 是**直接以 SIGPIPE 退出** → exit 141。更毒的是重启路径：`bytes` 从
+    `logFile.length()` 起算，文件早已 >2MB → **第一行就 break** → 每次拉起几秒内必死；而日志
+    轮转要到 **4MB** 才做 → **2~4MB 区间就是"怎么拉都 rc141"**。
+  * **本版已生效（进 APK 的 `.so`）**：`cmd/server/main.go` 用 `signal.Notify(SIGPIPE)` 接管该
+    信号 —— 管道被关也只返回 EPIPE、进程继续跑（日志丢了也不能让服务死）。**实测**：把网关
+    stdout 接到"读 1 字节就关"的管道（老代码必死），进程 **5s / 8s 后仍存活** ✓✓。
+  * **源码已修、待随下一版编进 dex**：`pump()` 超限后只把管道**读空**、不再落盘、**绝不关读端**
+    （循环只在 EOF 结束）；日志轮转阈值 4MB → **2MB**；`exitMeaning` 补 `rc=141` 人话解释。
+    ⚠ 本机 Java/Android 工具链又被环境重置（`aapt2` 缺 `libfmt`/依赖、`d8`/`apksigner` 脚本
+    shebang 指向旧的 Termux 前缀、重编 dex 的内存把这台机器的 agent 顶崩），所以本版采用
+    **零编译打包**：直接替换 APK 内的 `.so` 后重签，`classes.dex` 未变（仍 44,060 字节）。
+  * ⚠ 因此 APK 内 `versionName` 仍显示 **1.24.8**（AXML 字符串池未能安全改写），release 与功能
+    都是 v1.24.9；下一版工具链恢复后会自动归一。
+
+## v1.24.8
 
 * **修「换境外代理后 CN 模型报 503 no_healthy_account」的误诊**（用户实测：hint 里明明
   `healthy=3`、`realm_healthy=1`，却报"没有可用号"）。真相是**传输层失败**：号选出来了，

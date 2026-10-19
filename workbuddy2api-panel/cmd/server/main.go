@@ -312,6 +312,19 @@ func main() {
 		GlobalEnabled: cfg.Global.Enabled,
 	})
 
+	// 接管 SIGPIPE：Go 运行时对 **stdout/stderr** 写 EPIPE 有特殊对待 —— 直接以
+	// SIGPIPE 退出（exit code 141）。安卓看门狗把网关 stdout 接到管道上，一旦读取
+	// 线程退出/关闭读端（旧版 pump 写满 2MB 就 break 正是如此），网关下一次打日志
+	// 就会被内核打死，而它其实是健康的。signal.Notify 之后：写失败返回 EPIPE、
+	// 进程继续跑（日志丢了就算了，服务不能死）。
+	sigpipe := make(chan os.Signal, 1)
+	signal.Notify(sigpipe, syscall.SIGPIPE)
+	go func() {
+		for range sigpipe {
+			// 丢弃：管道断了就当日志丢失，不致命。
+		}
+	}()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
