@@ -115,14 +115,31 @@ if [ $frc -eq 0 ] && git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1; then
     echo "  已把本轮提交接到远端 $BRANCH 之后（保留远端历史 → 快进）"
   fi
 fi
-set +e
-OUT=$(gpush 2>&1); rc=$?
-set -e
-if [ $rc -ne 0 ]; then
-  printf '%s\n' "$OUT" | mask | tail -4
-  echo "  普通推送被拒，改强推："
+# 普通推送先重试 3 次：TLS 层偶发 "unexpected eof while reading" 是网络抖动，
+# 重试就能过。强推会覆盖远端历史（误用一次不可恢复），所以只在「重试仍失败
+# 且确认是快进关系」时才用——不是快进关系就停下让人看。
+push_ok=0
+for attempt in 1 2 3; do
   set +e
-  OUT=$(gpush --force 2>&1); rc=$?
+  OUT=$(gpush 2>&1); rc=$?
+  set -e
+  [ $rc -eq 0 ] && { push_ok=1; break; }
+  printf '%s\n' "$OUT" | mask | tail -3
+  [ $attempt -lt 3 ] && { echo "  第 $attempt 次推送失败，2 秒后重试…"; sleep 2; }
+done
+if [ $push_ok -ne 1 ]; then
+  # 只有「远端是本地的祖先」（快进）时强推才等价于正常推送；否则拒绝。
+  set +e
+  git fetch -q "$PURL" "$BRANCH" 2>/dev/null
+  if git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1 \
+     && git merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
+    echo "  重试 3 次仍失败；已确认是快进关系 → 强推"
+    OUT=$(gpush --force 2>&1); rc=$?
+  else
+    echo "  ⚠ 远端有本地没有的提交（非快进）。已停下，不覆盖远端历史。"
+    echo "     先在本机 git pull/合并，或确认要丢弃远端改动后再手工强推。"
+    rc=1
+  fi
   set -e
   if [ $rc -ne 0 ]; then
     printf '%s\n' "$OUT" | mask | tail -4
