@@ -546,6 +546,22 @@ func (c *Config) normalize() error {
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
 	}
+	// 空值回落必须在 ParseDuration **之前**（issue B4）：`ParseDuration("")` 直接
+	// 返回 invalid duration，配置里写 `"degrade_cooldown": ""` 会让进程启动失败，
+	// 而下面那段"空值回落默认"的分支永远走不到。口径与 soft_rate_max 一致：
+	// 空 → 回落默认，非法 → fail fast。
+	if c.Pool.BreakerCooldown == "" {
+		c.Pool.BreakerCooldown = "30m"
+	}
+	if c.Pool.BreakerCooldownMax == "" {
+		c.Pool.BreakerCooldownMax = "6h"
+	}
+	if c.Pool.DegradeCooldown == "" {
+		c.Pool.DegradeCooldown = "10m"
+	}
+	if c.Pool.DegradeCooldownMax == "" {
+		c.Pool.DegradeCooldownMax = "2h"
+	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)
 	}

@@ -120,8 +120,16 @@ public class GatewayService extends Service {
             if (f.length() > 512 * 1024) {
                 File old = new File(f.getParentFile(), "app.log.1");
                 if (old.exists()) old.delete();
-                f.renameTo(old);
-                f = appLogFile(c);
+                // renameTo 的返回值必须看（issue B10）：失败（存储满/被占用）时
+                // f 仍指向原文件继续追加，512KB 上限彻底失效，能把 files/ 撑满。
+                if (f.renameTo(old)) {
+                    f = appLogFile(c);
+                } else {
+                    // 兜底：原地截断重写，至少不让它无限涨。
+                    try (FileOutputStream os = new FileOutputStream(f, false)) {
+                        os.write(("[app] 日志翻代失败（rename 被拒），已截断重写\n").getBytes("UTF-8"));
+                    } catch (Throwable ignored) {}
+                }
             }
             String ts = new java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US)
                     .format(new java.util.Date());
@@ -361,7 +369,14 @@ public class GatewayService extends Service {
                     try { old.waitFor(4, java.util.concurrent.TimeUnit.SECONDS); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 }
-                startGateway();   // 用户/系统明确要求重启：无条件拉起（startGateway 内部有锁与 alive 检查）
+                // 等待窗口里用户点了「停止」（userStop=true 且已 stopSelf）：
+                // 这时再拉起就是一个没人看门狗、没 wakelock、没 alarm 的孤儿进程，
+                // 占着 7863 直到系统杀 App —— 用户还会以为"停了"。
+                if (userStop) {
+                    appLog(GatewayService.this, "重启任务被取消：等待期间用户已停止服务");
+                    return;
+                }
+                startGateway();
             }
         });
     }
@@ -403,6 +418,7 @@ public class GatewayService extends Service {
      * killProc() 只作用在已死的 P2 上，孤儿再也杀不掉。
      */
     synchronized void startGateway() {
+        if (userStop) return;           // 用户已点停止：任何路径都不许再拉起（B2）
         if (alive()) return;            // 已有存活进程：不重复拉起（锁内二次检查）
         try {
             File gwDir = new File(getFilesDir(), "gateway");
@@ -500,7 +516,11 @@ public class GatewayService extends Service {
                 if (!writeOn) continue;              // 只读空，保持管道通畅
                 try {
                     w.write(line); w.write('\n'); w.flush();
-                    bytes += line.length() + 1;
+                    // 按**实际写出的字节数**累计（issue B7）：String.length() 是
+                    // UTF-16 字符数，中文日志每字符写 3 字节 UTF-8 —— 用字符数当字节数，
+                    // LOG_PUMP_MAX=2MB 实际能落 6MB，而翻代判断用的是 logFile.length()
+                    // （真实字节），两处口径不一致，2MB/4MB 边界行为会跳变。
+                    bytes += line.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1;
                     if (bytes > LOG_PUMP_MAX) {      // 超限：停写，但**不关读端**
                         writeOn = false;
                         try { w.close(); } catch (Throwable ignored) {}
@@ -618,7 +638,14 @@ public class GatewayService extends Service {
      * 看门狗自然也救不了自己）。代价是需要在系统设置里给「显示在其他应用上层」权限；
      * 没给就静默跳过，不影响任何其它功能。
      */
-    void installOverlay() {
+    /**
+     * 常驻 1x1 全透明图层。**必须 synchronized**（issue B6）：
+     * 判空 → addView → 赋值不是原子操作，而 onStartCommand（主线程）与 watchLoop
+     * （看门狗线程）都会经 holdWake() 走到这里 —— 最坏情况加两个悬浮窗，静态字段
+     * 只记住后一个，前一个再也 removeView 不掉（WindowManager token 泄漏，且系统
+     * 仍认为该进程有可见窗口，保活语义被放大）。
+     */
+    synchronized void installOverlay() {
         if (overlay != null) return;
         try {
             if (Build.VERSION.SDK_INT < 23 || !Settings.canDrawOverlays(this)) return;

@@ -19,6 +19,8 @@ export GOPATH="$HOME/go" GOCACHE="$HOME/.cache/go-build" GOMODCACHE="$HOME/go/pk
 export GOFLAGS="-toolexec=/system/bin/linker64" CGO_ENABLED=0 GOTOOLCHAIN=local GOSUMDB=off
 export GOPROXY="file://$PREFIX/lib/workbuddy2api/goproxy,off"
 
+# 脚本目录（绝对路径）：脚本中途会 cd 到构建目录，$0 的相对路径到那时就失效了。
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WS="/storage/emulated/0/新建文件夹/workbuddy2api"
 # 版本号集中在这里：aapt2 路径写进清单；无 aapt2 的降级路径就地把旧清单里的版本串
 # 等长改写（AXML 字符串池是 UTF-16LE，等长替换不破坏结构）。
@@ -153,6 +155,30 @@ for it in src.infolist():
 dst.close()
 print("  复用清单/资源条目 %d 个" % kept)
 PYAXML
+
+  # 降级路径也必须改 versionCode（issue B8）：只改 versionName 的话，覆盖安装会被
+  # 系统当成"版本没变"，可能拒绝安装或让用户以为没更新。
+  python3 - "$PWD/base.apk" "$VERCODE" "$SCRIPT_DIR/patch_axml_version.py" <<'PYVC'
+import sys, os, zipfile, tempfile, importlib.util
+apk, code, mod = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+spec = importlib.util.spec_from_file_location("axv", mod)
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+z = zipfile.ZipFile(apk)
+entries = [(i, z.read(i.filename)) for i in z.infolist()]
+z.close()
+tmp = apk + ".tmp"
+out = zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED)
+for info, data in entries:
+    if info.filename == "AndroidManifest.xml":
+        fd, path = tempfile.mkstemp()
+        os.write(fd, data); os.close(fd)
+        m.patch(path, code)
+        data = open(path, "rb").read(); os.unlink(path)
+    out.writestr(info, data)
+out.close()
+os.replace(tmp, apk)
+print("  versionCode → %d" % code)
+PYVC
 fi
 
 if [ -f "$AJ" ]; then

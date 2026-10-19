@@ -27,10 +27,14 @@ func isTruncatedArguments(raw string) bool {
 	return json.Unmarshal([]byte(trimmed), &v) != nil
 }
 
-// dropTruncatedToolCalls 过滤出 arguments 完整的 tool_call（返回新 slice）。
+// dropTruncatedToolCalls 过滤出 arguments 完整的 tool_call（返回新 slice 与被丢弃的数量）。
 // 只依据 isTruncatedArguments 判定，不改动任何保留的调用（正例零改动）。
-func dropTruncatedToolCalls(calls []map[string]any) []map[string]any {
-	kept := make([]map[string]any, 0, len(calls))
+//
+// 返回丢弃数是为了可观测（issue B14）：不少兼容上游"发完就 EOF"、根本不发
+// data: [DONE]，此时被丢掉的调用会静默消失 —— 客户端看到"模型只说了话、工具没调"，
+// 服务端日志里查不到任何痕迹。调用方据此打一条 WARN。
+func dropTruncatedToolCalls(calls []map[string]any) (kept []map[string]any, dropped int) {
+	kept = make([]map[string]any, 0, len(calls))
 	for _, call := range calls {
 		fn, _ := call["function"].(map[string]any)
 		if fn == nil {
@@ -39,9 +43,10 @@ func dropTruncatedToolCalls(calls []map[string]any) []map[string]any {
 		}
 		args, _ := fn["arguments"].(string)
 		if isTruncatedArguments(args) {
+			dropped++
 			continue
 		}
 		kept = append(kept, call)
 	}
-	return kept
+	return kept, dropped
 }

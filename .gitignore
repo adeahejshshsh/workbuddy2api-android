@@ -11,6 +11,8 @@ workbuddy2api-panel/backups/
 # 密钥与签名
 apk-src/wb2api.keystore
 .kspass
+# 构建/测试中间产物目录（*.tmp 只匹配后缀，匹配不到目录）
+.tmp/
 *.keystore
 *.jks
 *.idsig

@@ -1,5 +1,72 @@
 # 变更记录
 
+## v1.26.4（当前）
+
+**本版 = Bug 清单（B1–B15）的落地修复，15 条全修。**
+
+### 高
+
+* **B1 打 tag 时发布流程必定失败** —— CI 从 `cmd/server/main.go` 里 grep `appVersion`
+  取版本，而该值在 v1.26.3 之后是 `dev`（真版本由 `-ldflags -X` 注入）：`TAG=1.26.4`、
+  `SRC=dev`，一致性断言必然 `exit 1`，Release 永远建不出来；"断言二进制含版本串"
+  也是 grep `dev`，任何二进制都命中，等于没校验。改成两个 job 都读仓库根 `VERSION`，
+  构建补 `-ldflags "-X main.appVersion=$(VERSION)"`，并自动识别 Go 模块目录。
+* **B2 点"停止"后，排队中的重启任务会把网关重新拉起** —— `restartGateway` 投递给静态
+  单线程 `boot` 的任务只检查 `alive()`：旧进程已被 `killProc` 杀掉 → 判定"没有存活进程"
+  → 直接 `startGateway()`。此时 Service 已 `stopSelf()`，新进程没人看门狗、没 wakelock、
+  没 alarm，成了占着 7863 的孤儿。现在 `boot` 任务执行前检查 `userStop`，
+  `startGateway()` 入口也加了一道。
+
+### 中
+
+* **B3 硬冷却被模型级 429 缩短并降级** —— `CooldownSoftForModel` 的"无重置时间"分支
+  是**赋值** `e.until = now.Add(d)` 且无条件 `coolKind = CoolSoft`：硬冷却到次日 04:00
+  的号会被 6004 砍成 10 分钟、提前回池继续撞 402，而 `reviveCoolingLocked` 只认
+  `CoolHard`，状态机此后错位。补上与 `CooldownSoftRate` 相同的守卫，并改成"只延长"。
+* **B4 配置写空串启动失败，"空值回落默认"是死代码** —— `ParseDuration("")` 先返回
+  invalid duration，后面那段 `if x == "" { 默认值 }` 永远走不到。四处（`degrade_cooldown`
+  / `degrade_cooldown_max` / `breaker_cooldown` / `breaker_cooldown_max`）的回落全部
+  **提到** ParseDuration 之前，与 `soft_rate_max` 口径一致（空回落、非法报错）。
+* **B5 面板 api_key 注入靠 400ms 硬延时** —— 写完 `localStorage` 睡 400ms 就 reload，
+  低端机首帧慢时 reload 抢在写入生效前 → 面板 401，点"重载面板"又是同一条竞速。
+  改成 `evaluateJavascript` 回调里**回读校验**，确认值一致才 reload；失败重试 3 次
+  （每次 300ms），仍失败在状态条明说"自动登录失败"。
+* **B6 常驻图层是 check-then-act** —— `installOverlay` 加 `synchronized`：主线程与看门狗
+  线程都会经 `holdWake()` 走到这里，最坏情况加两个 1×1 悬浮窗、静态字段只记住后一个，
+  前一个再也 `removeView` 不掉（WindowManager token 泄漏）。
+* **B7 日志配额按字符算** —— `line.length()` 是 UTF-16 字符数，中文日志每字符写 3 字节
+  UTF-8，`LOG_PUMP_MAX=2MB` 实际能落 6MB；而翻代判断用的是真实字节，两处口径不一致，
+  2MB/4MB 边界行为会跳变。改成按实际写出的 UTF-8 字节数累计。
+* **B8 降级构建不更新 versionCode，装机不升级** —— 无 aapt2 时复用上一版清单只改
+  `versionName`，`versionCode` 还是旧的，覆盖安装会被系统当成"版本没变"。
+  新增 `patches/patch_axml_version.py`：解析 AXML 的 resource map，定位
+  `android:versionCode`（0x0101021b）的 int 属性**原地改写 + 回读校验**，失败即非 0 退出
+  （宁可不产出，也不产出半正确的包）。本版实测：`versionCode` 从 **21 → 12604**。
+* **B9 `.tmp/` 里的构建产物被推到公开仓库** —— tar 排除清单补 `./.tmp`，根 `.gitignore`
+  补 `.tmp/`（原有 `*.tmp` 只匹配后缀，匹配不到目录）。
+
+### 低
+
+* **B10 `appLog` 翻代失败后日志无界增长** —— `renameTo` 的返回值此前没看，失败时仍往
+  原文件追加，512KB 上限失效。现在检查返回值，失败则原地截断重写并记一条原因。
+* **B11 `writeJSON` 吞掉 marshal 错误** —— 序列化失败仍 `WriteHeader(200)` 再写 0 字节，
+  客户端拿到"200 空响应"。改成 marshal 成功后才写状态码，失败回 500 并记日志。
+* **B12 面板里点外链会在 WebView 里跳走** —— 覆写 `shouldOverrideUrlLoading`：
+  只有面板地址放行，其余交系统浏览器。此前一跳出去 `panelLoaded` 仍是 true，
+  `tick()` 不会再把面板拉回来。
+* **B13 加权抽签的 `maxCredits` 基准与注释不一致** —— 截断用全集 max、抽签用子集 max，
+  子集里最高 credits 的号被 `minPickGap` 排除时基准变小、credits 权重被放大。
+  改成把全集 `maxCredits` 传进 `pickWeighted`，两阶段基准统一。
+* **B14 上游不发 `[DONE]` 时被丢弃的 tool_call 没有日志** —— `dropTruncatedToolCalls`
+  返回丢弃数，`Aggregate` 有丢弃时打一条 WARN（带 id / model / finish_reason / saw_done）。
+* **B15 算不出速率却打成 `0.0tok/s`** —— 同一列同一语义（无观测）不能有两种表示，
+  改成保持 `-`，与 `toks` 缺失同口径。
+
+### 测试
+
+`upstream 203 / server 90 / pool 184 / panel 24 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`gofmt -l` 为 0。
+
 ## v1.26.3（当前）
 
 **本版 = ISSUES-2026-10-19.md（19 个 issue）的落地。**

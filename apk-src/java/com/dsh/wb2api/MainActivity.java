@@ -181,6 +181,17 @@ public class MainActivity extends Activity {
             @Override public void onReceivedError(WebView v, int code, String desc, String failingUrl) {
                 panelLoaded = false;          // 加载失败 → 交回 tick 重试（最多 MAX_LOAD_TRIES 次）
             }
+
+            // 面板里的外链（文档、上游状态页）一律交给系统浏览器（issue B12）：
+            // 否则 WebView 会被导航出面板，而 panelLoaded 仍为 true → tick 不再拉回来，
+            // 用户只能靠返回键硬退。
+            @Override public boolean shouldOverrideUrlLoading(WebView v, String url) {
+                if (url == null || url.startsWith(PANEL_URL)) return false;  // 面板内部：照常
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (Throwable ignored) {}
+                return true;
+            }
         });
         web.setWebChromeClient(new WebChromeClient() {
             @Override public void onProgressChanged(WebView v, int p) {
@@ -377,12 +388,42 @@ public class MainActivity extends Activity {
         }
     }
 
-    void injectKey() {
+    /**
+     * 把 api_key 写进面板的 localStorage 再重载。
+     *
+     * 不能用「写完睡 400ms 就 reload」（issue B5）：低端机冷启动 / WebView 首帧慢时，
+     * reload 会抢在写入生效之前，面板拿不到 key → 所有 /panel/api/* 401，用户点
+     * 「重载面板」又走同一条竞速，只能反复赌。
+     * 现在写入后**回读校验**，确认 localStorage 里确实是目标值才 reload；
+     * 不一致就重试（最多 3 次，每次 300ms），仍失败就在状态条上明说。
+     */
+    void injectKey() { injectKey(0); }
+
+    void injectKey(final int attempt) {
         apiKey = readApiKey();
         if (apiKey.isEmpty()) { toast("读不到 config.json 里的 api_key"); return; }
-        String js = "try{localStorage.setItem('" + LS_KEY + "'," + quote(apiKey) + ");}catch(e){}";
-        web.evaluateJavascript(js, null);
-        ui.postDelayed(new Runnable() { public void run() { web.reload(); } }, 400);
+        if (web == null) return;
+        final String want = apiKey;
+        String js = "try{localStorage.setItem('" + LS_KEY + "'," + quote(want) + ");"
+                + "localStorage.getItem('" + LS_KEY + "');}catch(e){null}";
+        web.evaluateJavascript(js, new android.webkit.ValueCallback<String>() {
+            public void onReceiveValue(String got) {
+                // evaluateJavascript 把字符串结果再包一层 JSON：带引号才算成功写入
+                boolean ok = got != null && got.contains(want);
+                if (ok) {
+                    web.reload();
+                    return;
+                }
+                if (attempt >= 2) {
+                    logLine.setText("自动登录失败：面板拿不到 api_key，请点「重载面板」重试");
+                    logLine.setTextColor(WARN);
+                    return;
+                }
+                ui.postDelayed(new Runnable() {
+                    public void run() { injectKey(attempt + 1); }
+                }, 300);
+            }
+        });
     }
 
     static String quote(String s) {

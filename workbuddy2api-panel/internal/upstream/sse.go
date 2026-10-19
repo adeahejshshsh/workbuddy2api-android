@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -291,7 +292,14 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		// 完整参数原样保留（正例零改动）；空参数（无参工具）不是截断，同样保留。
 		// 此前只认 finish_reason=="length"，EOF 截断的 tool_calls 残缺参数被原样下发。
 		if finishReason == "length" || !sawDone {
-			calls = dropTruncatedToolCalls(calls)
+			var dropped int
+			calls, dropped = dropTruncatedToolCalls(calls)
+			if dropped > 0 {
+				// 被丢弃的调用必须有痕迹（issue B14）：上游 EOF 未发 [DONE] 是常态，
+				// 静默消失会让"工具没被调用"变成一个无从排查的悬案。
+				log.Printf("WARN: [upstream] non-stream id=%s model=%s: dropped %d truncated tool_call(s) (finish_reason=%q saw_done=%v)",
+					id, model, dropped, finishReason, sawDone)
+			}
 		}
 		if len(calls) > 0 {
 			message["tool_calls"] = calls

@@ -1695,7 +1695,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 // ---------------------------------------------------------------------------
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	raw, _ := json.Marshal(v)
+	// 序列化失败必须报 500（issue B11）：此前 `raw, _ :=` 吞掉错误后照样
+	// WriteHeader(200) 再写 0 字节 —— 客户端拿到"200 空响应"，既不能解析也不知道
+	// 服务端出错。状态码要在 marshal **成功之后**才写。
+	raw, err := json.Marshal(v)
+	if err != nil {
+		log.Printf("ERR: [server] writeJSON marshal 失败: %v", err)
+		http.Error(w, `{"error":{"message":"internal error: response encode failed","type":"server_error"}}`,
+			http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)

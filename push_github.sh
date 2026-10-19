@@ -50,6 +50,7 @@ tar -C "$WS" \
     --exclude=./WorkBuddy2API.apk.idsig \
     --exclude=./.panel-ip \
     --exclude=./.kspass \
+    --exclude=./.tmp \
     -cf - . | tar -C "$STAGE" -xf -
 [ -d "$STAGE/.git" ] && echo "  （沿用已有 .git，历史可累加）"
 

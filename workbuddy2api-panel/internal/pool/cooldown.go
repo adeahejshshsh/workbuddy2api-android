@@ -174,6 +174,15 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 		// ServableForRealm 带偏（账号实际被限流却报可服务）。
 		// 但不能整个 return —— 无重置时间的那条路本来就是「账号级软冷却」，
 		// 与模型名无关（下面 else 分支），早期版本的守卫直接 return 会把它一起关掉。
+		// 未到期的硬冷却（余额耗尽）不被模型级软限流降级/缩短（issue B3）：
+		// 与 CooldownSoftRate 同一道守卫。此前这条 else 分支是**赋值**——
+		// 硬冷却到次日 04:00 的号会被 6004 砍成默认 10 分钟，提前回池继续撞 402；
+		// 且 coolKind 被改成 CoolSoft，reviveCoolingLocked 只认 CoolHard，状态机错位。
+		if e.coolKind == CoolHard && now.Before(e.until) {
+			clearRoutingModelCooldownsLocked(e)
+			p.dirty.Store(true)
+			return
+		}
 		if !resetAt.IsZero() && model != "" {
 			// 有上游重置时间：冷却截止 = min(resetAt, now+softRateMax)，不做指数放大。
 			if e.modelCooldowns == nil {
@@ -190,7 +199,10 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			if e.coolKind != CoolSoft || !now.Before(e.until) {
 				d := p.softDurationLocked(base, e.softStreak+1)
 				e.softStreak++
-				e.until = now.Add(d)
+				// 冷却只延长（issue B3）：与 Cooldown/CooldownSoftRate 同一总原则。
+				if next := now.Add(d); next.After(e.until) {
+					e.until = next
+				}
 			}
 			e.coolKind = CoolSoft
 			e.reason = reason

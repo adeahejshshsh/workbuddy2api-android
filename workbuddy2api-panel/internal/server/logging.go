@@ -522,10 +522,10 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 		// 速率与用量账本走同一个函数（扣掉 TTFB）。此前这里自己除 total，漏扣首
 		// token 等待，于是控制台流水行的 tok/s 与面板数字对不上（issue #34）——
 		// 本函数本来就收到了 ttfb，只是没拿它算速率。
+		// 算不出速率就保持 "-"（issue B15）：同一列同一语义（无观测）不能出现两种
+		// 表示 —— 此前这里打 "0.0tok/s"，运维会把"没测到"读成"测得 0"。
 		if tps, ok := tokensPerSecond(int64(toks), total, ttfb); ok {
 			tokpsField = fmt.Sprintf("%.1ftok/s", tps)
-		} else {
-			tokpsField = "0.0tok/s"
 		}
 	}
 	ttfbMS := "-"

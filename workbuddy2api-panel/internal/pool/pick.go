@@ -225,7 +225,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			}
 		}
 	} else {
-		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
+		e = p.pickWeighted(eligible, maxCredits) // eligible 保序 = top5 降序子集
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -368,14 +368,14 @@ var minPickGap = 100 * time.Millisecond
 // credits 全 0 时仍按 idleWeight 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
 // 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
-func (p *Pool) pickWeighted(cands []*entry) *entry {
+// pickWeighted 按权重抽签。
+//
+// maxCredits 由调用方传入**全集口径**（tier 过滤前全部 healthy 候选的最大 credits）：
+// 截断排序与抽签权重共享同一基准，两阶段权重可比（issue B13）。此前本函数在传入的
+// eligible 子集上重新算 max —— 子集里最高 credits 的号若刚好被 minPickGap 排除，
+// 基准就变小、credits 权重被相对放大，与注释承诺不符。
+func (p *Pool) pickWeighted(cands []*entry, maxCredits int64) *entry {
 	now := time.Now()
-	var maxCredits int64
-	for _, e := range cands {
-		if e.credits > maxCredits {
-			maxCredits = e.credits
-		}
-	}
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
 	var total int64

@@ -55,16 +55,24 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: 取源码版本号
+      # 版本号唯一来源是仓库根 VERSION（与 rebuild.sh / build_apk.sh 同源）。
+      # 之前是 grep main.go 里的 appVersion —— 那个值现在是 "dev"（真版本靠
+      # -ldflags -X 注入），断言必然失败、Release 永远建不出来。
+      - name: 取版本号与 Go 模块目录
         id: ver
-        run: echo "v=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)" >> "$GITHUB_OUTPUT"
+        run: |
+          V=$(cat VERSION 2>/dev/null || cat workbuddy2api-panel/../VERSION 2>/dev/null || echo dev)
+          if [ -f go.mod ]; then D="."; else D="workbuddy2api-panel"; fi
+          echo "v=$V" >> "$GITHUB_OUTPUT"
+          echo "dir=$D" >> "$GITHUB_OUTPUT"
 
-      - name: 构建（剥离符号，对齐本地发布口径）
+      - name: 构建（剥离符号 + 注入版本，对齐本地发布口径）
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
-        run: go build -ldflags "-s -w" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
+        working-directory: ${{ steps.ver.outputs.dir }}
+        run: go build -ldflags "-s -w -X main.appVersion=${{ steps.ver.outputs.v }}" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
 
       # 版本串断言：二进制必须含源码 appVersion（防交叉编译矩阵里编错树/漏 ldflags）
       - name: 断言二进制版本串
@@ -111,8 +119,8 @@ jobs:
           fetch-depth: 0   # 取历史 tag 算 compare 链接
       - name: tag 与源码版本一致性断言
         run: |
-          SRC=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)
-          SRC="${SRC%-panel}"   # appVersion 带 -panel 后缀，比对前剥掉
+          # 版本唯一来源：仓库根 VERSION（不要再从 main.go 里 grep —— 那里是 "dev"）
+          SRC=$(cat VERSION 2>/dev/null || echo dev)
           TAG="${GITHUB_REF_NAME#v}"
           if [[ "$GITHUB_REF_NAME" != *-ci ]]; then
             if [[ "$TAG" != "$SRC" ]]; then
