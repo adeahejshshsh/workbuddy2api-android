@@ -65,6 +65,7 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		TaskCodes []string `json:"task_codes"`
 	}
+	limitJSONBody(w, r) // 面板 JSON 接口请求体上限 1MB（M6）
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.TaskCodes) == 0 {
 		writeErr(w, http.StatusBadRequest, "task_codes required")
 		return
@@ -159,6 +160,7 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		TaskCode string `json:"task_code"`
 	}
+	limitJSONBody(w, r) // 面板 JSON 接口请求体上限 1MB（M6）
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.TaskCode == "" {
 		writeErr(w, http.StatusBadRequest, "task_code required")
 		return

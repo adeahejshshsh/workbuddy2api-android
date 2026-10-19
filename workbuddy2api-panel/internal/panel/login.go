@@ -163,11 +163,35 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	p.loginMu.Lock()
 	sess, known := p.logins[state]
+	if known && sess.consumed {
+		// 另一路 poll 正在处理同一个 state（前端 3s 轮询 + 完成路径 4 次上游调用
+		// 各 30s 超时，慢一次就会叠第二发）。让后来的这一路先回去，别重复执行
+		// Pool.Add / SaveAtomic / 签到 / 余额刷新。
+		p.loginMu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": "上一次轮询结果仍在处理，请稍候"})
+		return
+	}
+	if known {
+		sess.consumed = true // 立即认领（锁内），离开临界区后不再有第二个 poll 进来
+	}
 	p.loginMu.Unlock()
 	if !known {
 		writeErr(w, http.StatusNotFound, "unknown or expired state（请重新发起添加账号）")
 		return
 	}
+	// 未走完成路径就返回（pending / 上游抖动 / 写盘失败）时复位认领，否则这个
+	// state 会被永久锁死到 TTL 过期。
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		p.loginMu.Lock()
+		if s2, ok := p.logins[state]; ok {
+			s2.consumed = false
+		}
+		p.loginMu.Unlock()
+	}()
 	_, epToken, epAcct, origin := loginEndpoints(sess.realm)
 
 	// auth/token 是权威登录状态端点：pending 时业务 code 非 0（"login ing"）。
@@ -276,6 +300,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
 	}
 
+	completed = true // 完成路径：后面的 delete 会移除 state，defer 无需复位
 	p.loginMu.Lock()
 	delete(p.logins, state)
 	p.loginMu.Unlock()

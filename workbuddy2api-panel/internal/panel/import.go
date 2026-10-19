@@ -53,9 +53,15 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	raw, err := io.ReadAll(file)
+	// 32MB 只是 ParseMultipartForm 的内存阈值（超出会落到临时文件），文件本身
+	// 仍会被整份读进内存 —— 这里再套一层硬上限，别让一个超大上传把进程吃穿。
+	raw, err := io.ReadAll(io.LimitReader(file, panelMaxBodyBytes+1))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read file: "+err.Error())
+		return
+	}
+	if len(raw) > panelMaxBodyBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "import file too large (limit 32MB)")
 		return
 	}
 

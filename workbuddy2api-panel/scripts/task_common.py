@@ -139,7 +139,9 @@ def get_streak(auth) -> int:
     st, d = do_get(auth, chat_base(auth), PATH_STREAK)
     if st != 200:
         return -1
-    return (d.get("data", {}).get("streak", {}) or {}).get("days", 0)
+    # 兜「键存在但值为 null」：上游对新号会回 {"code":0,"data":null}，
+    # d.get("data", {}) 拿到 None 后再 .get 就是 AttributeError。
+    return ((d.get("data") or {}).get("streak") or {}).get("days", 0)
 
 
 def chat_event(auth, conversation_id=None, model_id="deepseek-v4-flash",

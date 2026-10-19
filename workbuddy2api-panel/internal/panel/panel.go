@@ -133,6 +133,11 @@ const loginTTL = 15 * time.Minute
 type loginSession struct {
 	created time.Time
 	realm   string // "cn" / "global"，缺省 cn
+	// consumed 已被一路 poll 认领：完成路径要走 4 次上游调用（各 30s 超时），
+	// 前端 setInterval 3s 轮询没有重入保护，慢一次就会叠出第二个 poll，
+	// 两个都通过「state 还在」的检查 → Pool.Add / SaveAtomic / 签到 / 余额刷新
+	// 各跑两遍。认领标记让第二路直接退出，完成（delete）或失败时复位。
+	consumed bool
 }
 
 // New 构建面板。
@@ -179,6 +184,12 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.withAuth(p.accountTaskClaim))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.withAuth(p.accountTaskAuto))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
+	// 跳过名单 / 尝试型任务开关。任务中心界面已下线，但这个开关仍被 autotask 的
+	// 三个入口（单任务、全部、accept_all）读取：不注册路由时 setAllowAttempt /
+	// skipClear 永远调不到，attemptAllowed() 恒 false，尝试型任务被永久锁死，
+	// 而 409 文案还指向一个不存在的界面。保留为纯 API 入口（可用 curl 开）。
+	p.mux.HandleFunc("GET /panel/api/tasks/skip", p.withAuth(p.tasksSkipState))
+	p.mux.HandleFunc("POST /panel/api/tasks/skip", p.withAuth(p.tasksSkipState))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
 	p.mux.HandleFunc("POST /panel/api/activity_all", p.withAuth(p.activityAll))
@@ -196,7 +207,30 @@ func (p *Panel) routes() {
 // 与 401 错误响应全都带上（API 也可能在浏览器里被直接打开）。
 func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	// 面板请求体硬上限。此前全仓没有 MaxBytesReader：task_codes 数组可以无限增长、
+	// 账号导入能整份读进内存，而面板默认 api_key 为空时连凭证都不用带，等于给同网段
+	// 任何人对本机内存做放大攻击。32MB 留给导入上传（超过即 413），纯 JSON 接口在
+	// 解码前再用 limitJSONBody 收紧到 1MB。
+	//
+	// 注意 /v1/chat/completions 不在这里：那是 server 包的路由，无上限是有意设计
+	// （长上下文请求本身就是大 body）。
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, panelMaxBodyBytes)
+	}
 	p.mux.ServeHTTP(w, r)
+}
+
+// 面板请求体上限：整体 32MB（导入上传），JSON 接口 1MB。
+const (
+	panelMaxBodyBytes = 32 << 20
+	panelMaxJSONBytes = 1 << 20
+)
+
+// limitJSONBody 把纯 JSON 接口的请求体收紧到 1MB（解码前调用）。
+func limitJSONBody(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, panelMaxJSONBytes)
+	}
 }
 
 // withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
@@ -338,6 +372,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 			} else {
 				for _, mi := range infos {
 					if skip, tag := p.tierHidden(mi.ID, "cn", showHidden); skip {
+						hiddenTier++ // 计数：前端据此提示「已按账号等级隐藏 N 个」
 						continue
 					} else if tag {
 						e := panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP)
@@ -363,6 +398,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
 					for _, mi := range infos {
 						if skip, tag := p.tierHidden(mi.ID, "global", showHidden); skip {
+							hiddenTier++
 							continue
 						} else if tag {
 							e := panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP)
@@ -380,6 +416,18 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	if len(out) == 0 {
 		if len(fetchErrs) > 0 {
 			writeErr(w, http.StatusBadGateway, "fetch models: "+strings.Join(fetchErrs, "; "))
+			return
+		}
+		// 池里有号、只是每个号对这个域的所有模型都被 11158 学成 deny：此前落
+		// 503「请先添加账号」，把人引去查账号（方向全错）。这不是服务不可用，
+		// 是「你这批号用不了这些模型」，给 200 + 空列表 + 说明。
+		if hiddenTier > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":          true,
+				"models":      out,
+				"hidden_tier": hiddenTier,
+				"note":        "所有模型都被账号等级闸门隐藏（上游 11158：当前账号类型不支持）；勾选「显示等级不支持的模型」可查看",
+			})
 			return
 		}
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")

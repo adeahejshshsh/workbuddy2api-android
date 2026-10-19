@@ -24,6 +24,47 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
+// ErrorFrame 上游以 error 帧报错（HTTP 200 已开流，但流里是一帧 {"error":...}）。
+// 非流式 Aggregate 遇到它不再合成空成功响应，而是把它交回调用方——调用方用
+// FrameKind(Payload) 分类后走与 HTTP 错误完全相同的账号处置与末端文案。
+type ErrorFrame struct {
+	// Payload error 帧的 data 原文（JSON），保留完整以便分类与透传。
+	Payload string
+}
+
+func (e *ErrorFrame) Error() string {
+	p := e.Payload
+	if r := []rune(p); len(r) > 200 {
+		p = string(r[:200]) + "…"
+	}
+	return "upstream error frame: " + p
+}
+
+// IsErrorFrame 报告错误是否为上游 error 帧（供调用方区分「流里报错」与「流解析失败」）。
+func IsErrorFrame(err error) bool {
+	var ef *ErrorFrame
+	return errors.As(err, &ef)
+}
+
+// errClientWrite 标记「写客户端失败」：SSE 透传时 w.Write 出错只可能是客户端
+// 断连（上游帧本身是好的）。handler 必须把它与「读上游失败」分开——前者账号健康、
+// 记 Interrupted；后者是上游故障，账号要被喂失败计数。
+var errClientWrite = errors.New("client write failed")
+
+// errUpstreamRead 标记「读上游失败」：流读到一半 RST/连接被掐（unexpected EOF、
+// connection reset）。客户端已收到 200 和若干帧，只能补一帧 error + [DONE] 收尾，
+// 但错误必须能追溯到上游，不能让调用方当成「客户端走了」。
+var errUpstreamRead = errors.New("upstream stream read failed")
+
+// IsClientWriteError 报告错误是否为写客户端失败（客户端断连）。
+func IsClientWriteError(err error) bool { return errors.Is(err, errClientWrite) }
+
+// IsUpstreamReadError 报告错误是否为读上游失败（上游中途断流）。
+func IsUpstreamReadError(err error) bool { return errors.Is(err, errUpstreamRead) }
+
+// clientWriteErr 包装写客户端的错误（保留原错误文本，供日志）。
+func clientWriteErr(err error) error { return fmt.Errorf("%w: %v", errClientWrite, err) }
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
@@ -145,8 +186,10 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			return nil, err
 		}
 		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			payload := strings.TrimPrefix(line, "data: ")
+		// SSE 规范里 "data:" 后的空格是可选的（"data:{...}" 同样合法）。只认
+		// "data: " 会让这种上游变成「零有效事件」→ 误报 502 upstream_parse。
+		if strings.HasPrefix(line, "data:") {
+			payload := strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
 			if payload == "[DONE]" {
 				// 上游显式结束：停止读取，DONE 之后的任何数据一律忽略。
 				sawDone = true
@@ -154,6 +197,16 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			} else {
 				var chunk map[string]any
 				if json.Unmarshal([]byte(payload), &chunk) == nil {
+					// 上游「200 + error 帧」是真实形态（6004 限流、内容审核、11158 等级
+					// 拒绝）。流式路径一直专门处理它（StreamHint 的 error-passthrough），
+					// 非流式此前把它当普通事件吃掉：error 帧没有 choices → 不并入内容，
+					// 但 validEvents 已自增、不触发 errEmptyStream → 合成
+					// content="" + finish_reason:"stop" 的假 200 成功，调用方还会
+					// NoteSuccess 把正在限流的号洗成健康号、粘性把会话钉死在它身上。
+					// 这里一律升级成 ErrorFrame 交回调用方走既有的错误策略。
+					if _, hasErr := chunk["error"]; hasErr {
+						return nil, &ErrorFrame{Payload: payload}
+					}
 					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
 					validEvents++
 					if v, ok := chunk["id"].(string); ok && id == "" {
@@ -378,10 +431,45 @@ func stripToolCallNames(obj map[string]any, seen map[int]bool) {
 				continue
 			}
 			// 首现：保留 name 键原样（上游首片通常带非空 name；空 name 也照发，
-			// 与 OpenAI 对「首帧无 name」的容忍一致），随后分片统一删除。
-			seen[idx] = true
+			// 与 OpenAI 对「首帧无 name」的容忍一致）。
+			//
+			// 但「空 name」不能占住首片名额：上游先发 function.name:""、真名在
+			// 第二片才到的形态是实测存在的，占位会让第二片的真名被 delete 抹掉，
+			// 客户端最终拿到空工具名。只有真发过非空 name 才算「首片已出」。
+			if fn, _ := tc["function"].(map[string]any); fn != nil {
+				if nm, _ := fn["name"].(string); nm != "" {
+					seen[idx] = true
+				}
+			}
 		}
 	}
+}
+
+// maxToolIdxIn 返回 obj 里出现过的最大 tool_call index（没有则返回 cur）。
+// 供 repairFrame 在分配合成 index 之前把「同一帧里的真实调用」算进去。
+func maxToolIdxIn(obj map[string]any, cur int) int {
+	chs, _ := obj["choices"].([]any)
+	for _, ci := range chs {
+		c, _ := ci.(map[string]any)
+		if c == nil {
+			continue
+		}
+		d, _ := c["delta"].(map[string]any)
+		if d == nil {
+			continue
+		}
+		tcs, _ := d["tool_calls"].([]any)
+		for _, tci := range tcs {
+			tc, _ := tci.(map[string]any)
+			if tc == nil {
+				continue
+			}
+			if v, ok := tc["index"].(float64); ok && int(v) > cur {
+				cur = int(v)
+			}
+		}
+	}
+	return cur
 }
 
 // normalizeFrame 以 OpenAI 流式规范白名单重建帧：仅保留标准字段，
@@ -545,9 +633,11 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	toolFinishSent := false
 
 	// writeSSE 原样写出一帧并 flush。
+	// 写失败一律包成 errClientWrite：上游帧本身是好的，写不出去只可能是客户端
+	// 断连。handler 据此区分「人走了」与「上游坏了」——两者对账号的处置相反。
 	writeSSE := func(payload string) error {
 		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
-			return werr
+			return clientWriteErr(werr)
 		}
 		if fl != nil {
 			fl.Flush()
@@ -619,6 +709,11 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		if !repair.Enabled() {
 			return []map[string]any{obj}
 		}
+		// 先把本帧自带的真实 tool_call index 并入 maxToolIdx。maxToolIdx 原本只在
+		// writeChunk 里更新，而 repairFrame 在 writeChunk **之前**跑：同一帧既有真实
+		// delta.tool_calls[index=0] 又有正文标记时（首帧 maxToolIdx=-1），合成调用也
+		// 拿到 index 0，被 stripToolCallNames 当成「同 index 的后续分片」删掉 name。
+		maxToolIdx = maxToolIdxIn(obj, maxToolIdx)
 		chs, ok := obj["choices"].([]any)
 		if !ok {
 			return []map[string]any{obj}
@@ -709,17 +804,21 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 
 	br := bufio.NewReaderSize(r, 64*1024)
 	validFrames := 0
+	// readErr 上游读错误（非 EOF）：流中途被掐。记下来走统一收尾，绝不裸 return。
+	var readErr error
 readLoop:
 	for {
 		line, err := br.ReadString('\n')
 		trimmed := strings.TrimRight(line, "\r\n")
 		switch {
-		case strings.HasPrefix(trimmed, "data: [DONE]"):
-			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
-			// [DONE] 统一在循环结束后写出，保证恰好一个。
-			break readLoop
-		case strings.HasPrefix(trimmed, "data: "):
-			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
+		case strings.HasPrefix(trimmed, "data:"):
+			// "data:" 后的空格可选（SSE 规范）。[DONE] 统一在循环结束后写出。
+			payload := strings.TrimPrefix(strings.TrimPrefix(trimmed, "data:"), " ")
+			if strings.TrimSpace(payload) == "[DONE]" {
+				// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
+				break readLoop
+			}
+			n, werr := writeFrame(payload)
 			validFrames += n
 			if werr != nil {
 				return werr
@@ -727,7 +826,7 @@ readLoop:
 		case trimmed != "":
 			// 注释/其他行：原样透传
 			if _, werr := io.WriteString(w, line); werr != nil {
-				return werr
+				return clientWriteErr(werr)
 			}
 			if fl != nil {
 				fl.Flush()
@@ -738,7 +837,12 @@ readLoop:
 			if err == io.EOF {
 				break
 			}
-			return err
+			// 上游中途断流（RST / unexpected EOF）：不能直接 return —— 那样客户端
+			// 拿到的是没有 error 帧、没有 [DONE] 的悬挂流，而这个函数承诺「恰好一个
+			// [DONE]」；handler 还会把错误当「客户端断连」把账号洗白。
+			// 这里记下读错误、跳出循环，走下方统一的 error 帧 + [DONE] 收尾。
+			readErr = err
+			break
 		}
 	}
 	// 标记修复的尾部收尾：流结束时仍未判定的字节一律原文回吐（绝不吞字节，未闭合
@@ -764,22 +868,30 @@ readLoop:
 			}
 		}
 	}
+	// 上游读错误（流中途断）：补一帧 error 再补 [DONE]。客户端因此能区分
+	// 「说完了」与「说到一半上游断了」，不会把半截答案当完整答案。
+	if readErr != nil {
+		_ = writeRaw(`{"error":{"message":"upstream stream broke before completion","type":"upstream_error","code":"upstream_read_error"}}`)
+	}
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
 	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。
 	// 网关本地空流兜底帧走 hintFn=nil 的直写路径：该形态未覆盖（不编造 hint），
 	// 且 writeRaw 的 hintFn 闭包在空流路径下可能携带上一帧的上下文造成误配。
-	if validFrames == 0 {
+	if validFrames == 0 && readErr == nil {
 		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-		return err
+		return clientWriteErr(err)
 	}
 	if fl != nil {
 		fl.Flush()
 	}
 	if validFrames == 0 {
 		return errEmptyStream
+	}
+	if readErr != nil {
+		return fmt.Errorf("%w: %v", errUpstreamRead, readErr)
 	}
 	return nil
 }

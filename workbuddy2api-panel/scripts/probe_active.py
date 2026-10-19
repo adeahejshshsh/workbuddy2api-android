@@ -27,7 +27,8 @@ def cred(prefix):
     hits = glob.glob(os.path.join(AUTHS, f"workbuddy-{prefix}*.json"))
     if not hits:
         raise SystemExit(f"no auth for {prefix}")
-    d = json.load(open(hits[0]))
+    with open(hits[0], encoding="utf-8") as f:   # 非 UTF-8 locale（中文 Windows GBK）下必须显式指定
+        d = json.load(f)
     a, acc = d["auth"], d["account"]
     return {"token": a["accessToken"], "domain": a.get("domain") or "",
             "uid": acc["uid"], "nick": acc.get("nickname", ""),

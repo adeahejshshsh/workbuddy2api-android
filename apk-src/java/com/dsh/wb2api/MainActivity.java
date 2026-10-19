@@ -306,14 +306,19 @@ public class MainActivity extends Activity {
     void probePort() {
         if (probing) return;
         probing = true;
-        probe.execute(new Runnable() {
-            public void run() {
-                final boolean up = GatewayService.portUp();
-                ui.post(new Runnable() {
-                    public void run() { portServing = up; probed = true; probing = false; }
-                });
-            }
-        });
+        try {
+            probe.execute(new Runnable() {
+                public void run() {
+                    final boolean up = GatewayService.portUp();
+                    ui.post(new Runnable() {
+                        public void run() { portServing = up; probed = true; probing = false; }
+                    });
+                }
+            });
+        } catch (Throwable t) {
+            // 线程池已关闭（Activity 正在销毁）：吞掉即可，绝不能让主线程崩。
+            probing = false;
+        }
     }
 
     void injectKey() {
@@ -456,7 +461,15 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        // 顺序要紧：先停掉主 Looper 上的 tick 自投递，再关线程池。
+        // 此前只 shutdownNow()、从不 removeCallbacks —— 已投递的那一发 tick 仍会在
+        // Activity 销毁后执行，probePort() 往已关闭的 ExecutorService 里 execute()，
+        // 主线程抛 RejectedExecutionException 直接 FATAL EXCEPTION，同进程的
+        // GatewayService 一起陪葬（和「常驻网关」的设计前提直接冲突）。
+        try { ui.removeCallbacksAndMessages(null); } catch (Throwable ignored) {}
         try { probe.shutdownNow(); } catch (Throwable ignored) {}
+        // WebView 必须显式销毁：它持有 Activity 上下文，不 destroy 就永久泄漏。
+        try { if (web != null) { web.destroy(); web = null; } } catch (Throwable ignored) {}
         super.onDestroy();
     }
 

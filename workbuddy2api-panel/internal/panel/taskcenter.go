@@ -88,7 +88,7 @@ func (p *Panel) skipReason(a *auth.Auth, t upstream.Task) string {
 	case act == nil:
 		return "本移植版没有该任务的自动化动作，需在官方客户端完成"
 	case act.Attempt && !p.attemptAllowed():
-		return "尝试型任务（上游未证实可点亮），默认不执行；需要可在任务中心勾选「包含尝试型任务」"
+		return "尝试型任务（上游未证实可点亮），默认不执行；需要请 POST /panel/api/tasks/skip {\"allow_attempt\":true}"
 	}
 	if a != nil {
 		if blocked, why := p.skipBlocked(a.UID, t.TaskCode); blocked {

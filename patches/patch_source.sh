@@ -7,7 +7,7 @@
 #
 # 用法: bash patch_source.sh            # 打补丁
 #       bash patch_source.sh --revert   # 还原
-set -u
+set -eu
 PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
 GOROOT="$PREFIX/lib/go"
 RESOLV="$PREFIX/etc/resolv.conf"
@@ -49,6 +49,10 @@ if old not in s:
 open(f, 'w').write(s.replace(old, new, 1))
 print("  已修改: " + f)
 PY
+  # 退出码必须检查：锚点未命中时 python 以 2 退出，此前无人看，脚本继续往下跑并
+  # exit 0 —— 随后 rebuild.sh 编出的二进制 argv 错位（-config 被当普通参数），
+  # 启动即退，且没有任何「补丁没打上」的提示。
+  [ $? -eq 0 ] || { echo "❌ rt0 补丁失败（Go 版本变了？请手工核对锚点）"; exit 1; }
 fi
 
 # ---------- 2) net resolv.conf 路径 ----------

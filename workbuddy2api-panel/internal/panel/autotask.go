@@ -222,6 +222,20 @@ func isMPTaskCode(code string) bool { return mpTaskCodes[code] }
 // taskByCode 拉取任务列表并定位单个任务；未找到返回 nil（不视为错误）。
 // 双口径：mp 专属任务在默认列表查不到，自动回落 mp 列表（仅对已登记的 mp 码，
 // 未知码不多打一次上游）。
+// taskDone 任务是否「已完成到不必再跑」：已领取奖励，或已达目标但还没领取。
+// 单任务入口与一键全部此前口径不一致 —— 单任务只跳过 Claimed，于是「已达标未领」
+// 时点一键完成会把整条动作链重跑一遍（expert_5 是 5 次真实对话 + 5 组召唤事件），
+// 白烧配额与时间。两个入口共用这一个判定，避免再分叉。
+func taskDone(t *upstream.Task) bool {
+	if t == nil {
+		return true
+	}
+	if t.Claimed {
+		return true
+	}
+	return t.Target > 0 && t.Current >= t.Target
+}
+
 func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
@@ -629,6 +643,7 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		TaskCode string `json:"task_code"`
 	}
+	limitJSONBody(w, r) // 面板 JSON 接口请求体上限 1MB（M6）
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.TaskCode == "" {
 		writeErr(w, http.StatusBadRequest, "task_code required")
 		return
@@ -642,7 +657,7 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	// 被判"做不了"的任务不再白跑一遍（v1.22.0）：直接说清原因，避免"点了没效果"。
 	if act.Attempt && !p.attemptAllowed() {
 		writeErr(w, http.StatusConflict,
-			"该任务是尝试型（上游未证实可点亮），默认不执行；如要试请在任务中心勾选「包含尝试型任务」")
+			"该任务是尝试型（上游未证实可点亮），默认不执行；如要试请 POST /panel/api/tasks/skip 带上 {\"allow_attempt\":true} 打开开关")
 		return
 	}
 	if a != nil {
@@ -671,8 +686,12 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	isMP := isMPTaskCode(act.TaskCode)
-	if before.Claimed {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true, "message": "该任务已领取过奖励"})
+	if taskDone(before) {
+		msg := "该任务已领取过奖励"
+		if !before.Claimed {
+			msg = "该任务已达标（" + taskProgressText(before) + "），无需再跑"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true, "message": msg})
 		return
 	}
 	msg, err := act.run(p, a)
@@ -1197,7 +1216,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			out = append(out, item)
 			continue
 		}
-		if before.Claimed || before.Current >= before.Target && before.Target > 0 {
+		if taskDone(before) {
 			item["status"] = "skipped"
 			item["message"] = "已完成（" + taskProgressText(before) + "）"
 			out = append(out, item)
@@ -1277,7 +1296,13 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 用 context 兜底超时（多项任务串联 + 每项含真实对话，可能耗时较长）。
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	//
+	// 预算必须覆盖流水线真实耗时，否则必然 504：mp 待办每条 sleep(mpChatEventGap=45s
+	// + 0..10s 抖动)，9 条就 ≈ 8 分钟/账号；再叠 expert_5 的 5×6s、每项 3 次 3s
+	// 回读与 reportGap 节流。原来的 5 分钟远小于这个量级 —— 返回 504 的同时后台
+	// goroutine 还持着 per-account 锁，用户重试全撞 409「有任务动作正在执行中」。
+	// 15 分钟给足余量；真要更长就走队列+轮询（本函数返回值里已有逐项进度）。
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
 	done := make(chan []map[string]any, 1)
 	go func() {

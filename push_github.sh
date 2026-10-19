@@ -81,8 +81,10 @@ if git diff --cached --quiet; then echo "  （内容无变化，跳过提交）"
 fi
 
 echo "== 3/5 仓库（不存在就建，公开）"
+# set -eu 下命令替换里的 curl 非零会直接触发 errexit，把「3/5 建仓」这步无自述地
+# 中断（网络抖动 / DNS 超时 = curl 6/28）。这里显式容错并降级成空码。
 CODE=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" \
-       "https://api.github.com/repos/$OWNER/$NAME")
+       "https://api.github.com/repos/$OWNER/$NAME" 2>/dev/null) || CODE=""
 if [ "$CODE" = "200" ]; then echo "  已存在"; else
   curl -sS -m 30 -o /dev/null -w '  建仓 http=%{http_code}\n' -X POST \
     -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \

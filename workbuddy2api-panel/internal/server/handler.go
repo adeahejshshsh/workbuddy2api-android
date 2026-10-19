@@ -1003,13 +1003,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
 			case sErr != nil:
-				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
-				// （与 default 同语义），请求日志归为 Interrupted（人已走，未完成）。
-				st.outcome = reqlog.OutcomeInterrupted
-				h.cfg.Pool.NoteSuccess(acct.UID)
-				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-				if sessKey != "" && h.cfg.Session != nil {
-					h.cfg.Session.Bind(sessKey, acct.UID)
+				if upstream.IsClientWriteError(sErr) {
+					// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
+					// （与 default 同语义），请求日志归为 Interrupted（人已走，未完成）。
+					st.outcome = reqlog.OutcomeInterrupted
+					h.cfg.Pool.NoteSuccess(acct.UID)
+					h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
+					if sessKey != "" && h.cfg.Session != nil {
+						h.cfg.Session.Bind(sessKey, acct.UID)
+					}
+				} else {
+					// 读上游失败（中途 RST / unexpected EOF）：这是**上游故障**，不是
+					// 「人走了」。此前不分来源一律记 Interrupted + NoteSuccess，等于把
+					// 上游断流洗白成账号健康、还顺手清掉 11102 负缓存并绑粘性，监控里
+					// 也看不到真实故障。流尾已补 error 帧 + [DONE]（见 StreamHint）。
+					st.status = http.StatusBadGateway
+					st.outcome = reqlog.OutcomeStreamError
+					h.cfg.Pool.NoteFailures(acct.UID)
+					log.Printf("WARN: [server] stream acct=%s model=%s: upstream read error: %v",
+						logfmt.Label(acct.UID, acct.Nickname), bareModel, sErr)
 				}
 			default:
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
@@ -1067,6 +1079,35 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc.Close()
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			// 上游「200 + error 帧」（6004 限流 / 内容审核 / 11158 等级拒绝）：既不是
+			// 成功也不是解析失败。按流式路径的同一口径分类、处置账号，然后照常轮转
+			// 换号（请求级错误直接终止轮转）。此前 Aggregate 把它当普通事件吃掉，
+			// 合成空 content 的假 200，还把正在限流的号记成健康号。
+			var ef *upstream.ErrorFrame
+			if errors.As(err, &ef) {
+				kind := upstream.FrameKind(ef.Payload)
+				uerr := &upstream.Error{Kind: kind, Status: http.StatusOK, Msg: ef.Payload}
+				lastErr = uerr
+				h.applyErrorPolicy(acct.UID, kind, ef.Payload, bareModel, uerr)
+				fail(acct.UID)
+				log.Printf("WARN: [server] non-stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(ef.Payload, 200))
+				// 请求级错误：换任何号都是同一个审核/同一个超限/同一份非法 body，
+				// 轮转只会把无效请求放大 MaxRotate 倍，立即终止交给末端映射。
+				stop := false
+				switch kind {
+				case upstream.ErrContentBlocked, upstream.ErrPromptTooLong,
+					upstream.ErrBadParams, upstream.ErrImageInvalid:
+					stop = true
+				}
+				if stop {
+					break
+				}
+				if !rotateBackoff(i, r.Context()) {
+					break
+				}
+				continue
+			}
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
@@ -1227,6 +1268,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 该做的是换个模型。用 400 + 明确的 code 把不可重试的性质讲清楚。
 			code = "model_unavailable"
 			status = http.StatusBadRequest
+		case upstream.ErrContentBlocked, upstream.ErrPromptTooLong,
+			upstream.ErrBadParams, upstream.ErrImageInvalid:
+			// 请求级错误经「上游 error 帧」形态到达末端（HTTP 400 形态在轮转循环里
+			// 已各自立即返回，走不到这里）。同一份 body 换任何号都是同样的结果，
+			// 不该伪装成 503「服务端过载」让客户端无限重试——统一给 400 + 精确 code。
+			status = http.StatusBadRequest
+			switch ue.Kind {
+			case upstream.ErrContentBlocked:
+				code = "content_blocked"
+			case upstream.ErrPromptTooLong:
+				code = "prompt_too_long"
+			case upstream.ErrBadParams:
+				code = "bad_params"
+			case upstream.ErrImageInvalid:
+				code = "image_invalid"
+			}
 		}
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游 body 是一份 JSON 文档；整段塞进 message 会让客户端看到满屏
@@ -1357,12 +1414,25 @@ func promptTooLongMessage(body string) string {
 
 // usageCreditTotal 从聚合响应取 usage.credit 与 total_tokens（成本台账非流式入口）。
 // 任一字段缺失/非法 → ok=false（不记录）。
+//
+// 「缺失」与「0」必须分开：上游没给 credit 时，把缺失当 0 会让 NoteModelCost 记下
+// per1k=0 → 该 (账号,模型) 被标成 tier 0「已实测免费」，而 pick.go 的 costTier 是
+// 硬过滤（只留最优层）——6 小时 modelCostTTL 内该模型的全部流量被压到这一个号上，
+// 且因为 credit>0 才扣余额，内插余额也不动，看起来「一切正常」。流式路径用的是
+// *float64 判存在性（logging.go 的 hasCredit），这里对齐同一口径。
 func usageCreditTotal(resp map[string]any) (credit float64, total int, ok bool) {
 	usage, _ := resp["usage"].(map[string]any)
 	if usage == nil {
 		return 0, 0, false
 	}
-	c, _ := usage["credit"].(float64)
+	cv, hasCredit := usage["credit"]
+	if !hasCredit {
+		return 0, 0, false
+	}
+	c, isNum := cv.(float64)
+	if !isNum {
+		return 0, 0, false
+	}
 	t, _ := usage["total_tokens"].(float64)
 	if t <= 0 {
 		return 0, 0, false

@@ -342,6 +342,11 @@ public class GatewayService extends Service {
         refreshNotification();
         sleep(backoffMs(n));            // 退避，别打连环炮
         if (!watching) return;
+        // 退避窗口里主线程可能已经手动重启过（onStartCommand 的 killProc + startGateway）：
+        // 这时再拉起就是第二个进程 —— P1 变孤儿占着 7863，P2 bind 失败退出，看门狗下一拍
+        // 把「端口有人但 proc 已死」判成外部实例，界面永久停在「运行中（外部）」，点停止
+        // 也杀不掉孤儿。二次检查（startGateway 内另有锁 + 同样的检查，双保险）。
+        if (alive()) return;
         startGateway();
     }
 
@@ -356,7 +361,17 @@ public class GatewayService extends Service {
     }
 
     // ---------- 启动网关 ----------
-    void startGateway() {
+    /**
+     * 拉起网关进程。
+     *
+     * synchronized + 入口 alive() 二次检查是必需的：调用方有两个线程 —— 主线程
+     * （onStartCommand）与看门狗线程（selfHeal）。此前没有任何互斥，看门狗在
+     * selfHeal 的 sleep 退避里时用户点「重启网关」，主线程先拉起 P1，看门狗醒来
+     * 再拉起 P2 并覆盖静态 proc → P1 成孤儿占着 7863，P2 bind 失败退出，之后
+     * killProc() 只作用在已死的 P2 上，孤儿再也杀不掉。
+     */
+    synchronized void startGateway() {
+        if (alive()) return;            // 已有存活进程：不重复拉起（锁内二次检查）
         try {
             File gwDir = new File(getFilesDir(), "gateway");
             new File(gwDir, "auths").mkdirs();
@@ -479,9 +494,13 @@ public class GatewayService extends Service {
         if (cfg.exists() && cfg.length() > 0) return;
         String key = "wb2api-" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
         try (InputStream is = getAssets().open("config.json")) {
+            // 必须读到 EOF：单次 read() 只保证「至少读到 1 字节」，assets 一旦涨过缓冲
+            // 上限就被截成半截 JSON，网关读配置失败起不来；按字节切 UTF-8 还会切出乱码。
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
             byte[] buf = new byte[8192];
-            int n = is.read(buf);
-            String tpl = (n > 0) ? new String(buf, 0, n, "UTF-8") : "{}";
+            int n;
+            while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+            String tpl = (bo.size() > 0) ? new String(bo.toByteArray(), "UTF-8") : "{}";
             tpl = tpl.replace("\"api_key\": \"test_key\"", "\"api_key\": \"" + key + "\"");
             if (!tpl.contains(key)) tpl = tpl.replace("test_key", key);
             try (FileOutputStream os = new FileOutputStream(cfg)) { os.write(tpl.getBytes("UTF-8")); }
@@ -512,7 +531,9 @@ public class GatewayService extends Service {
         return f;
     }
 
-    void killProc() {
+    /** 杀掉当前网关句柄。与 startGateway 同锁：proc 的读改写必须串行，否则两个线程
+     *  交叉执行会出现「拉起后立刻被另一个线程的 killProc 清空句柄」（孤儿进程）。 */
+    synchronized void killProc() {
         Process p = proc;
         proc = null;
         if (p != null) { try { p.destroy(); } catch (Throwable ignored) {} }

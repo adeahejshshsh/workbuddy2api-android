@@ -262,6 +262,7 @@ func (p *Panel) tasksSkipState(w http.ResponseWriter, r *http.Request) {
 		UID          string `json:"uid"`
 		Code         string `json:"code"`
 	}
+	limitJSONBody(w, r) // 面板 JSON 接口请求体上限 1MB（M6）
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON："+err.Error())
 		return

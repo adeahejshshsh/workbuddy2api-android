@@ -1,6 +1,97 @@
 # 变更记录
 
-## v1.25.0（当前）
+## v1.26.0（当前）
+
+**本版 = 第三方代码审查报告（CODE-REVIEW.md）的落地修复。** 4 条高危全修，10 条中危修 10，
+9 条低危修 8（L1 保留，见下），并新增 6 个回归测试。
+
+### 高优先级（全部修复）
+
+* **H1 非流式把上游 error 帧吃成「假 200 成功」**（`internal/upstream/sse.go`、`internal/server/handler.go`）
+  * `Aggregate` 现在识别 `{"error":...}` 帧并返回 `*upstream.ErrorFrame`，不再合成
+    `content:""` + `finish_reason:"stop"` 的空成功响应。
+  * handler 用 `FrameKind` 分类后走与流式路径**同一套**账号处置：6004 冷却、内容审核 400、
+    11158 等级负缓存；请求级错误（内容拦截/上下文超限/参数非法/图片无效）直接终止轮转，
+    不再伪装成 503「服务端过载」让客户端无限重试。
+  * 后果链被切断：此前一个正在限流的号会被 `NoteSuccess` 洗成健康号、11102 负缓存被清、
+    粘性把会话钉死在它身上，后续每轮继续失败。
+* **H2 Activity 销毁后 tick 仍在跑 → `RejectedExecutionException` 崩掉整个进程**（`MainActivity.java`）
+  * `onDestroy` 补 `ui.removeCallbacksAndMessages(null)`（先停自投递，再关线程池），
+    补 `web.destroy()`（WebView 持有 Activity，不 destroy 就永久泄漏）。
+  * `probePort()` 的 `probe.execute()` 包 try/catch：线程池已关时吞掉，绝不让主线程崩
+    —— 主线程崩会把同进程的 `GatewayService` 一起带走。
+* **H3 `startGateway()` 无互斥 → 两个 Go 进程、孤儿占着 7863**（`GatewayService.java`）
+  * `startGateway()` / `killProc()` 改 `synchronized`，入口加 `if (alive()) return;` 二次检查；
+    `selfHeal` 退避醒来后再查一次 `alive()`。三条路一起堵住「主线程 + 看门狗同时拉起」，
+    也就堵住了「P1 变孤儿 → 界面永久显示『运行中（外部）』→ 点停止杀不掉」。
+* **H4 成本账本把「上游没给 credit」记成「免费」，6 小时把该模型流量压到一个号**（`handler.go`）
+  * `usageCreditTotal` 增加存在性校验（`usage["credit"]` 不存在或非数字 → `ok=false`），
+    与流式路径的 `*float64` 判存在性口径对齐。
+
+### 中优先级（10/10）
+
+* **M1** 一键完成全部：HTTP 超时 5min → **15min**（mp 9 条 × ~50s ≈ 8min + expert_5 等，
+  原来必然 504，且超时后后台还持着 per-account 锁 → 重试全撞 409）。
+* **M2** `StreamHint` 区分「写客户端失败」与「读上游失败」：新增 `errClientWrite` /
+  `errUpstreamRead` 两个哨兵。上游中途 RST 现在**补一帧 error + [DONE] 收尾**再返回，
+  客户端不再拿到悬挂流；handler 不再把上游故障记成「人走了」，改为 `NoteFailures` + 502 观测。
+* **M3** `patch_source.sh` 加 `set -eu` 并检查 rt0 补丁的 python 退出码（此前锚点未命中被静默吞掉，
+  之后编出的二进制 argv 错位、启动即退且无提示）。
+* **M4** `build_apk.sh` 的 GOROOT 源码替换改为 `trap ... EXIT INT TERM HUP` 还原（此前中途打断
+  会把 GOROOT 永久停在「未打 rt0 补丁」状态）；缺 `.orig-dsh` 时前置报错。
+* **M5** 复用上一版 `classes.dex` 前校验 `apk-src/java/**` 指纹（`.java-src-hash`），
+  源码改过就**直接失败**，不再产出「新版本号 + 旧 Java 代码」。
+* **M6** 面板请求体上限：`ServeHTTP` 统一 `MaxBytesReader(32MB)`，JSON 接口再收紧到 1MB
+  （`limitJSONBody`），导入文件 `io.LimitReader` + 413。
+* **M7** 单任务入口与「一键全部」共用 `taskDone()`（已领取 **或** 已达标未领都跳过），
+  不再在「已达标未领」时把整条动作链重跑一遍。
+* **M8** `models()` 的 `hiddenTier` 现在真的自增；全部模型被等级闸门隐藏时返回
+  **200 + 空列表 + 说明**，而不是误导性的 503「请先添加账号」。
+* **M9** 重新注册 `GET/POST /panel/api/tasks/skip`（跳过名单 + 尝试型开关的唯一入口），
+  并把 409 文案里「任务中心勾选」改成实际的 API 调用方式。
+* **M10** `loginPoll` 加 `consumed` 认领标记：并发轮询不再重复执行完成路径
+  （`Pool.Add` / `SaveAtomic` / 签到 / 余额刷新各跑两遍）。
+
+### 低优先级（8/9）
+
+* **L2** `function.name` 为空串不再占住「首片已出」名额（否则真名会被后续分片删掉）。
+* **L3** `repairFrame` 在分配合成 `tool_calls` index 之前先并入本帧的真实 index，
+  避免合成调用与真实调用撞 index 被当成「同 index 后续分片」。
+* **L4** SSE 接受 `data:{...}`（冒号后无空格）。多行 `data:` 合并仍按行处理（见「已知限制」）。
+* **L5** `ensureConfig` 读 assets 循环到 EOF（此前单次 `read()` 超 8KB 就截成半截 JSON）。
+* **L6** `push_github.sh` 建仓探测的 `curl` 加容错（`set -eu` 下网络抖动会无自述地中断）。
+* **L7** `probe_active.py` 读 auth 文件显式 `encoding="utf-8"`。
+* **L8** `task_common.py` 兜住 `{"data": null}`（新号无连登数据）。
+* **L9** `ReenableIfCredits` 的注释从「调用方必须已持锁」改成「本函数自己取锁，别持锁调用」
+  ——原注释会诱导后人写出自死锁代码。
+
+### 已知限制（本版未改）
+
+* **L1** 上游吐若干帧后直接断连（无 `finish_reason`、无 `[DONE]`）时，正文的 `finish_reason`
+  仍是 `stop`。OpenAI 协议里没有「半截」这个语义，强行改成 `length` 是撒谎；本版只保证
+  **客户端能看出是上游断流**（error 帧 `upstream_read_error`），不改写正文的收尾原因。
+* **L4 的多行 `data:`**：一个事件里多条 `data:` 行仍未按空行合并（按行当独立事件）。
+  上游实测未出现该形态；如出现需把读循环改成「按空行分帧」。
+
+### 工具链与打包
+
+* `build_apk.sh` 新增 **无 aapt2 降级路径**：探测 `aapt2 version` 失败时，复用上一版 APK 的
+  清单与资源，并把 AXML 字符串池里的版本串**等长就地改写**（`1.25.0` → `1.26.0`）。
+  本机 `aapt2` 与仓库最新 abseil/protobuf ABI 不匹配（缺 `ReadCord` 符号），本版仍走这条路径。
+* `build_apk.sh` 的 `R8`/`SIGNER` 改为双路径探测（`$PREFIX/lib/wbapi-tools/` → `$PREFIX/share/java/`），
+  环境重置抹掉私有副本后仍可构建。
+* `javac` 的 `gen/.../R.java` 改为按存在与否决定（降级路径下没有它，且 Java 源码只引用
+  `android.R.*`）。
+
+### 测试
+
+新增回归：`internal/upstream/sse_errorframe_test.go`（5 个：error 帧不再假成功、正常流不受影响、
+`data:` 无空格、上游断流补 error+[DONE]、客户端写失败可识别）、
+`internal/server/usagecredit_test.go`（1 个：credit 缺失/为 null/为字符串都不记账）。
+
+全绿：upstream **203**、server **90**、pool **184**、panel **24**（+15 node 依赖 SKIP），0 FAIL。
+
+## v1.25.0
 
 * **rc=141（SIGPIPE）根治完成 —— Java 侧修复这次真正编进 dex 了**：
   * `GatewayService.pump()`：超限后只把管道**读空**、不再落盘、**绝不关读端**（循环只在 EOF 结束）；
