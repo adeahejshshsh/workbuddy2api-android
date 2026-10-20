@@ -778,15 +778,17 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	}
 
 	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
-	// 仅 JSON 解析成功时计数记为一次有效转发（JSON 解析失败照常降级原样写出，但不计数）。
+	// 只要**成功转发了一帧**就计数（bug #12）：非 JSON 的 data 帧（心跳/纯文本兼容
+	// 形态）此前不计数，若整条流都是这种帧，客户端明明收到了内容，这里仍判空流 →
+	// 补写 "empty upstream stream" 错误帧 + 返回 errEmptyStream，handler 记 502 假失败。
 	writeFrame := func(payload string) (int, error) {
 		var obj map[string]any
 		if json.Unmarshal([]byte(payload), &obj) != nil {
-			// 非 JSON 帧：原样降级写出，不计数（与修复前一致）。
+			// 非 JSON 帧：原样降级写出，**计一次有效转发**（已成功交给客户端）。
 			if werr := writeSSE(payload); werr != nil {
 				return 0, werr
 			}
-			return 0, nil
+			return 1, nil
 		}
 		// 上游错误帧透传（error-passthrough）：带 error 键的帧**原样写出**，不走
 		// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游

@@ -946,9 +946,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.degrade.Trigger()
 				body = prompt.Rewrite(body, prompt.Degraded)
 				degradedApplied = true
-				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
+				delete(tried, acct.UID) // 单账号池也能拿到重试机会
 				releaseHeld()
 				log.Printf("content-blocked (likely fingerprint false positive) -> degraded prompt retry")
+				// 降级重试**不占轮转名额**（bug #5）：这条分支从不给 lastErr 赋值，
+				// 若它吃掉一次 i，MaxRotate==1 时循环直接结束 → 末端落默认
+				// 503 no_healthy_account，把"请求内容被拦（应 400 content_blocked）"
+				// 报成"服务端没号"，客户端会无限重试。
+				i--
 				continue
 			}
 			if kind == upstream.ErrContentBlocked {

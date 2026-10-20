@@ -1475,7 +1475,10 @@ func promoClock(hhmm string) (int, bool) {
 	}
 	h, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
 	m, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if err1 != nil || err2 != nil || h < 0 || h > 24 || m < 0 || m > 59 {
+	// 小时上限必须是 23（bug #7）：允许 "24:00" 会返回 1440，若上游下发 start="24:00"
+	// 则 st=1440 > ed → promoActive 走跨午夜分支 cur>=st||cur<ed，对大多数窗口恒真
+	// → 优惠被判"全天生效"，面板显示错误的生效价。
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
 		return -1, false
 	}
 	return h*60 + m, true
@@ -2185,9 +2188,19 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 		}
 		return remain, used, size
 	}
+	// 非 Cycle 分支同样钳制（bug #2）：上游脏数据（CapacityRemain > Size，常见于
+	// 对账延迟 / 包已过期未清）会高估 credits → 选号权重 credits/maxCredits 与
+	// credit_floor 判定失真，面板还会显示"剩余 > 面额"。函数注释承诺了钳 [0,size]，
+	// 但此前只实现了 Cycle 那一半。
 	remain = a.CapacityRemain
 	used = a.CapacityUsed
 	size = a.CapacitySize
+	if remain < 0 {
+		remain = 0
+	}
+	if size > 0 && remain > size {
+		remain = size
+	}
 	if used == 0 && size > remain {
 		used = size - remain
 	}

@@ -1212,9 +1212,14 @@ $('btnRefresh').onclick = async () => {
   const b = $('btnRefresh');
   b.disabled = true; b.textContent = '刷新中…';
   try {
+    // 后端已改成异步（起 goroutine 立刻返回，bug #9）：这里轮询几次把结果拉回来，
+    // 不再假装"已刷新完成"（46 个号在上游慢时最坏要几分钟）。
     await api('balance_all', { method: 'POST' });
-    await loadOverview(true);
-    toast('余额已从上游刷新', 'ok');
+    toast('已触发余额刷新（后台进行中）', 'ok');
+    for (let i = 0; i < 3; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      await loadOverview(true);
+    }
   } catch (e) { toast('刷新失败：' + e.message, 'err'); await loadOverview(true); }
   finally { b.disabled = false; b.textContent = '刷新'; }
   if (view === 'logs') loadLogs();

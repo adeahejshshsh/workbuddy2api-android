@@ -741,18 +741,29 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
-// balanceAll 手动全量刷新余额：并发查上游、写回池内 credits（含解冻语义），
-// 完成后返回——面板紧接着拉 overview 即是最新值。账号量小（个位数），
-// 同步等待（上限受短 RPC 超时约束）比"触发后盲刷"体验更确定。
+// balanceAll 手动全量刷新余额：起 goroutine 立刻返回，结果由前端轮询 overview 拿。
+//
+// 为什么改异步（bug #9）：此前同步等全部账号查完 —— 并发上限 3、每号最长 30s，
+// 46 个号在上游慢时最坏 ≈ 7 分钟。其它 *_all 端点都是「起 goroutine 立刻回 200」，
+// 只有它同步；前端 fetch 无超时，用户点「刷新余额」后按钮一直转，浏览器/代理还可能
+// 先掐断这条长请求（面板报错但服务端仍在跑）。
 func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	p.cfg.Scheduler.RunBalanceRefreshNow()
-	p.syncNicknames()
-	log.Printf("panel: 手动全量余额刷新完成")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panel: 全量余额刷新 panic: %v", rec)
+			}
+		}()
+		p.cfg.Scheduler.RunBalanceRefreshNow()
+		p.syncNicknames()
+		log.Printf("panel: 手动全量余额刷新完成")
+	}()
+	log.Printf("panel: 手动全量余额刷新已触发（异步）")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
 // syncNicknames 手动刷新时的昵称同步（issue #94：上游改名免重登）。

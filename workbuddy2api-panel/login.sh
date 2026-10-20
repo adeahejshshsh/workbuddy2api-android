@@ -42,7 +42,11 @@ elif command -v xsel &>/dev/null; then
 fi
 
 echo ""
-read -rp "完成登录后按 y 继续: " ans
+# read 在 stdin 非 tty / EOF 时返回 1，set -e 会直接终止脚本、只留半截输出（bug #11）。
+if ! read -rp "完成登录后按 y 继续: " ans; then
+    echo "❌ 当前环境无法交互输入（stdin 不是终端，或输入已结束）" >&2
+    exit 1
+fi
 if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
     echo "已取消"
     exit 1

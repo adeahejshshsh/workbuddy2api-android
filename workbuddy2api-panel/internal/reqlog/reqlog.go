@@ -254,6 +254,8 @@ type archiveWriter struct {
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
+	// enqMu 让「检查 enabled + 入队」与 close 互斥（bug #8）。
+	enqMu     sync.RWMutex
 	closed    atomic.Bool // Close 后置位：enqueue 直接丢弃（review 观察项 3）
 	dropped   atomic.Uint64
 	lastErrMu sync.Mutex
@@ -312,7 +314,14 @@ func (w *archiveWriter) enabled() bool {
 }
 
 func (w *archiveWriter) enqueue(e Event) {
+	// 「检查 + 入队」必须与 close 互斥（bug #8）：此前 enqueue 先查 enabled() 再写
+	// ch，中间有窗口 —— close 已置 closed 且 run 的 drain 读到空 default 返回后，
+	// 这个事件才写进没人读的通道：既不落盘、也不进 DroppedWrites（指标显示"没丢"），
+	// 归档里少最后几条请求且查不出来。读写锁把两步变成原子。
+	w.enqMu.RLock()
+	defer w.enqMu.RUnlock()
 	if !w.enabled() {
+		w.dropped.Add(1) // 停机窗口内的事件：计入丢弃，别再静默
 		return
 	}
 	select {
@@ -692,8 +701,11 @@ func (w *archiveWriter) close() {
 		return
 	}
 	w.closeOnce.Do(func() {
-		w.closed.Store(true) // 先置位：此后 enqueue 直接返回，不再往死通道里塞
+		// 写锁：等在途 enqueue 落完再置位 + 停 run（bug #8）。
+		w.enqMu.Lock()
+		w.closed.Store(true)
 		close(w.stop)
+		w.enqMu.Unlock()
 		<-w.done
 	})
 }

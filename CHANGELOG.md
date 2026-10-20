@@ -1,5 +1,59 @@
 # 变更记录
 
+## v1.26.8（当前）
+
+**本版 = 第四份 bug 清单（12 条）的落地修复，严重 3/3、一般 9/9 全修。**
+
+### 严重
+
+* **1 面板加载被反复打断，最终永久白屏** —— `tick()` 每 2 秒只要 `!panelLoaded` 就再发一次
+  `loadUrl`，**不判上一次是否还在进行**。低端机上 WebView 冷启动 + 面板大 HTML/JS 普遍
+  超过 2 秒，于是从第 2 拍起每 2 秒把正在进行的加载打断重来，30 次（≈60 秒）后
+  `loadTries` 用尽 → 永久空白页，只能手点「重载面板」。新增 `panelLoading` 在途标志，
+  `onPageFinished` / `onReceivedError` 里清位。
+* **2 余额解析非周期套餐不钳制** —— `packageRemainUsed` 的 Cycle 分支把 remain 钳到
+  `[0,size]`，非 Cycle 分支没钳（函数注释却承诺了）。上游脏数据（`CapacityRemain > Size`）
+  会高估 credits → 选号权重与 `credit_floor` 判定失真、面板显示"剩余 > 面额"。
+* **3 用量窗口起点按绝对时间取整** —— `time.Now().Truncate(time.Hour)` 是按「公元 1 年起
+  的绝对时长」截断，UTC+05:30 / +05:45 / +12:45 这类非整点偏移时区会截到本地 :30/:45，
+  而桶按本地小时存 → 当前小时的桶被排除，「近 N 小时」永远少最新一小时。
+  改成先用 `time.Date` 构造本地整点。
+
+### 一般
+
+* **4 前台服务 `onTimeout` 里不退出服务** —— 两个重载都只 `setState` + `armAlarm`，
+  而 `onTimeout` 的语义是「你自己停下来，几秒内不停就 ANR / 被打死」。补 `stopSelf(startId)`
+  （服务是 `START_STICKY`，停掉后 alarm / JobScheduler 照常拉回）。
+* **5 降级重试吃掉一次轮转名额** —— 内容拦截降级重试走 `continue` 会让 `i` 自增；
+  `MaxRotate==1` 时循环直接结束，而这条分支从不给 `lastErr` 赋值 → 末端落默认
+  503 `no_healthy_account`，把"请求内容被拦（应 400 `content_blocked`）"报成"服务端没号"。
+  改成 `i--` 不占名额。
+* **6 两个模型缺默认档位** —— `deepseek-v4-flash` / `hy4-preview-x` 补 `defaultEffort: "high"`
+  （表头注释与其它三档模型都是 high），否则 `/v1/models` 这两个模型没有
+  `reasoning_default_effort`。
+* **7 优惠时段允许 24 点** —— `promoClock` 校验是 `h > 24`，`"24:00"` 合法并返回 1440；
+  上游下发 `start:"24:00"` 时 `st > ed` → 走跨午夜分支对多数窗口恒真 → 优惠被判"全天生效"。
+  上限改 `h > 23`。
+* **8 请求归档停机时静默丢事件且不计数** —— `close()` 置位与 `enqueue()` 检查之间有窗口，
+  事件可能写进没人读的通道：既不落盘也不进 `DroppedWrites`（指标显示"没丢"）。
+  加 `enqMu` 读写锁让「检查 + 入队」与 close 互斥，停机窗口内的事件计入丢弃。
+* **9 全量余额刷新是同步扇出** —— 其它 `*_all` 都是「起 goroutine 立刻回 200」，只有
+  `balance_all` 同步等（并发 3 × 每号 30s，46 个号最坏 ≈ 7 分钟）。改异步 + 前端轮询
+  overview，toast 不再谎称"已刷新完成"。
+* **10 `GatewayService.stop()` 停不掉服务** —— 只 `stopService`、没置 `userStop`，
+  `onDestroy` 里 `if (!userStop)` 会重挂 alarm + JobScheduler，5 分钟内自己回来。
+  按 `ACTION_STOP` 分支补齐（`userStop` + 取消 alarm/job）。
+* **11 `login.sh` 在非交互环境静默退出** —— `set -e` 下 `read` 遇 EOF 直接终止脚本、
+  只留半截输出。改成显式判返回值并给错误说明。
+* **12 非 JSON 数据帧被当「空流」** —— `writeFrame` 对非 JSON 帧原样透传但**不计数**；
+  整条流都是这种帧（心跳/纯文本兼容形态）时被判空流 → 补写错误帧 + 返回
+  `errEmptyStream` → handler 记 502 假失败。改成成功转发即计一帧。
+
+### 测试
+
+`upstream 203 / server 90 / pool 184 / panel 27 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**688 通过 0 失败**；`gofmt -l` 为 0。
+
 ## v1.26.7（当前）
 
 **新增任务 `WorkBuddy_Valorant`：体验「无畏契约拼豆专家」（+100 分 +5 能，截止 11-15）。**

@@ -165,6 +165,7 @@ public class MainActivity extends Activity {
         web.setOverScrollMode(View.OVER_SCROLL_NEVER);
         web.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView v, String url) {
+                panelLoading = false;   // 本次加载结束（成功或错误页都算结束，bug #1）
                 progress.setVisibility(View.GONE);
                 // 只有真正落在面板地址上才算加载成功：错误页也会回调本方法。
                 if (url == null || !url.startsWith(PANEL_URL)) {
@@ -183,6 +184,7 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onReceivedError(WebView v, int code, String desc, String failingUrl) {
+                panelLoading = false;         // 失败也算结束，允许下一拍重试（bug #1）
                 panelLoaded = false;          // 加载失败 → 交回 tick 重试（最多 MAX_LOAD_TRIES 次）
             }
 
@@ -323,7 +325,12 @@ public class MainActivity extends Activity {
         }
 
         // 面板加载：端口真的通了才加载（tick 每 2 秒一拍，最多试 MAX_LOAD_TRIES 次）。
-        if (!panelLoaded && portServing && web != null && loadTries < MAX_LOAD_TRIES) {
+        // 必须判「上一次还在加载」（bug #1）：低端机上 WebView 冷启动 + 面板大 HTML/JS
+        // 普遍超过 2 秒，不判在途的话从第 2 拍起每 2 秒把正在进行的加载打断重来，
+        // 30 次（≈60 秒）后 loadTries 用尽 → 永久空白页，只能手点「重载面板」。
+        if (!panelLoaded && !panelLoading && portServing && web != null
+                && loadTries < MAX_LOAD_TRIES) {
+            panelLoading = true;
             loadTries++;
             web.loadUrl(PANEL_URL);
         }
@@ -371,6 +378,7 @@ public class MainActivity extends Activity {
     // 面板加载状态（H4）：panelLoaded 只在真落在面板地址上才置 true；
     // loadTries 限制自动重试次数，避免死循环打空。
     volatile boolean panelLoaded = false;
+    volatile boolean panelLoading = false;   // 有一次 loadUrl 在途（防反复打断，bug #1）
     volatile int loadTries = 0;
     static final int MAX_LOAD_TRIES = 30;
 

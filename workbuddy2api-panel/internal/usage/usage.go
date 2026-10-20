@@ -550,7 +550,14 @@ func (w Window) bounds() (time.Time, time.Time) {
 	if h > 24*60 {
 		h = 24 * 60
 	}
-	return time.Now().Truncate(time.Hour).Add(-time.Duration(h-1) * time.Hour), time.Time{}
+	// 按**本地整点**取窗口起点（bug #3）：time.Truncate 是按「公元 1 年 1 月 1 日
+	// 00:00 UTC 起的绝对时长」截断，在 UTC+05:30 / +05:45 / +12:45 这类非整点偏移
+	// 时区会截到本地 :30/:45 —— 而桶是按本地小时字符串存的，当前小时的桶于是被
+	// ts.Before(from) 排除，表现为"近 N 小时"永远少最新一小时。
+	now := time.Now().In(time.Local)
+	from := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location()).
+		Add(-time.Duration(h-1) * time.Hour)
+	return from, time.Time{}
 }
 
 // bucketTime 把桶 scope 解析成本地时间；脏 scope 返回 false（不进任何口径）。

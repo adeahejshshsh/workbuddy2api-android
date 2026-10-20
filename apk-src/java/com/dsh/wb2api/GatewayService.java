@@ -190,7 +190,18 @@ public class GatewayService extends Service {
             reason = "服务启动被系统拒：" + t.getClass().getSimpleName();
         }
     }
-    public static void stop(Context c) { c.stopService(new Intent(c, GatewayService.class)); }
+    /** 用户主动停止：必须与 ACTION_STOP 分支同语义（bug #10）。
+     *  只 stopService 的话，onDestroy 里 `if (!userStop)` 会重挂 alarm + JobScheduler，
+     *  服务 5 分钟内自己回来 —— 用户以为停了其实没停。 */
+    public static void stop(Context c) {
+        userStop = true;
+        try {
+            c.getSharedPreferences(PREF, MODE_PRIVATE).edit().putBoolean("service_up", false).apply();
+        } catch (Throwable ignored) {}
+        cancelAlarm(c);
+        ReviveJobService.cancel(c);
+        try { c.stopService(new Intent(c, GatewayService.class)); } catch (Throwable ignored) {}
+    }
 
     public static boolean alive() {
         Process p = proc;
@@ -823,11 +834,15 @@ public class GatewayService extends Service {
     }
 
     /** 前台服务被系统判超时回收（Android 14+ 的 onTimeout / 15+ 的 FGS 时限）→ 立刻挂兜底 */
+    // onTimeout 的语义是「你自己停下来，几秒内不停就 ANR / 直接打死进程」（bug #4）。
+    // 此前只 setState + armAlarm、不 stopSelf，本该靠 alarm 兜底自愈的路径变成进程
+    // 被系统当场杀掉。服务是 START_STICKY，停掉后 alarm / JobScheduler 照常拉回。
     @Override public void onTimeout(int startId) {
         setState(ST_STARTING, "前台服务超时被系统回收",
                  "系统按 FGS 时限回收了前台服务，已挂 5 分钟 alarm 兜回来自启");
         appLog(this, "前台服务被系统按 FGS 时限回收，已挂 alarm 兜底");
         armAlarm(this);
+        try { stopSelf(startId); } catch (Throwable ignored) {}
     }
 
     @Override public void onTimeout(int startId, int fgsType) {
@@ -835,6 +850,7 @@ public class GatewayService extends Service {
                  "系统按 FGS 时限回收了前台服务（type=" + fgsType + "），已挂 5 分钟 alarm 兜回来自启");
         appLog(this, "前台服务被系统按 FGS 时限回收（type=" + fgsType + "），已挂 alarm 兜底");
         armAlarm(this);
+        try { stopSelf(startId); } catch (Throwable ignored) {}
     }
 
     void stopForegroundCompat() {
