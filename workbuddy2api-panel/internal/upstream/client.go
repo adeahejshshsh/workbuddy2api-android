@@ -818,6 +818,10 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 		// deepseek-v4.1-flash ['high']）。当前探测桶为空时也按静态表降级，不全程透传
 		//（issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
 		efforts, defs = globalEffortMap(efforts, defs)
+	} else {
+		// CN 侧此前没有静态兜底（bug P1-4）：探测桶为空（预热失败/无可用 CN 号）
+		// 时档位原样出站 → 上游 400 + 11101 → 网关当 ErrBadParams 终结请求。
+		efforts, defs = cnEffortMap(efforts, defs)
 	}
 	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，

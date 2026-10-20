@@ -162,6 +162,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		}
 		e := &entry{
 			a:                        &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			needAuth:                 true,                 // 标记占位（bug P1-3）：拿到真实凭证前不参与路由
 			credits:                  s.Credits,
 			creditsTotal:             s.CreditsTotal,
 			creditsExpiring:          s.CreditsExpiring,

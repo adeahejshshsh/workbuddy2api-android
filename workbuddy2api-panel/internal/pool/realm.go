@@ -4,6 +4,8 @@ package pool
 import (
 	"sort"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
 // expiringVirtualSlots 快过期账号在新会话候选集中的虚拟实例权重。
@@ -12,6 +14,20 @@ const expiringVirtualSlots = 3
 
 // AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
 // realm=="" 退化为 AvailableUIDs（现状语义）。
+// PickExistingAuth 按 uids 顺序返回第一个仍持有凭证的账号，全都不在返回 nil。
+//
+// 为什么需要（bug P1-2 / B20）：AvailableUIDsForRealm 与 AuthByUID 是两次独立加锁
+// 查询，两次之间账号可能被面板移除 / SyncToDir 剔除。各处若只取 uids[0]，取不到就
+// 静默放弃该域 —— 表现为 /v1/models 偶发返回空、启动预热静默跳过、日志里零线索。
+func (p *Pool) PickExistingAuth(uids []string) *auth.Auth {
+	for _, uid := range uids {
+		if a := p.AuthByUID(uid); a != nil {
+			return a
+		}
+	}
+	return nil
+}
+
 func (p *Pool) AvailableUIDsForRealm(realm string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

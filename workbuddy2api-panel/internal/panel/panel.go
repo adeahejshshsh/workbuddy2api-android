@@ -379,7 +379,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		// AvailableUIDsForRealm 与 AuthByUID 是两次独立加锁查询，若两次之间该账号
 		// 被移除/SyncToDir 剔除，原先静默跳过该域 → 最终 503「没有可用账号」，
 		// 而池里其实还有别的号，日志里也没有任何线索。
-		acct := pickExistingAuth(p.cfg.Pool, uids)
+		acct := p.cfg.Pool.PickExistingAuth(uids)
 		if acct == nil {
 			fetchErrs = append(fetchErrs, fmt.Sprintf("cn: %d 个可用账号在查询间隙被移除", len(uids)))
 		}
@@ -409,7 +409,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Upstream.GlobalEnabled {
 		if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
 			// 同 CN 域：取凭证失败回退下一个 uid 并记录原因（bug B20）。
-			gAcct := pickExistingAuth(p.cfg.Pool, uids)
+			gAcct := p.cfg.Pool.PickExistingAuth(uids)
 			if gAcct == nil {
 				fetchErrs = append(fetchErrs, fmt.Sprintf("global: %d 个可用账号在查询间隙被移除", len(uids)))
 			}
@@ -472,20 +472,6 @@ func (p *Panel) tierHidden(model, realm string, showHidden bool) (skip bool, tag
 		return false, true
 	}
 	return true, false
-}
-
-// pickExistingAuth 按 uids 顺序返回第一个仍存在的账号凭证，全都不在返回 nil。
-//
-// 为什么需要（bug B20）：AvailableUIDsForRealm 与 AuthByUID 是两次独立加锁查询，
-// 两次之间账号可能被移除/SyncToDir 剔除。原实现只看 uids[0]，取不到就静默跳过该域，
-// 最终 503「没有可用账号」而池里其实还有别的号。
-func pickExistingAuth(p *pool.Pool, uids []string) *auth.Auth {
-	for _, uid := range uids {
-		if a := p.AuthByUID(uid); a != nil {
-			return a
-		}
-	}
-	return nil
 }
 
 func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string, remoteDefault string, httpc *http.Client) map[string]any {
@@ -737,6 +723,14 @@ func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		defer p.cfg.Scheduler.EndTask(scheduler.TaskCheckin)
+		// panic 兜底（bug P0-1）：这些 goroutine 不是 net/http 起的，Go 不会替它们
+		// recover —— 任务链里全是弱类型解析上游响应，一次 panic 死的是整个网关进程
+		// （在途请求与未落盘状态一起没）。LIFO 下先 recover 再 EndTask，与 balanceAll 一致。
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panel: 全量签到 panic: %v", rec)
+			}
+		}()
 		p.cfg.Scheduler.RunCheckinNow()
 	}()
 	log.Printf("panel: 手动全量签到已触发（猫猫旅行是独立排程，需另点「旅行巡检」）")
@@ -755,6 +749,14 @@ func (p *Panel) travelAll(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		defer p.cfg.Scheduler.EndTask(scheduler.TaskTravel)
+		// panic 兜底（bug P0-1）：这些 goroutine 不是 net/http 起的，Go 不会替它们
+		// recover —— 任务链里全是弱类型解析上游响应，一次 panic 死的是整个网关进程
+		// （在途请求与未落盘状态一起没）。LIFO 下先 recover 再 EndTask，与 balanceAll 一致。
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panel: 全量旅行巡检 panic: %v", rec)
+			}
+		}()
 		p.cfg.Scheduler.RunTravelNow()
 	}()
 	log.Printf("panel: 手动全量旅行巡检已触发")
@@ -773,6 +775,14 @@ func (p *Panel) activityAll(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		defer p.cfg.Scheduler.EndTask(scheduler.TaskActivity)
+		// panic 兜底（bug P0-1）：这些 goroutine 不是 net/http 起的，Go 不会替它们
+		// recover —— 任务链里全是弱类型解析上游响应，一次 panic 死的是整个网关进程
+		// （在途请求与未落盘状态一起没）。LIFO 下先 recover 再 EndTask，与 balanceAll 一致。
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panel: 全量活跃上报 panic: %v", rec)
+			}
+		}()
 		p.cfg.Scheduler.RunActivityNow()
 	}()
 	log.Printf("panel: 手动全量活跃上报已触发")
@@ -791,6 +801,14 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		defer p.cfg.Scheduler.EndTask(scheduler.TaskKeepalive)
+		// panic 兜底（bug P0-1）：这些 goroutine 不是 net/http 起的，Go 不会替它们
+		// recover —— 任务链里全是弱类型解析上游响应，一次 panic 死的是整个网关进程
+		// （在途请求与未落盘状态一起没）。LIFO 下先 recover 再 EndTask，与 balanceAll 一致。
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panel: 全量保活 panic: %v", rec)
+			}
+		}()
 		p.cfg.Scheduler.RunKeepaliveNow()
 	}()
 	log.Printf("panel: 手动全量保活已触发")

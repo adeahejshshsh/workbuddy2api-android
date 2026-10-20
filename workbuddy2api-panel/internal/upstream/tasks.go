@@ -193,6 +193,8 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 			}
 		}
 		claimed := t.AcceptStatus == "claimed"
+		// done 上游已完成（一次性任务的主要完成标志，bug P1-1）
+		done := t.AcceptStatus == "completed" || t.Status == "complete"
 		out = append(out, Task{
 			TaskCode:     t.TaskCode,
 			Title:        t.Title,
@@ -210,8 +212,12 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 			Current:      cur,
 			AcceptStatus: t.AcceptStatus,
 			Status:       t.Status,
-			Claimable:    !claimed && tgt > 0 && cur >= tgt,
-			Claimed:      claimed,
+			// 一次性任务常 target=0/progress=null，完成状态只在 accept_status 上
+			// （bug P1-1）：只判 tgt>0 && cur>=tgt 会让它们永远 claimable=false，
+			// 面板不渲染「领取」按钮、排序也归到"进行中"，而 autotask 各处却按
+			// AcceptStatus=="completed" 判完成 —— 两侧口径不一致。
+			Claimable: !claimed && ((tgt > 0 && cur >= tgt) || done),
+			Claimed:   claimed,
 		})
 	}
 	return out, nil

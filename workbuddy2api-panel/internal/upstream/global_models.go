@@ -259,12 +259,12 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	if v3.err != nil {
 		// /v3 失败降级：不拖累企业端点结果（降级仅企业端点 + warn）。
 		log.Printf("WARN: [upstream] global models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
-		names, infos, efforts, defaults = extractEfforts(enterprise.infos)
+		names, infos, efforts, defaults = degradedCatalog(enterprise)
 		return names, infos, efforts, defaults, nil
 	}
 	if enterprise.err != nil {
 		log.Printf("WARN: [upstream] global models: enterprise endpoint failed (v3/config only): %v", enterprise.err)
-		names, infos, efforts, defaults = extractEfforts(v3.infos)
+		names, infos, efforts, defaults = degradedCatalog(v3)
 		return names, infos, efforts, defaults, nil
 	}
 	// 两路皆成功：v3 为主、企业端点补缺合并（含 effort 桶合并，v3 权威）。
@@ -280,6 +280,21 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	efforts = mergeEffortBuckets(v3Efforts, entEfforts)
 	defaults = mergeEffortDefaults(v3Defaults, entDefaults)
 	return names, infos, efforts, defaults, nil
+}
+
+// degradedCatalog 单路降级时的目录（bug P0-3）。
+//
+// 关键在最后那句兜底：企业端点（以及 v3 的某些形态）只回**窄表**——只有 id 名单，
+// infos 为 nil。此时 extractEfforts(nil) 返回空名字集，若直接返回空 names，
+// 调用方 fetchGlobalModelsOnce 会按 len(names)==0 判失败并写 5 分钟负缓存 →
+// 整个 global 域在 /v1/models 与面板模型页**静默消失**，日志只有一句
+// "v3 probe failed (degraded to enterprise endpoint)"，看不出其实拿到了目录。
+func degradedCatalog(r probeResult) (names []string, infos []ModelInfo, efforts map[string][]string, defaults map[string]string) {
+	names, infos, efforts, defaults = extractEfforts(r.infos)
+	if len(names) == 0 {
+		names = r.names
+	}
+	return names, infos, efforts, defaults
 }
 
 // probeResult 单路模型目录探测结果（/v3/config 某 UA 路，或企业端点家族）。

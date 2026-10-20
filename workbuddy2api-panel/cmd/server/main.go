@@ -405,7 +405,7 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 	}
 	// CN：有可用 CN 账号才拉（与面板 models 同口径，避免无谓上游调用）。
 	if uids := p.AvailableUIDsForRealm("cn"); len(uids) > 0 {
-		if a := p.AuthByUID(uids[0]); a != nil {
+		if a := p.PickExistingAuth(uids); a != nil { // 依次回退（bug P1-2）
 			if _, err := up.FetchModels(a); err != nil {
 				log.Printf("WARN: [upstream] warm model rates (cn): %v", err)
 			} else {
@@ -416,7 +416,7 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 	// global：独立目录端点（workbuddy.ai），倍率按 "global" 域键存储。
 	if up.GlobalEnabled && ctx.Err() == nil {
 		if uids := p.AvailableUIDsForRealm("global"); len(uids) > 0 {
-			if a := p.AuthByUID(uids[0]); a != nil {
+			if a := p.PickExistingAuth(uids); a != nil { // 依次回退（bug P1-2）
 				// FetchGlobalModelInfos 无错误返回（内部负缓存自行节流），
 				// 仅按结果条数判断是否拿到目录。
 				if infos := up.FetchGlobalModelInfos(a); len(infos) == 0 {

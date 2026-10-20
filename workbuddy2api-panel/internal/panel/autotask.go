@@ -931,10 +931,11 @@ func taskProgressText(t *upstream.Task) string {
 
 // truncateStr 截断错误文本（避免把上游长响应原样透给前端）。
 func truncateStr(s string, n int) string {
+	// rune 边界（bug P2-2）：按字节切中文会出半个字符，进 fmt.Errorf → JSON 后变 \ufffd
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return logfmt.Truncate(s, n) + "…"
 }
 
 // ---------------------------------------------------------------------------

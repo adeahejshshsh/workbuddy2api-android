@@ -396,7 +396,8 @@ func (p *Pool) Remove(uid string) *auth.Auth {
 // 调用方必须已持有 p.mu；Add 与 SyncToDir 共用此 upsert 逻辑。
 func (p *Pool) upsertLocked(a *auth.Auth) {
 	if e, ok := p.byUID[a.UID]; ok {
-		e.a = a // 保留 credits/cooling 状态
+		e.a = a            // 保留 credits/cooling 状态
+		e.needAuth = false // 拿到真实凭证：解除占位标记（bug P1-3）
 		return
 	}
 	p.byUID[a.UID] = &entry{a: a}

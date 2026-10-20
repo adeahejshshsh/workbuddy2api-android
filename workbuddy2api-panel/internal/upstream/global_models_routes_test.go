@@ -170,3 +170,27 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// TestDegradedCatalogKeepsNarrowNames bug P0-3 回归：降级到单路时，如果那一路只回
+// 「窄表」（只有 id 名单、infos 为 nil），names 必须非空 —— 否则调用方按
+// len(names)==0 判失败并写 5min 负缓存，整个 global 域静默消失。
+func TestDegradedCatalogKeepsNarrowNames(t *testing.T) {
+	narrow := probeResult{names: []string{"glm-5.2", "kimi-k3"}} // infos 为 nil
+	names, infos, _, _ := degradedCatalog(narrow)
+	if len(names) != 2 || names[0] != "glm-5.2" {
+		t.Fatalf("窄表降级丢了名单: names=%v", names)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("窄表不该凭空造 infos: %v", infos)
+	}
+
+	// 对象形态：以 infos 为准（extractEfforts 的 id 集合）
+	full := probeResult{
+		names: []string{"glm-5.2"},
+		infos: []ModelInfo{{ID: "glm-5.2", ContextWindow: 200000}},
+	}
+	names2, infos2, _, _ := degradedCatalog(full)
+	if len(names2) != 1 || len(infos2) != 1 {
+		t.Fatalf("对象形态降级结果异常: names=%v infos=%v", names2, infos2)
+	}
+}

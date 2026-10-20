@@ -490,7 +490,45 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	buf := make([]byte, 0, 1<<20)
 	tmp := make([]byte, 8192)
 	searchFrom := 0
+	// scan 在当前缓冲区里从头找一个合法 requestId（找不到返回 false，需要更多数据）。
+	// 注意 `continue` 是**这个闭包里**的内层循环：跳过空 id / 不匹配的 id 后继续往后找。
+	scan := func() (string, bool) {
+		for {
+			i := bytes.Index(buf[searchFrom:], []byte(`"id":"`))
+			if i < 0 {
+				return "", false // 缓冲里没有匹配点
+			}
+			abs := searchFrom + i
+			rest := buf[abs+6:]
+			end := bytes.IndexByte(rest, '"')
+			if end < 0 {
+				return "", false // 半截 id：等后续数据补齐
+			}
+			if end == 0 {
+				// 空 id（`"id":""`，错误帧/心跳形态）：跳过这个匹配点继续找
+				searchFrom = abs + 6
+				continue
+			}
+			id := string(rest[:end])
+			if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+				fmt.Printf("[dbg-id] %q match=%v\n", id, idRegex.MatchString(id))
+			}
+			if idRegex.MatchString(id) {
+				return id, true
+			}
+			// 不匹配的 id（消息 id 等）：推进一格继续找，避免原地重复命中
+			searchFrom = abs + 1
+		}
+	}
+
 	for {
+		// 先把**已缓冲**数据里能判定的全部试一遍，再决定要不要 Read（bug P0-2）。
+		// 此前搜索写在 Read 之后：命中空 id / 不匹配的 id 只推进偏移然后 continue →
+		// 下一轮开头先阻塞 Read。后果两种：流刚好结束 → EOF → 误报"未找到"
+		// （合法 id 就躺在 buf 里）；流还开着但上游不再吐帧 → 卡到 HTTP 120s 超时。
+		if id, ok := scan(); ok {
+			return conversationID, id, nil
+		}
 		n, rerr := resp.Body.Read(tmp)
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
@@ -501,33 +539,13 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 				}
 				fmt.Printf("[dbg-rd %d] %q\n", n, dbg)
 			}
-			// 从上次搜索位置继续：SSE 里 `"id":"` 可能先出现在消息 id 等字段，
-			// 若不推进偏移，首个不匹配的 id 会让循环永远重复命中同一位置，
-			// 读满 1MB 后误报"未找到 requestId"。
-			if i := bytes.Index(buf[searchFrom:], []byte(`"id":"`)); i >= 0 {
-				abs := searchFrom + i
-				rest := buf[abs+6:]
-				if end := bytes.IndexByte(rest, '"'); end >= 0 {
-					if end == 0 {
-						// 空 id（`"id":""`，错误帧/心跳形态）：必须跳过这个匹配点继续往后找
-						// （bug #7）。此前 end>0 才推进偏移，空 id 让 searchFrom 原地不动，
-						// 下一轮 Index 又命中同一位置 —— 后面的合法 requestId 永远找不到，
-						// 读满 1MB 后误报"SSE 中未找到服务端 requestId"。
-						searchFrom = abs + 6
-						continue
-					}
-					id := string(rest[:end])
-					if os.Getenv("WB2A_DEBUG_CHAT") != "" {
-						fmt.Printf("[dbg-id] %q match=%v\n", id, idRegex.MatchString(id))
-					}
-					if idRegex.MatchString(id) {
-						return conversationID, id, nil
-					}
-					searchFrom = abs + 1
-				}
-			}
 		}
 		if rerr != nil || len(buf) > 1<<20 {
+			// Read 允许同时返回数据与 EOF：最后一块必须先扫一遍再退出，
+			// 否则"id 帧和流结束一起到达"这种最常见的短流形态会被判成没找到。
+			if id, ok := scan(); ok {
+				return conversationID, id, nil
+			}
 			break
 		}
 	}

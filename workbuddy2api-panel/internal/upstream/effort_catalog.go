@@ -120,6 +120,36 @@ func containsEffort(efforts []string, want string) bool {
 // 只认 high，客户端传 low/max 必降级到 high，否则上游 400 毁掉请求）。
 // 语义对齐参考仓库 effortsFor（remoteMeta → productFallback → 静态表），只取前两级：
 // 远端桶（探测已解析）→ 本产品静态表（本文件），缺档位即无（不再到通用静态表）。
+// cnEffortMap CN 域的降级表：静态兜底 ∪ 远端探测桶（远端非空时覆盖）。
+//
+// 为什么需要（bug P1-4）：此前 CN 只用 effortsSnapshot("cn") 这一个运行时桶，
+// 而它仅在 FetchModels 成功时填充。启动预热失败（上游抖动/无可用 CN 号）期间，
+// CN 出站请求的 reasoning_effort 完全不降级 —— 客户端给 hy3 发 max、给 glm-5.1
+// 发 high 这类非法档位原样出站，被上游 400 + 11101 拒掉，网关再把它当
+// ErrBadParams 终结请求：用户看到"模型解析参数失败"，与档位毫无关联。
+// 与 global 侧完全对称。
+func cnEffortMap(remoteEfforts map[string][]string, remoteDefaults map[string]string) (map[string][]string, map[string]string) {
+	efforts := make(map[string][]string, len(cnEffortFallback)+len(remoteEfforts))
+	defs := make(map[string]string, len(cnEffortFallback)+len(remoteDefaults))
+	for id, cap := range cnEffortFallback {
+		efforts[id] = append([]string(nil), cap.efforts...)
+		if cap.defaultEffort != "" {
+			defs[id] = cap.defaultEffort
+		}
+	}
+	for id, v := range remoteEfforts {
+		if len(v) > 0 {
+			efforts[id] = v
+		}
+	}
+	for id, v := range remoteDefaults {
+		if v != "" {
+			defs[id] = v
+		}
+	}
+	return efforts, defs
+}
+
 func globalEffortMap(remoteEfforts map[string][]string, remoteDefaults map[string]string) (map[string][]string, map[string]string) {
 	efforts := make(map[string][]string, len(globalEffortFallback)+len(remoteEfforts))
 	defs := make(map[string]string, len(globalEffortFallback)+len(remoteDefaults))

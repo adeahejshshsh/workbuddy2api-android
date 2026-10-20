@@ -472,7 +472,8 @@ func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
 	if len(uids) == 0 {
 		return nil, nil
 	}
-	acct := h.cfg.Pool.AuthByUID(uids[0])
+	// 取不到就依次回退（bug P1-2：两次独立加锁查询之间账号可能已被移除）
+	acct := h.cfg.Pool.PickExistingAuth(uids)
 	if acct == nil {
 		return nil, nil
 	}
@@ -523,7 +524,7 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	if len(uids) == 0 {
 		return nil
 	}
-	acct := h.cfg.Pool.AuthByUID(uids[0])
+	acct := h.cfg.Pool.PickExistingAuth(uids) // 同 global 分支：依次回退（bug P1-2）
 	if acct == nil {
 		return nil
 	}

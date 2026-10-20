@@ -530,10 +530,13 @@ func (p *Pool) ServableForRealm(realm string) bool {
 		if p.inFlightFull(e) {
 			continue
 		}
-		// 存在性语义：账号级 healthy，或处于模型级豁免形态（6004 单模型软冷却——
-		// 对触发模型不可用，对其他模型仍可选）。探活无请求模型上下文，取"存在可服务
-		// 模型"与 chat 实际可达性等价（issue #31 探活侧补齐）。
-		if e.healthy(now) || e.modelExempt() {
+		// 存在性语义：只看账号级 healthy（bug P1-5）。
+		// 原先这里还有 `|| e.modelExempt()`，但它恒等于 healthy：
+		// modelExempt 要求 until/breakerUntil/degradeUntil 三个截止**都是零**，
+		// 而 healthy 为假的唯一原因正是「其中某个仍在未来」—— 两者互斥，
+		// 所以那个 || 分支从未生效（注释宣称的"6004 豁免号在探活里算可服务"
+		// 其实已经由 healthy 满足：模型级冷却不影响账号级健康）。
+		if e.healthy(now) {
 			return true
 		}
 	}

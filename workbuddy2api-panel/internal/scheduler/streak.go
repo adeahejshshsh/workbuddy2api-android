@@ -112,7 +112,8 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 func compactJSON(raw json.RawMessage) string {
 	s := string(raw)
 	if len(s) > 220 {
-		return s[:220] + "…"
+		// rune 边界（bug P2-2）：奖品载荷多是中文，按字节切日志输出乱码
+		return logfmt.Truncate(s, 220) + "…"
 	}
 	return s
 }

@@ -214,7 +214,11 @@ func UserTypeFromError(body string) string {
 		if i < 0 {
 			continue
 		}
-		rest := body[i+len(key):]
+		// 必须在**同一个串**上切片（bug P2-1）：i 是 low 里的下标，而 strings.ToLower
+		// 对非 ASCII 字符可能改变字节长度（如 İ），用去切原 body 就会错位，取出的
+		// "账号等级"是乱码 → 被 NoteModelTierDenied 当成等级写进 model_tier.json，
+		// denyFor 永远匹配不上、等级闸门静默失效。等级名本身是 ASCII，切 low 足够。
+		rest := low[i+len(key):]
 		end := strings.IndexAny(rest, "]\n\r\t ,;")
 		if end < 0 {
 			end = len(rest)

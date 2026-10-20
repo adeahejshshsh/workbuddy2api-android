@@ -657,9 +657,15 @@ async function loadModels() {
     mdProbes = pr.probes || {};
     if (!mdAll.length) {
       mdLoaded = true; // 上游确实没返回：算加载成功，不必反复重试
-      tb.innerHTML = '<tr><td colspan="7"><div class="empty">上游未返回模型</div></td></tr>';
+      // 别写死「上游未返回模型」（bug P2-3）：后端在「所有模型都被账号等级闸门
+      // 11158 隐藏」时返回 200 + models:[] + hidden_tier + note，正是为了避免
+      // 把「你这批号等级不够」误报成「上游没给目录」。有 note 就用 note。
+      const msg = d.note || '上游未返回模型';
+      tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(msg) + '</div></td></tr>';
       $('mdCount').textContent = '';
-      $('mdNote').textContent = '上游未返回模型';
+      $('mdNote').textContent = d.hidden_tier
+        ? ('已按账号等级隐藏 ' + d.hidden_tier + ' 个模型')
+        : msg;
       return;
     }
     // 探测键带域前缀（cn:glm-5.2），模型表显示裸名，按「精确命中或 :后缀」关联。
@@ -2126,9 +2132,16 @@ function renderUsageChart(series) {
   }
 
   // 跨天时补一条日期分隔线，让「日界」在长窗口里可见
+  // 用 parsePointTime（内部补 :00:00）而不是 new Date(p.t)：小时桶形如
+  // "2026-09-16T13"，`new Date("…T13")` 是 Invalid Date，getDate() 得 NaN，
+  // 而 NaN !== NaN 恒真 → 从第 2 个点起每根柱子后都画一条"跨天"线（bug P0-4）。
+  // 顺带把日键换成 YYYYMMDD 整数：原来只比 getDate()，跨月（31→1）会漏画。
   let prevDay = null;
   for (const p of pts) {
-    const d = new Date(p.t).getDate();
+    const ms = parsePointTime(p);
+    if (ms == null) continue;
+    const dt = new Date(ms);
+    const d = dt.getFullYear() * 10000 + (dt.getMonth() + 1) * 100 + dt.getDate();
     if (prevDay !== null && d !== prevDay) {
       const x = xOf(p.t).toFixed(1);
       out += '<line class="gl" x1="' + x + '" y1="' + PT + '" x2="' + x + '" y2="' +

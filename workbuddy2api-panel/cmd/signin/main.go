@@ -144,8 +144,7 @@ func truncBytes(s string, n int) string {
 
 func short(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) > 60 {
-		return s[:60]
-	}
-	return s
+	// 按 rune 边界截断（bug P2-2）：上游错误体是中文，按字节切会留半个 UTF-8，
+	// 终端表格直接输出乱码。
+	return logfmt.Truncate(s, 60)
 }

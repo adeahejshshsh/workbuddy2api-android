@@ -186,6 +186,9 @@ type entry struct {
 	// creditsExpiring 配置窗口内即将过期的可用积分子集，是 credits 的一部分。
 	// creditsEarliestExpiry / creditsEarliestRemaining 是全部未来到期批次中的最早一批；
 	// 两者均由签到/余额刷新更新，供 earliest-expiry 路由和状态观测使用。
+	// needAuth 快照恢复出的占位条目（无凭证），见 healthy()（bug P1-3）。
+	needAuth bool
+
 	creditsExpiring int64
 	// creditFrac 不足 1 分的扣费余数（bug B6）：上游 credit 常是 0.02~0.34 量级，
 	// 此前 int64(credit+0.5) 直接抹零 → 余额只增不减，credit_floor 判据迟迟不触发。
@@ -279,9 +282,23 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/连败降权期）。
 // 连败降权与冷却/熔断同入本判定（取更长者不叠加：三个截止是并列的或门，
 // 只要任一未到期即不可选，天然「并存取更远者」——不需要显式比较长短）。
+// needAuth 条目是否是「快照恢复出来的占位」——只有 UID、没有凭证（bug P1-3）。
+//
+// 为什么用一个显式标记而不是"看凭证是否为空"：空凭证在其它路径上有合法含义
+// （手工构造、刷新中），用标记能精确只影响快照恢复这一条链路。
+//
+// 背景：Redis 快照恢复时每个账号先塞一个只带 UID 的占位 auth.Auth，
+// 正常情况下 SyncToDir 会用真实凭证覆盖；但 SyncToDir 在「扫到 0 个账号」时
+// 直接 return（防清空状态），占位对象就被永久留在池里：healthy 为真、credits/冷却
+// 都在 → 被 pick 选中 → NeedsRefresh 因 ExpiresAt=0 恒真 → RefreshToken 报
+// no refreshToken → 熔断+轮转。表现为「面板显示 20 个号、每次请求全 503，
+// 日志全是 no refreshToken」。
 func (e *entry) healthy(now time.Time) bool {
 	if e.disabled || e.paused {
 		return false
+	}
+	if e.needAuth {
+		return false // 占位条目（无凭证）不参与路由/计数（bug P1-3）
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
 		return false

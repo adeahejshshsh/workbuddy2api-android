@@ -1,5 +1,93 @@
 # 变更记录
 
+## v1.27.4（当前）
+
+**本版 = 第十份审查报告（13 条）的落地修复。逐条对当前代码复核：13 条全部为真、0 误报。
+其中 P0-1、P0-2、P1-2 与本会话前几轮的改动直接相关 —— 上一轮我只修了一半。**
+
+### 与前几轮同源的三条（又一次"修了入口没修根"）
+
+* **P0-1 四个批量端点的 goroutine 没有 recover** —— v1.27.2 我给 checkinAll/travelAll/
+  activityAll/keepaliveAll 加了 `TryBeginTask` + `EndTask`，**只加了锁、没加 recover**
+  （而 balanceAll 有）。Go 不会替非 net/http 起的 goroutine recover：任务链里全是弱类型
+  解析上游响应，一次 panic 死的是整个网关进程。四个入口各补 `defer recover`
+  （LIFO 下先 recover 再 EndTask）。
+* **P0-2 requestId 扫描命中空 id 后重新阻塞 Read** —— v1.26.x 我修了"空 id 让偏移原地不动"
+  的死循环，但搜索仍写在 `Read` 之后：推进偏移后 `continue` → 下一轮开头先阻塞 Read，
+  **缓冲区里后面的合法 id 永远不看**。流恰好结束就误报"未找到"，流没结束就卡到 120s 超时。
+  改成「先把缓冲里能判定的全试一遍，再决定 Read」。
+* **P1-2 handler/main 取目录账号固定 `uids[0]`** —— v1.27.3 我只给 **panel** 加了
+  `pickExistingAuth`，server 与 main 没同步（`/v1/models` 偶发返回空、预热静默跳过，
+  日志零线索）。这版把它收敛成 `pool.PickExistingAuth` 一处实现，panel/server/main 三处共用。
+
+### P0
+
+* **P0-3 global_models 降级丢「窄表」名单** —— 企业端点（或某路 v3）只回 id 名单、
+  `infos=nil` 时，`extractEfforts(nil)` 得空名字集 → 调用方按 `len(names)==0` 判失败并写
+  5min 负缓存 → 整个 global 域在 /v1/models 与面板模型页**静默消失**，日志只有一句
+  "degraded to enterprise endpoint"。抽出 `degradedCatalog()` 给两条降级分支共用
+  （两路皆成功的主路径本来就有这个兜底）。【复核】真。
+* **P0-4 用量图把 Invalid Date 当跨天** —— `new Date("2026-09-16T13")` 是 Invalid Date，
+  `getDate()` 得 `NaN`，而 `NaN !== NaN` 恒真 → 从第 2 个点起每根柱子后都画一条日界线。
+  改用已有的 `parsePointTime`（内部补 `:00:00`）并换成 `YYYYMMDD` 整数键
+  （原来只比 `getDate()`，跨月 31→1 会漏画）。【复核】真。
+
+### P1
+
+* **P1-1 Claimable 忽略 `accept_status=completed`** —— 一次性任务常 `target=0`/`progress=null`，
+  完成状态只在 accept_status 上。`Claimable: !claimed && (tgt>0 && cur>=tgt)` 让它们永远
+  不可领取（面板不渲染「领取」按钮），而 autotask 各处却按 `AcceptStatus=="completed"`
+  判完成 —— 两侧口径不一致。补 `done` 条件。【复核】真。
+* **P1-3 空 auths + Redis 快照 → 幽灵账号** —— 快照恢复先塞「只有 UID」的占位 `auth.Auth`，
+  靠 `SyncToDir` 用真实凭证覆盖；但 `SyncToDir` 扫到 0 个账号时直接 return（防清空状态），
+  占位对象永久留在池里：healthy 为真 → 被 pick 选中 → `NeedsRefresh` 因 `ExpiresAt=0` 恒真 →
+  `RefreshToken` 报 no refreshToken → 熔断+轮转。表现为「面板显示 20 个号、每次请求全 503，
+  日志全是 no refreshToken」。
+  采用报告方案 A：entry 加 `needAuth` 标记（快照恢复的占位置位、`upsertLocked` 拿到真实
+  凭证后清位），`healthy()` 对占位返回 false —— 一处收敛，覆盖 pick / 可用集 / 探活 / 计数。
+  【复核】真。**没用「凭证为空就判不健康」那种写法**：空凭证在其它路径（手工构造、
+  刷新中）有合法含义，实测会把 28 个 pool 测试打挂，且语义上过宽。
+* **P1-4 CN 侧 reasoning_effort 缺静态兜底** —— `prepareBody` 只对 global 用
+  `globalEffortMap`（静态表 ∪ 远端桶），CN 只用运行时桶；该桶仅在 `FetchModels` 成功时填充，
+  于是启动预热失败期间 CN 档位**完全不降级**：给 `hy3` 发 `max` 这类非法值原样出站 →
+  上游 400+11101 → 网关当 `ErrBadParams` 终结请求，用户看到"模型解析参数失败"。
+  新增 `cnEffortMap`（与 global 对称）并接到 `prepareBody`。【复核】真。
+* **P1-5 `modelExempt()` 恒为假 / `||` 分支是死代码** —— `modelExempt` 要求
+  `until/breakerUntil/degradeUntil` 三个截止**都为零**，而 `healthy()` 为假的唯一原因正是
+  「其中某个仍在未来」，两者互斥 → `healthy || modelExempt` 恒等于 `healthy`。
+  删掉死分支并改写注释（模型级冷却本就不影响账号级健康，注释宣称的语义已由 healthy 满足）。
+  【复核】真。
+
+### P2
+
+* **P2-1 `UserTypeFromError` 用小写串的下标切原串** —— `i` 来自 `low`，却用它切 `body`；
+  `strings.ToLower` 对非 ASCII 可能改变字节长度（如 `İ`）→ 下标错位 → 取出的"账号等级"是
+  乱码 → 被 `NoteModelTierDenied` 写进 `model_tier.json`，等级闸门静默失效。
+  改成在同一串（`low`）上切片。【复核】真。
+* **P2-2 三处中文按字节截断** —— `cmd/signin` 的 `short()`（60B）、`panel` 的
+  `truncateStr`（n B）、`scheduler/streak` 的 `compactJSON`（220B）都直接 `s[:n]`，
+  中文被切成半个 UTF-8（终端乱码 / JSON 里 `\ufffd`）。统一改用 `logfmt.Truncate`。
+  【复核】真。
+* **P2-3 空模型列表吞掉后端说明** —— 后端在「所有模型被等级闸门 11158 隐藏」时返回
+  `200 + models:[] + hidden_tier + note`，前端却写死"上游未返回模型"并 return，
+  把「你这批号等级不够」误报成「上游没给目录」。改用 `d.note` / `d.hidden_tier`。
+  【复核】真。
+
+### 测试（+5 个回归，其中一条抓出了我自己新引入的 bug）
+
+- `TestDesktopChatWithExpertFindsIDAfterEmptyIDInSameChunk`（P0-2：同一 chunk 里空 id 在前、
+  合法 id 在后必须能取到）+ 对照用例 `NoValidID`（只有空/不匹配 id 时如实报错）
+- `TestDegradedCatalogKeepsNarrowNames`（P0-3：窄表降级不能丢名单）
+- `TestParseGrowthTasksClaimableForCompletedSingleTask`（P1-1：completed + target=0 应可领）
+- `TestSnapshotPlaceholderNotRoutableUntilCredsArrive`（P1-3：占位不可选、拿到凭证后立即可选）
+
+**P0-2 的回归测试抓到我自己写的新 bug**：`Read` 允许同时返回数据与 `io.EOF`，我第一版
+在 `break` 之前没有再扫一遍，于是「id 帧和流结束一起到达」这种最常见的短流形态仍会误报
+未找到（该测试在 5 次连跑里挂了 2 次）。已改成退出前补扫一次。
+
+`upstream 208 / pool 185 / server 92 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 51`，**703 通过 0 失败**；`gofmt -l` 为 0。
+
 ## v1.27.3（当前）
 
 **本版 = 第九份审查报告（20 条）的落地修复。主人问「怎么感觉这些 bug 之前修过」——
