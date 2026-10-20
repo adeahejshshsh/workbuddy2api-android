@@ -1,6 +1,29 @@
 # 变更记录
 
-## v1.28.1（当前）
+## v1.28.2（当前）
+
+**本版 = 网关加一条模型别名：官方名 `deepseek-flash` 落到 WorkBuddy 目录里的真名
+`deepseek-v4.1-flash`。客户端按官方 id 调用时请求真正跑通（此前原样转给上游，被按未知模型拒绝，换号无效）。**
+
+### 功能
+
+* **模型别名 `deepseek-flash` → `deepseek-v4.1-flash`**，在 `resolveModel` 里一次替换裸名。
+  官方 DeepSeek 客户端/前端按官方 id 认这个模型（DSH 的 1017 版本标签判据里就有
+  `model.id === "deepseek-flash"`），而 WorkBuddy 目录叫 `deepseek-v4.1-flash`。
+  别名落在 `resolveModel` 内，下游的选号、限流、倍率、出站 body 重写全部吃替换后的真名，
+  **不会出现「半个请求认别名、半个不认」**。
+  只放**确指同一个模型**的别名，不做模糊/前缀匹配：`deepseek-v4-flash`（v4 不是 v4.1）、
+  `deepseek-flash-sg`、`DeepSeek-Flash`（大写）一律不动——别名属于协议面，
+  猜错会把请求送去客户端没要的模型，比报错更糟。
+
+### 测试
+
+* 新增 `internal/server/resolve_model_test.go`：realm 前缀协议（大小写敏感、
+  未知前缀不剥离、`cn:` 空名）、别名正反 9 条（含 `cn:deepseek-flash` /
+  `global:deepseek-flash` / 近似名不误映射）、别名表自检（不许指向自己、不许二段跳）。
+  全量 **752 通过 / 0 失败**。
+
+## v1.28.1
 
 **本版 = 面板「模型与档位」新增 `1017` 版本徽标：WorkBuddy 目录里的 DeepSeek 4.1 Flash
 （`cn:` / `global:` / `-sg` 三条线）跟官方直连的 `deepseek-flash` 用同一套判据，一眼看出是哪个版本。**
