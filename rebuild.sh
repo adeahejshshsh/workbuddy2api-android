@@ -20,6 +20,10 @@ export GOTOOLCHAIN=local      # 不尝试联网切换工具链
 export GOSUMDB=off
 export GOPROXY="file://$PREFIX/lib/workbuddy2api/goproxy,off"   # 本地模块代理(离线)
 
+# 脚本自身所在目录（绝对）：VERSION 在仓库根，而下面会 cd 到 panel 子目录 ——
+# 用 dirname "$0" 相对路径在 cd 之后必然指错（bug-02：版本号一直注入成 dev）。
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 REPO="/storage/emulated/0/新建文件夹/workbuddy2api/workbuddy2api-panel"
 OUT="$PREFIX/lib/workbuddy2api"
 mkdir -p "$OUT"
@@ -38,7 +42,8 @@ fi
 
 echo "== 编译 cmd/* =="
 # 版本从仓库根 VERSION 注入（issue ISSUE-05 单一版本源）
-VER=$(tr -d ' \r\n' < "$(dirname "$0")/VERSION" 2>/dev/null || echo dev)
+VER=$(tr -d ' \r\n' < "$SELF_DIR/VERSION" 2>/dev/null || echo dev)
+[ "$VER" = "dev" ] && echo "  ⚠ 未找到 $SELF_DIR/VERSION，版本按 dev 注入"
 LDF="-s -w -X main.appVersion=$VER"
 echo "  版本: $VER"
 # rc 累计失败（bug-09）：此前某个 cmd 编不过只打印 FAIL 就继续，脚本末尾照样 exit 0 ——

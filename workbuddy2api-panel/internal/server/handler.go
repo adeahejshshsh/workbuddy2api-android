@@ -836,12 +836,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			modelBlock = h.cfg.Pool.ModelBlockedForRealm(bareModel, realm) // 分域判定（bug #3）
 			break
 		}
-		st.uid = acct.UID
-		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
-		st.nick = acct.NicknameValue()
-		tried[acct.UID] = true
-
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
+		// 注意 tried / st.uid / st.nick 必须在**抢到之后**才记（bug-08）：抢失败时
+		// 这个号既没被真正使用，又被写进 tried 排除出本轮后续轮转 —— 可用号被无谓
+		// 浪费一次，而 st.uid/st.nick 还会让流水行把这次请求记到没服务成功的号头上。
 		if !h.cfg.Pool.Acquire(acct.UID) {
 			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
 			// 满载粘性号再浪费一次 PickByUID 往返（语义与 fail()/PickByUID-nil 的解绑一致）。
@@ -855,6 +853,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue // 最后一个名额被并发抢走 → 换号
 		}
 		heldUID = acct.UID
+		// 抢到名额才算"本轮真的试过这个号"（bug-08）。
+		tried[acct.UID] = true
+		st.uid = acct.UID
+		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
+		st.nick = acct.NicknameValue()
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {

@@ -12,7 +12,18 @@
 # 二进制升级: go build -o credit ./cmd/credit
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# 二进制定位（bug-03）：Docker 镜像里产物就在当前目录（COPY /out/credit /app/credit），
+# 而本机 rebuild.sh 把产物放到 $PREFIX/lib/workbuddy2api/ —— 仓库里**没有** ./credit，
+# 所以原先的 `exec ./credit` 在手机上必然 "No such file or directory"。
+PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
+BIN=""
+for c in ./credit "$PREFIX/lib/workbuddy2api/credit"; do
+    [ -x "$c" ] && { BIN="$c"; break; }
+done
+[ -n "$BIN" ] || { echo "❌ 找不到 credit 二进制（先跑 bash rebuild.sh）" >&2; exit 1; }
+
 if [[ "${1:-}" == "-json" ]]; then
-    exec ./credit
+    exec "$BIN"
 fi
-exec ./credit -pretty
+exec "$BIN" -pretty

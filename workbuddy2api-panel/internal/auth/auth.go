@@ -438,6 +438,9 @@ func writeAuthSnapshot(s authFileSnapshot) error {
 	return nil
 }
 
+// atomicSeq 原子替换的临时文件名序号（bug-01：唯一临时名，避免并发写交错）。
+var atomicSeq atomic.Uint64
+
 // ReplaceAtomic 用 tmp 原子替换 path，并对「单文件 bind mount」做 EBUSY 兜底。
 //
 // 为什么需要（bug #4）：Docker 用 `-v ./data/state.json:/app/data/state.json` 这种
@@ -447,7 +450,12 @@ func writeAuthSnapshot(s authFileSnapshot) error {
 //
 // 返回 nil 表示内容已落盘（原子替换成功，或 bind mount 原地覆写成功）。
 func ReplaceAtomic(path string, raw []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
+	// 临时名必须唯一（bug-01）：固定 `path+".tmp"` 时，同一账号的两个并发 SaveAtomic
+	// 会共用同一个临时文件 —— A 截断并写完后，B 截断、只写了一半，此时 A 的 rename
+	// 把**半截内容**换成正式文件（文件长度正常，JSON 已损坏），下次启动 LoadDir
+	// Parse 失败后静默跳过 → 面板上少一个号，日志里没有任何提示。
+	// v1.27.6 把 SaveAtomic 的磁盘 I/O 挪出 a.mu（性能修复）后，这条竞争才真正可达。
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), atomicSeq.Add(1))
 	if err := os.WriteFile(tmp, raw, mode); err != nil {
 		return err
 	}
@@ -502,16 +510,19 @@ func LoadDir(dir string) ([]*Auth, error) {
 		}
 		a.FilePath = f
 		if prev, ok := seenUID[a.UID]; ok {
-			log.Printf("WARN: uid %s duplicated across %s and %s — 后者覆盖（不同 realm 同名 UID？）",
-				logfmt.Label(a.UID, a.Nickname), prev, f)
+			// 用加锁访问器 + 写明"保留谁/丢弃谁"（bug-12）：两条日志文本一致时，
+			// 事后根本判断不出到底哪个文件留下了。锁外直读 Nickname 也是同包
+			// 专门加 NicknameValue() 要消除的那类竞争。
+			log.Printf("WARN: uid %s duplicated — 保留 %s，丢弃 %s（不同 realm 同名 UID？）",
+				logfmt.Label(a.UID, a.NicknameValue()), prev, f)
 		}
 		seenUID[a.UID] = f
 		if a.RealmStored() == "" {
 			if changed, r := a.BackfillRealm(); changed {
 				if err := a.SaveAtomic(); err != nil {
-					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.Nickname), err)
+					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 				} else if r == "global" {
-					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.Nickname), a.Domain)
+					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.NicknameValue()), a.Domain)
 				}
 			}
 		}

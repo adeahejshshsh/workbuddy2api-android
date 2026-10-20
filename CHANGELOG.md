@@ -1,6 +1,88 @@
 # 变更记录
 
-## v1.27.8（当前）
+## v1.27.9（当前）
+
+**本版 = 第十五份审查报告（CODE-REVIEW-2026-10-20.md，12 条）的落地修复。
+逐条复核：12 条全部为真、0 误报。其中 BUG-01 是我 v1.27.6 的性能优化引入的回归，
+BUG-04 / BUG-06 / BUG-09 是「同一类门控/写法只改了一处」的老毛病。**
+
+### 严重
+
+* **BUG-01 凭证文件可能被并发写坏，重启后账号静默消失** —— `ReplaceAtomic` 用**固定**
+  临时名 `path+".tmp"`，而 v1.27.6 我把 `SaveAtomic` 的磁盘 I/O 挪出 `a.mu`（性能修复）
+  之后，同一账号的并发落盘不再有串行化：A 截断并写完后、B 截断只写了一半，此时 A 的
+  `rename` 会把**半截内容**换成正式文件（长度正常、JSON 已坏）→ 下次启动 `LoadDir`
+  `Parse` 失败后静默跳过，面板上少一个号且日志无任何提示。
+  改成唯一临时名 `path.tmp.<pid>.<seq>`（原子序号）：rename 依然原子，最后一次完整内容胜出，
+  不可能交错。【复核】真，且是我上一版引入的回归。
+* **BUG-02 构建脚本注入的版本号永远是 `dev`** —— `rebuild.sh` 先 `cd` 到 panel 子目录，
+  再用 `dirname "$0"` 找 `VERSION` —— 按文档的 `bash rebuild.sh`（相对路径）执行时
+  `dirname` 就是 `.`，指向 panel 目录，`VERSION` 打不开 → 兜底成 `dev` →
+  `-X main.appVersion=dev`，面板 `/status` 的 version 恒为 dev。
+  改成在 `cd` 之前算 `SELF_DIR="$(cd "$(dirname "$0")" && pwd)"`，并加一条找不到时的告警。
+  实测：`VER=1.27.8`（修复前是 `dev`）。【复核】真。
+* **BUG-03 `credit.sh` / `signin.sh` 指向不存在的二进制** —— `rebuild.sh` 把产物写到
+  `$PREFIX/lib/workbuddy2api/{server,signin,login,credit,trial}`，而 `credit.sh` 执行
+  仓库内的 `./credit`（不存在）；`signin.sh` 现场 `go build`，而本机 `go` 不在 `PATH`
+  （在 `$PREFIX/lib/go/bin`），`set -e` 下直接退出。
+  两个脚本都改成「先找当前目录（Docker 镜像里的形态）→ 再找 `$PREFIX/lib/workbuddy2api/`」，
+  都找不到才报错；`signin.sh` 的 `go build` 兜底路径补上 `PATH`。
+  实测：`bash credit.sh -json` 正常输出 JSON、`bash signin.sh /tmp/x` 正常打印
+  `no auth files`。【复核】真。
+* **BUG-04「一键完成全部任务」缺国际版门控** —— v1.27.8 我给 `accountTaskAuto`（单任务）
+  加了 `IsGlobal()` 门控，**`accountTaskAutoAll` 漏了**：对 global 号点「一键完成全部」
+  会跑满 19 个动作、每个打一次上游全是 403，还长期占着 per-account 锁。
+  补同一段门控（与 `accountTasks` 同口径）。【复核】真。
+
+### 中等
+
+* **BUG-05 `taskDone` 漏判「已完成未领」** —— 上游解析侧早已把「进度达标」与
+  `accept_status=completed` 统一成 `Claimable`，而 `taskDone` 仍自己判
+  `Target>0 && Current>=Target`：一次性任务（`target=0`、完成状态只在 accept_status 上）
+  已达标未领时被判"没做完" → 整条动作链重跑（`expert_5` 是 5 次真实对话 + 5 组召唤事件）。
+  改成 `t.Claimed || t.Claimable`（已确认全仓只有一处构造 `Task`，必带 Claimable）。
+  【复核】真。
+* **BUG-06 单任务入口查跳过名单用固定任务码** —— 跳过名单的 key 是 `uid|实际任务码`，
+  `runAutoAll` 与队列路径都用 `effectiveTaskCode`，只有 `accountTaskAuto` 在算出
+  `effCode` **之前**用 `act.TaskCode` 查了一次 → 按域换码的任务（`WorkBuddy_Valorant`）
+  永远命中不了，"做不了"的任务照样白跑一遍。
+  把 `effCode` 提前到 `skipBlocked` 之前（顺带避免"拿着账号锁打上游"）。【复核】真。
+* **BUG-07 会话分配慢路径持会话写锁扫全池** —— 慢路径在 `r.mu.Lock()` 内部调用
+  `usable()`（→ pool RLock）和 `availableSlice(model)`（全池扫描 + 排序），
+  于是所有其他会话的命中 / `Bind` / `Unbind`（handler 每请求一次）都要排队；
+  而 `pool.Flush`（每 5s 持池写锁做磁盘 IO）一拿住池锁，整张会话表就跟着被堵在磁盘 IO 后面
+  —— 表现为面板「偶发整秒卡顿」。
+  改成**锁外取可用集合**、锁内只读本地 `avail` map。【复核】真。
+* **BUG-08 抢在途名额失败仍记为「本轮已试」** —— `tried[uid]=true` / `st.uid` / `st.nick`
+  写在 `Acquire` **之前**：抢失败时该号既没被使用、又被排除出本轮后续轮转（可用号被浪费），
+  流水行还会把这次请求记到没服务成功的号头上。三行移到 `Acquire` 成功之后。【复核】真。
+
+### 轻微
+
+* **BUG-09 信号量在 goroutine 内部获取** —— `packages` 与 `runQueueItems` 仍是
+  "先起 N 个 goroutine、N-3 个阻塞在 sem 上"（`syncNicknames` 在 v1.27.8 已修过）。
+  两处都改成**先抢槽再起 goroutine**。【复核】真。
+* **BUG-10 全池冷却兜底每次选号都打一条 WARN** —— 这是**每请求**路径，整池软冷却时
+  几秒就能刷满面板 500 行环形缓冲，把任务/错误日志全挤掉。
+  改成只在「兜底账号变了」时打印（`p.mu` 已由调用方持有，字段读写安全）。【复核】真。
+* **BUG-11 权威余额写入不清扣费余数** —— `SetCredits` / `SetCreditsDetailed` /
+  `ReenableIfCredits` 只覆盖 `credits`，`creditFrac`（内插扣费的不足 1 分余数）仍留着，
+  后续 `NoteModelCost` 从旧余数继续累加 → `credits` 与真实余额长期差不到 1 分，
+  `credit_floor` 触底判定略早/略晚。三处都补 `e.creditFrac = 0`。【复核】真。
+* **BUG-12 `LoadDir` 重复 UID 告警直读昵称、且看不出保留谁** —— 改用
+  `NicknameValue()`，并把日志改成「保留 X，丢弃 Y」，事后可追溯。【复核】真。
+
+### 测试
+
+`upstream 213 / server 91（+1 skip）/ pool 186 / panel 44 / session 20 / redisstore 6 /
+reqlog 7 / auth 28 / usage 14 / scheduler 65 / cmd-server 52`，
+**726 通过 + 1 跳过（`TestModelsEndpoint`：上游目录不可达，v1.27.8 起按设计跳过）+ 0 失败**；
+`gofmt -l` 为 0。
+
+实测验证：`VER=1.27.8`（BUG-02 修复前为 `dev`）、`bash credit.sh -json` 正常输出、
+`bash signin.sh` 正常定位到 `$PREFIX/lib/workbuddy2api/signin`。
+
+## v1.27.8
 
 **本版 = 第十四份审查报告（REVIEW-BUGS.md，13 条）的落地修复。逐条复核：
 12 条为真、1 条（BUG-12）机制不成立。其中 BUG-08 是我上一版（v1.27.6）修复的漏洞。**

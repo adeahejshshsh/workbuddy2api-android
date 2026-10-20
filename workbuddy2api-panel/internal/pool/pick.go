@@ -333,7 +333,14 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	if best == nil {
 		return nil
 	}
-	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.NicknameValue()), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
+	// 只在「兜底账号变了」时打一行（bug-10）：这是**每请求**路径，整池都在软冷却时
+	// 每个请求都会走到这里 —— 原样打 WARN 会瞬间刷满面板 500 行环形缓冲，
+	// 把任务日志、错误日志全挤掉。p.mu 已由调用方持有，字段读写安全。
+	if p.lastFallbackLog != best.a.UID {
+		p.lastFallbackLog = best.a.UID
+		log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s（同一账号后续不再重复打印）",
+			logfmt.Label(best.a.UID, best.a.NicknameValue()), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
+	}
 	best.lastUsed = time.Now()
 	// 兜底同样是「选中」，必须与 pick() 正常路径、粘性命中路径（PickByUIDForModel）
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的

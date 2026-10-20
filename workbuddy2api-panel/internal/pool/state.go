@@ -146,6 +146,10 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 			e.credits = remain
 			e.creditsTotal = total
 		}
+		// 权威余额到达：内插扣费的不足 1 分余数归零（bug-11）。不清的话后续
+		// NoteModelCost 会从旧余数继续累加，credits 与真实余额长期差不到 1 分，
+		// credit_floor 的触底判定会略早/略晚。
+		e.creditFrac = 0
 		// ReenableIfCredits 只有聚合余额上下文；到期明细必须由 SetCreditsDetailed
 		// 重新写入，不能沿用旧窗口/旧批次的缓存。
 		e.creditsExpiring = 0

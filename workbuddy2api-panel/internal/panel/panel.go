@@ -1031,6 +1031,9 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
 	for i, s := range accts {
+		// 抢槽放在 go 之前（bug-09）：此前在 goroutine 内抢，N 个账号就瞬时创建 N 个
+		// goroutine、N-3 个阻塞在 channel 上，并发上限只限住了上游、没限住资源。
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(i int, s pool.Status) {
 			defer wg.Done()
@@ -1040,7 +1043,6 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 					out[i] = row{UID: s.UID, Nickname: s.Nickname, Realm: s.Realm, Error: "内部错误"}
 				}
 			}()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			it := row{UID: s.UID, Nickname: s.Nickname, Realm: s.Realm}

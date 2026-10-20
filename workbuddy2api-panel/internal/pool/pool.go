@@ -83,7 +83,9 @@ type Pool struct {
 	// nil = 未启动 flusher（stateFp 为空时 New 不起 flusher）。
 	stopCh chan struct{}
 	// closeOnce 保证 Close 幂等（多次调用不重复 close channel）。
-	closeOnce sync.Once
+	// lastFallbackLog 上一次打过兜底选号日志的账号（bug-10：每请求路径要节流）。
+	lastFallbackLog string
+	closeOnce       sync.Once
 }
 
 // New 构建账号池（stateFp 为空 = 不落盘，纯内存，测试用）。

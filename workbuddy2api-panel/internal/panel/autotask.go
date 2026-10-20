@@ -272,10 +272,11 @@ func taskDone(t *upstream.Task) bool {
 	if t == nil {
 		return true
 	}
-	if t.Claimed {
-		return true
-	}
-	return t.Target > 0 && t.Current >= t.Target
+	// Claimable 已含「进度达标」与「accept_status=completed」两种完成形态（bug-05）：
+	// 上游解析侧（upstream/tasks.go）把它们统一成同一个结论，这里再用
+	// Target>0 && Current>=Target 自己判一遍，就把"已完成未领"的一次性任务漏成了
+	// "没做完" → 整条动作链重跑（expert_5 是 5 次真实对话 + 5 组召唤事件）。
+	return t.Claimed || t.Claimable
 }
 
 // refreshCreditsAsync 领奖成功后异步刷新该号积分（bug #17）。
@@ -787,8 +788,14 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 			"该任务是尝试型（上游未证实可点亮），默认不执行；如要试请 POST /panel/api/tasks/skip 带上 {\"allow_attempt\":true} 打开开关")
 		return
 	}
+	// 跳过名单的 key 是 `uid|实际任务码`（bug-06）：runAutoAll 与队列路径都用
+	// effectiveTaskCode 写/读，这里若用动作表里的固定码查，按域换码的任务
+	// （WorkBuddy_Valorant）永远命中不了 → 被判"做不了"的任务照样重跑一遍。
+	// 顺带：effectiveTaskCode 内部会 ListTasks，放在 tryLockAccount 之前也避免了
+	// "拿着账号锁打上游"。
+	effCode := p.effectiveTaskCode(a, act.TaskCode)
 	if a != nil {
-		if blocked, why := p.skipBlocked(a.UID, act.TaskCode); blocked {
+		if blocked, why := p.skipBlocked(a.UID, effCode); blocked {
 			writeErr(w, http.StatusConflict, "该任务已被判定做不了并跳过："+why+
 				"；如要立即重试：打开该账号的「任务」弹窗，点「清空跳过名单」")
 			return
@@ -810,10 +817,8 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	defer stopWatch()
 	// 前置读取：已完成的任务直接跳过（幂等，不浪费上游调用）。
 	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
-	// 先解析**实际**任务码，再做前置读取（bug B6）：动作可能按域换码
-	// （WorkBuddy_Valorant），此前用固定码查不到就直接 404 返回，
-	// effectiveTaskCode 永远走不到 → 换码任务永远"该账号没有此任务"。
-	effCode := p.effectiveTaskCode(a, act.TaskCode)
+	// 用**实际**任务码做前置读取（bug B6）：动作可能按域换码（WorkBuddy_Valorant），
+	// 此前用固定码查不到就直接 404 返回。effCode 已在上面（跳过名单查询处）算好。
 	before, err := p.taskByCode(a, effCode)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
@@ -1668,6 +1673,14 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	// 国际版账号无成长任务体系（bug-04）：与 accountTaskAuto / accountTasks 同口径。
+	// 此前这里漏了门控，"一键完成全部"会对 global 号白跑整条流水线（19 个动作各打一次
+	// 上游，全是 403 growth system is only available for personal users），
+	// 还长期占着 per-account 锁。
+	if a.IsGlobal() {
+		writeErr(w, http.StatusNotImplemented, "国际版账号无成长任务体系（上游 growth 仅对个人 CN 用户开放）")
 		return
 	}
 	// per-account 互斥（与单任务动作共用一把锁）：重复点击 409。

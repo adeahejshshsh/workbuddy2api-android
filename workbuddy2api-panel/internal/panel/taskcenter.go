@@ -537,6 +537,8 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	for _, one := range accts {
+		// 抢槽前置（bug-09，与 packages / syncNicknames 同口径）
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(one queueAccount) {
 			defer wg.Done()
@@ -552,7 +554,6 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 					})
 				}
 			}()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			// per-account 互斥：与单任务/一键完成共用一把锁。
 			if !p.tryLockAccount(one.a.UID) {

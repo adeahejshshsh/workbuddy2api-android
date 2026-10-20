@@ -180,12 +180,27 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	}
 
 	// ── Slow path: 写锁 re-check 后分配 ────────────────────
+	//
+	// 锁外先取可用集合（bug-07）：这是唯一需要 pool 锁的部分，绝不能放在会话写锁里。
+	// 否则所有其他会话的命中 / Bind / Unbind（handler 每请求一次）都要等这次全池
+	// 扫描 + 排序结束；而 pool.Flush（每 5s 持池写锁做磁盘 IO）一旦拿住池锁，
+	// 整张会话表就跟着被堵在磁盘 IO 后面 —— 表现为面板上「偶发整秒卡顿」。
+	uids := r.availableSlice(model)
+	if len(uids) == 0 {
+		return "", false
+	}
+	avail := make(map[string]bool, len(uids))
+	for _, u := range uids {
+		avail[u] = true
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// re-check：并发同 key 可能已被其他 goroutine 分配好。
+	// 锁内只读本地 avail，不再回头调 pool（bug-07）。
 	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
-		if usable(e2.uid) {
+		if avail[e2.uid] {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
 			return e2.uid, true
 		}
@@ -194,11 +209,6 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		// 这一处漏了 —— 重启后 LoadFromStore 会把旧绑定读回来，会话又被钉到那个
 		// 不可用的号上（表现为「重启后某会话持续 503 / 换不动号」），要等 TTL 到期。
 		r.cfg.Store.DelBind(key)
-	}
-
-	uids := r.availableSlice(model)
-	if len(uids) == 0 {
-		return "", false
 	}
 
 	// 双段策略：优先"空闲账号"（未被任何会话绑定的可用号），其次全池。
