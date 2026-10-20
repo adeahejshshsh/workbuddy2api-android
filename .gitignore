@@ -33,17 +33,14 @@ build/
 data/
 docs/*.tmp
 
-# 代码审查 / 缺陷报告：只在本地当工作笔记，不进公开仓库
-# （它们是随手丢在工作区根目录的 md，tar 会把整个工作区带走，靠这里挡住）
-/*-REVIEW*.md
-/REVIEW-*.md
-/CODE-REVIEW*.md
-/BUG-REVIEW*.md
-/ISSUES-*.md
-/审查报告*.md
-/代码审查报告*.md
-/缺陷*.md
-/*BUG清单*.md
+# 文档：一律不进库，只放行本来就有的这几份
+# （和 workbuddy2api-panel/.gitignore 同一套写法：审查报告/缺陷清单随手丢在根目录，
+#   tar 会把整个工作区带走 —— 默认全挡，白名单放行）
+*.md
+!README.md
+!AGENT.md
+!CHANGELOG.md
+!NOTICE.md
 
 # Python 字节码（tools/ patches/ 里的 __pycache__）
 __pycache__/
