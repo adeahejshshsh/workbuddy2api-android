@@ -334,7 +334,21 @@ var (
 // taskByCodeWaiting 回读任务，若未达标则在有界预算内轮询等待（上游异步计分）。
 // 已达标（claimable）立即返回；预算耗尽返回最后一次结果（可能仍未达标）。
 func (p *Panel) taskByCodeWaiting(a *auth.Auth, code string) (*upstream.Task, error) {
-	t, err := p.taskByCode(a, code)
+	return p.taskByCodeWaitingWith(a, code, p.taskByCode)
+}
+
+// taskByCodeWaitingMP 小程序口径的同一套有界轮询（bug #6）。
+//
+// 为什么需要：上游计分是异步的（实测 3~8s），非 mp 任务走 taskByCodeWaiting 会
+// 轮询等它落定，而 mp 分支此前只读一次 —— 于是「一键完成全部」里 mp 任务几乎总是
+// claimable=false、奖励不会自动领，单任务入口反而能领到，两个入口行为不一致。
+func (p *Panel) taskByCodeWaitingMP(a *auth.Auth, code string) (*upstream.Task, error) {
+	return p.taskByCodeWaitingWith(a, code, p.taskByCodeMP)
+}
+
+// taskByCodeWaitingWith 回读 + 有界轮询的公共实现（fetch 决定用哪种口径读任务列表）。
+func (p *Panel) taskByCodeWaitingWith(a *auth.Auth, code string, fetch func(*auth.Auth, string) (*upstream.Task, error)) (*upstream.Task, error) {
+	t, err := fetch(a, code)
 	if err != nil || t == nil {
 		return t, err
 	}
@@ -345,7 +359,7 @@ func (p *Panel) taskByCodeWaiting(a *auth.Auth, code string) (*upstream.Task, er
 		if !sleepAB(a.UID, claimPollGap) {
 			return nil, errTaskAborted
 		}
-		t2, err2 := p.taskByCode(a, code)
+		t2, err2 := fetch(a, code)
 		if err2 != nil {
 			return t, nil // 轮询期间的查询失败不覆盖已拿到的结果
 		}
@@ -1596,7 +1610,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		}
 		var after *upstream.Task
 		if isMPTaskCode(effCode) {
-			after, _ = p.taskByCodeMP(a, effCode)
+			after, _ = p.taskByCodeWaitingMP(a, effCode) // 与 Web 口径同等待（bug #6）
 		} else {
 			after, _ = p.taskByCodeWaiting(a, effCode)
 		}

@@ -212,6 +212,14 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 		changed = true
 		if len(keptCalls) == 0 {
 			delete(msg, "tool_calls")
+			// 整批 tool_calls 被裁掉后，这条消息可能变成
+			// {"role":"assistant","content":null} —— null content 在部分上游被判参数
+			// 非法（11133/11101 同类），而清理本身就是为了让请求能过（bug #7）。
+			// 这里**不删消息**：删掉会改变对话结构（可能变成连续两条 user），
+			// 而 content:"" 是合法形态。只把 null/缺失补成空串。
+			if v, ok := msg["content"]; !ok || v == nil {
+				msg["content"] = ""
+			}
 			continue
 		}
 		msg["tool_calls"] = keptCalls

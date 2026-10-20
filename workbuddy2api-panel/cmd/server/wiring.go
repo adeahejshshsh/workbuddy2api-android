@@ -16,6 +16,21 @@ import (
 //
 // 返回列表可能对快过期账号重复同一 UID，作为虚拟实例权重；会话哈希分配无需感知
 // 权重细节，已有绑定的快路径仍直接返回原账号，不做迁移。
+// realmAwareIsAvailableForModel 单点版（bug #13）：同样按 realm 前缀剥出 realm+bare，
+// 再问池里那一个账号此刻对该模型是否可选。
+func realmAwareIsAvailableForModel(p *pool.Pool) func(model, uid string) bool {
+	return func(model, uid string) bool {
+		realm, bare := server.ResolveModel(model)
+		if realm != "" {
+			// 域不匹配直接否：粘性号不能跨 realm 服务（与全集版同口径）。
+			if a := p.AuthByUID(uid); a != nil && a.Realm() != realm {
+				return false
+			}
+		}
+		return p.IsAvailableForModel(uid, bare)
+	}
+}
+
 func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
 	return func(model string) []string {
 		realm, bare := server.ResolveModel(model)

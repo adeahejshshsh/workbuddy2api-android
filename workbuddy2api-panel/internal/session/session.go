@@ -41,6 +41,9 @@ type Config struct {
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
 	AvailableForModel func(model string) []string
+	// IsAvailableForModel 单点校验（可选）：非 nil 时快路径只查绑定的那个 uid，
+	// 不再为一次命中构建整池集合（bug #13）。为 nil 时退回 AvailableForModel 全集。
+	IsAvailableForModel func(model, uid string) bool
 }
 
 // Router 会话粘性路由器。
@@ -146,14 +149,25 @@ func (r *Router) Resolve(key string) (string, bool) {
 // 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
 func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	now := time.Now()
-	available := r.availableSet(model)
+	// 快路径用单点校验（bug #13）：命中时不必为整池建集合 + 排序。
+	// 慢路径才需要全集，届时按需构建（避免"命中也要付全量扫描"的固定开销）。
+	var available map[string]bool
+	usable := func(uid string) bool {
+		if r.cfg.IsAvailableForModel != nil {
+			return r.cfg.IsAvailableForModel(model, uid)
+		}
+		if available == nil {
+			available = r.availableSet(model)
+		}
+		return available[uid]
+	}
 
 	// ── Fast path: RLock 快查 ──────────────────────────────
 	r.mu.RLock()
 	e, found := r.entries[key]
 	r.mu.RUnlock()
 	if found && !expired(e, now, r.cfg.TTL) {
-		if available[e.uid] {
+		if usable(e.uid) {
 			// 续期节流：滑动过期不需要毫秒精度，而每次 touch 都要拿写锁 + 一次
 			// Redis 镜像写。此前每个命中请求都做一遍 —— 全池并发请求串行在同一把
 			// 写锁上，还把异步写放大成「每请求一次」（review M5/H5）。
@@ -171,7 +185,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 
 	// re-check：并发同 key 可能已被其他 goroutine 分配好。
 	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
-		if available[e2.uid] {
+		if usable(e2.uid) {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
 			return e2.uid, true
 		}

@@ -78,7 +78,11 @@ func (p *Panel) postImportActivate(a *auth.Auth, realm string) {
 //
 // 返回 {ok, total, imported, skipped, errors}。
 func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	// 内存阈值与文件大小上限分开（bug #12）：外层 MaxBytesReader 是 32MB，而
+	// multipart 有 boundary 与头部开销，实际可读字节更少 —— 一个正好 32MB 的导出
+	// 文件会在这里被截断，报 "unexpected EOF"，用户看到的是语法错误而不是"文件太大"。
+	// 阈值给 1MB 余量（超出的部分会落到临时文件，不影响正确性）。
+	if err := r.ParseMultipartForm(33 << 20); err != nil {
 		writeErr(w, http.StatusBadRequest, "parse form: "+err.Error())
 		return
 	}

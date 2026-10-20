@@ -1483,6 +1483,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		hint = "model tier denied: every account in the pool is known not to support this model (learned from upstream 11158)"
 	}
+	// 客户端已断连：不要再往死连接写响应，也不要把 OutcomeInterrupted 覆盖成
+	// HTTPError（bug #2）。断连是**客户端行为**，记成 503 会同时污染中断率统计与
+	// 排障方向（"服务端 503" vs "用户点了停止"）。这条兜住所有 break 出口
+	// （含 rotateBackoff 判定断连的那处）。
+	if r.Context().Err() != nil {
+		st.status = http.StatusServiceUnavailable
+		st.outcome = reqlog.OutcomeInterrupted
+		return
+	}
 	writeOpenAIErrorFull(w, status, code, msg, hint, upBrief)
 	st.status = status
 	st.outcome = reqlog.OutcomeHTTPError

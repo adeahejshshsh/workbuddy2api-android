@@ -1,6 +1,106 @@
 # 变更记录
 
-## v1.27.6（当前）
+## v1.27.7（当前）
+
+**本版 = 第十三份审查报告（17 条）的落地修复。逐条复核：17 条全部为真、0 误报。
+#1 是上一版（v1.27.6）我自己引入的；另外顺手修了一个更严重的问题 ——
+本机 14 个前端测试**一直在静默跳过**，这类 bug 就是这么漏出去的。**
+
+### P0
+
+* **1 前端「运行日志」空列表时抛 ReferenceError** —— `renderRequestTable()` 里引用 `reqErr`，
+  但它只是 `loadLogs` 的局部变量（我上一版为修 #7 引入的形参）。空列表（归档关闭 / 无请求 /
+  筛选无命中，**最常见场景**）时直接 `ReferenceError`，`tb.innerHTML` 不清空、`reqCount` 不更新，
+  异常冒泡到 catch 后页面显示「日志读取失败：reqErr is not defined」。
+  改成模块级 `reqErrText`（`loadLogs` 赋值、`renderRequestTable` 读取），去掉那个形参。
+  【复核】真，且是我上一版引入的。
+* **2 客户端断连被记成 503 / http_error** —— 断连分支设了 `OutcomeInterrupted` 后 `break`，
+  却直接落进末端错误路径：既向已断开的连接写一次 503 JSON，又把 `OutcomeInterrupted`
+  覆盖成 `OutcomeHTTPError`、`st.status` 改成 503 —— 流水行与 reqlog 把「用户主动取消」
+  记成「服务端 503」，中断率统计与排障全部失真。
+  在末端写响应前加 `if r.Context().Err() != nil { 保留 Interrupted; return }`
+  （兜住所有 break 出口，含 `rotateBackoff` 判定的那处）。【复核】真。
+* **3 非流式「上游中途断流」分支永远不可达** —— `errUpstreamRead` 只在 `StreamHint` 里包装，
+  `Aggregate` 从不包装；于是 `IsUpstreamReadError(err)` 恒假，非流式断流一律落到
+  `upstream_parse` 502，错误码与流式路径不一致。`Aggregate` 读循环里包装该错误。
+  【复核】真（这条也是我上一版加分支时没配套）。
+* **4 安卓壳杀进程只发 SIGTERM，无强杀兜底** —— `killProc()` 只 `destroy()`。Go 侧若卡在
+  优雅停机（在途 SSE 排空 / 锁竞争）就会留下一个**占着 7863 的旧进程**：新进程 bind 失败
+  立刻退出，看门狗反复自愈也救不回来，只有系统杀掉 App 才恢复。
+  `killProc` 后起 3s 延时强杀线程（API 26+ 用 `destroyForcibly`，更低版本退回 `destroy`），
+  `restartGateway` 的 8s 等待窗口结束时再补一次。【复核】真。
+
+### P1
+
+* **5 任务队列执行时无锁遍历 `q.items`** —— `for i := range q.items` 读 slice header 未持锁，
+  与 `queueMarkAt` 的元素写、以及下一轮 `startGrowthQueue` 对 `q.items` 的整体替换构成
+  数据竞争。改成遍历**入参快照**，并给按下标写入加 `seq` 守卫（队列已被新一轮替换时丢弃）。
+  【复核】真。
+* **6 一键完成里 mp 任务不做异步计分等待** —— 非 mp 走 `taskByCodeWaiting`（4×3s 轮询等
+  上游异步计分），mp 只读一次；上游计分延迟 3~8s，于是 mp 任务在「一键完成」里几乎总是
+  `claimable=false`、奖励不自动领，而单任务入口能领到。抽出
+  `taskByCodeWaitingWith`，新增 `taskByCodeWaitingMP` 复用同一套轮询。【复核】真。
+* **7 清理孤儿 tool_call 后可能留下 `content:null` 的空 assistant** —— 整批 `tool_calls`
+  被裁掉时只 `delete(msg,"tool_calls")`，消息可能变成 `{"role":"assistant","content":null}`，
+  这类空 assistant 在部分上游被判参数非法，而清理本身就是为了让请求能过。
+  改为把 null/缺失的 `content` 补成空串。
+  （**没有删整条消息**：那会改变对话结构、可能变成连续两条 user；既有测试也明确断言
+  「assistant 保留」。报告给了两个选项，这里取更保守的那个。）【复核】真。
+* **8 `run.sh stop` 无论是否杀成功都删 pid 文件** —— `kill -9` 之后进程仍可能活着
+  （僵尸/无权限），`rm -f "$PIDF"` 照样执行，之后 `status/stop` 再也定位不到它。
+  改成只有 `kill -0` 失败（确认已退出）才删，否则保留并提示。【复核】真。
+* **9 `run.sh restart` 用相对路径递归调用自身** —— `bash "$0" stop`，从别的目录执行时
+  找不到脚本，restart 静默只跑一半。开头算 `SELF` 绝对路径，restart 改用 `$SELF`。
+  【复核】真。
+
+### P2
+
+* **10 `doJSON` 在 HTTP 200 上无法识别 11102/11115/11135** —— 这三类判定都带 400/404/413
+  状态门槛，而 doJSON 拿到的常是 200 + 业务 code → 全部退化成 `ErrClient`（上一版 B8 的修复
+  实际只有 14018/11101 受益）。新增 `businessCodeStatus()` 合成**语义状态码**只用于分类，
+  `Error.Status` 仍报真实 HTTP 状态（避免影响调用方按 Status 的分支）。【复核】真。
+* **11 `ChatStreamContext` 用 `panic` 做不可达兜底** —— HTTP 路径有 net/http recover，但
+  `RunNightChats` / `runModelChat` 这些后台 goroutine 没有 → 一次 panic 打死整个网关。
+  改成返回错误。【复核】真。
+* **12 面板导入的 32MB 上限与 multipart 解析撞边界** —— 外层 `MaxBytesReader` 是 32MB，
+  而 multipart 有 boundary 与头开销，一个正好 32MB 的导出文件会在 `ParseMultipartForm`
+  处被截断，报 `unexpected EOF`（语法错误而非「文件太大」）。阈值留 1MB 余量。
+  【复核】真。
+* **13 会话粘性每条请求做两次全池扫描 + 排序** —— 快路径命中也要先 `availableSet(model)`
+  （池 RLock + 全池遍历 + 排序），慢路径再来一次。新增 `pool.IsAvailableForModel(uid, model)`
+  与 `session.Config.IsAvailableForModel`，快路径改单点校验（O(1)），慢路径才建全集。
+  【复核】真。
+* **14 `cost_explore_interval` 负值钳 0 后未回写字符串** —— 与 `expiring_soon` 的处理不一致：
+  配置里仍留 `"-5m"`，面板保存后写盘还是负值、重启再钳一次。补回写 `"0"`。【复核】真。
+* **15 `WriteDefault` 落盘缺 `Sync`** —— 这是 O_EXCL 生成的「唯一一份密钥」，掉电/强杀时
+  可能留下 0 字节或半截 config.json，下次启动 `Load` 报 parse config 且密钥无处可寻。
+  `Write` 后补 `Sync()`。【复核】真。
+* **16 面板 `models` 与 `mdTier` 开关参数无效** —— `loadModels(true)` 而 `loadModels()` 没有
+  形参。面板 models 端点每次直连上游、没有客户端缓存，`force` 无意义 —— 删掉实参并注明。
+  【复核】真。
+* **17 `taskAcceptAll` 失败批次不节流** —— 成功批次间 `sleepAB(1.05s)`，失败分支 `continue`
+  直接跳下一批，可对上游连发多次 accept（与「防风控」意图相反）。改成无论成败都在
+  「还有下一批」时等。【复核】真。
+
+### 附带修复：本机 14 个前端测试长期静默跳过
+
+`nodeBin()` 探针发现 node 不可直接 exec 就 `t.Skip` —— 而 Android app 私有目录是 noexec，
+**所有** JS 测试在这台机器上从来没跑过（`TestAppJSSyntax` / `TestAppJSTopLevelSmoke` /
+`TestAppJSRequestLogFormatting` 等 14 个）。v1.27.6 引入的 #1 就是这么漏出去的。
+
+- 新增 `nodeCmd()`：必要时自动改走 `/system/bin/linker64 <node> …` 代跑；17 处调用点统一。
+- 钉 `TZ=Asia/Shanghai`（面板按浏览器本地时区渲染，不钉的话 epoch 断言随宿主时区漂 8 小时）。
+- 新增 `TestRenderRequestTableWithEmptyEntries`：显式调 `renderRequestTable()`（空列表 +
+  有错误文案两种），顶层 smoke 抓不到这类「函数被别处调用才炸」的问题。
+
+结果：panel 从「28 通过 + 14 跳过」变成 **44 通过 + 0 跳过**。
+
+### 测试
+
+`upstream 213 / server 92 / pool 186 / panel 44 / session 20 / redisstore 6 / reqlog 7 /
+auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**727 通过 0 失败 0 跳过**；`gofmt -l` 为 0。
+
+## v1.27.6
 
 **本版 = 第十二份审查报告（13 条）的落地修复。逐条对当前代码复核：13 条全部为真、0 误报。
 其中 #3/#4/#5/#6/#9 与本会话前几轮改动同源 —— 我把机制加了一半。**

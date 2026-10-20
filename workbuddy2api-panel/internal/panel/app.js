@@ -11,6 +11,9 @@ let mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'defaul
 let mdAll = [], mdProbes = {}, mdProbeOf = () => undefined;
 let reqFilter = { q: '', outcome: '' };
 let reqEntries = [];
+// reqErrText 请求记录接口的错误文案（bug #1）：renderRequestTable 会被筛选防抖与
+// 下拉 change 单独调用，读不到 loadLogs 的局部变量 —— 用模块级变量承载。
+let reqErrText = '';
 let usDim = 'account', usCreditDim = 'account', usSort = 'total';
 let usageData = null;
 let reqRangeState = null; // 请求记录的时间范围（用量页的见 trangeState）
@@ -794,7 +797,9 @@ $('mdQ').oninput = () => {
   clearTimeout(mdQTimer);
   mdQTimer = setTimeout(() => { mdFilter.q = $('mdQ').value.trim(); renderModels(); }, 120);
 };
-$('mdTier').onchange = () => loadModels(true);
+// loadModels 没有形参，也不存在客户端缓存（面板 models 端点每次直连上游）——
+// 原来传的 `true` 被静默忽略（bug #16）。删掉实参，别让人以为有 force 语义。
+$('mdTier').onchange = () => loadModels();
 for (const [id, key] of [['mdRealm', 'realm'], ['mdCap', 'cap'], ['mdEffort', 'effort'], ['mdPromo', 'promo'], ['mdSort', 'sort']]) {
   const el = $(id);
   if (!el) continue;
@@ -824,9 +829,9 @@ async function loadLogs() {
     // 请求记录接口失败要透出来（bug #7）：此前 `.catch(() => ({entries: []}))` 把
     // 500/超时/密钥失效静默替换成空数组，而 archiveOn 为真 → 表格显示「暂无请求记录」、
     // 计数显示 0 条，用户以为筛选或归档没数据，实际是接口挂了。
-    let reqErr = '';
+    reqErrText = '';
     const requestLogs = api('request_logs?' + rq.toString())
-      .catch(e => { reqErr = e.message; return { entries: [] }; });
+      .catch(e => { reqErrText = e.message; return { entries: [] }; });
     const [d, metrics, requestRows] = await Promise.all([
       api('logs'),
       api('request_metrics').catch(() => ({})),
@@ -837,7 +842,7 @@ async function loadLogs() {
     // 只有归档关闭时才回落到内存指标，保证没有归档的部署仍能看到最近请求。
     const archiveOn = !!(metrics && metrics.archive && metrics.archive.enabled);
     const recent = archiveOn ? (requestRows.entries || []) : (metrics.recent || []);
-    renderRequestMetrics(metrics, recent, reqErr);
+    renderRequestMetrics(metrics, recent);
     const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
     box.innerHTML = entries.length
       ? entries.map(e => {
@@ -861,7 +866,7 @@ async function loadLogs() {
   }
 }
 
-function renderRequestMetrics(m, entries, reqErr) {
+function renderRequestMetrics(m, entries) {
   m = m || {};
   const a = m.archive || {};
   $('reqSummary').textContent =
@@ -939,7 +944,7 @@ function renderRequestTable() {
       '<td>' + (rid ? '<span class="clip rid" title="' + esc(rid) + '">' + esc(rid) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '</tr>';
   }).join('') || '<tr><td colspan="10" class="empty">' +
-      (reqErr ? '请求记录读取失败：' + esc(reqErr)
+      (reqErrText ? '请求记录读取失败：' + esc(reqErrText)
               : reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
 
   const filtered = list.length !== reqEntries.length;

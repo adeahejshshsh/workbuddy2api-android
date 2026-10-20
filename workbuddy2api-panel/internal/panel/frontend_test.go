@@ -13,21 +13,47 @@ import (
 	"time"
 )
 
-// nodeBin 返回可用的 node 路径；没有或**执行不了**时跳过当前测试。
-//
-// 为什么要真跑一次探针：exec.LookPath 只查 PATH 里有没有这个文件。Android 上
-// app 私有目录里的二进制不能直接 exec（需要经 /system/bin/linker64 代跑），
-// LookPath 成功、执行却 "permission denied" —— 之前这里只在 LookPath 失败时
-// skip，于是 15 个前端测试在这台机器上全红。
+// nodeExec / nodePrefix 决定「怎么跑 node」：本机（Android app 私有目录）是 noexec，
+// 任何二进制/脚本都不能直接 exec，必须由 /system/bin/linker64 代跑。
+// 此前这里直接 skip —— 于是**所有**前端检查在这台机器上长期静默跳过，
+// v1.27.6 引入的 reqErr 作用域 bug 就是这么漏出去的。
+var (
+	nodeExec   = "node"
+	nodePrefix []string
+)
+
+// nodeCmd 构造跑 node 的命令（自动处理 linker64 代跑）。
+func nodeCmd(args ...string) *exec.Cmd {
+	full := append(append([]string{}, nodePrefix...), args...)
+	cmd := exec.Command(nodeExec, full...)
+	// 钉死时区：面板按**浏览器本地时区**渲染时间，而 node 进程默认可能是 UTC。
+	// 不钉的话「本地时间 → epoch」的断言会随宿主时区漂 8 小时（本机实测过）。
+	cmd.Env = append(os.Environ(), "TZ=Asia/Shanghai")
+	return cmd
+}
+
+// nodeBin 确保 node 可用（必要时配置 linker64 代跑）；不可用则跳过当前测试。
+// 返回值仅用于日志/兼容，实际执行请用 nodeCmd。
 func nodeBin(t *testing.T) string {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not available; JS checks skipped")
 	}
-	if out, err := exec.Command(node, "--version").CombinedOutput(); err != nil {
+	if out, err := exec.Command(node, "--version").CombinedOutput(); err == nil {
+		nodeExec, nodePrefix = node, nil
+		return node
+	} else if !strings.Contains(err.Error(), "permission denied") {
 		t.Skipf("node 不可执行（%v）: %s; JS checks skipped", err, strings.TrimSpace(string(out)))
 	}
+	const linker = "/system/bin/linker64"
+	if _, err := os.Stat(linker); err != nil {
+		t.Skipf("node 需 linker64 代跑但 %s 不存在; JS checks skipped", linker)
+	}
+	if out, err := exec.Command(linker, node, "--version").CombinedOutput(); err != nil {
+		t.Skipf("linker64 代跑的 node 不可用（%v）: %s; JS checks skipped", err, strings.TrimSpace(string(out)))
+	}
+	nodeExec, nodePrefix = linker, []string{node}
 	return node
 }
 
@@ -38,12 +64,12 @@ func nodeBin(t *testing.T) string {
 // 就让整个面板白屏，而所有 Go 测试依然全绿。此测试把语法校验前移到 CI。
 // 无 node 环境时跳过（不阻塞无 Node 的构建机）。
 func TestAppJSSyntax(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	path, err := filepath.Abs("app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(node, "--check", path).CombinedOutput()
+	out, err := nodeCmd("--check", path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("app.js syntax error:\n%s", out)
 	}
@@ -83,7 +109,7 @@ func TestIndexHTMLNoInlineScript(t *testing.T) {
 // 无 node 的环境跳过（CI/精简机不受影响）；harness 与 app.js 同判（app.js 顶层
 // start() 的 setInterval 会让 node 事件循环不退出，故成功路径显式 exit(0)）。
 func TestAppJSTopLevelSmoke(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	harness := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -126,9 +152,9 @@ try {
 	}
 	hf.Close()
 	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
-		cmd := exec.Command(node, hf.Name(), "app.js")
-		cmd.Dir = "." // 测试工作目录 = internal/panel
-		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
+		cmd := nodeCmd(hf.Name(), "app.js")
+		cmd.Dir = "."                                 // 测试工作目录 = internal/panel
+		cmd.Env = append(cmd.Env, "SMOKE_HASH="+hash) // 保留 nodeCmd 设好的 TZ
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("app.js 顶层求值 %s 崩溃: %v\n%s", hash, err, out)
@@ -141,7 +167,7 @@ try {
 
 // 积分扣除维度的格式必须稳定，且缺样本/缺匹配 Token 时不能伪造比例。
 func TestAppJSCreditDimensionFormatting(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -173,7 +199,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("credit formatting node test failed: %v\n%s", err, out)
 	}
@@ -185,7 +211,7 @@ process.stdout.write(JSON.stringify({
 
 // 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
 func TestAppJSRateLimitMeta(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -214,7 +240,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("rate-limit formatting node test failed: %v\n%s", err, out)
 	}
@@ -226,7 +252,7 @@ process.stdout.write(JSON.stringify({
 
 // 请求记录行必须紧凑、可读，并带上调用来源（IP / UA）；来源缺失时以 — 兜底。
 func TestAppJSRequestLogFormatting(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -261,7 +287,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("request log formatting node test failed: %v\n%s", err, out)
 	}
@@ -276,7 +302,7 @@ process.stdout.write(JSON.stringify({
 
 // 请求记录筛选：IP / UA / 模型 / 账号 / 请求 ID 的包含匹配（空格分词 AND）+ 结果精确匹配。
 func TestAppJSRequestMatch(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -308,7 +334,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("request filter node test failed: %v\n%s", err, out)
 	}
@@ -321,7 +347,7 @@ process.stdout.write(JSON.stringify({
 
 // 模型按条件查询：域 / 能力 / 档位 / 价格 / 关键词，以及倍率、上下文、输出排序。
 func TestAppJSModelFilter(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -368,7 +394,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("model filter node test failed: %v\n%s", err, out)
 	}
@@ -399,7 +425,7 @@ process.stdout.write(JSON.stringify({
 // height 是 rect 的 CSS 几何属性——同名类会把每根柱子压成 3px 高，图看起来"没数据"。
 // 这个坑只能在浏览器里看出来，所以在这里钉住类名。
 func TestAppJSUsageChartBarClass(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -443,7 +469,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("usage chart node test failed: %v\n%s", err, out)
 	}
@@ -458,7 +484,7 @@ process.stdout.write(JSON.stringify({
 //   - 滚动预设 rolling=true 发 hours（服务端整点对齐），rolling=false 折算成 from；
 //   - 「全部历史」两者都不发；「自定义」发用户挑的 from/to。
 func TestAppJSTimeRangeQuery(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -514,12 +540,15 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("time range node test failed: %v\n%s", err, out)
 	}
+	// 与 nodeCmd 的 TZ=Asia/Shanghai 对齐：用固定 +08:00 而非 time.Local，
+	// 否则 CI 跑在 UTC 时这条断言必然漂 8 小时。
+	cst := time.FixedZone("CST", 8*3600)
 	local := func(h, m int) string {
-		return strconv.FormatInt(time.Date(2026, 9, 30, h, m, 0, 0, time.Local).Unix(), 10)
+		return strconv.FormatInt(time.Date(2026, 9, 30, h, m, 0, 0, cst).Unix(), 10)
 	}
 	want := `{"todayIsMidnight":true,"todayNoTo":true,` +
 		// rolling0 必须是 "hours=0"（显式全部历史）。此前期望值是空串——那恰好把
@@ -597,7 +626,7 @@ func TestConfigFormMatchesCFGMap(t *testing.T) {
 
 // 同到期时间按面额降序；其余未用完包与零/负余额包分别聚合。
 func TestAppJSDetailGroups(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -638,7 +667,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("detail groups node test failed: %v\n%s", err, out)
 	}
@@ -650,7 +679,7 @@ process.stdout.write(JSON.stringify({
 
 // 精确剩余天数聚合、账号内按总余额钳制、无到期批次不进入图表。
 func TestAppJSExpirySummary(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -687,7 +716,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry summary node test failed: %v\n%s", err, out)
 	}
@@ -705,7 +734,7 @@ process.stdout.write(JSON.stringify({
 // 同时钉住反面：其余文本字段空串仍然不下发。这条同样重要——若哪天为了修上面那个
 // 问题改成"所有空串都发"，表单里任何一个没填的框都会变成"请清空"，静默抹掉配置。
 func TestAppJSCollectConfigClearable(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -744,7 +773,7 @@ process.stdout.write(JSON.stringify([
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
 	}
@@ -763,7 +792,7 @@ process.stdout.write(JSON.stringify([
 //
 // 日期按「今天 +N 天」生成而不是写死：写死的话过了那天用例就会自己失效。
 func TestAppJSExpirySortedByExpiry(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -805,7 +834,7 @@ process.stdout.write(JSON.stringify(names));`
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry sort node test failed: %v\n%s", err, out)
 	}
@@ -828,7 +857,7 @@ process.stdout.write(JSON.stringify(names));`
 //  1. 只给 overview 形态的输入（没有 packages 字段）也能出内容；
 //  2. 渲染后 expBox.hidden 必须为 false——把这句删掉（还原 bug）测试就必须 FAIL。
 func TestAppJSExpirySnapshotRenders(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -879,7 +908,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry snapshot node test failed: %v\n%s", err, out)
 	}
@@ -925,7 +954,7 @@ func TestPanelIndexExpiryBoxNotHidden(t *testing.T) {
 // 断言结构：<g> 数量 == 数据点数，且每个 <g> 紧跟一个 <title>；同时确认没有
 // 游离在 <g> 之外的 <title>。
 func TestAppJSChartTooltipInsideBar(t *testing.T) {
-	node := nodeBin(t)
+	nodeBin(t)
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -969,7 +998,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("chart tooltip node test failed: %v\n%s", err, out)
 	}
@@ -977,5 +1006,66 @@ process.stdout.write(JSON.stringify({
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("chart tooltip structure=%s\nwant %s（groups 应等于数据点数，loose 应为 0）",
 			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// bug #1 回归：renderRequestTable 会被筛选防抖/下拉 change 单独调用，
+// 它必须能在"请求记录为空"时正常渲染 —— 此前它引用了 loadLogs 的局部变量 reqErr，
+// 空列表（归档关闭/无请求/筛选无命中，最常见场景）直接抛 ReferenceError。
+//
+// 顶层 smoke 抓不到这类问题：hash 落到 #logs 时 loadLogs 的 fetch 是永不 resolve 的
+// promise，renderRequestTable 根本不会被调用。这里显式调它。
+func TestRenderRequestTableWithEmptyEntries(t *testing.T) {
+	nodeBin(t)
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; }, apply() { return inert; }, construct() { return inert; }, has() { return true; },
+});
+const sandbox = new Proxy({
+  location: { hash: '#taskscenter' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { querySelectorAll: () => [], querySelector: () => inert, getElementById: () => inert, addEventListener() {}, documentElement: inert, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, { filename: 'app.js' });
+// 空列表渲染（bug #1 的触发条件）
+try {
+  vm.runInContext('reqEntries = []; reqErrText = ""; renderRequestTable();', sandbox, { filename: 'probe-empty.js' });
+} catch (e) {
+  console.log('EMPTY FAIL:', (e && e.message) || e); process.exit(1);
+}
+// 有错误文案时也要能渲染（bug #7 的展示分支）
+try {
+  vm.runInContext('reqErrText = "boom"; renderRequestTable();', sandbox, { filename: 'probe-err.js' });
+} catch (e) {
+  console.log('ERR FAIL:', (e && e.message) || e); process.exit(1);
+}
+console.log('RT OK');
+process.exit(0);
+`
+	hf, err := os.CreateTemp(t.TempDir(), "rt-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hf.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	hf.Close()
+	cmd := nodeCmd(hf.Name(), "app.js")
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err != nil || !bytes.Contains(out, []byte("RT OK")) {
+		t.Fatalf("renderRequestTable 空列表渲染失败: %v\n%s", err, out)
 	}
 }

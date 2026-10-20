@@ -2,6 +2,10 @@
 # workbuddy2api 启停脚本（Android / DeepSeek Harness 移植版）
 #   用法: bash run.sh [start|stop|restart|status|log|panel]
 set -u
+# SELF 绝对路径（bug #9）：restart 里原本用 bash "$0"，而 $0 是**调用时的相对路径**
+# （如 run.sh），从别的目录执行（cd /tmp && bash ~/run.sh restart）就会找不到脚本，
+# restart 静默只跑一半。
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
 APP_DIR="/storage/emulated/0/新建文件夹/workbuddy2api/workbuddy2api-panel"
@@ -80,18 +84,26 @@ case "${1:-start}" in
         sleep 0.1; i=$((i+1))
       done
       if kill -0 "$p" 2>/dev/null; then
-        kill -9 "$p" 2>/dev/null; echo "已强制终止 pid=$p（等待 8s 仍未退出）"
+        kill -9 "$p" 2>/dev/null
+        sleep 0.3
+      fi
+      # 只有确认已退出才删 pid 文件（bug #8）：kill -9 之后进程仍可能活着
+      # （僵尸/无权限），此时删掉 pid 就再也定位不到它了 —— 之后的 status/stop
+      # 只剩 pgrep 兜底，还会打印「未在运行」，误导性极强。
+      if kill -0 "$p" 2>/dev/null; then
+        echo "⚠ 已发 SIGKILL 但 pid=$p 仍存活（僵尸/无权限），保留 $PIDF 便于排查"
       else
-        echo "已停止 pid=$p（优雅退出）"
+        rm -f "$PIDF"
+        echo "已停止 pid=$p"
       fi
     else
       echo "未在运行"
+      rm -f "$PIDF"   # 残留 pid 文件：清掉
     fi
-    rm -f "$PIDF"
     ;;
   # 必须用 bash 起子进程（bug #1）：工作区在 sdcard（noexec）且脚本本身没有 x 位，
   # 直接执行 "$0" 会报 command not found / Permission denied，stop 和 start 都没跑。
-  restart) bash "$0" stop; sleep 1; bash "$0" start ;;
+  restart) bash "$SELF" stop; sleep 1; bash "$SELF" start ;;
   status)
     p=$(running_pid)
     if [ -n "$p" ]; then

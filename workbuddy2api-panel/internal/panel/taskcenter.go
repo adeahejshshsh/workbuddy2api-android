@@ -507,7 +507,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	q.mu.Unlock()
 
 	scanOK = true // 成功交给 runQueueItems 负责复位
-	go p.runQueueItems(accts, items, concurrency)
+	go p.runQueueItems(accts, items, concurrency, seq)
 	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v）", len(items), concurrency, growth)
 	return true, len(items), seq, "", "ok"
 }
@@ -525,7 +525,7 @@ func (p *Panel) RunGrowthQueueOnce() {
 
 // runQueueItems 队列执行主体：按账号分组，账号内串行（per-account 锁），
 // 账号间并发（信号量）。每项结果写回队列状态。
-func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurrency int) {
+func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurrency, seq int) {
 	q := p.queue()
 	defer func() {
 		q.mu.Lock()
@@ -573,12 +573,16 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 					return // 断连：本账号不再继续
 				}
 			}
-			for i := range q.items {
-				uid, kind, code := q.snapshotAt(i)
+			// 用**入参快照**遍历，不再每轮读 q.items 的 slice header（bug #5）：
+			// 那个读没有持锁，与 queueMarkAt 的元素写、以及下一轮 startGrowthQueue
+			// 对 q.items 的整体替换构成数据竞争（-race 可复现），极端时序下按下标
+			// 写入会落到新一轮队列的条目上。下标写入本身另有 seq 守卫。
+			for i := range items {
+				uid, kind, code := items[i].UID, items[i].Kind, items[i].Code
 				if uid != one.a.UID {
 					continue
 				}
-				p.queueMarkAt(i, "running", "")
+				p.queueMarkAt(seq, i, "running", "")
 				var msg string
 				var progressed bool
 				var err error
@@ -587,9 +591,9 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 					msg, progressed, err = p.runGrowthQueued(one.a, code)
 				}
 				if err != nil {
-					p.queueMarkAt(i, "error", err.Error())
+					p.queueMarkAt(seq, i, "error", err.Error())
 				} else {
-					p.queueMarkAt(i, "done", msg)
+					p.queueMarkAt(seq, i, "done", msg)
 				}
 				// 执行了但没进展 → 记一笔；连续 skipFailLimit 次就把该 (账号,任务码)
 				// 砍出待办，别再天天"做了也没用"（7 天后自动放回，或一键清空）。
@@ -605,9 +609,9 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 							"或在该账号的「任务」弹窗点「清空跳过名单」立即重试）", n)
 					}
 					if err != nil {
-						p.queueMarkAt(i, "error", err.Error()+note)
+						p.queueMarkAt(seq, i, "error", err.Error()+note)
 					} else {
-						p.queueMarkAt(i, "done", msg+note)
+						p.queueMarkAt(seq, i, "done", msg+note)
 					}
 					log.Printf("panel: 任务无效 uid=%s code=%s %s（%s）", one.a.UID, code, note, why)
 				} else {
@@ -636,9 +640,17 @@ func (q *queueState) snapshotAt(i int) (uid, kind, code string) {
 }
 
 // queueMarkAt 按索引更新队列条目状态（条目数组固定不再增删）。
-func (p *Panel) queueMarkAt(i int, status, msg string) {
+// queueMarkAt 按下标写队列状态；seq 与当前队列不符时丢弃（bug #5）。
+//
+// 为什么必须守卫：q.items 会被下一轮 startGrowthQueue 整体替换，此时旧一轮的
+// 下标要么越界、要么指到新一轮的别的条目上 —— 两种都是错的，直接丢弃最安全。
+func (p *Panel) queueMarkAt(seq, i int, status, msg string) {
 	q := p.queue()
 	q.mu.Lock()
+	if q.seq != seq || i < 0 || i >= len(q.items) {
+		q.mu.Unlock()
+		return
+	}
 	q.items[i].Status, q.items[i].Message = status, msg
 	q.mu.Unlock()
 }

@@ -397,6 +397,12 @@ func WriteDefault(path string) (string, error) {
 	if _, err := f.Write(out); err != nil {
 		return "", fmt.Errorf("write config: %w", err)
 	}
+	// 必须 Sync 再 Close（bug #15）：这是 O_EXCL 生成的「唯一一份密钥」，
+	// 掉电/进程被强杀时可能留下 0 字节或半截 config.json，下次启动 Load 直接
+	// 报 parse config，而密钥无处可寻。与 auth.ReplaceAtomic 的写分支同口径。
+	if err := f.Sync(); err != nil {
+		return "", fmt.Errorf("sync config: %w", err)
+	}
 	return key, nil
 }
 
@@ -627,7 +633,11 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("pool.cost_explore_interval: %w", err)
 	}
 	if c.CostExploreIntervalDur < 0 {
+		// 负值钳 0 时同步回写字符串（bug #14）：与 expiring_soon 的处理同口径。
+		// 否则配置里仍留 "-5m"，面板保存后写盘还是负值、重启再钳一次，
+		// 而 restartRequiredFields 不含该键，用户看不到任何提示。
 		c.CostExploreIntervalDur = 0
+		c.Pool.CostExploreInterval = "0"
 	}
 	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
 	if c.Pool.CreditFloor < 0 {

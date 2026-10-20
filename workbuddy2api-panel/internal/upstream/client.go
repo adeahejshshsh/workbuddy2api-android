@@ -941,7 +941,19 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		// 都依赖原始 JSON 结构 —— 于是 14018（积分耗尽）、11102（模型不存在）、
 		// 11101（参数错）在这些走 doJSON 的路径上一律退化成 ErrClient，
 		// 按 code 判定的策略全部失效。
-		kind := Classify(resp.StatusCode, fmt.Sprintf(`{"code":%d,"msg":%s}`, env.Code, mustJSONString(env.Msg)))
+		//
+		// 还要给 Classify 一个**语义状态码**（bug #10）：IsModelBlocked /
+		// promptTooLongMarkers / invalidImageMarkers 都带 400/404/413 状态门槛，
+		// 而这里拿到的常是 HTTP 200 + 业务 code —— 不合成的话只有 14018/11101
+		// 两类真正受益，11102/11115/11135 仍然退化。注意只用于分类：
+		// Error.Status 仍报真实 HTTP 状态，避免影响调用方按 Status 的分支。
+		clsStatus := resp.StatusCode
+		if clsStatus < 400 {
+			if s := businessCodeStatus(env.Code); s != 0 {
+				clsStatus = s
+			}
+		}
+		kind := Classify(clsStatus, fmt.Sprintf(`{"code":%d,"msg":%s}`, env.Code, mustJSONString(env.Msg)))
 		if kind == ErrNone {
 			kind = ErrClient
 		}
@@ -1167,7 +1179,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
 		return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 	}
-	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
+	// 不用 panic 做兜底（bug #11）：HTTP 路径有 net/http recover，但 RunNightChats /
+	// runModelChat 这些后台 goroutine 没有 —— chatPaths 一旦被改成可返回空切片
+	// （例如按 realm 配置化），一次 panic 打死的是整个网关进程。
+	return nil, 0, nil, fmt.Errorf("no chat path for realm %q", a.Realm())
 }
 
 // ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens + 上游模型对象全字段）。
@@ -2336,6 +2351,25 @@ func IsAlreadyCheckin(err error) bool {
 		}
 	}
 	return false
+}
+
+// businessCodeStatus 把「HTTP 200 + 业务 code」映射成等价的语义 HTTP 状态（bug #10）。
+// 下游的模型阻塞 / prompt 超长 / 图片非法判定都按状态码设门槛，不合成就会退化成
+// ErrClient（只换号不罚、错误码也不对）。返回 0 = 未知码，保持原状态。
+func businessCodeStatus(code int) int {
+	switch code {
+	case 11102: // 模型不存在/不可用 → 与 404 同语义
+		return http.StatusNotFound
+	case 11115: // prompt is too long → 与 413 同语义
+		return http.StatusRequestEntityTooLarge
+	case 11135: // 图片格式/数据错误 → 与 400 同语义
+		return http.StatusBadRequest
+	case 11101: // 参数错误
+		return http.StatusBadRequest
+	case 14018: // 积分耗尽
+		return http.StatusPaymentRequired
+	}
+	return 0
 }
 
 // mustJSONString 把字符串编成 JSON 字面量（失败时退化为手工转义的最小实现），

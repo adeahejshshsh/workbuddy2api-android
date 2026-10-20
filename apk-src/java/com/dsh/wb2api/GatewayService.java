@@ -415,6 +415,14 @@ public class GatewayService extends Service {
                         try { Thread.sleep(150); }
                         catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
                     }
+                    // 窗口结束仍活着 → 强杀再走（bug #4）：否则新进程必然撞端口。
+                    if (isAlive(old)) {
+                        try {
+                            if (Build.VERSION.SDK_INT >= 26) old.destroyForcibly();
+                            else old.destroy();
+                        } catch (Throwable ignored) {}
+                        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+                    }
                 }
                 // 等待窗口里用户点了「停止」（userStop=true 且已 stopSelf）：
                 // 这时再拉起就是一个没人看门狗、没 wakelock、没 alarm 的孤儿进程，
@@ -650,7 +658,29 @@ public class GatewayService extends Service {
     synchronized void killProc() {
         Process p = proc;
         proc = null;
-        if (p != null) { try { p.destroy(); } catch (Throwable ignored) {} }
+        if (p == null) return;
+        try { p.destroy(); } catch (Throwable ignored) {}
+        // 强杀兜底（bug #4）：只发 SIGTERM 的话，Go 侧一旦卡在优雅停机（在途 SSE 排空 /
+        // 锁竞争）就会留下一个**占着 7863 的旧进程** —— 新进程 bind 失败立刻退出，
+        // 看门狗反复自愈也救不回来，只有系统杀掉 App 才恢复。
+        forceKillLater(p, 3000);
+    }
+
+    /** 延时强杀：到点仍活着就 destroyForcibly（API 26+；更低版本只能再 destroy 一次）。 */
+    static void forceKillLater(final Process p, final long delayMs) {
+        if (p == null) return;
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                try { Thread.sleep(delayMs); } catch (InterruptedException e) { return; }
+                if (!isAlive(p)) return;
+                try {
+                    if (Build.VERSION.SDK_INT >= 26) p.destroyForcibly();
+                    else p.destroy();
+                } catch (Throwable ignored) {}
+            }
+        }, "wb2api-forcekill");
+        t.setDaemon(true);
+        t.start();
     }
 
     // ---------- 保活三件套 ----------

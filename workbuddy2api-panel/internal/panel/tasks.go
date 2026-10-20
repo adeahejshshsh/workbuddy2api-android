@@ -118,13 +118,12 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 		if err := p.cfg.Upstream.AcceptTasks(a, codes[i:end]); err != nil {
 			log.Printf("panel: 批量接受失败 uid=%s codes=%v err=%v", uid, codes[i:end], err)
 			failed = append(failed, codes[i:end]...)
-			continue
+		} else {
+			accepted += end - i
 		}
-		accepted += end - i
-		// 批间节流（对齐脚本 1.05s 口径），只在**还有下一批**时等（bug B12）。
-		// 此前末批后也无条件等 —— 若这 1.05s 内客户端断开（watchAbort 打标），
-		// 接口返回 504「全部接受已中止」，可任务其实已经全部接受完了，
-		// 用户重试等于白跑一遍上游。
+		// 批间节流（对齐脚本 1.05s 口径），只在**还有下一批**时等（bug B12），
+		// 且**无论成败都等**（bug #17）：失败分支此前 continue 直接跳下一批，
+		// 短时间内可对上游连发多次 accept，与「防风控」的意图相反。
 		if end < len(codes) {
 			if !sleepAB(uid, acceptBatchGap) {
 				writeErr(w, http.StatusGatewayTimeout, "客户端已断开，剩余批次未接受")

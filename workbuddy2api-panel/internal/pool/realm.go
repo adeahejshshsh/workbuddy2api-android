@@ -14,6 +14,22 @@ const expiringVirtualSlots = 3
 
 // AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
 // realm=="" 退化为 AvailableUIDs（现状语义）。
+// IsAvailableForModel 报告单个账号对该模型是否可选（healthyForModel + 未占满在途）。
+//
+// 用途（bug #13）：会话粘性的快路径只需要校验"绑定号此刻还能不能用"，
+// 而 availableSet 会为了一次命中构建整池集合并排序 —— 账号多、QPS 高时是热路径上的
+// 固定开销。这里单点查，复杂度 O(1)。
+func (p *Pool) IsAvailableForModel(uid, model string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	return e.healthyForModel(now, model) && !p.inFlightFull(e)
+}
+
 // PickExistingAuth 按 uids 顺序返回第一个仍持有凭证的账号，全都不在返回 nil。
 //
 // 为什么需要（bug P1-2 / B20）：AvailableUIDsForRealm 与 AuthByUID 是两次独立加锁
