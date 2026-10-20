@@ -130,6 +130,11 @@ var autoActions = []autoAction{
 		run:      runExpertLighthouse,
 	},
 	{
+		TaskCode: "WorkBuddy_Valorant",
+		Desc:     "体验「无畏契约拼豆专家」（指定专家 id，按域区分国服/国际服）：召唤链 + 真实对话 + expert_actual_use → 领奖（+100c+5e）",
+		run:      runValorantExpert,
+	},
+	{
 		TaskCode: "black_cat",
 		Desc:     "夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示稍后再试）",
 		Attempt:  true,
@@ -1074,6 +1079,170 @@ func runExpertLighthouse(p *Panel, a *auth.Auth) (string, error) {
 		return "", fmt.Errorf("使用事件: %w", err)
 	}
 	return "已上报轻量云专家召唤+使用链（真实对话 requestId）", nil
+}
+
+// WorkBuddy_Valorant：体验「无畏契约拼豆专家」（+100c+5e，截止 11-15）。
+//
+// 与 expert_5 的区别：那个是「任意 5 个专家各用一次」，这个是**指定某一个专家**
+// （拼豆/无畏契约主题）。判据同样是 expert_actual_use，但要求：
+//   - 专家 id 必须是该域市场里真实存在的 ex_ id（编造/跨域 id 不计数）；
+//   - requestId 必须是真实 chat 的服务端 id（自造 UUID 不计数）。
+//
+// 国服/国际服必须分开：两套专家市场（webBase 按账号 realm 切），id 与 version 都可能
+// 不同。已知国服 id 见 valorantExpertIDs，国际服按名称在各自市场里匹配 —— 匹配不到
+// 就明确报错，绝不拿国服 id 去打国际服（那样只会白跑一次且不留痕迹）。
+var valorantExpertIDs = map[string]string{
+	"cn":     "ex_xQHHD1u5Jkua", // agent_name=valorant-perler-expert, version 1.2.1
+	"global": "",                // 国际服 id 未实测：留空 → 走名称匹配
+}
+
+// valorantNameKeys 市场列表的名称兜底匹配关键词（小写比较，命中任一即可）。
+var valorantNameKeys = []string{"无畏契约", "valorant", "perler", "拼豆"}
+
+// resolveValorantExpert 解析本域应使用的专家条目。
+// 优先：本域已知 id 在市场列表里命中（用服务端下发的 version/名称）；
+// 其次：按名称关键词匹配（跨域 id 不同时靠它兜底）；
+// 最后：市场拉不到时退回「已知 id + 硬编码元数据」（与 Expert_lighthouse 同策略）。
+func resolveValorantExpert(p *Panel, a *auth.Auth) (upstream.MarketExpert, error) {
+	realm := a.Realm()
+	wantID := valorantExpertIDs[realm]
+	fallback := upstream.MarketExpert{
+		ExpertID: wantID, ExpertType: "agent",
+		DisplayNameZH: "无畏契约拼豆专家", ProfessionZH: "无畏契约拼豆专家", Version: "1.2.1",
+	}
+	experts, err := p.cfg.Upstream.MarketExpertList(a, "agent")
+	if err != nil || len(experts) == 0 {
+		if wantID == "" {
+			return fallback, fmt.Errorf("realm=%s 专家市场不可用（%v）且没有已知专家 id", realm, err)
+		}
+		return fallback, nil // 市场拉不到：按已知 id 硬上（信息仍以本地兜底为准）
+	}
+	if e, ok := matchValorantExpert(experts, wantID); ok {
+		return e, nil
+	}
+	return fallback, fmt.Errorf("realm=%s 的专家市场里没找到「无畏契约拼豆专家」（期望 id=%q）：国服/国际服 id 不通用，需在对应域确认", realm, wantID)
+}
+
+// matchValorantExpert 在给定市场列表里定位拼豆专家：先按 id 精确命中，
+// 再按名称关键词兜底（跨域 id 不同时靠它）。纯函数，便于单测。
+func matchValorantExpert(experts []upstream.MarketExpert, wantID string) (upstream.MarketExpert, bool) {
+	if wantID != "" {
+		for _, e := range experts {
+			if e.ExpertID == wantID {
+				return e, true
+			}
+		}
+	}
+	for _, e := range experts {
+		hay := strings.ToLower(e.DisplayNameZH + " " + e.ProfessionZH)
+		for _, k := range valorantNameKeys {
+			if strings.Contains(hay, k) {
+				return e, true
+			}
+		}
+	}
+	return upstream.MarketExpert{}, false
+}
+
+// runValorantExpert 完成 WorkBuddy_Valorant。
+func runValorantExpert(p *Panel, a *auth.Auth) (string, error) {
+	code := "WorkBuddy_Valorant"
+	t, err := p.taskByCode(a, code)
+	if err != nil {
+		return "", err
+	}
+	if t == nil {
+		// 国服/国际服的任务码可能不同（同一活动两套配置）：按名字兜底找一次，
+		// 找到就用它的真实 code（后面 accept / claim 都用它）。
+		if tasks, lerr := p.cfg.Upstream.ListTasks(a); lerr == nil {
+			for i := range tasks {
+				lc := strings.ToLower(tasks[i].TaskCode)
+				if strings.Contains(lc, "valorant") || strings.Contains(lc, "perler") {
+					t = &tasks[i]
+					code = tasks[i].TaskCode
+					break
+				}
+			}
+		}
+	}
+	if t == nil {
+		return "该账号未下发此任务（活动未开放 / 已结束 / 该域没有）", nil
+	}
+	if t.Claimed {
+		return "已领取", nil
+	}
+	target := t.Target
+	if target <= 0 {
+		target = 1 // 未 accept 的任务 progress 可能为 null，target 兜底
+	}
+	// 已达标（含 completed 未领）：直接领奖。
+	if t.Current >= target || t.AcceptStatus == "completed" {
+		credit, energy, cerr := p.cfg.Upstream.ClaimReward(a, code)
+		if cerr != nil {
+			return "已达标但领奖失败: " + cerr.Error(), nil
+		}
+		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
+	}
+	// 先 accept（PC 口径任务：未报名时上报事件不计数）。
+	if t.AcceptStatus == "not_accepted" || t.AcceptStatus == "" {
+		if aerr := p.cfg.Upstream.AcceptTasks(a, []string{code}); aerr != nil {
+			return "accept 失败: " + aerr.Error(), nil
+		}
+		if !sleepAB(a.UID, reportGap) {
+			return "", errTaskAborted
+		}
+	}
+	e, rerr := resolveValorantExpert(p, a)
+	if rerr != nil {
+		return rerr.Error(), nil
+	}
+	// 召唤链（web_element_click + summon_click + summoned）。
+	if rerr = p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertSummonSequence(e)...); rerr != nil {
+		return "召唤链上报失败: " + rerr.Error(), nil
+	}
+	if !sleepAB(a.UID, expertSummonGap) {
+		return "", errTaskAborted
+	}
+	// 真实 chat（带 X-Expert-Id）→ 服务端 requestId。
+	conv, req, cerr := p.cfg.Upstream.DesktopChatWithExpert(a, e.ExpertID)
+	if cerr != nil {
+		return "真实对话失败: " + cerr.Error(), nil
+	}
+	if len(req) < 8 {
+		return "服务端未返回 requestId，判据不成立（跳过上报以免白跑）", nil
+	}
+	// 使用事件（JOIN 服务端 requestId）+ chat 链。
+	events := append(upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model"),
+		upstream.DesktopExpertActualUseEvent(e, conv, req))
+	if rerr = p.cfg.Upstream.ReportDesktopEvent(a, events...); rerr != nil {
+		return "使用事件上报失败: " + rerr.Error(), nil
+	}
+	// 回读（异步计分）：两轮各隔 3s，达标即领奖。
+	for i := 0; i < 3; i++ {
+		if !sleepAB(a.UID, claimPollGap) {
+			return "", errTaskAborted
+		}
+		t2, err2 := p.taskByCode(a, code)
+		if err2 != nil || t2 == nil {
+			continue
+		}
+		t = t2
+		if t.Claimable || t.Claimed || (t.Target > 0 && t.Current >= t.Target) {
+			break
+		}
+	}
+	if t.Claimed {
+		return "任务已完成并领取（此前已领）", nil
+	}
+	if t.Claimable || (t.Target > 0 && t.Current >= t.Target) {
+		credit, energy, cerr := p.cfg.Upstream.ClaimReward(a, code)
+		if cerr != nil {
+			return "已点亮但领奖失败（可稍后重试）: " + cerr.Error(), nil
+		}
+		return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de，专家=%s realm=%s）", credit, energy, e.ExpertID, a.Realm()), nil
+	}
+	return fmt.Sprintf("已上报召唤+使用链（专家=%s realm=%s），进度 %s（计分异步，稍后再看）",
+		e.ExpertID, a.Realm(), taskProgressText(t)), nil
 }
 
 // runAppearance 完成 Hp_Appearance（换主题）。

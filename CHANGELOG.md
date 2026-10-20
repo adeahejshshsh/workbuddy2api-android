@@ -1,5 +1,29 @@
 # 变更记录
 
+## v1.26.7（当前）
+
+**新增任务 `WorkBuddy_Valorant`：体验「无畏契约拼豆专家」（+100 分 +5 能，截止 11-15）。**
+
+* **判据与 expert_5 同源但目标不同**：那个是「任意 5 个专家各用一次」，这个是**指定
+  某一个专家**。走完整链：accept → 召唤链（`web_element_click` + `expert_summon_click`
+  + `expert_summoned`）→ 真实桌面 chat（`X-Expert-Id`，拿服务端 `requestId`）→
+  `expert_actual_use` + chat 链 → 回读进度 → 达标即领奖。
+* **国服/国际服分开**（`valorantExpertIDs`）：
+  * 国服已知 id `ex_xQHHD1u5Jkua`（`agent_name=valorant-perler-expert`，version 1.2.1）；
+  * 国际服 id 未实测，**留空**表示只能按名称匹配（`无畏契约` / `valorant` / `perler` / `拼豆`），
+    绝不复用国服 id —— 跨域 id 打过去只会白跑一次且不留痕迹；
+  * 市场列表里都找不到时明确报错，不静默用兜底 id。
+* **任务码也可能按域不同**：`WorkBuddy_Valorant` 查不到时按 `valorant` / `perler`
+  在任务列表里兜底匹配，命中后用它的真实 code 做 accept / claim。
+* 新增 3 个单测：动作已注册且非尝试型、国服 id 固定 / 国际服必须留空、名称兜底匹配
+  （英文名、中文名、无关列表都要给出正确结论）。
+
+### 测试
+
+`upstream 203 / server 90 / pool 184 / panel 27（+3） / session 20 / redisstore 6 /
+reqlog 7 / auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**688 通过 0 失败**；
+`gofmt -l` 为 0。
+
 ## v1.26.6（当前）
 
 **本版 = 第三份 bug 审查（19 条）的落地修复，P0 7/7、P1 7/7、P2 5/5 全修。**
