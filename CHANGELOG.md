@@ -1,6 +1,27 @@
 # 变更记录
 
-## v1.28.0（当前）
+## v1.28.1（当前）
+
+**本版 = 面板「模型与档位」新增 `1017` 版本徽标：WorkBuddy 目录里的 DeepSeek 4.1 Flash
+（`cn:` / `global:` / `-sg` 三条线）跟官方直连的 `deepseek-flash` 用同一套判据，一眼看出是哪个版本。**
+
+### 功能
+
+* **1017 版本徽标** —— `mdRowHtml` 的能力徽标行新增一枚 `1017`（新样式 `.tag.info`，中性蓝，
+  跟能力徽标的绿/黄分开）。判据 `is1017Model(m)`：先用 `mdModelKey` 归一化
+  （去 `cn:` / `global:` 前缀、转小写、空格下划线统一成连字符），再比对
+  `deepseek-flash` / `deepseek-v4.1-flash` / `deepseek-v4.1-flash-sg`，id 或 name 命中即标。
+  归一化是必须的：上游目录里 id 带 realm 前缀（`cn:deepseek-v4.1-flash`）、
+  name 带厂商前缀（`CN:Deepseek-V4.1-Flash`），直接比对一条都命中不了。
+  `deepseek-v4-flash`（v4，不是 v4.1）、`glm`、`auto` 一律不标。
+
+### 测试
+
+* 新增 `TestAppJSModel1017Badge`：8 条正反用例（含空对象）+ 归一化脏输入
+  （`'  CN: Deepseek V4.1 Flash '` → `deepseek-v4.1-flash`）+ 纯谓词断言。
+  全量 **749 通过 / 0 失败**（panel 44 → 45）。
+
+## v1.28.0
 
 **本版 = 第十六份审查报告（BUG-REVIEW-2026-10-20.md，16 条）的落地修复。
 逐条复核：14 条为真、2 条误报（#5、#9）。其中 #4 / #10 / #11 / #13 直接指向我最近两版的改动。**

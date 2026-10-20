@@ -421,6 +421,67 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
+// 1017 版本徽标：WorkBuddy 目录里的 deepseek 4.1 flash（cn: / global: / -sg 三条线）都要标上，
+// 而 v4（非 v4.1）、glm、auto 这些一条都不能误标。判据靠 mdModelKey 归一化，
+// 所以顺带把「带 realm 前缀 + 大小写混写 + 空格分隔」这种脏输入也钉住。
+func TestAppJSModel1017Badge(t *testing.T) {
+	nodeBin(t)
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const MD_1017_KEYS');
+const end = src.indexOf('function renderModels');
+if (start < 0 || end < 0) throw new Error('1017 helpers not found');
+const ctx = { Number, String, Array, Object, isFinite, parseFloat };
+ctx.esc = s => String(s == null ? '' : s);
+ctx.rateCell = () => '';
+ctx.outCell = () => '';
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.is1017Model=is1017Model; this.mdRowHtml=mdRowHtml; this.mdModelKey=mdModelKey;', ctx);
+const has = m => ctx.mdRowHtml(m, null).indexOf('>1017<') >= 0;
+const cases = [
+  ['cn:deepseek-v4.1-flash', 'CN:Deepseek-V4.1-Flash', true],
+  ['global:deepseek-v4.1-flash', 'Deepseek-V4.1-Flash', true],
+  ['global:deepseek-v4.1-flash-sg', 'Deepseek-V4.1-Flash-SG', true],
+  ['deepseek-flash', 'DeepSeek-V4.1-Flash', true],
+  ['cn:deepseek-v4-flash', 'Deepseek-V4-Flash', false],
+  ['cn:glm-5.3', 'GLM-5.3', false],
+  ['cn:auto', 'Auto', false],
+  ['', '', false],
+];
+const out = cases.map(([id, name, want]) => {
+  const got = has({ id, name });
+  return (got === want ? 'ok' : 'FAIL') + ' ' + (id || '<空>') + '=' + got;
+});
+out.push('key=' + ctx.mdModelKey('  CN: Deepseek V4.1 Flash '));
+out.push('pred=' + ctx.is1017Model({ id: 'global:deepseek-v4.1-flash-sg', name: '' }));
+process.stdout.write(out.join('|'));`
+	f, err := os.CreateTemp(t.TempDir(), "model-1017-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("1017 badge node test failed: %v\n%s", err, out)
+	}
+	const want = `ok cn:deepseek-v4.1-flash=true|` +
+		`ok global:deepseek-v4.1-flash=true|` +
+		`ok global:deepseek-v4.1-flash-sg=true|` +
+		`ok deepseek-flash=true|` +
+		`ok cn:deepseek-v4-flash=false|` +
+		`ok cn:glm-5.3=false|` +
+		`ok cn:auto=false|` +
+		`ok <空>=false|` +
+		`key=deepseek-v4.1-flash|pred=true`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("1017 badge=%s\nwant %s", out, want)
+	}
+}
+
 // 用量时序图的柱体类名不得叫 bar：账号池的积分条是 .bar{height:3px}，而 SVG2 里
 // height 是 rect 的 CSS 几何属性——同名类会把每根柱子压成 3px 高，图看起来"没数据"。
 // 这个坑只能在浏览器里看出来，所以在这里钉住类名。

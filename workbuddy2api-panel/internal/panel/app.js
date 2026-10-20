@@ -750,14 +750,35 @@ function mdSortList(list, f) {
   return out;
 }
 
+// 1017 版 DeepSeek 4.1 Flash 的标识：官方直连的 id 是 deepseek-flash，
+// WorkBuddy 目录里是带 realm 前缀的 v4.1-flash（含 -sg 新加坡线）。
+const MD_1017_KEYS = ['deepseek-flash', 'deepseek-v4.1-flash', 'deepseek-v4.1-flash-sg'];
+
+// mdModelKey 归一化模型标识：去 realm 前缀（cn: / global:）、转小写、空格下划线统一成连字符。
+// 不归一化的话 "CN:Deepseek-V4.1-Flash" / "Deepseek-V4.1-Flash-SG" 这类名字一个都对不上。
+function mdModelKey(v) {
+  return String(v == null ? '' : v).trim().toLowerCase()
+    .replace(/^(?:cn|global)\s*:\s*/, '').replace(/[\s_]+/g, '-');
+}
+
+// is1017Model 判断是否 1017 版 DeepSeek 4.1 Flash。
+// id 或 name 任一命中即可：上游目录这两个字段并不总一致（id 带 realm 前缀、name 带厂商前缀）。
+// 注意 deepseek-v4-flash（v4，不是 v4.1）不在名单里，不能顺带标成 1017。
+function is1017Model(m) {
+  if (!m) return false;
+  const id = mdModelKey(m.id), name = mdModelKey(m.name);
+  return MD_1017_KEYS.indexOf(id) >= 0 || MD_1017_KEYS.indexOf(name) >= 0;
+}
+
 // mdRowHtml 单个模型行（纯渲染，便于独立测试）。
 function mdRowHtml(m, pr) {
   const eff = (m.supported_efforts || []).slice();
   if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
   const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
     : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
-  // 能力徽标：默认模型 / 工具调用 / 视觉 / 纯推理（上游目录全字段透出，缺失不显示）
+  // 能力徽标：版本（1017）/ 默认模型 / 工具调用 / 视觉 / 纯推理（上游目录全字段透出，缺失不显示）
   const caps = [];
+  if (is1017Model(m)) caps.push('<span class="tag info">1017</span>');
   if (m.is_default) caps.push('<span class="tag ok">默认</span>');
   if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
   if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
