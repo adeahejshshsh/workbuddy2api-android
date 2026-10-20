@@ -101,11 +101,18 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		// 缺失时**不得**伪造远期（issue ISSUE-08）：NeedsRefresh 依据 ExpiresAt 判定，
 		// 写一年后会让 token 过期后永不主动刷新，只能等 chat 401/12153 三振禁用。
 		// 这里写 now+1h —— 留一次刷新窗口，且首次请求后就会进入正常刷新节奏。
-		expiresAt := acc.ExpiresAt / 1000
-		if expiresAt <= 0 {
-			expiresAt = time.Now().Add(time.Hour).Unix()
-			log.Printf("panel: import uid=%s 缺 expires_at，按 now+1h 处理（首次请求即刷新）", acc.UID)
+		// 按**量级**判单位（bug #6）：只假设毫秒的话，导出工具给秒（1760000000）
+		// 时 /1000 得到 1760000（1970-01），既非 0 也进不了兜底，NeedsRefresh 恒真
+		// —— 每个 chat 请求前都先打一次 refresh。
+		raw := acc.ExpiresAt
+		if raw > 1e11 {
+			raw /= 1000 // 毫秒（13 位）→ 秒
 		}
+		if raw <= 0 || raw < time.Now().Add(-24*time.Hour).Unix() {
+			raw = time.Now().Add(time.Hour).Unix()
+			log.Printf("panel: import uid=%s 的 expires_at 缺失或明显过期，按 now+1h 处理（首次请求即刷新）", acc.UID)
+		}
+		expiresAt := raw
 
 		nickname := acc.Nickname
 		if strings.TrimSpace(nickname) == "" {

@@ -42,7 +42,7 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	s.makeupYesterday(a)
 	// 0.5 礼包/补偿（每号一次，无则业务错误静默跳过）。
 	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil {
-		log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(logfmt.Label(a.UID, a.NicknameValue()), a.NicknameValue()), credit)
+		log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(a.UID, a.NicknameValue()), credit)
 	}
 	if credit, err := s.cfg.Upstream.ClaimCompensation(a); err == nil {
 		log.Printf("streak-bonus %s: 🎊 补偿领取 +%dc", logfmt.Label(a.UID, a.NicknameValue()), credit)

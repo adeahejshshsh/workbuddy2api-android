@@ -561,24 +561,28 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		CreditsExpiring:          e.creditsExpiring,
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,
-		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
-		Reason:                   e.reason,
-		Disabled:                 e.disabled,
-		Paused:                   e.paused,
-		SuccessCount:             e.successCount,
-		ErrTotal:                 e.errTotal,
-		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),
-		TokenUsage:               e.tokenUsage,
-		LastSuccessTime:          e.lastSuccess,
-		LastErrTime:              e.lastErr,
-		Until:                    e.until,
-		SoftStreak:               e.softStreak,
-		ModelCosts:               p.modelCostsStatusLocked(e, now),
-		ConsecutiveFails:         e.consecutiveFails,
-		DegradeUntil:             e.degradeUntil,
-		InFlight:                 int(e.inFlight.Load()),
-		BreakerFails:             e.fails,
-		BreakerUntil:             e.breakerUntil,
+		// 三维或门（bug #8）：entry.healthy() 是 until / breakerUntil / degradeUntil /
+		// disabled|paused 四维或门，而 /status 的汇总 cooling 计数用的是 !healthy ——
+		// 此前这里只取前两维，于是"仅因连败降权出池"的号在汇总里算 cooling、
+		// 在行内却 cooling=false / cool_kind 空，监控按行判断会漏掉它。
+		Cooling:          now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
+		Reason:           e.reason,
+		Disabled:         e.disabled,
+		Paused:           e.paused,
+		SuccessCount:     e.successCount,
+		ErrTotal:         e.errTotal,
+		CheckinDone:      e.lastCheckinDay == now.Format("2006-01-02"),
+		TokenUsage:       e.tokenUsage,
+		LastSuccessTime:  e.lastSuccess,
+		LastErrTime:      e.lastErr,
+		Until:            e.until,
+		SoftStreak:       e.softStreak,
+		ModelCosts:       p.modelCostsStatusLocked(e, now),
+		ConsecutiveFails: e.consecutiveFails,
+		DegradeUntil:     e.degradeUntil,
+		InFlight:         int(e.inFlight.Load()),
+		BreakerFails:     e.fails,
+		BreakerUntil:     e.breakerUntil,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
@@ -598,6 +602,13 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 			if r := int64(time.Until(e.breakerUntil).Seconds() + 0.999); r > remaining {
 				remaining = r
 				st.CoolKind = "breaker"
+			}
+		}
+		// 降权期也参与"取更晚截止"的比较（bug #8）：只有它生效时给出 degraded。
+		if now.Before(e.degradeUntil) {
+			if r := int64(time.Until(e.degradeUntil).Seconds() + 0.999); r > remaining {
+				remaining = r
+				st.CoolKind = "degraded"
 			}
 		}
 		st.CoolRemaining = remaining

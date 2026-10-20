@@ -186,9 +186,14 @@ func (r *Recorder) Record(e Event) {
 		r.httpSuccess++
 	}
 	r.durationSum += e.DurationMs
-	r.recent = append([]Event{e}, r.recent...)
-	if len(r.recent) > recentLimit {
-		r.recent = r.recent[:recentLimit]
+	// 环形写（bug #17）：此前每条请求都 `append([]Event{e}, r.recent...)`，
+	// Event 是 20 多个字段的结构体、recent 上限 100 —— 持锁状态下搬运十几 KB，
+	// 高 QPS 下纯浪费且拉长锁持有时间。这里保留"最新的在末尾"的语义，Snapshot 再倒序。
+	if len(r.recent) < recentLimit {
+		r.recent = append(r.recent, e)
+	} else {
+		copy(r.recent, r.recent[1:])
+		r.recent[recentLimit-1] = e
 	}
 	r.mu.Unlock()
 	if r.archive != nil {
@@ -207,7 +212,8 @@ func (r *Recorder) Snapshot() Snapshot {
 		Completed: r.completed,
 		InFlight:  r.inFlight,
 		Succeeded: r.succeeded,
-		Recent:    append([]Event(nil), r.recent...),
+		// 内部按"旧→新"存放，对外契约是"新→旧"（bug #17）。
+		Recent: reversedEvents(r.recent),
 	}
 	if r.completed > 0 {
 		s.Failed = r.completed - r.succeeded
@@ -520,6 +526,15 @@ func (w *archiveWriter) prune() {
 			}
 		}
 	}
+}
+
+// reversedEvents 返回倒序副本（内部按旧→新存，对外要新→旧）。
+func reversedEvents(in []Event) []Event {
+	out := make([]Event, len(in))
+	for i, e := range in {
+		out[len(in)-1-i] = e
+	}
+	return out
 }
 
 func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {

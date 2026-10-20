@@ -895,11 +895,14 @@ readLoop:
 	if fl != nil {
 		fl.Flush()
 	}
-	if validFrames == 0 {
-		return errEmptyStream
-	}
+	// 读错误优先（bug #12）：上游刚开流就 RST（0 有效帧 + 读错误）时，此前先返回
+	// errEmptyStream，handler 记成 "empty upstream stream (200+0 frames)"，与真正的
+	// "上游 200 但空流"混在一起，排障时分不清是上游没吐数据还是连接被打断。
 	if readErr != nil {
 		return fmt.Errorf("%w: %v", errUpstreamRead, readErr)
+	}
+	if validFrames == 0 {
+		return errEmptyStream
 	}
 	return nil
 }

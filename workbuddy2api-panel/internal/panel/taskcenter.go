@@ -242,7 +242,16 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 		pending += len(it.Growth)
 	}
 	log.Printf("panel: 队列扫描完成：全部账号待办 %d 项", pending)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": items, "pending_count": pending})
+	// 过滤空行（bug #2）：items 是按 len(states) 预分配的，被禁用账号与 ctx 取消的
+	// 分支用 continue 跳过，留下 {"uid":"","nickname":""} 的零值条目 —— 前端按数组
+	// 渲染就是一行空账号。schoolVouchers 早就做了同样的过滤，这里漏了。
+	res := make([]scanAccountItem, 0, len(items))
+	for _, it := range items {
+		if it.UID != "" {
+			res = append(res, it)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": res, "pending_count": pending})
 }
 
 // ---------------------------------------------------------------------------
@@ -507,7 +516,9 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 			// 面板「一键完成」一直有这步，队列路径此前漏了（表现为上报 200 但进度
 			// 一直 not_accepted、无法领奖）。失败不阻塞（行为事件才是进度判据）。
 			if accepted := p.acceptPendingTasks(one.a); accepted > 0 {
-				time.Sleep(reportGap) // 给上游状态流转留时间
+				if !sleepAB(one.a.UID, reportGap) {
+					return // 断连：本账号不再继续
+				}
 			}
 			for i := range q.items {
 				uid, kind, code := q.snapshotAt(i)
@@ -549,7 +560,9 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				} else {
 					p.skipReset(one.a.UID, code) // 有效 → 清掉历史失败计数
 				}
-				time.Sleep(reportGap) // 项间节流
+				if !sleepAB(one.a.UID, reportGap) {
+					return
+				}
 			}
 		}(one)
 	}

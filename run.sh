@@ -82,7 +82,9 @@ case "${1:-start}" in
     fi
     rm -f "$PIDF"
     ;;
-  restart) "$0" stop; sleep 1; "$0" start ;;
+  # 必须用 bash 起子进程（bug #1）：工作区在 sdcard（noexec）且脚本本身没有 x 位，
+  # 直接执行 "$0" 会报 command not found / Permission denied，stop 和 start 都没跑。
+  restart) bash "$0" stop; sleep 1; bash "$0" start ;;
   status)
     p=$(running_pid)
     if [ -n "$p" ]; then

@@ -468,12 +468,24 @@ public class GatewayService extends Service {
             waiter = new Thread(() -> {
                 try {
                     int rc = me.waitFor();
-                    lastExit = exitMeaning(rc);
-                    appLog(this, "网关进程退出：" + lastExit);
+                    String why = exitMeaning(rc);
+                    // 先判「我还是不是当前进程」（bug #4）：看门狗自愈先 SIGTERM 旧进程
+                    // 再退避 2s 拉新的，而 Go 侧优雅停机最长 5s —— 旧进程的 waitFor
+                    // 可能在新进程 setState(RUNNING) **之后**才返回，把状态和 lastExit
+                    // 一起覆盖成「已停止 / rc=143」，而 7863 其实正在服务。
+                    if (proc != me) {
+                        appLog(this, "旧网关进程退出（已被新实例接管）：" + why);
+                        return;
+                    }
+                    lastExit = why;
+                    appLog(this, "网关进程退出：" + why);
                     try { getSharedPreferences(PREF, MODE_PRIVATE).edit().putString("last_exit", lastExit).apply(); } catch (Throwable ignored) {}
-                    setState(ST_STOPPED, "已退出 " + lastExit,
-                             "网关进程退出：" + lastExit + "，看门狗按退避重拉");
-                } catch (Exception e) { setState(ST_STOPPED, "等待异常 " + e, "等待网关进程出错：" + e); }
+                    setState(ST_STOPPED, "已退出 " + why,
+                             "网关进程退出：" + why + "，看门狗按退避重拉");
+                } catch (Exception e) {
+                    if (proc != me) return;       // 同上：被接管了就别写全局状态
+                    setState(ST_STOPPED, "等待异常 " + e, "等待网关进程出错：" + e);
+                }
                 if (proc == me) proc = null;      // 只清自己那个句柄，别把看门狗刚拉起的顶掉
                 refreshNotification();
             });

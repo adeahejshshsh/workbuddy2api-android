@@ -121,7 +121,11 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		accepted += end - i
-		time.Sleep(acceptBatchGap) // 批间节流（对齐脚本 1.05s 口径）
+		// 批间节流（对齐脚本 1.05s 口径），可中断（bug #9）。
+		if !sleepAB(uid, acceptBatchGap) {
+			writeErr(w, http.StatusGatewayTimeout, "客户端已断开，全部接受已中止")
+			return
+		}
 	}
 	// 小程序口径任务单独批量接受（默认列表不含 mp 码，accept 也要求 mp 头）。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
@@ -138,7 +142,10 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, mpCodes...)
 			} else {
 				accepted += len(mpCodes)
-				time.Sleep(acceptBatchGap)
+				if !sleepAB(uid, acceptBatchGap) {
+					writeErr(w, http.StatusGatewayTimeout, "客户端已断开，全部接受已中止")
+					return
+				}
 			}
 		}
 	}
@@ -183,5 +190,8 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("panel: 领取任务奖励 uid=%s code=%s +%d分 +%d能", uid, body.TaskCode, credit, energy)
+	// 立刻回读余额写回池内（bug #3）：自动领奖路径都调了，手动这条漏了 ——
+	// 用户点「领取」拿到奖励但面板积分不动，会读成"领了没到账"。
+	p.refreshCreditsAsync(a)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credit": credit, "energy": energy})
 }

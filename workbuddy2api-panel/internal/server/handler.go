@@ -1202,9 +1202,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if st.hasCache {
 			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
 		}
-		writeJSON(w, http.StatusOK, resp)
-		st.status = http.StatusOK
-		st.outcome = reqlog.OutcomeSuccess
+		// 先 marshal 再写（bug #18）：writeJSON 内部失败会回 500，但表格流水行/
+		// reqlog 此前仍记 200 + success —— 排查时看不到这次失败。
+		if raw, merr := json.Marshal(resp); merr == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(raw)
+			st.status = http.StatusOK
+			st.outcome = reqlog.OutcomeSuccess
+		} else {
+			log.Printf("ERR: [server] non-stream 响应序列化失败: %v", merr)
+			writeOpenAIError(w, http.StatusInternalServerError, "encode_failed", merr.Error())
+			st.status = http.StatusInternalServerError
+			st.outcome = reqlog.OutcomeHTTPError
+			return
+		}
 		st.toks = completionTokens(resp)
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)

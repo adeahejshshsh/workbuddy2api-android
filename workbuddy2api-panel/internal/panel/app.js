@@ -1922,10 +1922,15 @@ function parsePointTime(p) {
 
 /* fmtTokTimeLabel 时间桶的短标签，与 x 轴刻度同一口径（日桶 MM-DD，小时桶 HH:00）。 */
 function fmtTokTimeLabel(p) {
-  const d = new Date(p.t);
+  // 日桶必须按**本地**解析（bug #7）：`new Date("2026-09-16")` 按 ECMAScript 规范
+  // 解析成 UTC 零点，西半球时区会整体早一天；而柱子的横向位置用的是
+  // parsePointTime（补了 T00:00:00 走本地解析）—— 标签与柱子因此错开一天。
+  const s = p.scope === 'day' ? p.t + 'T00:00:00' : p.t + ':00:00';
+  const d = new Date(s);
+  const p2 = n => String(n).padStart(2, '0');
   return p.scope === 'day'
-    ? (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0')
-    : String(d.getHours()).padStart(2, '0') + ':00';
+    ? (d.getMonth() + 1) + '-' + p2(d.getDate())
+    : p2(d.getHours()) + ':00';
 }
 
 function renderUsageChart(series) {
@@ -2551,6 +2556,10 @@ if ($('pkSort')) {
 // 无缓存（首次进入）才自动查一次；显式刷新（force=true，点「刷新」按钮）始终实时查。
 async function loadPackages(force) {
   if (!force && lastPackages) {
+    // 缓存分支也要确保 limit 已解析（bug #15）：先打开首页让到期卡片拉过 packages
+    // （写 lastPackages 但**不**写 lastDetailLimit），再切到「积分构成」时会用默认 5，
+    // 配置里的 panel.package_detail_limit 不生效，直到手动点「刷新」。
+    if (cfgLoaded) lastDetailLimit = pkDetailLimit(cfgLoaded);
     renderPackages(lastPackages, lastDetailLimit);
     const ageMin = Math.floor((Date.now() - lastPackagesAt) / 60000);
     if (ageMin > 0) $('pkNote').textContent = lastPackages.accounts.length + ' 个账号 · ' + ageMin + ' 分钟前的数据，点「刷新」更新';
@@ -2705,7 +2714,12 @@ function renderExpirySnapshot(d) {
     const daily = Math.ceil(remain / Math.max(1, days));
     const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
     const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
-    const when = new Date(ms).toISOString().slice(0, 10);
+    // 本地格式化（bug #7）：toISOString() 输出 UTC 日期，西半球时区会比实际早一天。
+    const when = (() => {
+      const d = new Date(ms);
+      const p2 = n => String(n).padStart(2, '0');
+      return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+    })();
     return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
       '<span class="exp-nm">' + nm + '</span>' +
       '<span class="exp-main">最近到期 <b>' + esc(when) + '</b>（' + dayWord +

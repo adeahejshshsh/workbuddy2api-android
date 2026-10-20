@@ -309,7 +309,28 @@ func (r *Recorder) load() error {
 	}
 	for i := range f.Buckets {
 		b := f.Buckets[i]
-		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model+"|"+b.Rate] = &b
+		k := b.Scope + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate
+		// 同 key 累加而不是覆盖（bug #16）：文件里若出现两条同 key（手工合并、
+		// 旧版本写坏、两次落盘交错），后一条会把前一条的累计值直接顶掉 ——
+		// 用量凭空少一截且没有任何日志。
+		if old, ok := r.buckets[k]; ok {
+			old.Req += b.Req
+			old.Err += b.Err
+			old.PT += b.PT
+			old.CT += b.CT
+			old.TT += b.TT
+			old.LatMs += b.LatMs
+			old.LatN += b.LatN
+			old.TPS += b.TPS
+			old.TPSN += b.TPSN
+			old.CR += b.CR
+			old.CRN += b.CRN
+			old.CRT += b.CRT
+			old.CH += b.CH
+			old.CM += b.CM
+			continue
+		}
+		r.buckets[k] = &b
 	}
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil

@@ -21,6 +21,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -126,6 +127,13 @@ func main() {
 }
 
 func trunc(s string, n int) string {
+	// 按 rune 边界截断（bug #14）：按字节切会把中文昵称切成半个字符，
+	// 终端/日志里出现非法 UTF-8。仓库里早有 logfmt.Truncate 专门做这件事。
+	return logfmt.Truncate(s, n)
+}
+
+// truncBytes 旧的按字节实现（保留给确实需要字节语义的调用方）。
+func truncBytes(s string, n int) string {
 	if len(s) > n {
 		return s[:n]
 	}

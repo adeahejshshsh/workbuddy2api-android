@@ -402,7 +402,10 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
 func (c *Client) RefreshHeaders(req *http.Request, a *auth.Auth) {
 	c.CommonHeaders(req, a)
-	req.Header.Set("X-Refresh-Token", a.RefreshToken)
+	// 加锁读（bug #13）：同文件其它头都走 AccessTokenValue/DomainValue/RefreshTokenValue，
+	// 这一处是唯一直读 —— 一旦调用方按签名传池内的 *auth.Auth（AuthByUID 返回的
+	// 就是同一对象），就会与 RefreshToken 在 a.mu 内改字段形成数据竞争。
+	req.Header.Set("X-Refresh-Token", a.RefreshTokenValue())
 	if a.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
 	}

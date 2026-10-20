@@ -1,5 +1,71 @@
 # 变更记录
 
+## v1.26.6（当前）
+
+**本版 = 第三份 bug 审查（19 条）的落地修复，P0 7/7、P1 7/7、P2 5/5 全修。**
+
+### P0（功能直接失效）
+
+* **1 `run.sh` 的 restart 分支必然失败** —— `"$0" stop` 依赖可执行位，而脚本本身没有 x 位、
+  工作区还在 sdcard（noexec），`bash run.sh restart` 直接 `command not found`，
+  stop/start 都没跑。改成 `bash "$0" stop`（watchdog.sh 早就是这么调的，只有这一行漏了）。
+* **2 任务扫描结果混进空账号行** —— `items` 按 `len(states)` 预分配，被禁用账号与 ctx
+  取消的分支用 `continue` 跳过，留下 `{"uid":"","nickname":""}` 零值条目。收尾统一过滤
+  （`schoolVouchers` 早就这么做，这里漏了）。
+* **3 手动领奖后池内积分不刷新** —— 自动领奖路径都调了 `refreshCreditsAsync`，
+  手动这条漏了；用户点「领取」拿到奖励但面板积分不动，读成"领了没到账"。
+* **4 旧网关进程的退出回调覆盖新进程状态** —— 看门狗先 SIGTERM 旧进程再退避 2s 拉新的，
+  而 Go 侧优雅停机最长 5s：旧进程的 `waitFor` 可能在新进程 `setState(RUNNING)` **之后**
+  才返回，把状态和 `lastExit` 一起覆盖成「已停止 / rc=143」，而 7863 其实正在服务。
+  现在整个回调先判 `proc != me` 就直接返回。
+* **5 连登日志打出 `昵称(昵称(uid8))`** —— 上一轮的批量改写脚本把已经包在
+  `logfmt.Label(...)` 里的 `a.UID` 又替换了一次（嵌套两层）。
+* **6 导入账号的 `expires_at` 单位假设** —— 只按毫秒解释，导出工具给**秒**时
+  `/1000` 得到 1970 年，既非 0 也进不了兜底 → `NeedsRefresh` 恒真，每个 chat 请求前
+  都先打一次 refresh。改成按量级判单位（>1e11 才算毫秒），并对"明显过期"兜底。
+* **7 前端按 UTC 解析日桶日期** —— `new Date("2026-09-16")` 按规范解析成 UTC 零点，
+  西半球时区整体早一天，而柱子位置用的是本地解析（`parsePointTime` 补了 `T00:00:00`）
+  —— 标签与柱子错开一天。日桶标签与到期日都改成本地解析/格式化。
+
+### P1（状态与语义不一致）
+
+* **8 `/status` 的「冷却中」汇总与行内字段口径不一致** —— 汇总用 `!healthy`（四维或门），
+  行内只取 until/breakerUntil 两维：仅因连败降权的号在汇总里算 cooling、行内却
+  `cooling=false`。补上 `degradeUntil`，并把降权期并入"取更晚截止"的比较（`cool_kind=degraded`）。
+* **9 只有小程序路径的等待可中断** —— `runAutoAll` / `runChat5` / `runExpertBatch` /
+  `runTemplateUse` / `taskAcceptAll` / 队列路径的 18 处裸 `time.Sleep` 全部换成
+  `sleepAB(uid, d)`，断连后不再把整条流水线跑完还占着 per-account 锁。
+* **10 粘性绑定失效时不删 Redis 镜像** —— 慢路径 `delete(r.entries, key)` 漏了 `DelBind`，
+  重启后 `LoadFromStore` 把旧绑定读回来，会话又被钉到不可用的号上（要等 TTL 到期）。
+* **11 凌晨触发的余额耗尽冷却只到当天 04:00** —— 签到时点是 09:00/21:00，04:00 时余额
+  仍是 0：账号 04:00 回池必然再撞一次 402，然后被推到次日 04:00。改成 **09:00 前触发 →
+  当天 09:00**（下一次签到点），其余时段仍是次日 04:00。
+* **12 上游断流且 0 有效帧时被归类成「空流」** —— `validFrames == 0` 的判断排在
+  `readErr != nil` 之前，后者成了死代码；排障时分不清"上游没吐数据"与"连接被打断"。
+  调换顺序（读错误优先）。
+* **13 `RefreshHeaders` 直读 `a.RefreshToken`** —— 同文件其它头都走加锁读取器，
+  这一处是唯一直读；调用方一旦传池内的 `*auth.Auth` 就是数据竞争。改 `RefreshTokenValue()`。
+* **14 `trunc()` 按字节截断** —— 中文昵称被切成半个字符（非法 UTF-8）。改用 `logfmt.Truncate`。
+
+### P2（显示 / 健壮性）
+
+* **15 「积分构成」首次进入用错 `package_detail_limit`** —— 先开首页让到期卡片拉过
+  packages（写 `lastPackages` 但不写 `lastDetailLimit`），再切过去走缓存分支就用默认 5。
+  缓存分支也解析 limit。
+* **16 `usage.json` 同 key 重复条目互相覆盖** —— 命中已有 key 时改成累加，不再静默丢数据。
+* **17 每条请求都整体复制最近记录切片** —— `append([]Event{e}, r.recent...)` 在持锁状态下
+  搬运十几 KB。改成环形写，`Snapshot` 时倒序输出（对外契约不变）。
+* **18 非流式序列化失败时流水行仍记 200** —— 改成先 marshal 再写，失败记 500 + HTTPError。
+* **19 `.fixc.py` 的按行兜底替换是嵌套 `Label` 的源头** —— 一次性脚本已删除。
+
+### 测试
+
+`upstream 203 / server 90 / pool 184 / panel 24 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`gofmt -l` 为 0。
+
+bug #11 改了硬冷却的落点（09:00 前 → 当天 09:00），5 个断言随之更新为
+「hour ∈ {4, 9}」并注明理由 —— 这是行为变更，不是把测试改绿。
+
 ## v1.26.5（当前）
 
 **本版 = 第三份 bug 清单（19 条）的落地修复，P1 7/7、P2 9/9、P3 3/3 全修。**

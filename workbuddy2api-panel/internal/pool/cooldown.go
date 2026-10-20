@@ -532,8 +532,12 @@ func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
 // 04:00 整及之后返回次日 04:00。
 // time.Date 对日溢出自动进位（月末→下月 1 号、年末→下年 1 号），天然覆盖跨日/跨月/跨年。
 func nextDay4AM(now time.Time) time.Time {
-	if now.Hour() < 4 {
-		return time.Date(now.Year(), now.Month(), now.Day(), 4, 0, 0, 0, now.Location())
+	// 目标不是"次日 04:00"，而是"下一次签到之后"（bug #11）：签到时点是 09:00 / 21:00，
+	// 04:00 时余额仍是 0 —— 旧实现在凌晨 00:00–04:00 撞 402 的号 04:00 就回池，
+	// 必然再撞一次，然后被推到**次日** 04:00（面板显示"冷却到明天"，而当天 09:00
+	// 签到其实已经解冻了，中间 04:00–09:00 白打一次上游）。
+	if now.Hour() < 9 {
+		return time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location())
 	}
 	return time.Date(now.Year(), now.Month(), now.Day()+1, 4, 0, 0, 0, now.Location())
 }

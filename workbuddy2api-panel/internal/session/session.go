@@ -176,6 +176,10 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 			return e2.uid, true
 		}
 		delete(r.entries, key) // 失效：清掉再分配
+		// 必须同时删 Redis 镜像（bug #10）：Unbind/gcOnce 都成对调了 DelBind，
+		// 这一处漏了 —— 重启后 LoadFromStore 会把旧绑定读回来，会话又被钉到那个
+		// 不可用的号上（表现为「重启后某会话持续 503 / 换不动号」），要等 TTL 到期。
+		r.cfg.Store.DelBind(key)
 	}
 
 	uids := r.availableSlice(model)

@@ -295,7 +295,9 @@ func (p *Panel) taskByCodeWaiting(a *auth.Auth, code string) (*upstream.Task, er
 		return t, nil
 	}
 	for i := 1; i < claimPollAttempts; i++ {
-		time.Sleep(claimPollGap)
+		if !sleepAB(a.UID, claimPollGap) {
+			return nil, errTaskAborted
+		}
 		t2, err2 := p.taskByCode(a, code)
 		if err2 != nil {
 			return t, nil // 轮询期间的查询失败不覆盖已拿到的结果
@@ -428,7 +430,9 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 	}
 	// 回读（异步计分，有界轮询复用 claimPoll 预算的紧凑版：两轮各隔 3s）。
 	for i := 0; i < 2; i++ {
-		time.Sleep(claimPollGap)
+		if !sleepAB(a.UID, claimPollGap) {
+			return "", errTaskAborted
+		}
 		t2, err2 := p.taskByCodeMP(a, code)
 		if err2 != nil || t2 == nil {
 			continue
@@ -518,7 +522,9 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 	}
 	// 回读（两轮各隔 3s）；未点亮且有 fallback 时补报一轮再读。
 	for round := 0; round < 2; round++ {
-		time.Sleep(claimPollGap)
+		if !sleepAB(a.UID, claimPollGap) {
+			return "", errTaskAborted
+		}
 		t2, err2 := p.taskByCodeMP(a, code)
 		if err2 != nil || t2 == nil {
 			continue
@@ -639,7 +645,9 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	}
 	// 回读（异步计分，两轮各隔 3s——与 runMPMiniChatTask 同预算）。
 	for i := 0; i < 2; i++ {
-		time.Sleep(claimPollGap)
+		if !sleepAB(a.UID, claimPollGap) {
+			return "", errTaskAborted
+		}
 		t2, err2 := p.taskByCodeMP(a, code)
 		if err2 != nil || t2 == nil {
 			continue
@@ -844,7 +852,9 @@ func runChat5(p *Panel, a *auth.Auth) (string, error) {
 			return fmt.Sprintf("上报第 %d/%d 条失败: %v", i+1, need, err), nil
 		}
 		if i < need-1 {
-			time.Sleep(reportGap)
+			if !sleepAB(a.UID, reportGap) {
+				return "", errTaskAborted
+			}
 		}
 	}
 	return fmt.Sprintf("已补报 %d 条对话事件", need), nil
@@ -855,7 +865,9 @@ func runFirstBuddy(p *Panel, a *auth.Auth) (string, error) {
 	if err := p.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli()), ""); err != nil {
 		return "", fmt.Errorf("前置上报: %w", err)
 	}
-	time.Sleep(reportGap) // 给上游事件处理留时间（脚本实测口径）
+	if !sleepAB(a.UID, reportGap) { // 给上游事件处理留时间（脚本实测口径）
+		return "", errTaskAborted
+	}
 	if err := p.cfg.Upstream.BuddyAgreement(a); err != nil {
 		return "", fmt.Errorf("同意协议: %w", err)
 	}
@@ -875,7 +887,9 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 	if err := p.cfg.Upstream.AcceptTasks(a, []string{code}); err != nil {
 		log.Printf("panel: accept %s: %v（继续走行为链路）", code, err)
 	}
-	time.Sleep(reportGap)
+	if !sleepAB(a.UID, reportGap) {
+		return "", errTaskAborted
+	}
 	// 2. 真实对话一次（判据的最直接证据）
 	body, _ := json.Marshal(map[string]any{
 		"model": modelID,
@@ -895,7 +909,9 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 	// 读干 SSE（网关对上游强制 flow：不读完会残留连接）
 	_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<20))
 	rc.Close()
-	time.Sleep(reportGap)
+	if !sleepAB(a.UID, reportGap) {
+		return "", errTaskAborted
+	}
 	// 3. 对齐模型的上报（触发进度）
 	if err := p.cfg.Upstream.ReportChatActivityModel(a, fmt.Sprintf("wb2api-glm52-%d", time.Now().UnixMilli()), "", modelID, modelName); err != nil {
 		return "对话已完成，但进度上报失败：" + err.Error(), nil
@@ -1070,7 +1086,9 @@ func runAppearance(p *Panel, a *auth.Auth) (string, error) {
 	if err := p.cfg.Upstream.SetAppearanceTheme(a, themeKey); err != nil {
 		return "", fmt.Errorf("设置主题: %w", err)
 	}
-	time.Sleep(2 * time.Second)
+	if !sleepAB(a.UID, 2*time.Second) {
+		return "", errTaskAborted
+	}
 	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopEvent{
 		"eventCode": "appearance_skin_apply", "action": "apply", "source": "settings_close",
 		"id": themeKey, "vipLevel": 0, "series": "", "type": "unknown",
@@ -1093,7 +1111,9 @@ func runTemplateUse(p *Panel, a *auth.Auth) (string, error) {
 		if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 			return fmt.Sprintf("第 %d 组模板事件上报失败: %v", i+1, err), nil
 		}
-		time.Sleep(300 * time.Millisecond)
+		if !sleepAB(a.UID, 300*time.Millisecond) {
+			return "", errTaskAborted
+		}
 	}
 	return "已上报 template_used ×5", nil
 }
@@ -1175,7 +1195,9 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 		}
 		ok++
 		if i < len(experts)-1 {
-			time.Sleep(expertSummonGap)
+			if !sleepAB(a.UID, expertSummonGap) {
+				return "", errTaskAborted
+			}
 		}
 	}
 	_ = fail
@@ -1213,7 +1235,9 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 					"task_code": "(批量接受)", "status": "done",
 					"message": fmt.Sprintf("已接受 %d 个任务", len(codes)),
 				})
-				time.Sleep(reportGap)
+				if !sleepAB(a.UID, reportGap) {
+					return out
+				}
 			}
 		}
 	}
@@ -1237,7 +1261,9 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 					"task_code": "(批量接受-mp)", "status": "done",
 					"message": fmt.Sprintf("已接受 %d 个小程序任务", len(mpCodes)),
 				})
-				time.Sleep(reportGap)
+				if !sleepAB(a.UID, reportGap) {
+					return out
+				}
 			}
 		}
 	}
@@ -1320,7 +1346,10 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			}
 		}
 		out = append(out, item)
-		time.Sleep(reportGap) // 项间节流
+		// 项间节流改成可中断（bug #9）：客户端断开后不再把整条流水线跑完。
+		if !sleepAB(a.UID, reportGap) {
+			return out
+		}
 	}
 	return out
 }
