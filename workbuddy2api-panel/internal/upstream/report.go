@@ -26,6 +26,16 @@ const reportPath = "/v2/report"
 // 与 travel.go 的 growthJSON 对称（growth 域走 chatBase + BillingHeaders；billing 域走 billingBase）。
 // report/checkin 等 billing 端点共用：请求头统一 BillingHeaders，信封与错误语义同 doJSON。
 func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.RawMessage, error) {
+	return c.billingJSONCtx(context.Background(), a, method, path, body)
+}
+
+// billingJSONCtx 带 ctx 的 billing 请求（bug-12）：此前 ctx 只作用于重试间隔，
+// 单次请求仍用无 ctx 的 http.NewRequest + client 120s 超时 —— SIGTERM 时最坏
+// 还要等满一次请求才收尾，挤压 run.sh 的 8s 停机预算。
+func (c *Client) billingJSONCtx(ctx context.Context, a *auth.Auth, method, path string, body any) (json.RawMessage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -34,7 +44,7 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 		}
 		rdr = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequest(method, c.billingBase(a)+path, rdr)
+	req, err := http.NewRequestWithContext(ctx, method, c.billingBase(a)+path, rdr)
 	if err != nil {
 		return nil, err
 	}
@@ -46,9 +56,14 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 // 按 realm 走双路径 fallback：global 先无 /v2 前缀，ErrNotFound 时二次换有 /v2 前缀
 // （上游新旧路径分叉）；cn 单路径（有 /v2）现状不变。仅 global realm 才有多路径。
 func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, body any) (json.RawMessage, error) {
+	return c.billingMeterJSONCtx(context.Background(), a, paths, method, body)
+}
+
+// billingMeterJSONCtx 带 ctx（bug-12，语义同 billingJSONCtx）。
+func (c *Client) billingMeterJSONCtx(ctx context.Context, a *auth.Auth, paths []string, method string, body any) (json.RawMessage, error) {
 	var lastErr error
 	for i, path := range paths {
-		data, err := c.billingJSON(a, method, path, body)
+		data, err := c.billingJSONCtx(ctx, a, method, path, body)
 		if err == nil {
 			return data, nil
 		}

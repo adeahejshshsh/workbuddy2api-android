@@ -57,6 +57,7 @@ while :; do
       sleep 1
       bash "$DIR/run.sh" start >> "$LOG" 2>&1
       fail=0
+      noted=0   # 自愈后复位外部实例提示（bug-16）：否则之后切回本进程实例不再提示"已恢复"
     fi
   else                                                     # 进程没了且不通：立刻拉（退避）
     fail=$((fail + 1))

@@ -95,10 +95,14 @@ func packageRemainUsed(a resourcePackage) (remain, used, size int64) {
 		used = size - remain
 		if a.CycleCapacityUsed > used {
 			used = a.CycleCapacityUsed
-			if size >= used {
-				remain = size - used
-			}
 		}
+		// 与 internal/upstream 的权威口径对齐（bug-3）：先把 used 钳到 size、
+		// 再由 used 反算 remain，保证 remain+used == size。缺这两条时上游脏数据
+		// （CycleCapacityUsed > Size）会输出「剩余 50 / 已用 150 / 面额 100」。
+		if used > size {
+			used = size
+		}
+		remain = size - used
 		return remain, used, size
 	}
 	remain = a.CapacityRemain

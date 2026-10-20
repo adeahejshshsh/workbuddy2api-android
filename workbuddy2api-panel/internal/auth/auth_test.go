@@ -252,10 +252,14 @@ func TestLoadDirDuplicateUIDWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load err=%v", err)
 	}
-	// 行为稳定（不改加载结果）：LoadDir 返回全部可解析文件（去重发生在 pool.SyncToDir
-	// 的 UID 键 upsert），不 panic。
-	if len(list) != 2 {
-		t.Fatalf("want 2 accounts loaded (dedup later in pool), got %d", len(list))
+	// 契约变更（bug-4）：LoadDir 现在**真的去重**，保留先出现的文件（files 已排序，
+	// 结果确定）。此前只打日志、两条都返回，而 pool.upsertLocked 是"后写覆盖" ——
+	// 实际保留的是后出现的文件，与日志文案相反。
+	if len(list) != 1 {
+		t.Fatalf("want 1 account after dedupe, got %d", len(list))
+	}
+	if list[0].AccessTokenValue() != "at1" {
+		t.Fatalf("应保留先出现的文件（at1），got %q", list[0].AccessTokenValue())
 	}
 	// WARN 已触发且含两文件路径。
 	if !strings.Contains(string(raw), "WARN: uid") ||

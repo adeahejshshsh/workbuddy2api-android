@@ -198,10 +198,26 @@ public class MainActivity extends Activity {
                 }
             }
 
+            // 新签名（bug-15）：旧签名 onReceivedError(WebView,int,String,String) 在部分
+            // ROM/WebView 上对**子资源**失败也会回调 —— 图片/脚本 404 就会置
+            // pageHadError → panelLoaded=false → tick 反复自动重载面板（界面自己闪）。
+            // 新回调带 WebResourceRequest，只在主框架失败时才算"这次加载失败"。
+            @Override public void onReceivedError(WebView v, android.webkit.WebResourceRequest req,
+                                                 android.webkit.WebResourceError err) {
+                if (req != null && !req.isForMainFrame()) return;   // 子资源失败：忽略
+                pageHadError = true;
+                panelLoading = false;
+                panelLoaded = false;
+            }
+
+            // 旧签名保留给 API < 23（新回调不会触发）；API 23+ 时它仍可能被调用，
+            // 用 SDK 判断避免与上面的主框架判定重复计数。
+            @SuppressWarnings("deprecation")
             @Override public void onReceivedError(WebView v, int code, String desc, String failingUrl) {
-                pageHadError = true;          // 标记本次加载失败（bug B2）
-                panelLoading = false;         // 失败也算结束，允许下一拍重试（bug #1）
-                panelLoaded = false;          // 加载失败 → 交回 tick 重试（最多 MAX_LOAD_TRIES 次）
+                if (Build.VERSION.SDK_INT >= 23) return;   // 新回调已处理
+                pageHadError = true;
+                panelLoading = false;
+                panelLoaded = false;
             }
 
             // 面板里的外链（文档、上游状态页）一律交给系统浏览器（issue B12）：

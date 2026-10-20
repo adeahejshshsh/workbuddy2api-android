@@ -228,6 +228,35 @@ func TestRepackToolResultBlocks(t *testing.T) {
 		assertSummary(t, summarize(out), []string{"assistant(c00,c01)", "tool(c00)", "tool(c01)", "system(-)"})
 	})
 
+	t.Run("结果未到就先插入的非 tool 消息也要后移", func(t *testing.T) {
+		// bug-1：assistant(tool_calls) → developer/system 通知 → tool(结果)。
+		// 此前 `if len(results)==0 { break }` 让结果集为空时直接退出，插入物留在原位，
+		// 出站载荷仍是 assistant → system → tool，上游判 11148（tool_call_sequence_broken），
+		// 客户端每次重放同一条历史都失败且换号无效。
+		in := msgs(t, `[
+			{"role":"assistant","content":null,"tool_calls":[{"id":"c1"}]},
+			{"role":"developer","content":"notice"},
+			{"role":"tool","tool_call_id":"c1","content":"r1"}
+		]`)
+		out, changed := repackToolResultBlocks(in)
+		if !changed {
+			t.Fatal("changed=false，期望重排")
+		}
+		assertSummary(t, summarize(out), []string{"assistant(c1)", "tool(c1)", "developer(-)"})
+	})
+
+	t.Run("一条结果都没有时保持原序（零回归）", func(t *testing.T) {
+		in := msgs(t, `[
+			{"role":"assistant","content":null,"tool_calls":[{"id":"c1"}]},
+			{"role":"system","content":"notice"}
+		]`)
+		out, changed := repackToolResultBlocks(in)
+		if changed {
+			t.Fatal("changed=true，但没有结果可重排")
+		}
+		assertSummary(t, summarize(out), []string{"assistant(c1)", "system(-)"})
+	})
+
 	t.Run("下一组组头不被吞掉", func(t *testing.T) {
 		// 真实会话漏排的形态：第一组结果后跟着插入消息、再接第二组组头。组头必须交还外层
 		// 循环当组头处理——否则它会被当成插入物挪走，它自己那批结果（t(c10) 与 t(c11)

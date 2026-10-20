@@ -12,8 +12,6 @@ import (
 // 3:1 是温和偏好，不是固定比例：账号组成变化会自然改变最终占比。
 const expiringVirtualSlots = 3
 
-// AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
-// realm=="" 退化为 AvailableUIDs（现状语义）。
 // IsAvailableForModel 报告单个账号对该模型是否可选（healthyForModel + 未占满在途）。
 //
 // 用途（bug #13）：会话粘性的快路径只需要校验"绑定号此刻还能不能用"，
@@ -44,6 +42,8 @@ func (p *Pool) PickExistingAuth(uids []string) *auth.Auth {
 	return nil
 }
 
+// AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
+// realm=="" 退化为 AvailableUIDs（现状语义）。
 func (p *Pool) AvailableUIDsForRealm(realm string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

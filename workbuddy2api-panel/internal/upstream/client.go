@@ -2108,7 +2108,7 @@ func (c *Client) enterpriseResourceCtx(ctx context.Context, a *auth.Auth, soon t
 	var data json.RawMessage
 	err = c.retryBillingTransientCtx(ctx, func() error {
 		var e error
-		data, e = c.billingJSON(a, http.MethodPost, "/v2/billing/meter/get-enterprise-user-usage", map[string]any{})
+		data, e = c.billingJSONCtx(ctx, a, http.MethodPost, "/v2/billing/meter/get-enterprise-user-usage", map[string]any{})
 		return e
 	})
 	if err != nil {
@@ -2192,7 +2192,7 @@ func (c *Client) UserResourceDetailedWithExpiryCtx(ctx context.Context, a *auth.
 	var data json.RawMessage
 	err = c.retryBillingTransientCtx(ctx, func() error {
 		var e error
-		data, e = c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
+		data, e = c.billingMeterJSONCtx(ctx, a, c.billingMeterPaths(a), http.MethodPost, body)
 		return e
 	})
 	if err != nil {
@@ -2340,7 +2340,7 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 // DailyCheckinCtx 带 ctx（bug #3）：停机时不必把重试的 2s+4s 睡满。
 func (c *Client) DailyCheckinCtx(ctx context.Context, a *auth.Auth) error {
 	return c.retryBillingTransientCtx(ctx, func() error {
-		_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
+		_, err := c.billingMeterJSONCtx(ctx, a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
 		return err
 	})
 }

@@ -510,11 +510,12 @@ func LoadDir(dir string) ([]*Auth, error) {
 		}
 		a.FilePath = f
 		if prev, ok := seenUID[a.UID]; ok {
-			// 用加锁访问器 + 写明"保留谁/丢弃谁"（bug-12）：两条日志文本一致时，
-			// 事后根本判断不出到底哪个文件留下了。锁外直读 Nickname 也是同包
-			// 专门加 NicknameValue() 要消除的那类竞争。
+			// 真的去重（bug-4）：此前只打日志、两条都 append，而 pool.upsertLocked 是
+			// "后写覆盖" → 实际保留的是**后出现的**文件，与日志说的"保留 prev"相反。
+			// 保留先出现的（files 已排序，结果确定），并如实说明丢弃了谁。
 			log.Printf("WARN: uid %s duplicated — 保留 %s，丢弃 %s（不同 realm 同名 UID？）",
 				logfmt.Label(a.UID, a.NicknameValue()), prev, f)
+			continue
 		}
 		seenUID[a.UID] = f
 		if a.RealmStored() == "" {

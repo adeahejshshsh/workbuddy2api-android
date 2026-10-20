@@ -398,7 +398,7 @@ function renderAccounts(list) {
       const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
-    } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
+    } else tag = '<span class="tag ok">可用</span>'; // 两个分支都返回空串的三元已删（bug-14）
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
@@ -2477,13 +2477,17 @@ function renderPackages(d, detailLimit) {
   for (const a of list) for (const s of pkBySource(a.packages || [])) {
     if (!names.includes(s.key)) names.push(s.key);
   }
-  names.sort((x, y) => {
-    const sz = n => Math.max(...list.map(a => {
-      const f = pkBySource(a.packages || []).find(s => s.key === n);
-      return f ? f.size : 0;
-    }));
-    return sz(y) - sz(x);
-  });
+  // 先建一次「来源 → 最大面额」索引再排序（bug-8）：原先比较器内部对每个候选
+  // 重跑 pkBySource（每次遍历全部账号的全部包），账号 20+ / 包 100+ 时是
+  // O(n²·log n)，手机上打开「积分构成」会明显卡顿。
+  const maxSizeOf = {};
+  for (const a of list) {
+    for (const s of pkBySource(a.packages || [])) {
+      const prev = maxSizeOf[s.key] || 0;
+      if (s.size > prev) maxSizeOf[s.key] = s.size;
+    }
+  }
+  names.sort((x, y) => (maxSizeOf[y] || 0) - (maxSizeOf[x] || 0));
   const colorOf = n => pkColor(names.indexOf(n));
   // 键 → 展示名，供卡片与明细表共用（同一来源必然同色同名）。
   const labelOf = {};

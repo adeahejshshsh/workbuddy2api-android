@@ -206,26 +206,67 @@ func (p *Panel) effectiveTaskCode(a *auth.Auth, code string) string {
 	if a == nil || p.cfg.Upstream == nil || p.cfg.Pool == nil {
 		return code
 	}
-	if t, err := p.taskByCode(a, code); err == nil && t != nil {
+	m, err := p.loadTaskMap(a)
+	if err != nil || m == nil {
 		return code
+	}
+	return effectiveTaskCodeIn(m, code)
+}
+
+// loadTaskMap 一次拉齐任务列表（默认口径 + mp 合并）并建 code → Task 映射（bug-2）。
+//
+// 为什么需要：runAutoAll 有 19 个动作，每个动作都会调 effectiveTaskCode ——
+// 而它内部先 taskByCode（1 次 ListTasks）再 ListTasks（第 2 次），主流程又
+// taskByCode 一次，单账号一轮 ≈ 38~57 次 GET /v2/activity/growth/tasks。
+// 一次拉齐后每个动作只查本地 map。
+func (p *Panel) loadTaskMap(a *auth.Auth) (map[string]*upstream.Task, error) {
+	if a == nil || p.cfg.Upstream == nil {
+		return nil, nil
 	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
-		return code
+		return nil, err
 	}
-	want := strings.ToLower(code)
-	// 1) 精确同名（大小写不敏感）
-	for i := range tasks {
-		if strings.ToLower(tasks[i].TaskCode) == want {
-			return tasks[i].TaskCode
+	// mp 列表是默认口径的超集（实测含常规任务）：合并去重，失败静默（与
+	// accountTasks 同口径）。
+	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
+		seen := make(map[string]bool, len(tasks)+len(mpTasks))
+		for i := range tasks {
+			seen[strings.ToLower(tasks[i].TaskCode)] = true
+		}
+		for _, t := range mpTasks {
+			if k := strings.ToLower(t.TaskCode); !seen[k] {
+				tasks = append(tasks, t)
+				seen[k] = true
+			}
 		}
 	}
-	// 2) 名称特征兜底（仅对已知会换码的任务生效，避免误抓别的任务）
+	return taskMapByCode(tasks), nil
+}
+
+// taskMapByCode 建 code（小写）→ *Task 映射。
+func taskMapByCode(tasks []upstream.Task) map[string]*upstream.Task {
+	m := make(map[string]*upstream.Task, len(tasks))
+	for i := range tasks {
+		m[strings.ToLower(tasks[i].TaskCode)] = &tasks[i]
+	}
+	return m
+}
+
+// effectiveTaskCodeIn 在给定映射里解析实际任务码（纯函数，不发请求）。
+func effectiveTaskCodeIn(m map[string]*upstream.Task, code string) string {
+	want := strings.ToLower(code)
+	if t, ok := m[want]; ok && t != nil {
+		return t.TaskCode // 精确同名（大小写不敏感）：保留上游的原始大小写
+	}
+	// 名称特征兜底（仅对已知会换码的任务生效，避免误抓别的任务）
 	if strings.Contains(want, "valorant") {
-		for i := range tasks {
-			lc := strings.ToLower(tasks[i].TaskCode)
-			if strings.Contains(lc, "valorant") || strings.Contains(lc, "perler") {
-				return tasks[i].TaskCode
+		for k, t := range m {
+			if t == nil {
+				continue
+			}
+			if strings.Contains(k, "valorant") || strings.Contains(k, "perler") {
+				return t.TaskCode
 			}
 		}
 	}
@@ -1572,13 +1613,25 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		}
 	}
 
+	// 一次拉齐任务列表（bug-2）：此前 19 个动作各调一次 effectiveTaskCode
+	// （内部 2 次 ListTasks）+ 主流程再 taskByCode 一次 ≈ 38~57 次列表请求。
+	// 拉失败就退回逐次查询（行为与旧版一致，只是慢）。
+	snap, snapErr := p.loadTaskMap(a)
 	for _, act := range autoActions {
 		item := map[string]any{"task_code": act.TaskCode, "desc": act.Desc}
 		// 用**实际**任务码（bug #7）：动作可能按域换码（WorkBuddy_Valorant 国际服用
 		// 不同 code），而这里此前全程用 act.TaskCode —— 国际服账号在"一键完成全部"里
 		// before==nil → 记一条"该账号无此任务"，同一任务用单任务按钮却能跑通。
-		effCode := p.effectiveTaskCode(a, act.TaskCode)
-		before, err := p.taskByCode(a, effCode)
+		var effCode string
+		var before *upstream.Task
+		var err error
+		if snapErr == nil && snap != nil {
+			effCode = effectiveTaskCodeIn(snap, act.TaskCode)
+			before = snap[strings.ToLower(effCode)]
+		} else {
+			effCode = p.effectiveTaskCode(a, act.TaskCode)
+			before, err = p.taskByCode(a, effCode)
+		}
 		if err != nil {
 			item["status"] = "error"
 			item["message"] = "查询失败: " + err.Error()

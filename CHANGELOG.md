@@ -1,6 +1,96 @@
 # 变更记录
 
-## v1.27.9（当前）
+## v1.28.0（当前）
+
+**本版 = 第十六份审查报告（BUG-REVIEW-2026-10-20.md，16 条）的落地修复。
+逐条复核：14 条为真、2 条误报（#5、#9）。其中 #4 / #10 / #11 / #13 直接指向我最近两版的改动。**
+
+### 高优先级
+
+* **#1 tool 结果重排有缺口：插入物在结果之前时不重排** —— `repackToolResultBlocks` 里
+  `if len(results) == 0 { break }` 让「assistant(tool_calls) → developer/system 通知 →
+  tool(结果)」这种形态一条都不挪：结果集为空就退出，插入物留在原位，出站载荷仍是
+  assistant → system → tool，上游判 **11148（tool_call_sequence_broken）**，客户端每次
+  重放同一条历史都失败、换号无效。
+  改成「中间消息一律先缓冲」，只在**确实一条结果都没有**时保持原序（零回归）。
+  新增两条子用例：`结果未到就先插入的非 tool 消息也要后移`（修复前必挂）、
+  `一条结果都没有时保持原序`。【复核】真。
+
+### 中优先级
+
+* **#2「一键完成全部」对每个账号放大 38~57 次任务列表请求** —— 19 个动作各调一次
+  `effectiveTaskCode`（内部先 `taskByCode` 1 次、再 `ListTasks` 1 次），主流程又
+  `taskByCode` 一次。新增 `loadTaskMap`（默认口径 + mp 合并去重，**每账号一次**）、
+  `taskMapByCode`、`effectiveTaskCodeIn`（纯函数），`runAutoAll` 改为一次拉齐后查本地
+  map；拉取失败时自动退回逐次查询（行为与旧版一致，只是慢）。【复核】真。
+* **#3 `cmd/credit` 的余额口径与网关分叉** —— 它自带一份 `packageRemainUsed` 副本，
+  缺 `used > size` 钳制与 `remain = size - used` 反算（v1.27.8 我只修了 upstream 那份）
+  → 上游脏数据时 CLI 输出「剩余 50 / 已用 150 / 面额 100」。按 upstream 逐行对齐补齐。
+  【复核】真。
+* **#4 重复 UID 的告警文案与实际行为相反** —— v1.27.9 我只把日志改成「保留 prev，
+  丢弃 f」，但代码仍把两条都 `append`，而 `pool.upsertLocked` 是"后写覆盖" →
+  实际保留的是 **f**，日志在说谎。
+  改成**真去重**：保留先出现的文件（`files` 已排序，结果确定），日志如实说明丢弃了谁。
+  同步更新 `TestLoadDirDuplicateUIDWarning`（它原本断言"两条都返回"）。【复核】真。
+* **#6 Android 壳：自愈退避被误判成「系统冻结」** —— `lastTickAt` 在自愈前已更新，
+  而 `selfHeal` 里的 `sleep(backoffMs(n))` 退避到 ≥32s（第 5 次起）后，下一轮
+  `now-lastTickAt > 3*TICK_MS` 成立 → `freezes++` 并打「系统冻了我 N 秒」，
+  把「自己在退避」误报成「被系统冻结」。自愈（进程退出 / 僵死两处）返回后复位心跳基准。
+  【复核】真。
+* **#7 `ensureConfig`：配置里没有 `api_key` 键时不会补** —— v1.27.8 我只处理了
+  「键存在但值是占位/空」，`!m.find()` 时直接 `return`。用户手改删掉该键（`listen` 仍是
+  `:7863`）→ 网关 `checkListenKey` 判「非回环 + 空密钥」`log.Fatalf` 退出，看门狗无限重拉，
+  界面永远「启动中」。改成在最后一个 `}` 前插入该键（其余内容一个字不动）。【复核】真。
+* **#8 积分构成页排序比较器 O(n²·log n)** —— 比较器内部对每个候选重跑 `pkBySource`
+  （每次遍历全部账号的全部包），账号 20+ / 包 100+ 时手机打开「积分构成」明显卡顿。
+  先建一次「来源 → 最大面额」索引再排序。【复核】真。
+
+### 低优先级
+
+* **#10 全冷却兜底日志的节流标记永不复位** —— v1.27.9 我加的 `lastFallbackLog` 只在
+  账号变化时更新，账号恢复后再次进入兜底就不再打日志。新增 `resetFallbackLog`，
+  在 `NoteSuccess` 与 `ReenableIfCredits`（解冻 = 恢复）里清标记。【复核】真。
+* **#11 `schoolVouchers` 的并发闸门失效** —— v1.27.9 我修了 `packages` 与
+  `runQueueItems`，**这是第三处**漏改。同样把 `sem <- struct{}{}` 提到 `go func` 之前。
+  【复核】真。
+* **#12 `enterpriseResourceCtx` 的 ctx 只作用于重试间隔** —— `retryBillingTransientCtx`
+  能被打断，但单次 `billingJSON` 用的是无 ctx 的 `http.NewRequest` + client 120s 超时，
+  SIGTERM 时最坏仍等满一次请求，挤压 `run.sh` 的 8s 停机预算。
+  新增 `billingJSONCtx` / `billingMeterJSONCtx`（`http.NewRequestWithContext`），
+  并把 `enterpriseResourceCtx` / `UserResourceDetailedWithExpiryCtx` / `DailyCheckinCtx`
+  三处接上。【复核】真。
+* **#13 注释与函数错位** —— v1.27.8 我把 `IsAvailableForModel` 插在
+  `AvailableUIDsForRealm` 的文档注释与函数之间，godoc 会读成「IsAvailableForModel 按 realm
+  过滤」。注释归位，两个函数各写各的。【复核】真。
+* **#14 前端死代码** —— `+ (s.in_flight ? '' : '')` 两个分支都返回空串，删掉。【复核】真。
+* **#15 Android 壳：只重写了废弃的 `onReceivedError`** —— 旧签名在部分 ROM/WebView 上对
+  **子资源**失败也回调 → `pageHadError=true` → `panelLoaded=false` → tick 反复自动重载
+  面板（界面自己闪）。新增 `onReceivedError(WebView, WebResourceRequest, WebResourceError)`
+  并只在 `req.isForMainFrame()` 时置标记；旧签名保留给 API < 23（新回调不触发）。
+  【复核】真。
+* **#16 `watchdog.sh` 自愈后未复位外部实例提示标记** —— 「进程在但不通 → 杀掉重拉」分支
+  里 `fail=0` 但 `noted` 不复位，之后切回本进程实例不再提示「已恢复正常」。补 `noted=0`。
+  【复核】真。
+
+### 误报（未改，附理由）
+
+* **#5「WAF 分支：请求日志状态码与真实响应码不一致」** —— 报告称日志记 403、客户端收 503。
+  实际 `status` 在轮转循环内是**循环局部变量**（`rc, status, respBody, terr := …`），
+  而末端 `status := http.StatusServiceUnavailable` 是**另一个变量**：末端
+  `writeOpenAIErrorFull(w, status, …)` 之后紧跟 `st.status = status`，写的就是实际发出的
+  503。日志与客户端一致，不存在错位。
+* **#9「到期卡片『检查』按钮可能永久卡死」** —— `expFetching = false` 位于 `try/catch`
+  **之后**、函数末尾：`renderExpiry(d)` 抛的异常会被 `catch` 接住，控制流继续走到那行，
+  标志不会卡死。这条与之前某份报告的第 3 条是同一个误判，结论不变。
+
+### 测试
+
+`upstream 213 / server 92 / pool 186 / panel 44 / session 20 / redisstore 6 / reqlog 7 /
+auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**727 通过 0 失败**；`gofmt -l` 为 0。
+
+新增 2 条子用例（#1），更新 1 条旧断言（#4：`LoadDir` 现在真去重）。
+
+## v1.27.9
 
 **本版 = 第十五份审查报告（CODE-REVIEW-2026-10-20.md，12 条）的落地修复。
 逐条复核：12 条全部为真、0 误报。其中 BUG-01 是我 v1.27.6 的性能优化引入的回归，

@@ -383,10 +383,15 @@ public class GatewayService extends Service {
                     }
                     external = false;
                     selfHeal("网关进程已退出");
+                    // 自愈里 sleep(backoffMs) 可能长达 60s，而 lastTickAt 在进入本轮时
+                    // 就已更新 —— 不复位的话下一轮 now-lastTickAt 会超过 3*TICK_MS，
+                    // 被误判成「系统冻了我 N 秒」（bug-6），把排查方向带偏。
+                    lastTickAt = SystemClock.elapsedRealtime();
                     continue;
                 }
                 if (!httpUp() && now - startedAt > GRACE_MS) {
                     selfHeal("健康检查 45s 无响应（僵死）");
+                    lastTickAt = SystemClock.elapsedRealtime(); // 同上（bug-6）
                     continue;
                 }
                 if (restarts > 0 && now - startedAt > STABLE_MS) {   // 自愈后稳住 → 退避清零
@@ -634,7 +639,24 @@ public class GatewayService extends Service {
             java.util.regex.Matcher m = java.util.regex.Pattern
                     .compile("\"api_key\"\\s*:\\s*\"([^\"]*)\"")
                     .matcher(cur);
-            if (!m.find()) return;                 // 没有该键：交给网关自己的默认值
+            if (!m.find()) {
+                // 配置里**没有** api_key 键时也要补（bug-7）：listen 若是非回环地址，
+                // 网关的 checkListenKey 会判「非回环 + 空密钥」直接 log.Fatalf 退出，
+                // 看门狗按退避无限重拉、界面永远「启动中」。
+                // 在最后一个 } 前插入该键，其余内容一个字不动。
+                int brace = cur.lastIndexOf('}');
+                if (brace <= 0) return;            // 不是对象：别乱改
+                String injected = cur.substring(0, brace).replaceAll("\\s+$", "")
+                        + ", \"api_key\": \"" + key + "\"\n" + cur.substring(brace);
+                try (java.io.FileOutputStream os = new java.io.FileOutputStream(cfg)) {
+                    os.write(injected.getBytes("UTF-8"));
+                } catch (Throwable t) {
+                    appLog(this, "config.json 缺 api_key 且补写失败：" + t);
+                    return;
+                }
+                appLog(this, "config.json 缺 api_key，已补写随机 key（否则网关拒绝启动）");
+                return;
+            }
             String curKey = m.group(1).trim();
             boolean bad = curKey.isEmpty()
                     || "CHANGE_ME".equalsIgnoreCase(curKey)

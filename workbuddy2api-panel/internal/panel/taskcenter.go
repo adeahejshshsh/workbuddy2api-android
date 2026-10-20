@@ -807,10 +807,12 @@ func (p *Panel) schoolVouchers(w http.ResponseWriter, r *http.Request) {
 		if a == nil {
 			continue
 		}
+		// 抢槽前置（bug-11）：与 tasksScanAll / startGrowthQueue / packages 同款，
+		// 别再"先起 N 个 goroutine 再排队"。
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(i int, a *auth.Auth) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			defer func() { // panic 兜底（bug #14）
 				if r := recover(); r != nil {

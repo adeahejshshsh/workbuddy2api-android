@@ -84,9 +84,6 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 				i++
 				continue
 			}
-			if len(results) == 0 {
-				break // assistant 后没有结果：交由 cleanupOrphanToolCalls 处理
-			}
 			// 下一组 assistant.tool_calls 是新的组头，绝不能当插入物吞掉：一旦被收进
 			// between，它永远不再被外层循环当作组头处理，它自己那批结果也就永远得不
 			// 到重排（真实会话 msg[181] 正是这样漏掉的）。必须 break 交还外层循环。
@@ -95,10 +92,19 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 					break
 				}
 			}
-			// 同批结果尚未收齐时，中间消息视为插入物，暂存待后移。
+			// 中间消息一律先缓冲（bug-1）：此前 `if len(results)==0 { break }` 让
+			// 「assistant(tool_calls) → developer/system 通知 → tool(结果)」这种形态
+			// 一条都不挪 —— 结果集为空就退出，插入物留在原位，出站载荷仍是
+			// assistant → system → tool，上游判 11148（tool_call_sequence_broken），
+			// 客户端每次重放同一条历史都失败且换号无效。
 			between = append(between, messages[i])
 			sawNonTool = true
 			i++
+		}
+		if len(results) == 0 {
+			// 确实一条结果都没有：保持原序（零回归），交给 cleanupOrphanToolCalls。
+			out = append(out, between...)
+			continue
 		}
 		out = append(out, results...)
 		out = append(out, between...)

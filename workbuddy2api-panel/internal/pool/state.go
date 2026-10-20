@@ -140,6 +140,7 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		p.resetFallbackLog(uid) // 解冻 = 恢复：兜底日志下次还能打（bug-10）
 		if remain > 0 && !e.disabled {
 			p.reviveCoolingLocked(e, remain, total)
 		} else {
@@ -181,10 +182,19 @@ func (p *Pool) NoteError(uid string) {
 // 本模型的冷却截止（这正是"每模型独立"的语义）。模型级冷却只由到期/复活/账号级
 // 冷却（Cooldown/reviveCoolingLocked）清除。11102 条目的成功清理由 handler 在
 // 成功且模型命中时显式调 BlockModelClear（6004 不清，语义不同）。
+// resetFallbackLog 账号恢复正常时清掉兜底日志节流标记（bug-10）：
+// 否则同一个号第二次被兜底捞起时不会再打日志，运维看不到重复发生。
+func (p *Pool) resetFallbackLog(uid string) {
+	if p.lastFallbackLog == uid {
+		p.lastFallbackLog = ""
+	}
+}
+
 func (p *Pool) NoteSuccess(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		p.resetFallbackLog(uid) // 恢复正常：兜底日志下次还能打（bug-10）
 		e.successCount++
 		e.lastSuccess = time.Now()
 		e.fails = 0
