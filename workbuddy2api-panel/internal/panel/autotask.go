@@ -443,9 +443,14 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		target = 1
 	}
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+		credit, energy, already, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 		if err != nil {
 			return "", err
+		}
+		// 内层就完成了领奖，外层判 claimable 的 refreshCreditsAsync 走不到（bug B13），
+		// 面板积分要等 5 分钟才动 —— 这里补一次。
+		if !already {
+			p.refreshCreditsAsync(a)
 		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
@@ -489,9 +494,12 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 	if t.Current < target {
 		return fmt.Sprintf("已上报 %d 次但进度未达 %d/%d（异步计分未归账，下次重试）", need, t.Current, target), nil
 	}
-	credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+	credit, energy, already, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 	if err != nil {
 		return "", err
+	}
+	if !already { // 内层领奖后刷新积分（bug B13）
+		p.refreshCreditsAsync(a)
 	}
 	return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de）", credit, energy), nil
 }
@@ -547,9 +555,14 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 		target = 1
 	}
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+		credit, energy, already, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 		if err != nil {
 			return "", err
+		}
+		// 内层就完成了领奖，外层判 claimable 的 refreshCreditsAsync 走不到（bug B13），
+		// 面板积分要等 5 分钟才动 —— 这里补一次。
+		if !already {
+			p.refreshCreditsAsync(a)
 		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
@@ -586,9 +599,12 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 	if t.Current < target {
 		return "已上报但进度未点亮（判据形态待解锁后校正，下次重试）", nil
 	}
-	credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+	credit, energy, already, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 	if err != nil {
 		return "", err
+	}
+	if !already { // 内层领奖后刷新积分（bug B13）
+		p.refreshCreditsAsync(a)
 	}
 	return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de）", credit, energy), nil
 }
@@ -659,9 +675,14 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	}
 	// 已达标（含 completed 未领）：直接领奖。
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+		credit, energy, already, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 		if err != nil {
 			return "", err
+		}
+		// 内层就完成了领奖，外层判 claimable 的 refreshCreditsAsync 走不到（bug B13），
+		// 面板积分要等 5 分钟才动 —— 这里补一次。
+		if !already {
+			p.refreshCreditsAsync(a)
 		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
@@ -704,9 +725,12 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	if t.Current < target {
 		return "已上报但进度未归账（异步计分，下次重试）", nil
 	}
-	credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+	credit, energy, already, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 	if err != nil {
 		return "", err
+	}
+	if !already { // 内层领奖后刷新积分（bug B13）
+		p.refreshCreditsAsync(a)
 	}
 	return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de）", credit, energy), nil
 }
@@ -741,7 +765,7 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	if a != nil {
 		if blocked, why := p.skipBlocked(a.UID, act.TaskCode); blocked {
 			writeErr(w, http.StatusConflict, "该任务已被判定做不了并跳过："+why+
-				"；如要重试请点任务中心「清空跳过名单」")
+				"；如要立即重试：打开该账号的「任务」弹窗，点「清空跳过名单」")
 			return
 		}
 	}
@@ -761,7 +785,11 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	defer stopWatch()
 	// 前置读取：已完成的任务直接跳过（幂等，不浪费上游调用）。
 	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
-	before, err := p.taskByCode(a, act.TaskCode)
+	// 先解析**实际**任务码，再做前置读取（bug B6）：动作可能按域换码
+	// （WorkBuddy_Valorant），此前用固定码查不到就直接 404 返回，
+	// effectiveTaskCode 永远走不到 → 换码任务永远"该账号没有此任务"。
+	effCode := p.effectiveTaskCode(a, act.TaskCode)
+	before, err := p.taskByCode(a, effCode)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
 		return
@@ -770,8 +798,6 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "该账号没有此任务")
 		return
 	}
-	// 用**实际**任务码做后续判定与回读（bug #19：动作可能按域换码）。
-	effCode := p.effectiveTaskCode(a, act.TaskCode)
 	isMP := isMPTaskCode(effCode)
 	if taskDone(before) {
 		msg := "该任务已领取过奖励"

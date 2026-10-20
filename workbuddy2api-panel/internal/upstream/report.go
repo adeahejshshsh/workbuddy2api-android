@@ -9,6 +9,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -84,12 +85,27 @@ func isTransientBillingErr(err error) bool {
 // 最多补打 2 次（间隔 2s、4s），首次成功或非瞬时错误立即返回。chat 热路径
 // 不用本策略——它有自己的换号轮转语义，重试会放大在途请求。
 func (c *Client) retryBillingTransient(fn func() error) error {
+	return c.retryBillingTransientCtx(context.Background(), fn)
+}
+
+// retryBillingTransientCtx 可取消版本（bug B14）：SIGTERM 时不必把 2s+4s 睡满，
+// 否则优雅停机被拖过 5s 预算，最后一次 Flush 被 run.sh 的强杀夺走。
+func (c *Client) retryBillingTransientCtx(ctx context.Context, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	err := fn()
 	if err == nil || !isTransientBillingErr(err) {
 		return err
 	}
 	for i := 1; i <= 2; i++ {
-		time.Sleep(time.Duration(i) * billingRetryDelay)
+		t := time.NewTimer(time.Duration(i) * billingRetryDelay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return err
+		case <-t.C:
+		}
 		if err = fn(); err == nil || !isTransientBillingErr(err) {
 			return err
 		}

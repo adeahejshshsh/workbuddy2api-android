@@ -86,7 +86,7 @@ type Pool struct {
 	closeOnce sync.Once
 }
 
-// defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
+// New 构建账号池（stateFp 为空 = 不落盘，纯内存，测试用）。
 func New(stateFp string) *Pool {
 	// 账号等级闸门（modeltier.go）：与 state 文件同目录的独立小文件，不动 state schema。
 	tierFile := tierFilePath(stateFp)
@@ -285,7 +285,6 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 }
 
 // Acquire 为 uid 占一个在途名额（会话粘性命中后调用）；池上限内返回 true。
-// （原先这里贴的是 RestoreFromSnapshot 的注释——复制粘贴残留，已归位到 persist.go。）
 // 名额用 entry.inFlight 原子自增，满额返回 false。上限按账号 realm 分档
 // （global 档 maxInFlightGlobal，P1-1；未设置回落 maxInFlight）。
 func (p *Pool) Acquire(uid string) bool {

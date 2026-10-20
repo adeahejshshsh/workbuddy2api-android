@@ -1,5 +1,93 @@
 # 变更记录
 
+## v1.27.0（当前）
+
+**本版 = 第六份审查清单（18 条）的落地修复。按主人要求先逐条复核再改，结论见每条【复核】。**
+
+### P0
+
+* **B1 面板保存配置会丢掉 `WB2A_*` 环境变量覆盖（含 `api_key`）** —— 保存链路用
+  `ParseConfig(mergedJSON(merged))` 校验，而它只做 `Default()+JSON+normalize`、**不读环境变量**；
+  随后这个 newCfg 被直接灌进 `livecfg` 与 upstream 的热生效字段。用 `WB2A_API_KEY=sk-xxx`
+  起服务时，面板随便改一项保存就把鉴权密钥覆盖成文件值（常为空），日志还说「已立即生效」。
+  修法：保存路径补 `applyEnv(newCfg)` + `normalize()`，与启动路径（`Load`）同口径。
+  【复核】真：`ParseConfig` 的文档注释自己写着「不读环境变量」，而 `Load` 在 330 行调了 `applyEnv`。
+* **B2 「需重启字段」清单缺项，面板谎报「已立即生效」** —— `global.enabled/chat_base/billing_base`、
+  `upstream.client_version/cli_version/client_name/device_token/device_token_file/passthrough_ip`、
+  `prompt.mode/file`、`server.max_body_mb` 都在启动期被装配进 `upstream.Client` /
+  `server.Handler` / `auth` 包级开关，保存路径完全不碰、清单也没列。补齐清单（重启生效语义明确）。
+  【复核】真：对照 `main.go:169-181` 与 `330-331`，这些字段确实只在装配期写入。
+
+### P1
+
+* **B3 用键存在性判 error 帧，`"error":null` 会把非流式请求打死** —— `json.Unmarshal` 到 map 时
+  `"error":null` 会得到「键存在、值为 nil」，原判据 `_, hasErr := chunk["error"]; hasErr` 命中 →
+  非流式走 `ErrorFrame` → `FrameKind` 判 `ErrNone` → handler default 只换号 → 每个号失败一次 → 503。
+  两处（`Aggregate`、`StreamHint.writeFrame`）都改成「存在且非 nil」。
+  【复核】真：OpenAI 兼容实现常在正常 chunk 里带 `"error":null`。
+* **B4 `NeedsRefresh` / `RealmStored` 用写锁** —— 前者在 chat 热路径每请求调用
+  （`acct.NeedsRefresh(h.cfg.RefreshSkew)`），写锁会让同账号并发请求在此串行化。改 `RLock`。
+  【复核】真：`auth.mu` 已是 `RWMutex`（v1.26.2 改的），写方仍是 `Lock`，语义不变。
+* **B5 refresh 响应缺 `accessToken` 时丢弃已 rotate 的 `refreshToken`** —— 上游 refresh 会 rotate
+  旧 refreshToken 使其作废，原实现解析成功但 accessToken 为空时直接 return，新的就丢了 →
+  该账号之后每次刷新都失败，只能重新登录。改成先把 rotate 后的 refreshToken/domain 落回再报错。
+  【复核】真且后果严重。
+* **B6 `effectiveTaskCode` 算在 404 分支之后，换码任务永远「没有此任务」** —— 前置读取用固定码，
+  查不到直接 404 return，按域换码的解析永远走不到。改成先解析实际码再做前置读取/回读/领奖。
+  【复核】真：**这是 v1.26.7 加 `WorkBuddy_Valorant` 时我自己引入的**。
+* **B7 跳过名单没有 UI 出口，409 文案指向已下线的「任务中心」** —— 任务弹窗新增
+  「清空跳过名单」按钮（调 `POST /panel/api/tasks/skip {"clear":true}`），4 处文案同步改成
+  「打开该账号的「任务」弹窗，点「清空跳过名单」」。
+  【复核】真：`app.js` 里此前零处调用 `tasks/skip`，而文案 4 处都指向不存在的界面。
+* **B8 `Stop()` 在未 `Start()` 时永久阻塞** —— `done` 只在 `Start` 的 goroutine 里关闭，
+  只 `New` 不 `Start` 的调用方在 `Stop` 时永久 hang（`defer rec.Stop()` 在早期 return 路径同样会挂）。
+  加 `startedFlag atomic.Bool`：`Start` 幂等置位，`Stop` 未启动直接返回。
+  【复核】真（线上不显形，但确实是定时炸弹）。
+
+### P2
+
+* **B9 `watchAbort` 可能留下陈旧中止标记** —— `select` 在 `done` 与 `finished` 同时就绪时随机选，
+  若 `markAborted` 发生在 `stop()` 的 `clearAborted` 之后，标记残留；而队列路径不调 `clearAborted`，
+  下一次任务会在 `sleepAB` 处直接 false 提前退出。加 `stopped atomic.Bool` 二次确认，
+  并让 `runQueueItems` 在账号开始前 `clearAborted`。【复核】真（潜伏竞态）。
+* **B10 扫描阶段 panic 会让 `q.running` 永久为 true** —— 先置位再扫描，扫描段无 recover，
+  panic 后「执行全部待办」永远 409、`growth_hours` 也不再推进，只能重启。加 `scanOK` +
+  defer recover 复位。【复核】真。
+* **B11 脚本领奖走的是上游不存在的路径** —— `task_common.py` 仍用
+  `/v2/activity/growth/tasks/reward/claim`（Go 侧注释早已写明该路径一直返回 400），
+  真实路径是 `{webBase}/activity/growth/tasks/{code}/claim`（task_code 进路径、无 body、
+  带 `x-client-platform: web`）。改路径 + 新增 `web_base()` + 更新说明。
+  【复核】真：脚本领奖 100% 失败，而 Go 网关同一任务能领。
+* **B12 空流兜底帧注释说「不挂 hint」，实现却走了 hintFn** —— `writeRaw` 内部会调
+  `frameGatewayHint`，改用 `writeSSE`。当前 `FrameKind` 判 `ErrClient` 恰好不给 hint，
+  属「靠巧合正确」。【复核】真。
+* **B13 动作内部领奖成功后不刷新池内积分** —— mp 系任务在动作**内部**就完成 claim 并返回，
+  外层判 `claimable` 的 `refreshCreditsAsync` 走不到，面板数字要等 5 分钟。
+  6 处内层 claim 分支补 `if !already { p.refreshCreditsAsync(a) }`。【复核】真。
+* **B14 维护类重试与全量余额刷新不可取消** —— `retryBillingTransient` 用裸 `time.Sleep(2s)+Sleep(4s)`；
+  `RunBalanceRefreshNow()` 无 ctx。新增 `retryBillingTransientCtx` / `RunBalanceRefreshNowCtx`
+  （`sem` 抢占也改 `select`），停机不再干等。【复核】真。
+
+### P3
+
+* **B15 `nextDay4AM` 名不副实** —— 改名 `nextHardCooldownDeadline`，文档首句改成实际语义
+  （09:00 前 → 当天 09:00；09:00 后 → 次日 04:00），测试同步改名。【复核】真：名/注释与实现相反。
+* **B16 `strings.HasPrefix(hint, NoHealthyAccountHint())` 恒真** —— 上一行刚把 hint 赋成该值。
+  去掉死条件（保留块结构以最小化 diff）。【复核】真。
+* **B17 循环内 `raw := acc.ExpiresAt` 遮蔽外层 `raw []byte`** —— 改名 `expRaw`。
+  【复核】真（当前无功能错误，属隐患）。
+* **B18 注释错位/重复** —— 删掉 `main.go` 里重复的「成长任务排程接线」注释、把
+  `pool.go` 的 `defaultBreaker*` 注释从 `func New` 上挪走、合并 `runGrowthQueued` 的重复文档、
+  删掉三处「（原先这里贴的是 XXX 的注释——复制粘贴残留）」考古注释。【复核】真。
+
+### 测试
+
+新增 3 个回归（`cmd/server/saveconfig_test.go`）：需重启清单必须覆盖装配期字段、
+未变化字段不进清单、`applyEnv` 确实覆盖文件值。
+
+`upstream 203 / server 90 / pool 184 / panel 27 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 48`，**691 通过 0 失败**；`gofmt -l` 为 0。
+
 ## v1.26.9（当前）
 
 **本版 = 第五份 bug 清单（24 条）的落地修复。按主人要求，先逐条对着源码复核「是不是真 bug」，

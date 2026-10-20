@@ -1258,7 +1258,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 通用 503 自解释：把池子实况 + 每个号的当前状态写进 hint。此前只有一句
 	// "check /status"，用户拿到 503 只能干瞪眼（用户实测：反复 503，不知是号在冷却、
 	// 被连败降权、还是满载）。这一句让 503 自己讲清"哪个维度空了、还要等多久"。
-	if strings.HasPrefix(hint, upstream.NoHealthyAccountHint()) {
+	// 这里本来就是 no_healthy_account 场景（hint 上一行刚赋成 NoHealthyAccountHint），
+	// 原先的 strings.HasPrefix(hint, ...) 恒真，是死条件（bug B16）。
+	{
 		total, healthy, cooling, disabled, paused, inFlightFull := h.cfg.Pool.CountsDetailedWithPaused()
 		now := time.Now()
 		degraded, modelCooled, realmHealthy := 0, 0, 0

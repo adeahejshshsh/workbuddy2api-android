@@ -176,8 +176,8 @@ func (a *Auth) BackfillRealm() (bool, string) {
 
 // RealmStored 直读持久化的 realm 标识（可能为空 = 未 backfill 的旧文件，Realm() 会 fallback）。
 func (a *Auth) RealmStored() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock() // 只读（bug B4）
+	defer a.mu.RUnlock()
 	return a.realm
 }
 
@@ -233,8 +233,10 @@ func isGlobalDomain(d string) bool {
 
 // NeedsRefresh 报告 token 是否将在 within 内过期（或已过期/无 expiry）。
 func (a *Auth) NeedsRefresh(within time.Duration) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	// 只读判定用 RLock（bug B4）：这是 chat 热路径每请求都要调的（handler 里
+	// acct.NeedsRefresh(...)），用写锁会让同账号并发请求在这里串行化。
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	if a.ExpiresAt <= 0 {
 		return true
 	}

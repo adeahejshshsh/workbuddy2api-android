@@ -2,6 +2,7 @@ package panel
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -53,16 +54,24 @@ func sleepAB(uid string, d time.Duration) bool {
 // 返回的 stop 用于任务正常结束时停止监听并清标记。
 func watchAbort(done <-chan struct{}, uid string) (stop func()) {
 	finished := make(chan struct{})
+	var once sync.Once
+	var stopped atomic.Bool
 	go func() {
 		select {
 		case <-done:
-			markAborted(uid)
+			// 二次确认（bug B9）：select 在 done 与 finished 同时就绪时随机选一个，
+			// 若 stop() 已经 clearAborted 之后这里才 markAborted，标记就残留了 ——
+			// 而队列路径（runQueueItems）不调 clearAborted，下一次任务会在 sleepAB
+			// 处直接返回 false 提前退出。
+			if !stopped.Load() {
+				markAborted(uid)
+			}
 		case <-finished:
 		}
 	}()
-	var once sync.Once
 	return func() {
 		once.Do(func() {
+			stopped.Store(true)
 			close(finished)
 			clearAborted(uid)
 		})

@@ -276,9 +276,6 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
-	// 成长任务排程接线（issue ISSUE-15）：Scheduler 的 growth_hours 到点会调 GrowthHook，
-	// 而全仓从未调用 SetGrowthHook —— growth_hours（默认 01:00）到点什么都不做，
-	// 面板却写着"成长任务自动推进"。panel 在 scheduler 之后构造，所以在这里补挂。
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -487,6 +484,15 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err != nil {
 		return nil, err
 	}
+	// 保存路径也要叠一遍环境变量（bug B1）：ParseConfig 只做 Default+JSON+normalize，
+	// 不读 WB2A_*。而下面会把这个 newCfg 直接灌进 livecfg / upstream 的热生效字段 ——
+	// 用 WB2A_API_KEY 起服务时，面板随便改一项保存就把 APIKey 覆盖成文件里的值（常为空），
+	// 鉴权当场失效，日志还说"已立即生效"。与启动路径（Load 里 applyEnv 在 normalize 前）
+	// 保持同一口径。
+	applyEnv(newCfg)
+	if err := newCfg.normalize(); err != nil {
+		return nil, err
+	}
 
 	// 3) 落盘（原子替换）。
 	out, err := json.MarshalIndent(merged, "", "  ")
@@ -568,6 +574,14 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		"listen", "auth_dir", "state_file",
 		"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
 		"upstream.user_agent",
+		// 以下字段在启动期被装配进 upstream.Client / server.Handler / auth 包级开关，
+		// 保存路径不碰它们（bug B2）：此前清单漏列 → 面板提示"已立即生效"，
+		// 实际行为直到重启都不变，用户反复点保存怀疑面板坏了。
+		"upstream.client_version", "upstream.cli_version", "upstream.client_name",
+		"upstream.device_token", "upstream.device_token_file", "upstream.passthrough_ip",
+		"global.enabled", "global.chat_base", "global.billing_base",
+		"prompt.mode", "prompt.file",
+		"server.max_body_mb",
 		"upstash",
 		"session_sticky.ttl", "session_sticky.gc_interval",
 		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",

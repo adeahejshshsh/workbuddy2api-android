@@ -93,7 +93,7 @@ func (p *Panel) skipReason(a *auth.Auth, t upstream.Task) string {
 	if a != nil {
 		if blocked, why := p.skipBlocked(a.UID, t.TaskCode); blocked {
 			return "反复执行仍无进展，已跳过：" + why +
-				"（7 天后自动重试，或点「清空跳过名单」立即重试）"
+				"（7 天后自动重试；或在该账号的「任务」弹窗点「清空跳过名单」立即重试）"
 		}
 	}
 	return ""
@@ -139,7 +139,7 @@ func (d queueDiag) explain() (string, string) {
 	}
 	if d.skipped > 0 {
 		parts = append(parts, fmt.Sprintf("%d 项已跳过（尝试型 / 反复执行仍无进展）—— 只做有把握的，"+
-			"要重试请点任务中心「清空跳过名单」", d.skipped))
+			"要重试请在该账号的「任务」弹窗点「清空跳过名单」", d.skipped))
 	}
 	if len(parts) == 0 {
 		return "全部账号没有待办任务", level
@@ -341,6 +341,23 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	q.startedAt = time.Now()
 	q.mu.Unlock()
 
+	// 扫描段兜底（bug B10）：先置位再干活，若扫描期间 panic（上游异常数据、
+	// 装配缺依赖、空指针…），q.running 会永久为 true —— 之后「执行全部待办」
+	// 永远 409「队列正在执行中」，growth_hours 定时任务也不再推进，只能重启进程。
+	scanOK := false
+	defer func() {
+		if scanOK {
+			return // 交给 runQueueItems 的 defer 复位
+		}
+		if rec := recover(); rec != nil {
+			log.Printf("panel: 队列扫描 panic（已复位，队列可用）: %v", rec)
+		}
+		q.mu.Lock()
+		q.running = false
+		q.startedAt = time.Time{}
+		q.mu.Unlock()
+	}()
+
 	// 扫描待办（复用扫描逻辑的拉取部分）。
 	states := p.cfg.Pool.List()
 
@@ -469,6 +486,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	seq = q.seq
 	q.mu.Unlock()
 
+	scanOK = true // 成功交给 runQueueItems 负责复位
 	go p.runQueueItems(accts, items, concurrency)
 	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v）", len(items), concurrency, growth)
 	return true, len(items), seq, "", "ok"
@@ -512,6 +530,9 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				return
 			}
 			defer p.unlockAccount(one.a.UID)
+			// 开始前清掉可能残留的中止标记（bug B9）：队列路径此前不调 clearAborted，
+			// 上一轮 watchAbort 的竞态残留会让本任务在第一次 sleepAB 就退出。
+			clearAborted(one.a.UID)
 			// 前置：批量接受尚未接受的任务。上游对 not_accepted 的任务不计数——
 			// 面板「一键完成」一直有这步，队列路径此前漏了（表现为上报 200 但进度
 			// 一直 not_accepted、无法领奖）。失败不阻塞（行为事件才是进度判据）。
@@ -549,7 +570,7 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 					note := fmt.Sprintf("（连续无效 %d/%d）", n, skipFailLimit)
 					if added {
 						note = fmt.Sprintf("（连续 %d 次无效 → 已跳过：不再出现在待办里，7 天后自动重试，"+
-							"或点「清空跳过名单」立即重试）", n)
+							"或在该账号的「任务」弹窗点「清空跳过名单」立即重试）", n)
 					}
 					if err != nil {
 						p.queueMarkAt(i, "error", err.Error()+note)
@@ -624,9 +645,8 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 	return len(codes)
 }
 
-// runGrowthQueued 执行单个成长任务（动作 + 回读 + 自动领奖；与
-// accountTaskAuto 同语义，结果以文字返回）。
-// runGrowthQueued 执行一项队列任务。
+// runGrowthQueued 执行一项队列任务（动作 + 回读 + 自动领奖；与 accountTaskAuto
+// 同语义，结果以文字返回）。
 // v1.22.0 起多返回一个 progressed：本次执行到底有没有换来进展（进度前进 / 领到奖）。
 // 调用方用它喂跳过名单 —— "执行了但没进展"正是要把该任务砍出待办的判据。
 func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, bool, error) {

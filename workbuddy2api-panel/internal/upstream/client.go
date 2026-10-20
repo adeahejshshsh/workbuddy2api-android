@@ -989,7 +989,21 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		ExpiresIn    int64  `json:"expiresIn"`
 		Domain       string `json:"domain"`
 	}
-	if err := json.Unmarshal(data, &tok); err != nil || tok.AccessToken == "" {
+	if err := json.Unmarshal(data, &tok); err != nil {
+		return fmt.Errorf("refresh_failed: %w", err)
+	}
+	if tok.AccessToken == "" {
+		// 解析成功但 accessToken 为空：**先把已 rotate 的 refreshToken 落回**（bug B5）。
+		// 上游 refresh 会 rotate 旧 refreshToken 使其作废，若这里直接 return，新的就丢了
+		// → 该账号之后每次刷新都失败，只能重新登录。
+		if tok.RefreshToken != "" {
+			a.Lock()
+			a.RefreshToken = tok.RefreshToken
+			if tok.Domain != "" {
+				a.Domain = tok.Domain
+			}
+			a.Unlock()
+		}
 		return fmt.Errorf("refresh_failed: no accessToken in response — re-login required")
 	}
 

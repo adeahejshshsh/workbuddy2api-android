@@ -205,7 +205,10 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 					// content="" + finish_reason:"stop" 的假 200 成功，调用方还会
 					// NoteSuccess 把正在限流的号洗成健康号、粘性把会话钉死在它身上。
 					// 这里一律升级成 ErrorFrame 交回调用方走既有的错误策略。
-					if _, hasErr := chunk["error"]; hasErr {
+					// 必须「键存在且值非 nil」（bug B3）：OpenAI 兼容实现常在正常
+					// chunk 里带 "error":null，只判键存在会把它当错误帧 → FrameKind
+					// 判 ErrNone → handler default 只换号 → 每个号失败一次 → 503。
+					if e, hasErr := chunk["error"]; hasErr && e != nil {
 						return nil, &ErrorFrame{Payload: payload}
 					}
 					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
@@ -794,7 +797,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
 		// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
-		if _, hasErr := obj["error"]; hasErr {
+		// 同样要求「键存在且值非 nil」（bug B3）："error":null 是正常 chunk。
+		if e, hasErr := obj["error"]; hasErr && e != nil {
 			// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
 			if o.onErrorFrame != nil {
 				o.onErrorFrame(payload)
@@ -888,7 +892,11 @@ readLoop:
 	// 网关本地空流兜底帧走 hintFn=nil 的直写路径：该形态未覆盖（不编造 hint），
 	// 且 writeRaw 的 hintFn 闭包在空流路径下可能携带上一帧的上下文造成误配。
 	if validFrames == 0 && readErr == nil {
-		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+		// 用 writeSSE 而不是 writeRaw（bug B12）：上面注释明确要求"走 hintFn=nil 的
+		// 直写路径"，而 writeRaw 内部会调 frameGatewayHint(hintFn, payload) ——
+		// 当前 FrameKind 判 ErrClient 恰好不给 hint，属"靠巧合正确"；一旦 hint.go
+		// 给 ErrClient 加了兜底文案，本地故障帧就会带上误导性的上游语义提示。
+		_ = writeSSE(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {

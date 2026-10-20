@@ -1303,6 +1303,17 @@ $('btnCloseTask').onclick = closeTasks;
 $('btnTaskReload').onclick = loadTasks;
 
 // 全部接受：把该账号未接受的任务一次性报名（幂等，跳过已接受/已领取）。
+// 清空跳过名单（bug B7）：跳过名单此前只有 API 没有 UI 出口，而 409 文案却让用户
+// 去点"任务中心「清空跳过名单」"（该界面已下线）—— 用户只能等 7 天或用 curl。
+$('btnTaskSkipClear').onclick = async () => {
+  if (!confirm('清空跳过名单？\n\n清空后，此前被判「反复无进展」的 (账号,任务) 会重新尝试；\n若它们本来就做不了，会再累积 3 次后重新进入跳过名单。')) return;
+  try {
+    const r = await api('tasks/skip', { method: 'POST', body: JSON.stringify({ clear: true }) });
+    toast('已清空跳过名单（' + (r.cleared || 0) + ' 项）', 'ok');
+    if (taskUID) loadTasks(); // 刷新当前账号的任务列表（跳过状态已变）
+  } catch (e) { toast('清空失败：' + e.message, 'err'); }
+};
+
 $('btnTaskAcceptAll').onclick = async () => {
   if (!taskUID) return;
   const btn = $('btnTaskAcceptAll');

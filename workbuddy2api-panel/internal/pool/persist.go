@@ -83,7 +83,6 @@ func (p *Pool) RestoreFromSnapshot() {
 }
 
 // startFlusher 启动周期落盘协程（dirty 时 saveLocked，Close 时停止）。
-// （原先这里贴的是 Acquire 的注释——复制粘贴残留。）
 func (p *Pool) startFlusher() {
 	stopCh := make(chan struct{})
 	// 在启动 goroutine 前同步写入（避免与测试对 flushInterval 的恢复写竞争）；
@@ -126,7 +125,6 @@ func (p *Pool) Flush() {
 }
 
 // load 读取 state.json 到 p.byUID（文件不存在/损坏时静默从空状态开始）。
-// （原先这里贴的是 Add 的注释——复制粘贴残留。）
 func (p *Pool) load() {
 	raw, err := os.ReadFile(p.stateFp)
 	if err != nil {

@@ -561,7 +561,7 @@ func TestStatusCoolKindDefaultsWhenNotCooling(t *testing.T) {
 	}
 }
 
-func TestNextDay4AMBoundaries(t *testing.T) {
+func TestNextHardCooldownDeadlineBoundaries(t *testing.T) {
 	cases := []struct {
 		name string
 		now  string // RFC3339 (UTC 表示)
@@ -591,8 +591,8 @@ func TestNextDay4AMBoundaries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := nextDay4AM(now); !got.Equal(want) {
-				t.Errorf("nextDay4AM(%v)=%v want %v", c.now, got, want)
+			if got := nextHardCooldownDeadline(now); !got.Equal(want) {
+				t.Errorf("nextHardCooldownDeadline(%v)=%v want %v", c.now, got, want)
 			}
 		})
 	}

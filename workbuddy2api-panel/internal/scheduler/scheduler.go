@@ -642,7 +642,14 @@ func (s *Scheduler) RunKeepaliveNow() {
 // 解冻语义与签到一致（ReenableIfCredits：余额 > 0 的冷却账号自动解冻），
 // 但不做签到、不刷新 token——只让"积分"这个观测量保持新鲜。
 // 供两类入口复用：后台周期任务（StartBalanceRefresh）与面板手动全量刷新。
-func (s *Scheduler) RunBalanceRefreshNow() {
+func (s *Scheduler) RunBalanceRefreshNow() { s.RunBalanceRefreshNowCtx(context.Background()) }
+
+// RunBalanceRefreshNowCtx 带 ctx 的余额刷新（bug B14）：sem 抢占与账号间节流都可取消，
+// 否则 SIGTERM 时可能卡在 sem 上直到超时。
+func (s *Scheduler) RunBalanceRefreshNowCtx(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var wg sync.WaitGroup
 	// 并发闸门（review P1-11）：此前每个账号一个 goroutine，46 个号就是 46 路并发
 	// 打上游；余额刷新默认每 5 分钟一轮，多账号部署下会与 chat 请求争同一个出口
@@ -660,7 +667,12 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			continue
 		}
 		wg.Add(1)
-		sem <- struct{}{} // 限并发：满 3 路就等，不堆 goroutine
+		select {
+		case sem <- struct{}{}: // 限并发：满 3 路就等，不堆 goroutine
+		case <-ctx.Done():
+			wg.Done()
+			return
+		}
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
 			defer func() { <-sem }()

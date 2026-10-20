@@ -22,11 +22,15 @@ if not os.path.isdir(AUTHS):
         AUTHS = _fallback
 CHAT_BASE = "https://copilot.tencent.com"   # growth / tasks / buddy / streak / chat
 BILL_BASE = "https://www.codebuddy.cn"      # report / billing
+WEB_BASE  = "https://www.workbuddy.cn"      # growth 任务的 claim（Web 域，见 claim_reward）
 
 # growth 域常量（travel.go / report.go 与本次实测对齐）
 PATH_LIST_TASKS     = "/v2/activity/growth/tasks"
 PATH_ACCEPT_TASKS   = "/v2/activity/growth/tasks/accept"
-PATH_CLAIM_REWARD   = "/v2/activity/growth/tasks/reward/claim"
+# 领奖路径（bug B11）：/v2/activity/growth/tasks/reward/claim **不存在**（Go 侧
+# tasks.go 的注释早已写明：该路径一直返回 400 "task not completed"）。真实路径是
+# Web 域 {webBase}/activity/growth/tasks/{task_code}/claim，task_code 进路径、无 body。
+PATH_CLAIM_REWARD   = "/activity/growth/tasks/{code}/claim"
 PATH_BUDDY_FIRST    = "/activity/growth/buddy/first"
 PATH_BUDDY_AGREEMENT = "/activity/growth/buddy/agreement"
 PATH_STREAK         = "/activity/growth/streak"
@@ -62,6 +66,11 @@ def load_auth(uid_or_file: str) -> dict:
 
 def chat_base(auth: dict) -> str:
     return auth.get("chat_base") or CHAT_BASE
+
+
+def web_base(auth: dict) -> str:
+    """Web 域基址（growth 任务的 claim / 领奖走这里，不是 chat 域）。"""
+    return auth.get("web_base") or WEB_BASE
 
 
 def billing_base(auth: dict) -> str:
@@ -136,9 +145,15 @@ def accept_tasks(auth, task_codes) -> tuple:
 
 
 def claim_reward(auth, task_code) -> tuple:
-    """POST claim 领取奖励（任务已 complete 后可领）。重复领返回业务错误，安全。"""
-    return do_post(auth, chat_base(auth), PATH_CLAIM_REWARD,
-                   {"task_code": task_code})
+    """POST claim 领取奖励（Web 域，task_code 进路径、无 body）。
+
+    响应 data：{"already_claimed":bool,"credit":n,"energy":n}。already_claimed 为真
+    表示此前已领（幂等，不是错误）；credit/energy 为 0 也可能是道具类奖励的成功领取。
+    """
+    import urllib.parse
+    path = PATH_CLAIM_REWARD.format(code=urllib.parse.quote(task_code, safe=""))
+    hdr = {"x-client-platform": "web"}
+    return do_post(auth, web_base(auth), path, None, headers=hdr)
 
 
 def get_streak(auth) -> int:

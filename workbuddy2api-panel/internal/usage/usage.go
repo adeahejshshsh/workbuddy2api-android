@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -88,9 +89,10 @@ type Recorder struct {
 	// 折叠按「每小时最多一次」触发，避免小时桶无限增长把 flush 的 O(n) 放大。
 	lastRollup time.Time
 
-	stopOnce sync.Once
-	stop     chan struct{}
-	done     chan struct{}
+	stopOnce    sync.Once
+	startedFlag atomic.Bool // Start 是否跑过（Stop 据此判断要不要等 done，bug B8）
+	stop        chan struct{}
+	done        chan struct{}
 }
 
 // New 创建记录器。path 为空时禁用落盘（纯内存，测试用）。
@@ -112,6 +114,10 @@ func New(path string) *Recorder {
 
 // Start 启动后台防抖落盘与折叠。Stop 前一直运行。
 func (r *Recorder) Start() {
+	// 幂等 + 标记已启动（bug B8）：Stop 需要据此判断"有没有 goroutine 可等"。
+	if r.startedFlag.Swap(true) {
+		return
+	}
 	go func() {
 		defer close(r.done)
 		t := time.NewTicker(flushInterval)
@@ -142,6 +148,12 @@ func (r *Recorder) Start() {
 
 // Stop 停止后台循环并做最后一次落盘。
 func (r *Recorder) Stop() {
+	// 从未 Start 过就没有 goroutine 会 close(done)，直接返回（bug B8）：
+	// 否则任何「只 New 不 Start」的调用方（工具/单测/新装配路径）在 Stop 时永久挂住，
+	// defer rec.Stop() 在早期 return 路径上同样会挂。
+	if !r.startedFlag.Load() {
+		return
+	}
 	r.stopOnce.Do(func() { close(r.stop) })
 	<-r.done
 }

@@ -523,19 +523,19 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 // 用于 ErrHardCredit 场景：积分耗尽账号等签到任务（09:00/21:00）恢复。
 func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
 	now := time.Now()
-	p.Cooldown(uid, CoolHard, nextDay4AM(now).Sub(now), reason)
+	p.Cooldown(uid, CoolHard, nextHardCooldownDeadline(now).Sub(now), reason)
 }
 
-// nextDay4AM 返回 now 之后最近的一个 04:00（与 now 同一时区）。
-// now 在当天 04:00 之前（凌晨 00:00~04:00）时返回当天 04:00——此时签到尚未执行，
-// 该窗内触发的硬冷却等当天签到即可恢复；返回次日会白冷约一天。
-// 04:00 整及之后返回次日 04:00。
-// time.Date 对日溢出自动进位（月末→下月 1 号、年末→下年 1 号），天然覆盖跨日/跨月/跨年。
-func nextDay4AM(now time.Time) time.Time {
-	// 目标不是"次日 04:00"，而是"下一次签到之后"（bug #11）：签到时点是 09:00 / 21:00，
-	// 04:00 时余额仍是 0 —— 旧实现在凌晨 00:00–04:00 撞 402 的号 04:00 就回池，
-	// 必然再撞一次，然后被推到**次日** 04:00（面板显示"冷却到明天"，而当天 09:00
-	// 签到其实已经解冻了，中间 04:00–09:00 白打一次上游）。
+// nextHardCooldownDeadline 返回「下一次签到之后」的硬冷却截止时刻（同 now 时区）。
+//
+//   - 09:00 前 → 当天 09:00（当天第一个签到点，签到即 ReenableIfCredits 解冻）；
+//   - 09:00 后 → 次日 04:00（当天 21:00 的签到也会提前解冻）。
+//
+// 为什么不是固定的"最近一个 04:00"：签到时点是 09:00 / 21:00，04:00 时余额仍是 0 ——
+// 凌晨撞 402 的号若 04:00 就回池，必然再撞一次然后被推到次日 04:00（面板显示"冷却到
+// 明天"，而当天 09:00 签到其实已经解冻了，中间 04:00–09:00 白打一次上游）。
+// time.Date 对日溢出自动进位（月末→下月 1 号、年末→下年 1 号），覆盖跨日/跨月/跨年。
+func nextHardCooldownDeadline(now time.Time) time.Time {
 	if now.Hour() < 9 {
 		return time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location())
 	}

@@ -136,15 +136,17 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		// 按**量级**判单位（bug #6）：只假设毫秒的话，导出工具给秒（1760000000）
 		// 时 /1000 得到 1760000（1970-01），既非 0 也进不了兜底，NeedsRefresh 恒真
 		// —— 每个 chat 请求前都先打一次 refresh。
-		raw := acc.ExpiresAt
-		if raw > 1e11 {
-			raw /= 1000 // 毫秒（13 位）→ 秒
+		// 变量名用 expRaw（bug B17）：此前叫 raw，与函数开头的 raw []byte（请求体）
+		// 同名不同类型，遮蔽后极易在后续改动里误用。
+		expRaw := acc.ExpiresAt
+		if expRaw > 1e11 {
+			expRaw /= 1000 // 毫秒（13 位）→ 秒
 		}
-		if raw <= 0 || raw < time.Now().Add(-24*time.Hour).Unix() {
-			raw = time.Now().Add(time.Hour).Unix()
+		if expRaw <= 0 || expRaw < time.Now().Add(-24*time.Hour).Unix() {
+			expRaw = time.Now().Add(time.Hour).Unix()
 			log.Printf("panel: import uid=%s 的 expires_at 缺失或明显过期，按 now+1h 处理（首次请求即刷新）", acc.UID)
 		}
-		expiresAt := raw
+		expiresAt := expRaw
 
 		nickname := acc.Nickname
 		if strings.TrimSpace(nickname) == "" {
