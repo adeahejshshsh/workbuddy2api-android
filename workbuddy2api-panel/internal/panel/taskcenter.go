@@ -659,14 +659,24 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, bool, error)
 	claimed := false
 	if after != nil && after.Claimable {
 		var credit, energy int64
+		var already bool
 		var cerr error
 		if isMP {
-			credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, code)
+			credit, energy, already, cerr = p.cfg.Upstream.ClaimRewardMP(a, code)
 		} else {
-			credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, code)
+			credit, energy, already, cerr = p.cfg.Upstream.ClaimReward(a, code)
 		}
-		if cerr == nil && (credit > 0 || energy > 0) {
-			msg += fmt.Sprintf("；自动领奖 +%d 分 +%d 能", credit, energy)
+		// 领取成功 = 无错误（bug #6）：此前要求 credit>0||energy>0，于是"领到道具
+		// 但 0 分 0 能"被记成 progressed=false 并喂给跳过名单，连续 3 次后该
+		// (账号,任务) 被跳过 7 天 —— 明明领到了却被系统判成"做不了"。
+		if cerr == nil {
+			if already {
+				msg += "；奖励此前已领取"
+			} else if credit > 0 || energy > 0 {
+				msg += fmt.Sprintf("；自动领奖 +%d 分 +%d 能", credit, energy)
+			} else {
+				msg += "；已领取（道具/次数奖励）"
+			}
 			claimed = true
 		}
 	}

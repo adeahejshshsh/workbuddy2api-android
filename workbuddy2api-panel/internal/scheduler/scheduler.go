@@ -411,13 +411,13 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			case taskCheckin:
 				s.RunCheckinNowCtx(ctx)
 			case taskTravel:
-				s.RunTravelNow()
+				s.RunTravelNowCtx(ctx)
 			case taskActivity:
 				s.runActivity(ctx)
 			case taskKeepalive:
 				s.RunKeepaliveNow()
 			case taskBlackcat:
-				s.RunBlackcatNow()
+				s.RunBlackcatNowCtx(ctx)
 			case taskGrowth:
 				// 成长任务队列：回调在 panel 侧异步启动（返回不等执行完），nil 未挂载则跳过。
 				s.schedMu.Lock()
@@ -525,7 +525,7 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context) {
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
 	}
-	s.RunStreakBonusNow()
+	s.RunStreakBonusNowCtx(ctx)
 }
 
 // RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。

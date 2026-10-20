@@ -1,5 +1,104 @@
 # 变更记录
 
+## v1.26.9（当前）
+
+**本版 = 第五份 bug 清单（24 条）的落地修复。按主人要求，先逐条对着源码复核「是不是真 bug」，
+确认后再改；结论见每条末尾的【复核】。**
+
+### 高优先级
+
+* **1 `cmd/signin` 的刷新窗口单位写错** —— `NeedsRefresh(2 * 3600)` 传的是裸常量 7200 =
+  **7200 纳秒**（7.2 微秒），等于永不提前刷新，批量签到拿过期 token 打 daily-checkin，
+  大量 401 被误判成账号问题。改 `2 * time.Hour`。
+  【复核】真：`NeedsRefresh(within time.Duration)` 形参就是 Duration，7200 即 7.2µs。
+* **2 `cmd/signin` 的「已签到」判定过宽** —— 原实现只要文案里带 `code=400` / `checkin` /
+  `already` 就算已签到，把参数错误、风控拒绝全吞成 ALREADY（账号当天没签到、积分没恢复，
+  且无告警）。改用 `upstream.IsAlreadyCheckin(err)`（只认 `*upstream.Error` 且只匹配
+  「已签到 / already」）。【复核】真。
+* **3 Docker 每次重启都换 API Key** —— entrypoint 无条件生成随机 key 并 `export`，
+  而 `applyEnv` 在文件解析之后执行（env 优先），于是挂载的 `config.json` 里的 key 完全不生效，
+  每次 `docker restart` 客户端全 401。改成「配置里没有 key 才生成并**写回 config.json**」，
+  只有写不进去（只读挂载）时才退回 env 并明确告警。
+  【复核】真：这是我上一轮自己写的脚本，注释与实现相反。
+* **4 Dockerfile 编了 `trial` 却没 COPY 进镜像** —— 补 `COPY --from=build /out/trial /app/trial`，
+  并把 `COPY go.mod ./` 改成 `COPY go.mod go.sum ./`。【复核】真（镜像里确实没有该文件）。
+* **5 「系统重启 N 次」把普通启动也算进去** —— `onStartCommand` 不只在进程重建时调用
+  （MainActivity 每次 onCreate、BootReceiver、JobScheduler、5 分钟一次的 ACTION_WATCH alarm
+  都会进来），而 `service_up` 一直是 true → 计数随每次开 App / 每次 alarm 无限增长。
+  加进程级 `startCounted` 标志，每个进程只记一次。
+  【复核】真且显眼：alarm 的 `getService` 会走完整 `onStartCommand`，没有 ACTION_WATCH 提前返回分支。
+* **6 领奖用 `credit==0 && energy==0` 判「已领取」** —— `parseClaimReward` 解析了
+  `already_claimed` 却丢掉，调用方只能拿金额猜；道具类奖励（Buddy 盲盒/补签卡/抽奖次数）
+  本来就是 0 分 0 能，那是**成功**领取。现在 `ClaimReward`/`ClaimRewardMP` 把 `already`
+  透出，所有调用点改成「无错误即成功」，`already` 只决定文案。
+  【复核】真：队列路径还会把它记成 progressed=false 喂给跳过名单，连续 3 次判"做不了"。
+* **7 `DesktopChatWithExpert` 遇空 id 卡在同一偏移** —— `"id":""` 时 `end==0`，
+  只有 `end>0` 才推进偏移 → 下一轮命中同一位置，后面的合法 requestId 永远找不到。
+  空 id 时推进到 `abs+6` 继续找。【复核】真（需要上游先吐一个空 id 帧才触发，属潜伏）。
+* **8 配置页把合法的 `"0"` 判成非法时长** —— `DURATION_RE` 要求必须带单位，而 Go 的
+  `ParseDuration("0")` 合法且后端用它表示关停（`cost_explore_interval: "0"` 关探索、
+  `expiring_soon: "0"` 关快过期加权）。正则放行 `0`。【复核】真（填 0 会被前端 onsubmit 拦死）。
+
+### 中优先级
+
+* **9 首页积分汇总把企业版不限量算进去** —— 企业号在池内的等价表示是
+  `credits = 1<<40`、`credits_total = -1`，直接相加会把"剩余"撑成天文数字、把"总额"减掉账号数。
+  汇总时排除这类账号。【复核】真（Go 侧 `enterpriseUnlimitedRemain/Total` 常量确认）。
+* **10 到期快照「今天到期」显示成「明天」** —— `ceil((ms - 今天00:00)/一天)`，今天 23:00 到期
+  得 1 → "明天到期"，日均需耗也偏小；逐包明细版用的是日期差，两处口径不一致。
+  改成日历日差。【复核】真。
+* **11 第二次进「积分构成」忽略 `package_detail_limit`** —— 缓存分支只在 `cfgLoaded` 非空时
+  解析 limit，而 `cfgLoaded` 只有打开配置页才赋值 → 没开过配置页就永远用默认 5。
+  缺配置时补拉一次。【复核】真（我上一轮加的修复不完整）。
+* **12 `probe_active.py` 硬编码容器路径 + `data:null` 崩溃** —— 路径改「环境变量 → 脚本同级
+  ../auths → 旧容器路径」，空列表明确报错并返回非 0；`data` 为 null 时不再 `.get` 崩。
+  【复核】真（`task_common.py` 早就修过同类，这份漏了）。
+* **13 旅行/夜猫子的「可中断等待」实际不可中断** —— `sleepCtx(context.Background(), …)` 永远
+  返回 true（`return` 是死代码），另有两处裸 `time.Sleep`。给 `RunTravelNow`/`RunBlackcatNow`/
+  `travelOne`/`travelAdopt` 加 ctx，`runBatch` 传排程 ctx，面板入口走 Background 包装。
+  【复核】真。
+* **14 连登兑换/抽奖零节流** —— 签到 800ms/号、旅行/活跃/夜猫子都有，唯独
+  `RunStreakBonusNow` 没有：46 号一轮数百请求连发（正是仓库多处防范的 WAF 频控形态）。
+  加账号间节流 + ctx（`RunStreakBonusNowCtx`）。【复核】真。
+* **15 `X-Domain` 写成完整 URL** —— 真实抓包是 `copilot.tencent.com`（host），代码塞的是
+  `https://copilot.tencent.com`。新增 `desktopDomain()` 取 host，三处（/v2/report、专家市场、
+  DesktopChatWithExpert）统一。
+  【复核】真（不一致确定）；影响为**潜伏**——现有桌面任务已验证能点亮，说明上游当前容忍。
+* **16 `conversation_id` 未清洗就写进头** —— 带换行/控制字符时 net/http 报
+  `invalid header field value` → 传输层错误 → 轮转/503。新增 `HeaderSafe()` 在写头前清洗。
+  【复核】真（需要客户端 ID 里带控制字符才触发）。
+* **17 密钥弹窗的内联 `onsubmit` 被 CSP 拦** —— CSP 是 `script-src 'self'`，内联处理器不执行，
+  回车触发隐式提交 → 整页刷新、异步请求被中断。删掉内联属性，改 JS 绑定
+  `submit` 拦默认 + `keydown` 拦回车。【复核】真。
+
+### 低优先级
+
+* **18 到期卡片错误提示二次转义** —— `textContent` 不解析 HTML，再套 `esc()` 会把 `<` 显示成
+  `&lt;`。去掉 `esc()`。【复核】真。
+* **19 单任务回读用的是动作表里的固定 code** —— `runValorantExpert` 会按域换码，
+  但 `accountTaskAuto` 回读/领奖仍用 `act.TaskCode` → 进度回读 nil、自动领奖失效。
+  新增 `effectiveTaskCode()`，动作与调用方共用同一口径。
+  【复核】真（这是我上一轮加任务时自己引入的）。
+* **20 请求归档每秒全目录扫描** —— `prune()` 每次 `os.ReadDir` + 每文件 `Stat`，
+  而保留策略按天/按总量，不需要秒级。节流到 10 分钟一次。【复核】真。
+* **21 跳过名单展示与运行时口径不一致** —— `skipRows` 把 `Until` 零值显示成"已跳过"，
+  而 `skipBlocked` 把零值当已到期并删条目。展示侧对齐运行时。【复核】真。
+* **22 「留空 = 不鉴权」与真实行为不符** —— `api_key` 不在 `CLEARABLE_CFG` 里，留空是
+  "不下发"（保留旧 key）。占位符改成「留空 = 保持原密钥不变」。【复核】真。
+* **23 导入在 HTTP 请求内逐号签到/查余额** —— N 个账号 = 2N 个串行上游调用，几十个号必然
+  超时（前端报失败但已导入一半，重试又重复导入）。后置动作改 `go p.postImportActivate(...)`。
+  【复核】真。
+* **24 requestId 正则只认小写 hex** —— 上游若返回大写 hex 或 `CMB-` 前缀会被判"没找到"。
+  改 `(?i)`。【复核】真（潜伏）。
+
+### 测试
+
+`upstream 203 / server 90 / pool 184 / panel 27 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**688 通过 0 失败**；`gofmt -l` 为 0。
+
+`ClaimReward`/`ClaimRewardMP` 的签名变化导致 3 处测试断言同步更新
+（其中 `already_claimed` 那条新增了「必须透出 already」的断言）。
+
 ## v1.26.8（当前）
 
 **本版 = 第四份 bug 清单（12 条）的落地修复，严重 3/3、一般 9/9 全修。**

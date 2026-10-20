@@ -34,6 +34,38 @@ type cockpitAccount struct {
 	LastUsed       int64  `json:"last_used"`
 }
 
+// postImportActivate 导入后的后置动作（异步执行，bug #23）：注册激活 / 领 trial /
+// 签到 / 回读余额。失败只记日志，不影响导入结果。
+func (p *Panel) postImportActivate(a *auth.Auth, realm string) {
+	if a == nil || p.cfg.Upstream == nil {
+		return
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("panel: import 后置动作 panic uid=%s: %v", a.UID, rec)
+		}
+	}()
+	if realm == "global" {
+		if activated, err := p.cfg.Upstream.GlobalCompleteRegistration(a); err != nil {
+			log.Printf("panel: import global 注册激活 uid=%s: %v", a.UID, err)
+		} else if activated {
+			log.Printf("panel: import global 注册激活 uid=%s 完成", a.UID)
+		}
+		if claimed, err := p.cfg.Upstream.ClaimTrial(a); err != nil {
+			log.Printf("panel: import global trial uid=%s: %v", a.UID, err)
+		} else if claimed {
+			log.Printf("panel: import global trial uid=%s 已领", a.UID)
+		}
+	} else {
+		if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+			log.Printf("panel: import checkin uid=%s: %v", a.UID, err)
+		}
+	}
+	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+		p.cfg.Pool.ReenableIfCredits(a.UID, rm, tt)
+	}
+}
+
 // importCockpit 接收 cockpit tools 导出的 JSON 文件，批量导入账号到池中。
 //
 //	POST /panel/api/import/cockpit
@@ -148,30 +180,15 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		p.cfg.Pool.Add(a)
 		p.cfg.Pool.Revive(uid)
 
-		// 顺带签到/激活（幂等；失败仅记日志，不阻断导入）。
-		if realm == "global" {
-			if activated, err := p.cfg.Upstream.GlobalCompleteRegistration(a); err != nil {
-				log.Printf("panel: import global 注册激活 uid=%s: %v", uid, err)
-			} else if activated {
-				log.Printf("panel: import global 注册激活 uid=%s 完成", uid)
-			}
-			if claimed, err := p.cfg.Upstream.ClaimTrial(a); err != nil {
-				log.Printf("panel: import global trial uid=%s: %v", uid, err)
-			} else if claimed {
-				log.Printf("panel: import global trial uid=%s 已领", uid)
-			}
-		} else {
-			if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
-				log.Printf("panel: import checkin uid=%s: %v", uid, err)
-			}
-		}
-		if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
-			p.cfg.Pool.ReenableIfCredits(uid, rm, tt)
-		}
-
 		imported++
+		// 后置动作（签到/注册激活/领 trial/查余额）**丢到后台**（bug #23）：
+		// 每号 2 次上游调用，几十个号串行 = 几十秒到几分钟，全部跑完才返回 →
+		// 浏览器/反代先超时，前端报失败但账号其实已导入一半，用户重试又重复导入。
+		go p.postImportActivate(a, realm)
+		continue
 	}
 
+	// 后置动作已异步化（见上面的 go p.postImportActivate）。
 	total = len(accounts)
 	log.Printf("panel: cockpit import finished total=%d imported=%d skipped=%d", total, imported, skipped)
 	writeJSON(w, http.StatusOK, map[string]any{

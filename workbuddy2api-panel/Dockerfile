@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
@@ -24,6 +24,7 @@ COPY --from=build /out/wb2api /app/wb2api
 COPY --from=build /out/signin_bin /app/signin_bin
 COPY --from=build /out/login /app/login
 COPY --from=build /out/credit /app/credit
+COPY --from=build /out/trial /app/trial
 COPY login.sh signin.sh credit.sh /app/
 COPY scripts/probe_active.py /app/scripts/probe_active.py
 RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh

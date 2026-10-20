@@ -869,6 +869,19 @@ func (c *Client) webBase(a *auth.Auth) string {
 	return "https://www.workbuddy.cn"
 }
 
+// desktopDomain 返回桌面端 X-Domain 头应填的**纯 host**（bug #15）。
+//
+// 真实抓包是 `X-Domain: copilot.tencent.com`（见 desktop.go 文件头），而同仓库
+// v3ConfigDomain 也明确剥掉 scheme；此前 desktop.go 三处直接塞 chatBase（完整 URL
+// `https://copilot.tencent.com`），与真实客户端不一致，上游可能按非法域处理或归因错误。
+func (c *Client) desktopDomain(a *auth.Auth) string {
+	base := c.desktopBase(a)
+	if u, err := url.Parse(base); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
+}
+
 // webOrigin 返回该账号应使用的 Web 来源域（Origin/Referer 的基）。
 //
 // 为什么必须分域（bug #8）：profile / ClaimReward 的 URL 走 webBase(a)（global 号

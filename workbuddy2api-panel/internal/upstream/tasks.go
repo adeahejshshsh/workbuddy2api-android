@@ -111,12 +111,16 @@ func (c *Client) AcceptTasksMP(a *auth.Auth, taskCodes []string) error {
 
 // ClaimRewardMP 领取小程序限定任务奖励：chat 域 /activity/growth/tasks/{code}/claim
 // + mp 头（上游 task_runner claim_one(mp=True) 同款）；chat 域 400 时降级 Web 域
-// 领奖端点（ClaimReward，x-client-platform: web 形态）。返回 (credit, energy, err)。
-func (c *Client) ClaimRewardMP(a *auth.Auth, taskCode string) (credit, energy int64, err error) {
+// 领奖端点（ClaimReward，x-client-platform: web 形态）。
+//
+// 返回 (credit, energy, already, err)：already 来自上游的 already_claimed 字段
+// （bug #6）。不能再用 credit==0 && energy==0 判「已领取」—— 道具类奖励
+// （Buddy 盲盒 / 补签卡 / 抽奖次数）本来就是 0 分 0 能，那是一次**成功**领取。
+func (c *Client) ClaimRewardMP(a *auth.Auth, taskCode string) (credit, energy int64, already bool, err error) {
 	req, err := http.NewRequest(http.MethodPost,
 		c.chatBase(a)+"/activity/growth/tasks/"+url.PathEscape(taskCode)+"/claim", nil)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	c.BillingHeaders(req, a)
 	req.Header.Set("X-Client-Platform", mpPlatform)
@@ -129,22 +133,24 @@ func (c *Client) ClaimRewardMP(a *auth.Auth, taskCode string) (credit, energy in
 		if errors.As(err, &ue) && ue.Status == http.StatusBadRequest {
 			return c.ClaimReward(a, taskCode)
 		}
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	return parseClaimReward(data)
 }
 
 // parseClaimReward 解析领奖响应 data：{"already_claimed":bool,"credit":n,"energy":n}。
-func parseClaimReward(data json.RawMessage) (credit, energy int64, err error) {
+// already_claimed 必须透出（bug #6）：此前解析了却丢掉，调用方只能拿 0/0 猜，
+// 于是"领到道具但 0 分 0 能"被误判成"此前已领取"。
+func parseClaimReward(data json.RawMessage) (credit, energy int64, already bool, err error) {
 	var resp struct {
 		AlreadyClaimed bool  `json:"already_claimed"`
 		Credit         int64 `json:"credit"`
 		Energy         int64 `json:"energy"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
-	return resp.Credit, resp.Energy, nil
+	return resp.Credit, resp.Energy, resp.AlreadyClaimed, nil
 }
 
 // parseGrowthTasks 解析 growth 任务列表 data.tasks[]（默认与 mp 口径共用）。
@@ -227,12 +233,13 @@ func (c *Client) AcceptTasks(a *auth.Auth, taskCodes []string) error {
 // 关键区别：此前误用 CLI 域 copilot.tencent.com 的
 // /v2/activity/growth/tasks/reward/claim（task_code 放 body），该路径**不存在**，
 // 一直返回 400 "task not completed"，是此前领奖失败的真实原因。
-// 本实现返回 (credit, energy, err)：credit/energy 为本次到账奖励（已领取过时为 0）。
-func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int64, err error) {
+// 返回 (credit, energy, already, err)：credit/energy 为本次到账奖励，
+// already 为上游明示的「此前已领取」（不要用金额推断，见 ClaimRewardMP 注释）。
+func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int64, already bool, err error) {
 	req, err := http.NewRequest(http.MethodPost,
 		c.webBase(a)+"/activity/growth/tasks/"+url.PathEscape(taskCode)+"/claim", nil)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	// Web 端请求头形状（对照浏览器实际请求）：Origin/Referer 指向 workbuddy.cn 成长中心，
 	// 带 x-client-platform: web 标记来源端。
@@ -258,7 +265,7 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 
 	data, err := c.doJSON(req)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	// 响应 data：{"already_claimed":bool,"credit":100,"energy":5,...}
 	var resp struct {
@@ -267,10 +274,9 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 		Energy         int64 `json:"energy"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
-	if resp.AlreadyClaimed {
-		return 0, 0, nil // 幂等：重复领取不算错误，但无新增奖励
-	}
-	return resp.Credit, resp.Energy, nil
+	// 幂等：重复领取不算错误，但无新增奖励。用上游明示的 already_claimed 判断，
+	// 不再靠"金额为 0"推断（bug #6：道具类奖励本来就是 0 分 0 能）。
+	return resp.Credit, resp.Energy, resp.AlreadyClaimed, nil
 }

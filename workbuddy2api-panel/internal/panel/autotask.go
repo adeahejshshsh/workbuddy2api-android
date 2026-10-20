@@ -196,6 +196,42 @@ func autoActionFor(code string) *autoAction {
 	return nil
 }
 
+// effectiveTaskCode 返回动作**实际**要读回/领奖的任务码（bug #19）。
+//
+// 少数任务在不同域可能用不同 code（目前只有 WorkBuddy_Valorant）：动作内部会按
+// 名称兜底换码，但 accountTaskAuto 的回读与领奖判定仍用动作表里的固定 code，
+// 于是回读返回 nil（progress_after="?"）、自动领奖失效，用户看到"执行成功但进度未知"。
+// 这里统一解析一次，动作与调用方共用同一口径。
+func (p *Panel) effectiveTaskCode(a *auth.Auth, code string) string {
+	if a == nil || p.cfg.Upstream == nil || p.cfg.Pool == nil {
+		return code
+	}
+	if t, err := p.taskByCode(a, code); err == nil && t != nil {
+		return code
+	}
+	tasks, err := p.cfg.Upstream.ListTasks(a)
+	if err != nil {
+		return code
+	}
+	want := strings.ToLower(code)
+	// 1) 精确同名（大小写不敏感）
+	for i := range tasks {
+		if strings.ToLower(tasks[i].TaskCode) == want {
+			return tasks[i].TaskCode
+		}
+	}
+	// 2) 名称特征兜底（仅对已知会换码的任务生效，避免误抓别的任务）
+	if strings.Contains(want, "valorant") {
+		for i := range tasks {
+			lc := strings.ToLower(tasks[i].TaskCode)
+			if strings.Contains(lc, "valorant") || strings.Contains(lc, "perler") {
+				return tasks[i].TaskCode
+			}
+		}
+	}
+	return code
+}
+
 // autoActionIndex 任务在 autoActions 中的顺序（队列执行按依赖序排；未知返回大值）。
 func autoActionIndex(code string) int {
 	for i := range autoActions {
@@ -407,7 +443,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		target = 1
 	}
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+		credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 		if err != nil {
 			return "", err
 		}
@@ -453,7 +489,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 	if t.Current < target {
 		return fmt.Sprintf("已上报 %d 次但进度未达 %d/%d（异步计分未归账，下次重试）", need, t.Current, target), nil
 	}
-	credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+	credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 	if err != nil {
 		return "", err
 	}
@@ -511,7 +547,7 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 		target = 1
 	}
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+		credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 		if err != nil {
 			return "", err
 		}
@@ -550,7 +586,7 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 	if t.Current < target {
 		return "已上报但进度未点亮（判据形态待解锁后校正，下次重试）", nil
 	}
-	credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+	credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 	if err != nil {
 		return "", err
 	}
@@ -623,7 +659,7 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	}
 	// 已达标（含 completed 未领）：直接领奖。
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+		credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 		if err != nil {
 			return "", err
 		}
@@ -668,7 +704,7 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	if t.Current < target {
 		return "已上报但进度未归账（异步计分，下次重试）", nil
 	}
-	credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+	credit, energy, _, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 	if err != nil {
 		return "", err
 	}
@@ -734,7 +770,9 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "该账号没有此任务")
 		return
 	}
-	isMP := isMPTaskCode(act.TaskCode)
+	// 用**实际**任务码做后续判定与回读（bug #19：动作可能按域换码）。
+	effCode := p.effectiveTaskCode(a, act.TaskCode)
+	isMP := isMPTaskCode(effCode)
 	if taskDone(before) {
 		msg := "该任务已领取过奖励"
 		if !before.Claimed {
@@ -757,9 +795,9 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	var after *upstream.Task
 	var aerr error
 	if isMP {
-		after, aerr = p.taskByCodeMP(a, act.TaskCode)
+		after, aerr = p.taskByCodeMP(a, effCode)
 	} else {
-		after, aerr = p.taskByCodeWaiting(a, act.TaskCode)
+		after, aerr = p.taskByCodeWaiting(a, effCode)
 	}
 	progressBefore, progressAfter := taskProgressText(before), ""
 	claimable := false
@@ -779,21 +817,28 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	// 达标即自动领奖（Web 端 claim）：把"完成→领奖"收敛成一步，无需用户再点一次。
 	if claimable {
 		var credit, energy int64
+		var already bool
 		var cerr error
 		if isMP {
-			credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, act.TaskCode)
+			credit, energy, already, cerr = p.cfg.Upstream.ClaimRewardMP(a, effCode)
 		} else {
-			credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, act.TaskCode)
+			credit, energy, already, cerr = p.cfg.Upstream.ClaimReward(a, effCode)
 		}
 		if cerr == nil {
-			p.refreshCreditsAsync(a) // 领奖后刷新池内积分（bug #17）
+			// 成功 = 没有错误（bug #6）：道具类奖励就是 0 分 0 能，不能拿金额判失败。
+			// already 只用来决定文案。
 			resp["claimed"] = true
 			resp["credit"] = credit
 			resp["energy"] = energy
-			if credit > 0 || energy > 0 {
-				resp["message"] = msg + fmt.Sprintf("；已自动领奖 +%d 分 +%d 能", credit, energy)
-			} else {
+			if already {
 				resp["message"] = msg + "；奖励此前已领取"
+			} else {
+				p.refreshCreditsAsync(a) // 领奖后刷新池内积分（bug #17）
+				if credit > 0 || energy > 0 {
+					resp["message"] = msg + fmt.Sprintf("；已自动领奖 +%d 分 +%d 能", credit, energy)
+				} else {
+					resp["message"] = msg + "；已领取（该奖励为道具/次数，不含积分与能量）"
+				}
 			}
 		} else {
 			resp["claim_error"] = cerr.Error()
@@ -1146,24 +1191,11 @@ func matchValorantExpert(experts []upstream.MarketExpert, wantID string) (upstre
 
 // runValorantExpert 完成 WorkBuddy_Valorant。
 func runValorantExpert(p *Panel, a *auth.Auth) (string, error) {
-	code := "WorkBuddy_Valorant"
+	// 国服/国际服的任务码可能不同：统一走 effectiveTaskCode（与调用方回读同口径）。
+	code := p.effectiveTaskCode(a, "WorkBuddy_Valorant")
 	t, err := p.taskByCode(a, code)
 	if err != nil {
 		return "", err
-	}
-	if t == nil {
-		// 国服/国际服的任务码可能不同（同一活动两套配置）：按名字兜底找一次，
-		// 找到就用它的真实 code（后面 accept / claim 都用它）。
-		if tasks, lerr := p.cfg.Upstream.ListTasks(a); lerr == nil {
-			for i := range tasks {
-				lc := strings.ToLower(tasks[i].TaskCode)
-				if strings.Contains(lc, "valorant") || strings.Contains(lc, "perler") {
-					t = &tasks[i]
-					code = tasks[i].TaskCode
-					break
-				}
-			}
-		}
 	}
 	if t == nil {
 		return "该账号未下发此任务（活动未开放 / 已结束 / 该域没有）", nil
@@ -1177,9 +1209,15 @@ func runValorantExpert(p *Panel, a *auth.Auth) (string, error) {
 	}
 	// 已达标（含 completed 未领）：直接领奖。
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, cerr := p.cfg.Upstream.ClaimReward(a, code)
+		credit, energy, already, cerr := p.cfg.Upstream.ClaimReward(a, code)
 		if cerr != nil {
 			return "已达标但领奖失败: " + cerr.Error(), nil
+		}
+		if already {
+			return "奖励此前已领取", nil
+		}
+		if credit == 0 && energy == 0 {
+			return "已领取（该奖励为道具/次数，不含积分与能量）", nil
 		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
@@ -1235,9 +1273,12 @@ func runValorantExpert(p *Panel, a *auth.Auth) (string, error) {
 		return "任务已完成并领取（此前已领）", nil
 	}
 	if t.Claimable || (t.Target > 0 && t.Current >= t.Target) {
-		credit, energy, cerr := p.cfg.Upstream.ClaimReward(a, code)
+		credit, energy, already, cerr := p.cfg.Upstream.ClaimReward(a, code)
 		if cerr != nil {
 			return "已点亮但领奖失败（可稍后重试）: " + cerr.Error(), nil
+		}
+		if already {
+			return "任务已点亮，奖励此前已领取", nil
 		}
 		return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de，专家=%s realm=%s）", credit, energy, e.ExpertID, a.Realm()), nil
 	}
@@ -1493,21 +1534,27 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		if after != nil && after.Claimable {
 			item["claimable"] = true
 			var credit, energy int64
+			var already bool
 			var cerr error
 			if isMPTaskCode(act.TaskCode) {
-				credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, act.TaskCode)
+				credit, energy, already, cerr = p.cfg.Upstream.ClaimRewardMP(a, act.TaskCode)
 			} else {
-				credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, act.TaskCode)
+				credit, energy, already, cerr = p.cfg.Upstream.ClaimReward(a, act.TaskCode)
 			}
 			if cerr == nil {
-				p.refreshCreditsAsync(a) // 领奖后刷新池内积分（bug #17）
+				// 成功 = 无错误（bug #6）；already 只决定文案。
 				item["claimed"] = true
 				item["credit"] = credit
 				item["energy"] = energy
-				if credit > 0 || energy > 0 {
-					item["message"] = msg + fmt.Sprintf("；已自动领奖 +%d 分 +%d 能", credit, energy)
-				} else {
+				if already {
 					item["message"] = msg + "；奖励此前已领取"
+				} else {
+					p.refreshCreditsAsync(a) // 领奖后刷新池内积分（bug #17）
+					if credit > 0 || energy > 0 {
+						item["message"] = msg + fmt.Sprintf("；已自动领奖 +%d 分 +%d 能", credit, energy)
+					} else {
+						item["message"] = msg + "；已领取（该奖励为道具/次数，不含积分与能量）"
+					}
 				}
 			} else {
 				item["claim_error"] = cerr.Error()

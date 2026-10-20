@@ -174,17 +174,20 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	// 小程序口径任务走 chat 域 mp 头领奖（缺头实测不可领）；其余 Web 端接口。
 	var credit, energy int64
+	var already bool
 	var err error
 	if isMPTaskCode(body.TaskCode) {
-		credit, energy, err = p.cfg.Upstream.ClaimRewardMP(a, body.TaskCode)
+		credit, energy, already, err = p.cfg.Upstream.ClaimRewardMP(a, body.TaskCode)
 	} else {
-		credit, energy, err = p.cfg.Upstream.ClaimReward(a, body.TaskCode)
+		credit, energy, already, err = p.cfg.Upstream.ClaimReward(a, body.TaskCode)
 	}
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "claim: "+err.Error())
 		return
 	}
-	if credit == 0 && energy == 0 {
+	// 只认上游明示的 already_claimed（bug #6）：道具类奖励是 0 分 0 能，但那是
+	// 一次成功领取，此前会被误报成"该奖励此前已领取"。
+	if already {
 		log.Printf("panel: 领取任务奖励 uid=%s code=%s（已领取过，无新增）", uid, body.TaskCode)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already_claimed": true, "message": "该奖励此前已领取"})
 		return

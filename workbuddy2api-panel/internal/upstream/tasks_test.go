@@ -30,7 +30,7 @@ func TestClaimRewardWebEndpoint(t *testing.T) {
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 
-	credit, energy, err := c.ClaimReward(a, "Model_chat_GLM5.2")
+	credit, energy, _, err := c.ClaimReward(a, "Model_chat_GLM5.2")
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -62,9 +62,12 @@ func TestClaimRewardAlreadyClaimed(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{HTTP: srv.Client(), WebBaseCN: srv.URL}
-	credit, energy, err := c.ClaimReward(&auth.Auth{AccessToken: "at", UID: "u1"}, "chat_5")
+	credit, energy, already, err := c.ClaimReward(&auth.Auth{AccessToken: "at", UID: "u1"}, "chat_5")
 	if err != nil {
 		t.Fatalf("already_claimed should not error: %v", err)
+	}
+	if !already {
+		t.Error("already_claimed 必须透出（bug #6）：调用方不能再用 0/0 猜")
 	}
 	if credit != 0 || energy != 0 {
 		t.Errorf("already claimed should yield 0/0, got %d/%d", credit, energy)
@@ -79,7 +82,7 @@ func TestClaimRewardNotCompleted(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{HTTP: srv.Client(), WebBaseCN: srv.URL}
-	if _, _, err := c.ClaimReward(&auth.Auth{AccessToken: "at", UID: "u1"}, "chat_5"); err == nil {
+	if _, _, _, err := c.ClaimReward(&auth.Auth{AccessToken: "at", UID: "u1"}, "chat_5"); err == nil {
 		t.Fatal("want error for not-completed task")
 	}
 }

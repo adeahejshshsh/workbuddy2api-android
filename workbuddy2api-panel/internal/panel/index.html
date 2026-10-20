@@ -881,7 +881,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="listen" placeholder=":7863">
                 <span class="hint">改动需重启进程</span></label>
               <label class="fld"><span class="lb">API 密钥</span>
-                <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
+                <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 保持原密钥不变">
                 <button type="button" class="xs" id="btnEye">显示</button></div>
                 <span class="hint">立即生效（含面板自身）</span></label>
             </div>
@@ -1199,7 +1199,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="hint">该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。</div>
     </header>
     <div class="body">
-      <form style="display:contents" onsubmit="return false"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off"></form>
+      <form style="display:contents" id="keyForm"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off"></form>
       <div class="state err" id="keyErr" hidden style="margin-top:10px">密钥不正确，请重试。</div>
     </div>
     <footer>

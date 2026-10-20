@@ -255,8 +255,10 @@ type archiveWriter struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	// enqMu 让「检查 enabled + 入队」与 close 互斥（bug #8）。
-	enqMu     sync.RWMutex
-	closed    atomic.Bool // Close 后置位：enqueue 直接丢弃（review 观察项 3）
+	enqMu  sync.RWMutex
+	closed atomic.Bool // Close 后置位：enqueue 直接丢弃（review 观察项 3）
+	// lastPrune 上次清理时刻（只由 run 协程读写，无需加锁）。
+	lastPrune time.Time
 	dropped   atomic.Uint64
 	lastErrMu sync.Mutex
 	lastErr   string
@@ -331,6 +333,9 @@ func (w *archiveWriter) enqueue(e Event) {
 	}
 }
 
+// pruneInterval prune 的最小间隔（bug #20）。
+const pruneInterval = 10 * time.Minute
+
 func (w *archiveWriter) run() {
 	defer close(w.done)
 	ticker := time.NewTicker(time.Second)
@@ -341,7 +346,13 @@ func (w *archiveWriter) run() {
 			w.writeEvent(e)
 		case <-ticker.C:
 			w.flush()
-			w.prune()
+			// prune 节流到 10 分钟一次（bug #20）：它要 os.ReadDir + 每个文件 Stat，
+			// 而保留策略是按天/按总大小，根本不需要秒级检查。Android 共享存储上
+			// 每秒一次全目录 stat 是持续的无谓 IO。
+			if time.Since(w.lastPrune) >= pruneInterval {
+				w.lastPrune = time.Now()
+				w.prune()
+			}
 		case <-w.stop:
 			for {
 				select {

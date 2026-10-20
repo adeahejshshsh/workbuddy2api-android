@@ -83,6 +83,7 @@ public class GatewayService extends Service {
     static volatile int appRestarts = 0;        // App 进程被系统杀掉后又被拉起来的次数
     static volatile String lastExit = "";       // 上一次网关退出的原因（跨 App 重启保留）
     static volatile boolean userStop = false;   // 用户在通知里点了"停止"：那就不再自愈
+    static volatile boolean startCounted = false; // 本进程是否已统计过"被杀重启"（bug #5）
     public static int appRestartCount() { return appRestarts; }
     public static String lastExitText() { return lastExit; }
 
@@ -234,9 +235,17 @@ public class GatewayService extends Service {
         // 上一次实例没清"运行中"标记，说明是 App 进程被系统杀掉之后又被拉起来的 → 记一笔
         try {
             SharedPreferences sp = getSharedPreferences(PREF, MODE_PRIVATE);
-            if (sp.getBoolean("service_up", false)) {
-                appRestarts = sp.getInt("app_restarts", 0) + 1;
-                sp.edit().putInt("app_restarts", appRestarts).apply();
+            // 只统计「进程被系统杀掉后重建」，且每个进程只记一次（bug #5）。
+            // onStartCommand 不只在进程重建时调用：MainActivity 每次 onCreate、
+            // BootReceiver、JobScheduler、5 分钟一次的 ACTION_WATCH alarm 都会进来，
+            // 而 service_up 一直是 true —— 此前等于统计"onStartCommand 被调用次数"，
+            // 界面上的「系统重启 N」会随每次打开 App / 每次 alarm 无限增长。
+            if (!startCounted) {
+                startCounted = true;
+                if (sp.getBoolean("service_up", false)) {
+                    appRestarts = sp.getInt("app_restarts", 0) + 1;
+                    sp.edit().putInt("app_restarts", appRestarts).apply();
+                }
             }
             lastExit = sp.getString("last_exit", "");
             sp.edit().putBoolean("service_up", true).apply();

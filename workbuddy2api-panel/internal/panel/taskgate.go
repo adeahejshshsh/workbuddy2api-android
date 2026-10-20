@@ -229,13 +229,15 @@ func (p *Panel) skipRows() []map[string]any {
 		}
 		uid, code := splitSkipKey(k)
 		out = append(out, map[string]any{
-			"uid":     uid,
-			"code":    code,
-			"fails":   e.Fails,
-			"why":     e.Why,
-			"last":    e.Last,
-			"until":   e.Until,
-			"blocked": e.Fails >= skipFailLimit && (e.Until.IsZero() || now.Before(e.Until)),
+			"uid":   uid,
+			"code":  code,
+			"fails": e.Fails,
+			"why":   e.Why,
+			"last":  e.Last,
+			"until": e.Until,
+			// 与 skipBlocked 同口径（bug #21）：Until 零值视为已到期（运行时会在
+			// skipBlocked 里删掉该条目并重新尝试），面板不能还显示"已跳过"。
+			"blocked": e.Fails >= skipFailLimit && !e.Until.IsZero() && now.Before(e.Until),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

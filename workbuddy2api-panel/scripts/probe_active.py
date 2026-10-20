@@ -19,7 +19,14 @@
 """
 import json, os, sys, time, glob, argparse, urllib.request, urllib.error
 
-AUTHS = "/root/workbuddy2api/auths"
+# auths 目录：环境变量 → 脚本同级 ../auths → 旧容器路径（与 task_common.py 同口径）。
+# 硬编码 /root/... 在宿主机/Android 上 glob 为空，ALL 分支会"什么都不做也不报错"（bug #12）。
+AUTHS = os.environ.get("WB2A_AUTH_DIR") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "auths")
+if not os.path.isdir(AUTHS):
+    _fallback = "/root/workbuddy2api/auths"
+    if os.path.isdir(_fallback):
+        AUTHS = _fallback
 CHAT_BASE = "https://copilot.tencent.com"   # growth / report
 BILL_BASE = "https://www.codebuddy.cn"      # billing / report
 
@@ -78,7 +85,7 @@ def report_activity(c):
 def tasks(c):
     st, d = call(c, "GET", "/v2/activity/growth/tasks")
     out = {}
-    for t in (d.get("data", {}).get("tasks") or []):
+    for t in ((d.get("data") or {}).get("tasks") or []):
         out[t["task_code"]] = (t["accept_status"], t.get("progress"))
     return out
 
@@ -108,6 +115,13 @@ def main():
     else:
         prefixes = [a.account]
 
+    # 空列表要明确报错（bug #12）：此前 ALL 在路径不对时什么都不做也不报错，
+    # 看起来像"探针跑了但没输出"。
+    if not prefixes:
+        print(f"❌ 在 {AUTHS} 下没找到 workbuddy-*.json（可用 WB2A_AUTH_DIR 指定目录）",
+              file=sys.stderr)
+        return 1
+
     for pre in prefixes:
         c = cred(pre)
         print(f"== {c['uid'][:8]} ({c['nick']}) ==")
@@ -117,7 +131,7 @@ def main():
             print("  first_buddy:", t.get("first_buddy"),
                   "| RichMeow_Chat:", t.get("RichMeow_Chat"),
                   "| chat_5:", t.get("chat_5"))
-            print("  streak.days:", (s.get("data", {}).get("streak", {}) or {}).get("days"))
+            print("  streak.days:", (((s.get("data") or {}).get("streak") or {}).get("days")))
         elif a.action == "report":
             if not a.yes:
                 print("  [dry-run] 将上报 1 条 chat_request_send（加 --yes 执行）")
@@ -131,4 +145,4 @@ def main():
         time.sleep(a.gap)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

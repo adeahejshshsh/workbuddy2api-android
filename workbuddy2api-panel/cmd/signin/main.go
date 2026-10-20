@@ -3,6 +3,7 @@
 package main
 
 import (
+	"time"
 	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"log"
@@ -60,7 +61,10 @@ func main() {
 		r.uid, r.nick = a.UID, a.Nickname
 
 		// refresh 过期 token
-		if a.NeedsRefresh(2 * 3600) {
+		// 单位必须是 time.Duration（bug #1）：`2*3600` 是裸常量 7200 = 7200 纳秒
+		// （7.2 微秒），等于永不提前刷新 —— 批量签到会拿过期 token 直接打
+		// daily-checkin，大量 401 被误判成账号问题。
+		if a.NeedsRefresh(2 * time.Hour) {
 			if err := up.RefreshToken(a); err != nil {
 				if ue, ok := err.(*upstream.Error); ok && ue.Kind == upstream.ErrSessionDead {
 					r.status = "AUTH_INVALID"
@@ -85,7 +89,7 @@ func main() {
 			okN++
 		default:
 			// DailyCheckin 已签到返回 code!=0 错误
-			if isAlready(err.Error()) {
+			if isAlready(err) {
 				r.status = "ALREADY"
 				r.detail = short(err.Error())
 				alreadyN++
@@ -116,13 +120,12 @@ func main() {
 	fmt.Printf("\ntotal=%d ok=%d already=%d fail=%d\n", len(rows), okN, alreadyN, failN)
 }
 
-// 已签判定：code 非 0 且含 "已签到"/"already"/"checkin" 等字样
-func isAlready(msg string) bool {
-	s := strings.ToLower(msg)
-	return strings.Contains(s, "已签到") ||
-		strings.Contains(s, "already") ||
-		strings.Contains(s, "checkin") ||
-		strings.Contains(s, "code=400")
+// 已签判定（bug #2）：改用 upstream 的严格口径 —— 只认 *upstream.Error 且只匹配
+// 「已签到 / already」两类幂等文案。此前这里是宽匹配：任何 code=400（参数错误、
+// 风控拒绝）、任何带 checkin 的文案、任何带 already 的无关错误都算"已签到"，
+// 于是批量签到报 ALREADY 但账号当天实际没签，积分/解冻都没发生且无告警。
+func isAlready(err error) bool {
+	return upstream.IsAlreadyCheckin(err)
 }
 
 func trunc(s string, n int) string {

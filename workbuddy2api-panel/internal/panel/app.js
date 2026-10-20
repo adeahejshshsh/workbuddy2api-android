@@ -327,7 +327,13 @@ $('btnKey').onclick = async () => {
     start();
   } catch (e) { $('keyErr').hidden = false; }
 };
-$('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
+// 表单提交必须显式拦掉（bug #17）：CSP 是 script-src 'self'，HTML 里原来的
+// onsubmit="return false" 内联处理器**不会执行**，回车触发浏览器隐式提交 →
+// 整页 GET 刷新，异步的 api('overview') 被中断，输错密钥时看不到提示。
+$('keyForm').addEventListener('submit', e => e.preventDefault());
+$('keyInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('btnKey').click(); }
+});
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
 /* 积分包明细共享缓存：「积分构成」视图与首页「积分到期提醒」卡片共用同一份
@@ -500,8 +506,14 @@ async function loadOverview(quiet) {
     $('sDisabled').textContent = d.disabled;
     // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
     if ($('sPaused')) $('sPaused').textContent = d.paused == null ? '-' : d.paused;
-    const remSum = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);
-  const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
+    // 企业版不限量在池内的等价表示是 credits=1<<40、credits_total=-1（Go 侧
+    // enterpriseUnlimitedRemain/Total），直接相加会把"剩余"撑成天文数字、把"总额"
+    // 减掉账号个数（bug #9）。这两类账号不计入汇总。
+    const isUnlimited = s => Number(s.credits_total) === -1 || Number(s.credits) >= 1e12;
+    const remSum = (d.accounts || []).filter(s => !isUnlimited(s))
+      .reduce((a, s) => a + (Number(s.credits) || 0), 0);
+  const totSum = (d.accounts || []).filter(s => !isUnlimited(s))
+    .reduce((a, s) => a + (Number(s.credits_total) > 0 ? Number(s.credits_total) : 0), 0);
   $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
     $('sSticky').textContent = d.sticky_sessions;
     $('navSub').textContent = 'v' + d.version;
@@ -1060,7 +1072,10 @@ function collectConfig() {
    ParseDuration 语法（30m / 2h / 600s / 1h30m，可组合可带小数）。与后端
    config.go normalize() 的 time.ParseDuration 同口径，脏值在前端就地标红，
    不再等到保存被拒。 */
-const DURATION_RE = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
+// "0" 是合法的 Go 时长（time.ParseDuration("0") == 0），后端用它表示"关停"：
+// cost_explore_interval: "0" 关停探索、expiring_soon: "0" 关闭快过期加权。
+// 此前正则要求必须带单位，填 0 会被标红且 onsubmit 直接拦截，保存请求发不出去（bug #8）。
+const DURATION_RE = /^(0|(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+)$/;
 const DURATION_FIELDS = ['soft_rate', 'soft_rate_max', 'breaker_cooldown', 'breaker_cooldown_max',
   'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'expiring_soon', 'ttl'];
 const DURATION_TIP = '格式应为 Go 时长：30m / 2h / 600s / 1h30m';
@@ -2561,10 +2576,14 @@ if ($('pkSort')) {
 // 无缓存（首次进入）才自动查一次；显式刷新（force=true，点「刷新」按钮）始终实时查。
 async function loadPackages(force) {
   if (!force && lastPackages) {
-    // 缓存分支也要确保 limit 已解析（bug #15）：先打开首页让到期卡片拉过 packages
-    // （写 lastPackages 但**不**写 lastDetailLimit），再切到「积分构成」时会用默认 5，
-    // 配置里的 panel.package_detail_limit 不生效，直到手动点「刷新」。
-    if (cfgLoaded) lastDetailLimit = pkDetailLimit(cfgLoaded);
+    // 缓存分支也要确保 limit 已解析（bug #15/#11）：先打开首页让到期卡片拉过
+    // packages（写 lastPackages 但**不**写 lastDetailLimit），再切到「积分构成」时
+    // 会用默认 5。而 cfgLoaded 只在打开配置页时才赋值 —— 所以这里缺配置时补拉一次，
+    // 否则配置里的 panel.package_detail_limit 永远不生效。
+    if (!cfgLoaded) {
+      try { const c = await api('config'); cfgLoaded = c && c.config ? c.config : null; } catch (e) {}
+    }
+    lastDetailLimit = pkDetailLimit(cfgLoaded);
     renderPackages(lastPackages, lastDetailLimit);
     const ageMin = Math.floor((Date.now() - lastPackagesAt) / 60000);
     if (ageMin > 0) $('pkNote').textContent = lastPackages.accounts.length + ' 个账号 · ' + ageMin + ' 分钟前的数据，点「刷新」更新';
@@ -2714,7 +2733,12 @@ function renderExpirySnapshot(d) {
         '<span class="exp-nm">' + nm + '</span>' +
         '<span class="exp-main">无近期到期批次</span></div>';
     }
-    const days = Math.max(0, Math.ceil((ms - today.getTime()) / 86400000));
+    // 按**日历日差**算（bug #10）：此前 ceil((ms - 今天00:00)/一天)，今天 23:00
+    // 到期会得 1 → 文案"明天到期"，日均需耗也偏小；而逐包明细版（expDaysLeft）
+    // 用的是日期差，两处口径不一致。
+    const d0 = new Date(today); d0.setHours(0, 0, 0, 0);
+    const d1 = new Date(ms); d1.setHours(0, 0, 0, 0);
+    const days = Math.max(0, Math.round((d1 - d0) / 86400000));
     const remain = Number(a.credits_earliest_remaining || 0);
     const daily = Math.ceil(remain / Math.max(1, days));
     const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
@@ -2753,7 +2777,8 @@ async function loadExpiry(force) {
     lastPackagesAt = Date.now();
     renderExpiry(d);
   } catch (e) {
-    $('expNote').textContent = '查询失败：' + esc(e.message);
+    // textContent 本身不解析 HTML，再套 esc() 会把 `<` 显示成 `&lt;`（bug #18）。
+    $('expNote').textContent = '查询失败：' + e.message;
   }
   expFetching = false;
 }

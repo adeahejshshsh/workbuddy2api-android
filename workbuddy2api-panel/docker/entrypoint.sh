@@ -9,16 +9,50 @@
 # 用户显式设了 WB2A_API_KEY / WB2A_LISTEN 时一律尊重。
 set -e
 
+# 只在「配置里没有有效 key」时生成，并**写回 config.json**（bug #3）。
+# 此前每次容器启动都重新生成并 export —— 环境变量在 applyEnv 里覆盖配置文件，
+# 于是 docker restart / compose up / 宿主重启都会换掉 key：客户端、面板
+# localStorage、手机壳里注入的 key 全部失效，而挂载的 config.json 里的 key
+# 完全不生效（注释里"重启不会重新生成"与实现相反）。
 if [ -z "${WB2A_API_KEY:-}" ]; then
-  WB2A_API_KEY="sk-$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  echo "[entrypoint] 未提供 WB2A_API_KEY，已生成随机密钥：$WB2A_API_KEY"
-  echo "[entrypoint] 记下来：客户端与面板都要用它（重启容器不会重新生成，除非不挂载配置）"
+  if grep -q '"api_key"[[:space:]]*:[[:space:]]*"[^"]\+"' /app/config.json 2>/dev/null; then
+    echo "[entrypoint] 沿用 config.json 里已有的 api_key"
+  else
+    KEY="sk-$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - "$KEY" <<'PY'
+import json, sys
+p = "/app/config.json"
+try:
+    with open(p, encoding="utf-8") as f:
+        c = json.load(f)
+except Exception:
+    c = {}
+c["api_key"] = sys.argv[1]
+with open(p, "w", encoding="utf-8") as f:
+    json.dump(c, f, ensure_ascii=False, indent=2)
+PY
+    else
+      # 无 python：退回 sed 替换（仅当已有该键）
+      sed -i "s|\"api_key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"api_key\": \"$KEY\"|" /app/config.json
+    fi
+    # 写回失败（只读挂载等）时退回 env：至少能起来，但 key 会随重启变 —— 明确告警。
+    if grep -q "\"api_key\"[[:space:]]*:[[:space:]]*\"$KEY\"" /app/config.json 2>/dev/null; then
+      echo "[entrypoint] config.json 里没有 api_key，已生成并写入：$KEY"
+      echo "[entrypoint] 记下来：客户端与面板都要用它（之后重启不会再变）"
+    else
+      export WB2A_API_KEY="$KEY"
+      echo "[entrypoint] ⚠ config.json 不可写（只读挂载？），改用环境变量注入 api_key：$KEY"
+      echo "[entrypoint] ⚠ 这样每次重启都会换 key，请把 config.json 挂成可写或显式设 WB2A_API_KEY"
+    fi
+  fi
 fi
-export WB2A_API_KEY
 
 if [ -z "${WB2A_LISTEN:-}" ]; then
   WB2A_LISTEN="0.0.0.0:7863"
 fi
+# 用户显式提供了 WB2A_API_KEY 才 export（env 优先于文件，这是 applyEnv 的既有语义）
+if [ -n "${WB2A_API_KEY:-}" ]; then export WB2A_API_KEY; fi
 export WB2A_LISTEN
 
 exec /app/wb2api -config /app/config.json "$@"

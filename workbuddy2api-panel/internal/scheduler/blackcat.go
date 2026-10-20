@@ -3,6 +3,7 @@
 package scheduler
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -19,7 +20,13 @@ var nowForNightWindow = time.Now
 
 // RunBlackcatNow 对所有可用账号执行夜猫子对话补足（窗口外跳过）。
 // 由 blackcat_hours 排程（默认 [23]）触发；执行前二次校验 InNightWindow。
-func (s *Scheduler) RunBlackcatNow() {
+// RunBlackcatNowCtx 带 ctx 的夜猫子补足（bug #13）。
+func (s *Scheduler) RunBlackcatNow() { s.RunBlackcatNowCtx(context.Background()) }
+
+func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !upstream.InNightWindow(nowForNightWindow()) {
 		log.Printf("blackcat: 当前不在 23:00–08:00 计数窗口，跳过")
 		return
@@ -55,6 +62,8 @@ func (s *Scheduler) RunBlackcatNow() {
 			continue
 		}
 		log.Printf("blackcat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.NicknameValue()), ok)
-		time.Sleep(activityAccountDelay)
+		if !sleepCtx(ctx, activityAccountDelay) {
+			return
+		}
 	}
 }

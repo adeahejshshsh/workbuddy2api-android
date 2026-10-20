@@ -27,6 +27,17 @@ const (
 
 // originRefererFor 按账号 realm 返回 Origin/Referer 基础域：
 // global → https://www.workbuddy.ai；cn（含全局开关未开）→ https://www.codebuddy.cn。
+// HeaderSafe 清洗成 header-safe 值：去掉控制字符与 DEL，保留可打印字符。
+// header value 里出现 CR/LF 会让 net/http 拒绝整个请求（bug #16）。
+func HeaderSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 func originRefererFor(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
 		return originRefererGlobal
@@ -275,7 +286,10 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	}
 	messageID := session.NewMessageID()
 	if meta.ConversationID != "" {
-		req.Header.Set("X-Conversation-ID", meta.ConversationID)
+		// 清洗成 header-safe（bug #16）：conversation_id 来自客户端 JSON 原文，
+		// 带换行/其它控制字符时 net/http 会在写请求时报 "invalid header field value"
+		// → 传输层错误 → 轮转/503，而客户端本身只是 ID 里带了奇怪字符。
+		req.Header.Set("X-Conversation-ID", HeaderSafe(meta.ConversationID))
 	}
 	req.Header.Set("X-Conversation-Request-ID", convReqID)
 	req.Header.Set("X-Conversation-Message-ID", messageID)

@@ -116,7 +116,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("User-Agent", desktopUA)
-	req.Header.Set("X-Domain", c.desktopBase(a))
+	req.Header.Set("X-Domain", c.desktopDomain(a))
 	req.Header.Set("X-Product", "SaaS")
 	req.Header.Set("X-Request-ID", deriveID(a, "req")+fmt.Sprintf("%d", time.Now().UnixNano()%1e6))
 	if a.UID != "" {
@@ -394,7 +394,7 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", desktopUA)
-	req.Header.Set("X-Domain", c.chatBase(a))
+	req.Header.Set("X-Domain", c.desktopDomain(a))
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
@@ -442,7 +442,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
 	h.Set("User-Agent", desktopUA)
-	h.Set("X-Domain", c.chatBase(a))
+	h.Set("X-Domain", c.desktopDomain(a))
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
 	h.Set("X-Conversation-ID", conversationID)
@@ -495,7 +495,15 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 			if i := bytes.Index(buf[searchFrom:], []byte(`"id":"`)); i >= 0 {
 				abs := searchFrom + i
 				rest := buf[abs+6:]
-				if end := bytes.IndexByte(rest, '"'); end > 0 {
+				if end := bytes.IndexByte(rest, '"'); end >= 0 {
+					if end == 0 {
+						// 空 id（`"id":""`，错误帧/心跳形态）：必须跳过这个匹配点继续往后找
+						// （bug #7）。此前 end>0 才推进偏移，空 id 让 searchFrom 原地不动，
+						// 下一轮 Index 又命中同一位置 —— 后面的合法 requestId 永远找不到，
+						// 读满 1MB 后误报"SSE 中未找到服务端 requestId"。
+						searchFrom = abs + 6
+						continue
+					}
 					id := string(rest[:end])
 					if os.Getenv("WB2A_DEBUG_CHAT") != "" {
 						fmt.Printf("[dbg-id] %q match=%v\n", id, idRegex.MatchString(id))
@@ -515,7 +523,9 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 }
 
 // idRegex 服务端 requestId 形状（cmb- 前缀 32hex 或裸 32hex）。
-var idRegex = regexp.MustCompile(`^(cmb-)?[0-9a-f]{32}$`)
+// 大小写不敏感（bug #24）：上游若返回大写 hex 或 CMB- 前缀，只认小写会被判成
+// "没找到 requestId"，整条 expert/skill 任务链失败且日志只说"SSE 中未找到"。
+var idRegex = regexp.MustCompile(`(?i)^(cmb-)?[0-9a-f]{32}$`)
 
 // DesktopExpertSummonSequence 构造「召唤平台专家」事件组（expert_summon_click 等），
 // 载荷对齐真实抓包样本（Sunny row 2644）。需配合 DesktopChatWithExpert +
