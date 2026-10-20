@@ -82,7 +82,7 @@
 `upstream 213 / server 92 / pool 186 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
 auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**711 通过 0 失败**；`gofmt -l` 为 0。
 
-## v1.27.5（当前）
+## v1.27.5
 
 **本版 = 第十一份审查报告（18 条 + 1 条"待确认"）的落地修复。逐条对当前代码复核：
 19 条全部成立，0 误报。其中 #3/#4/#5/#6/#18 与本会话前几轮的改动直接相关
@@ -187,7 +187,7 @@ auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**711 通过 0 失败**；`
 `upstream 210 / server 92 / pool 186 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
 auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**708 通过 0 失败**；`gofmt -l` 为 0。
 
-## v1.27.4（当前）
+## v1.27.4
 
 **本版 = 第十份审查报告（13 条）的落地修复。逐条对当前代码复核：13 条全部为真、0 误报。
 其中 P0-1、P0-2、P1-2 与本会话前几轮的改动直接相关 —— 上一轮我只修了一半。**
@@ -275,7 +275,7 @@ auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**708 通过 0 失败**；`
 `upstream 208 / pool 185 / server 92 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
 auth 27 / usage 14 / scheduler 65 / cmd-server 51`，**703 通过 0 失败**；`gofmt -l` 为 0。
 
-## v1.27.3（当前）
+## v1.27.3
 
 **本版 = 第九份审查报告（20 条）的落地修复。主人问「怎么感觉这些 bug 之前修过」——
 我把 20 条逐条拿当前代码核对，并标出与本会话前几轮的渊源：19 条为真、1 条机制误报。
@@ -373,7 +373,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 51`，**698 通过 0 失败**；`
 B9 的语义变更同步更新了 `TestInjectPromptCacheKey_EmptyConversation`（原测试断言的
 正是"空会话也要生成非空恒定键"，等于把 bug 固化了）。
 
-## v1.27.2（当前）
+## v1.27.2
 
 **本版 = 第八份审查报告（9 条）的落地修复。按主人要求先逐条复核：9 条全部为真，0 误报。
 其中 P0-1 让我上一版的修复失效、P0-3 是我上一版写了个假注释 —— 两条都在这版纠正。**
@@ -450,7 +450,7 @@ B9 的语义变更同步更新了 `TestInjectPromptCacheKey_EmptyConversation`�
 `upstream 204 / server 92 / pool 184 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
 auth 27 / usage 14 / scheduler 65 / cmd-server 51`，**698 通过 0 失败**；`gofmt -l` 为 0。
 
-## v1.27.1（当前）
+## v1.27.1
 
 **本版 = 第七份审查报告（18 条）的落地修复。按主人要求先逐条复核：17 条为真、1 条误报。**
 
@@ -539,7 +539,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 48`，**693 通过 0 失败**；`
 `nextHardCooldownDeadline` 的边界用例同步更新（21:00 后 → 次日 09:00），并补了
 21:00 / 22:30 / 年末三个用例。
 
-## v1.27.0（当前）
+## v1.27.0
 
 **本版 = 第六份审查清单（18 条）的落地修复。按主人要求先逐条复核再改，结论见每条【复核】。**
 
@@ -627,7 +627,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 48`，**693 通过 0 失败**；`
 `upstream 203 / server 90 / pool 184 / panel 27 / session 20 / redisstore 6 / reqlog 7 /
 auth 27 / usage 14 / scheduler 65 / cmd-server 48`，**691 通过 0 失败**；`gofmt -l` 为 0。
 
-## v1.26.9（当前）
+## v1.26.9
 
 **本版 = 第五份 bug 清单（24 条）的落地修复。按主人要求，先逐条对着源码复核「是不是真 bug」，
 确认后再改；结论见每条末尾的【复核】。**
@@ -726,7 +726,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**688 通过 0 失败**；`
 `ClaimReward`/`ClaimRewardMP` 的签名变化导致 3 处测试断言同步更新
 （其中 `already_claimed` 那条新增了「必须透出 already」的断言）。
 
-## v1.26.8（当前）
+## v1.26.8
 
 **本版 = 第四份 bug 清单（12 条）的落地修复，严重 3/3、一般 9/9 全修。**
 
@@ -780,7 +780,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**688 通过 0 失败**；`
 `upstream 203 / server 90 / pool 184 / panel 27 / session 20 / redisstore 6 / reqlog 7 /
 auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**688 通过 0 失败**；`gofmt -l` 为 0。
 
-## v1.26.7（当前）
+## v1.26.7
 
 **新增任务 `WorkBuddy_Valorant`：体验「无畏契约拼豆专家」（+100 分 +5 能，截止 11-15）。**
 
@@ -804,7 +804,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**688 通过 0 失败**；`
 reqlog 7 / auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**688 通过 0 失败**；
 `gofmt -l` 为 0。
 
-## v1.26.6（当前）
+## v1.26.6
 
 **本版 = 第三份 bug 审查（19 条）的落地修复，P0 7/7、P1 7/7、P2 5/5 全修。**
 
@@ -870,7 +870,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`
 bug #11 改了硬冷却的落点（09:00 前 → 当天 09:00），5 个断言随之更新为
 「hour ∈ {4, 9}」并注明理由 —— 这是行为变更，不是把测试改绿。
 
-## v1.26.5（当前）
+## v1.26.5
 
 **本版 = 第三份 bug 清单（19 条）的落地修复，P1 7/7、P2 9/9、P3 3/3 全修。**
 
@@ -934,7 +934,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`
 三个「全禁用」排程用例补了 `GrowthDisabled: true` —— bug #6 修好之后成长排程有了默认
 时点（01:00），不关它这些用例的「不应排程」断言自然不成立。
 
-## v1.26.4（当前）
+## v1.26.4
 
 **本版 = Bug 清单（B1–B15）的落地修复，15 条全修。**
 
@@ -1001,7 +1001,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`
 `upstream 203 / server 90 / pool 184 / panel 24 / session 20 / redisstore 6 / reqlog 7 /
 auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`gofmt -l` 为 0。
 
-## v1.26.3（当前）
+## v1.26.3
 
 **本版 = ISSUES-2026-10-19.md（19 个 issue）的落地。**
 P0 1/1、P1 5/5、P2 10/10 全部关闭；P3 三个合集（17/18/19）里挑了高价值项修完，
@@ -1090,7 +1090,7 @@ P0 1/1、P1 5/5、P2 10/10 全部关闭；P3 三个合集（17/18/19）里挑了
 `upstream 203 / server 90 / pool 184 / panel 24 / session 20 / redisstore 6 / reqlog 7 /
 auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`gofmt -l` 为 0。
 
-## v1.26.2（当前）
+## v1.26.2
 
 **本版 = 第三份代码审查报告（CODE-REVIEW-REPORT.md）的落地修复。**
 4 条 P0、8 条 P1、8 条 P2 全部处理，脚本类 4 条修 3，观察项 4 条修 3。
@@ -1179,7 +1179,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**。
 - `frontend_test.go` 的 node 探针改成真跑一次 `node --version`：Android 上 `LookPath`
   能找到但执行不了（私有目录里的二进制需 linker 代跑），此前 15 个前端测试全红。
 
-## v1.26.1（当前）
+## v1.26.1
 
 **本版 = 第二份代码审查报告（CODE-REVIEW-2026-10-19.md）的落地修复。**
 7 条高危全修、9 条中危全修、6 条低危全修。其中 **H1 是上一版我自己引入的真 bug**
@@ -1252,7 +1252,7 @@ cmd-server 全绿`，0 FAIL。
 配置默认值变更导致 3 个断言同步更新（`listen` 默认值、`WriteDefault` 生成值、
 目录错误文案）。
 
-## v1.26.0（当前）
+## v1.26.0
 
 **本版 = 第三方代码审查报告（CODE-REVIEW.md）的落地修复。** 4 条高危全修，10 条中危修 10，
 9 条低危修 8（L1 保留，见下），并新增 6 个回归测试。
