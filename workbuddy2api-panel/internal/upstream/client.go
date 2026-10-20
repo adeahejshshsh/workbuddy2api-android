@@ -1003,6 +1003,15 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 				a.Domain = tok.Domain
 			}
 			a.Unlock()
+			// 必须**自己落盘**（bug #2）：三个调用点（handler / scheduler / signin）
+			// 在 error 分支都直接放弃、不 SaveAtomic。上游已经把旧 refreshToken
+			// rotate 作废了，不写回磁盘的话，进程重启后读回的是作废的旧值 ——
+			// 该账号从此再也刷新不了，只能重新登录。
+			if a.FilePath != "" {
+				if serr := a.SaveAtomic(); serr != nil {
+					log.Printf("WARN: [upstream] refresh rotate 落盘失败 uid=%s: %v", a.UID, serr)
+				}
+			}
 		}
 		return fmt.Errorf("refresh_failed: no accessToken in response — re-login required")
 	}

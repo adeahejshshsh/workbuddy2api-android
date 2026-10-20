@@ -640,8 +640,15 @@ func (c *Config) normalize() error {
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
 	}
+	// 只有端口（"7863"）→ 补成 ":7863"；只有主机名（"localhost"）→ 明确报错（bug #14）。
+	// 原先一律补冒号会把 "localhost" 变成 ":localhost"，ListenAndServe 报 unknown port，
+	// 错误文本指不到 listen 配置项。
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
-		c.Listen = ":" + c.Listen
+		if _, perr := strconv.Atoi(c.Listen); perr == nil {
+			c.Listen = ":" + c.Listen
+		} else if c.Listen != "" {
+			return fmt.Errorf("listen: %q 缺少端口（写成 127.0.0.1:7863 或 :7863）", c.Listen)
+		}
 	}
 	// 监听面 × 密钥一致性守卫（review H7，位置在归一化之后）：默认 listen 是
 	// 全网卡形态，配空密钥/占位密钥时同网段任何人都能白嫖账号积分、调面板接口

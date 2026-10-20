@@ -536,8 +536,14 @@ func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
 // 明天"，而当天 09:00 签到其实已经解冻了，中间 04:00–09:00 白打一次上游）。
 // time.Date 对日溢出自动进位（月末→下月 1 号、年末→下年 1 号），覆盖跨日/跨月/跨年。
 func nextHardCooldownDeadline(now time.Time) time.Time {
-	if now.Hour() < 9 {
+	h := now.Hour()
+	if h < 9 { // 当天 09:00 还没到
 		return time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location())
+	}
+	if h >= 21 {
+		// 21:00 已过：下一次签到是**次日 09:00**（bug #5）。原先一律给次日 04:00，
+		// 比签到早 5 小时 —— 回池时余额仍是 0，必然再撞一次 402 再被硬冷却一轮。
+		return time.Date(now.Year(), now.Month(), now.Day()+1, 9, 0, 0, 0, now.Location())
 	}
 	return time.Date(now.Year(), now.Month(), now.Day()+1, 4, 0, 0, 0, now.Location())
 }

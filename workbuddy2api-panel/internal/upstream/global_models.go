@@ -59,6 +59,8 @@ type fetchGlobalModelsCache struct {
 	infos    []ModelInfo // 成功缓存：对象形态的全字段条目（窄表/失败形态为 nil）
 	fetched  time.Time
 	lastFail time.Time
+	// probing 有探测在飞（bug #8）：防止缓存过期瞬间 N 个并发各探一遍（每次 4 路请求）。
+	probing bool
 }
 
 // globalModelsTTL / globalModelsFailCooldown 探测缓存时长：成功 1h，失败 5min 负缓存。
@@ -118,7 +120,20 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 		c.globalModels.Unlock()
 		return nil, nil
 	}
+	// in-flight 标记（bug #8）：缓存过期瞬间 N 个并发请求会各自探测一遍，而每次探测
+	// 是 4 路上游请求（3 个 UA 的 /v3/config + 企业端点）。CN 侧 handler.fetchDynamicModels
+	// 专门用 modelsFetchMu 防了这件事，global 侧此前漏了。
+	if c.globalModels.probing {
+		c.globalModels.Unlock()
+		return nil, nil // 已有探测在跑：本次直接按"暂无数据"返回，不打上游
+	}
+	c.globalModels.probing = true
 	c.globalModels.Unlock()
+	defer func() {
+		c.globalModels.Lock()
+		c.globalModels.probing = false
+		c.globalModels.Unlock()
+	}()
 
 	names, infos, efforts, defaults, err := c.probeGlobalModels(a)
 	if err != nil || len(names) == 0 {

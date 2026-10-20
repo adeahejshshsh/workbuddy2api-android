@@ -677,7 +677,19 @@ public class GatewayService extends Service {
      * 只记住后一个，前一个再也 removeView 不掉（WindowManager token 泄漏，且系统
      * 仍认为该进程有可见窗口，保活语义被放大）。
      */
-    synchronized void installOverlay() {
+    // 一把显式静态锁（bug #17）：installOverlay 原来是 synchronized（锁 Service 实例），
+    // removeOverlay 是 static 且无同步 —— 两者不是同一把锁。releaseWake（主线程）与
+    // installOverlay（看门狗线程）交错时，overlay=null 之后另一线程才 addView 并覆盖
+    // 静态字段，前一个 View 永远 remove 不掉（系统仍认为进程有可见窗口）。
+    static final Object OVERLAY_LOCK = new Object();
+
+    void installOverlay() {
+        synchronized (OVERLAY_LOCK) {
+            installOverlayLocked();
+        }
+    }
+
+    private void installOverlayLocked() {
         if (overlay != null) return;
         try {
             if (Build.VERSION.SDK_INT < 23 || !Settings.canDrawOverlays(this)) return;
@@ -703,6 +715,12 @@ public class GatewayService extends Service {
     }
 
     static void removeOverlay() {
+        synchronized (OVERLAY_LOCK) {
+            removeOverlayLocked();
+        }
+    }
+
+    private static void removeOverlayLocked() {
         final View v = overlay;
         overlay = null;
         if (v == null) return;

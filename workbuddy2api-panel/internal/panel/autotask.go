@@ -288,6 +288,12 @@ func (p *Panel) refreshCreditsAsync(a *auth.Auth) {
 		return
 	}
 	go func() {
+		// panic 兜底（bug #1）：这是纯观测性刷新，绝不能因为它打死网关。
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("WARN: [panel] refreshCredits uid=%s panic: %v", a.UID, r)
+			}
+		}()
 		remain, total, expiring, earliestAt, earliestRemaining, err :=
 			p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 		if err != nil {
@@ -800,11 +806,37 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	}
 	isMP := isMPTaskCode(effCode)
 	if taskDone(before) {
-		msg := "该任务已领取过奖励"
+		// 「已达标但没领」要先领一次再返回（bug #6）：runAutoAll 对同一状态会走
+		// claim，单任务入口却直接回"无需再跑"，奖励挂在那儿只能去列表手动点领取。
 		if !before.Claimed {
-			msg = "该任务已达标（" + taskProgressText(before) + "），无需再跑"
+			var credit, energy int64
+			var already bool
+			var cerr error
+			if isMP {
+				credit, energy, already, cerr = p.cfg.Upstream.ClaimRewardMP(a, effCode)
+			} else {
+				credit, energy, already, cerr = p.cfg.Upstream.ClaimReward(a, effCode)
+			}
+			progress := taskProgressText(before)
+			if cerr != nil {
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true,
+					"message": "该任务已达标（" + progress + "）但领奖失败：" + cerr.Error()})
+				return
+			}
+			if already {
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true,
+					"message": "该任务已达标（" + progress + "），奖励此前已领取"})
+				return
+			}
+			p.refreshCreditsAsync(a)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true, "claimed": true,
+				"credit": credit, "energy": energy,
+				"message": "该任务已达标（" + progress + "），已自动领奖 +" +
+					fmt.Sprintf("%d 分 +%d 能", credit, energy)})
+			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true, "message": msg})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true,
+			"message": "该任务已领取过奖励"})
 		return
 	}
 	msg, err := act.run(p, a)
@@ -1436,7 +1468,11 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 			}
 		}
 	}
-	_ = fail
+	// 失败数要写进返回值（bug #18）：此前 `_ = fail` 丢掉，用户看到"已对 5 位完成"
+	// 却不知道其中 3 个是失败的（ok>=count 才停，失败的那些白跑）。
+	if fail > 0 {
+		return fmt.Sprintf("已对 %d 位真实专家完成召唤+使用链（类型 %s，另有 %d 位失败）", ok, expertType, fail), nil
+	}
 	return fmt.Sprintf("已对 %d 位真实专家完成召唤+使用链（类型 %s）", ok, expertType), nil
 }
 
@@ -1625,6 +1661,18 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer p.unlockAccount(uid) // 流水线真正结束（而非 HTTP 超时返回）才放锁
 		defer stopWatch()
+		// panic 兜底（bug #1）：非 http 起的 goroutine 不会有人 recover，
+		// 任务链里大量对上游响应的弱类型解析，一旦 panic 死的是整个网关。
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("ERR: [panel] auto_all uid=%s panic: %v", uid, r)
+				select {
+				case done <- []map[string]any{{"task_code": "(pipeline)", "status": "error",
+					"message": fmt.Sprintf("内部错误：%v", r)}}:
+				default:
+				}
+			}
+		}()
 		done <- p.runAutoAll(a)
 	}()
 	select {

@@ -2,7 +2,6 @@ package panel
 
 import (
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -55,25 +54,29 @@ func sleepAB(uid string, d time.Duration) bool {
 func watchAbort(done <-chan struct{}, uid string) (stop func()) {
 	finished := make(chan struct{})
 	var once sync.Once
-	var stopped atomic.Bool
+	// 用一把锁把「判断 + 打标记」与「置位 + 清标记」串起来（bug #12）：
+	// 光用 atomic 的 check-then-act 仍有窗口 —— stop() 清完标记后 goroutine 又把
+	// 它写回来，该账号下一次任务在第一个 sleepAB 就提前退出（表现为"点了没反应"）。
+	var mu sync.Mutex
+	stopped := false
 	go func() {
 		select {
 		case <-done:
-			// 二次确认（bug B9）：select 在 done 与 finished 同时就绪时随机选一个，
-			// 若 stop() 已经 clearAborted 之后这里才 markAborted，标记就残留了 ——
-			// 而队列路径（runQueueItems）不调 clearAborted，下一次任务会在 sleepAB
-			// 处直接返回 false 提前退出。
-			if !stopped.Load() {
+			mu.Lock()
+			if !stopped {
 				markAborted(uid)
 			}
+			mu.Unlock()
 		case <-finished:
 		}
 	}()
 	return func() {
 		once.Do(func() {
-			stopped.Store(true)
+			mu.Lock()
+			stopped = true
 			close(finished)
 			clearAborted(uid)
+			mu.Unlock()
 		})
 	}
 }

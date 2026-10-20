@@ -1,5 +1,94 @@
 # 变更记录
 
+## v1.27.1（当前）
+
+**本版 = 第七份审查报告（18 条）的落地修复。按主人要求先逐条复核：17 条为真、1 条误报。**
+
+### 会让进程挂掉 / 功能永久失效
+
+* **1 任务队列 goroutine 没有 recover，一次 panic 打死整个网关** —— `runQueueItems`（按账号那层）、
+  `accountTaskAutoAll` 的流水线 goroutine、`refreshCreditsAsync` 三处都不是 net/http 起的，
+  Go 不会替它们 recover。任务链里大量对上游响应的弱类型解析，上游换个返回形状就可能 panic ——
+  死的是**整个网关进程**，而不是"这次任务失败"。三处都补 `defer recover`（队列那层还顺手把该项
+  标成 error，不卡状态）。
+  【复核】真：三处 goroutine 原文只有复位/解锁 defer，没有 recover。
+* **2 refresh 已 rotate 的 refreshToken 不落盘 → 重启后该账号永久无法刷新** ——
+  `tok.AccessToken == ""` 分支把新 refreshToken 写进内存后返回 error，而三个调用点
+  （handler / scheduler / signin）在 error 分支都直接放弃、不 `SaveAtomic`。进程重启后从磁盘
+  读回的是**已被上游作废**的旧 refreshToken，账号从此刷新不了，只能重登。
+  改成在该分支内自己落盘（改的是内存里唯一的真值，最安全）。
+  【复核】真且后果严重。
+* **4 `state.json` / auth 文件用 rename 落盘，单文件 bind mount 时持久化静默失效** ——
+  `main.go` 早已为 config.json 处理了「rename 到挂载点返回 EBUSY」，但 state/auth 没同步。
+  抽 `auth.ReplaceAtomic()`（tmp 写 → rename → EBUSY 时原地 O_TRUNC 覆写）三处共用。
+  【复核】真：Docker `-v ./data/state.json:/app/data/state.json` 这种单文件挂载下 rename 恒失败。
+
+### 状态机 / 调度逻辑
+
+* **5 21:00 之后撞 402 的账号被冷却到次日 04:00，比下次签到早 5 小时** —— 签到时点是
+  09:00/21:00，21:00 后的 402 下一次签到是次日 09:00，而 04:00 回池时余额仍是 0 → 必然再撞
+  一次 402。`nextHardCooldownDeadline` 补 `h >= 21 → 次日 09:00`。
+  【复核】真。
+* **6 单任务入口对「已达标未领」不领奖** —— `taskDone(before)` 对该状态返回 true → 直接回
+  "无需再跑"，而 `runAutoAll` 会走 claim。改成先领一次再返回（带 `already` 区分文案）。
+  【复核】真：口径不一致，用户白丢奖励。
+* **7「执行全部待办」的扫描阶段没有并发上限** —— 每账号一个 goroutine、每个打 2 次上游，
+  46 号 = 92 并发；同文件 `tasksScanAll` 用 `sem=4`。补 `scanSem`（cap 4）。
+  【复核】真。
+* **8 global 模型目录探测没有 single-flight** —— 缓存判断在锁内、探测在锁外且无 in-flight
+  标记，TTL 一到 N 个并发各探一遍（每次 4 路请求）。补 `probing` 标记。
+  【复核】真：CN 侧 `fetchDynamicModels` 有 `modelsFetchMu`，global 侧漏了。
+* **9 会话粘性 `Bind` 每个成功请求都写一次 Redis** —— 会把异步队列（1024 条/8 worker）打满，
+  丢的不只是绑定，`SaveState` 快照也走同一队列。按 `minTouchInterval` 节流（与 `touch` 对齐）。
+  【复核】真。
+* **10 余额刷新在 ctx 取消时直接 return，不等在途 goroutine** —— 已起飞的还在跑并占着 `sem`，
+  下一轮再建新 sem → 并发闸门失效。改成 `break dispatch` + 末尾统一 `wg.Wait()`。
+  【复核】真。
+* **11 扫描接口 ctx 取消后空转整个账号列表** —— `continue` 只跳过当前账号，for 会跑完剩余
+  （每次立刻再命中 `ctx.Done`）。改 `break scanLoop`。【复核】真。
+* **12 `watchAbort` 的「已停止」判断有竞态** —— `atomic.Bool` 的 check-then-act 仍有窗口：
+  stop 清完标记后 goroutine 又写回来，该账号下次任务在第一个 `sleepAB` 就提前退出
+  （表现为"点了没反应 / 秒失败"）。改用一把 mutex 把两组操作串起来。
+  【复核】真：上一版只加了二次确认，没有互斥。
+* **13 调度主循环在 `runBatch` 期间不看时点** —— `runBatch` 末尾 `wg.Wait()` 阻塞主循环，
+  主循环随后用 `time.Now()` 重算下一次唤醒；若这批任务跨过下一个时点，那次直接被跳过
+  （checkin 末尾串跑 streak 管家 + 800ms/号节流，46 号就是数分钟）。改成 `go s.runBatch(...)`。
+  【复核】真。
+
+### 次要
+
+* **14 `listen` 只有主机名时被补成非法地址** —— `"localhost"` 被补成 `":localhost"`，
+  `ListenAndServe` 报 `unknown port`，错误指不到 `listen`。改成「纯数字才补冒号，
+  否则明确报错」。【复核】真。
+* **15 运行日志拉取失败被完全吞掉** —— `catch (e) { /* 概览已提示 */ }` 让页面保持旧内容，
+  用户以为"日志没更新"。改成写 `logNote`。【复核】真。
+* **16 MainActivity 首帧重复 tick** —— `onCreate` 里 `tick()` + `onStart` 又 `tick()+scheduleTick()`
+  → 首屏两次端口探测、两次渲染。删掉 `onCreate` 那次。【复核】真。
+* **17 `removeOverlay` 与 `installOverlay` 不共用一把锁** —— 前者 `static` 无同步、后者
+  `synchronized`（锁 Service 实例），交错时可能泄漏一个悬浮窗（系统仍认为进程有可见窗口）。
+  改用显式 `static final Object OVERLAY_LOCK`。【复核】真。
+* **18 专家批量执行里的失败计数被丢弃** —— `_ = fail`，用户看到"已对 5 位完成"却不知道其中
+  3 个失败。写进返回值。【复核】真。
+
+### 误报（未改）
+
+* **3「面板『检查』点一次异常后永久失灵」** —— 报告称 `expFetching` 永不复位。实际
+  `renderExpiry(d)` 在 `try` 内，抛异常会被 `catch` 捕获，随后 `expFetching = false` 照常执行
+  （它不在 try 里，但在 catch 之后、函数末尾）。**不会永久失灵**。
+  不过报告顺带指出的 `a.uid.slice(0, 8)` 隐患成立（`nickname` 为空且 `uid` 缺失时 TypeError），
+  已顺手改成 `String(a.uid || '').slice(0, 8)`，与 `renderExpirySnapshot` 口径一致。
+
+### 测试
+
+新增 2 个回归：`TestRefreshRotatePersistsEvenWithoutAccessToken`（rotate 结果必须落盘）、
+`TestRefreshCreditsAsyncRecoversPanic`（观测性 goroutine 自己 recover）。
+
+`upstream 204 / server 90 / pool 184 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 48`，**693 通过 0 失败**；`gofmt -l` 为 0。
+
+`nextHardCooldownDeadline` 的边界用例同步更新（21:00 后 → 次日 09:00），并补了
+21:00 / 22:30 / 年末三个用例。
+
 ## v1.27.0（当前）
 
 **本版 = 第六份审查清单（18 条）的落地修复。按主人要求先逐条复核再改，结论见每条【复核】。**

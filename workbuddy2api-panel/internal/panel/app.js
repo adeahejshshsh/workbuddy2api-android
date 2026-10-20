@@ -828,7 +828,12 @@ async function loadLogs() {
     $('logNote').textContent = logCh === 'all'
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
-  } catch (e) { /* 概览已提示 */ }
+  } catch (e) {
+    // 拉取失败要提示（bug #15）：此前完全吞掉，页面保持上一次内容，
+    // 用户以为"日志没更新"，实际是请求失败了。
+    const n = $('logNote');
+    if (n) n.textContent = '日志读取失败：' + e.message;
+  }
 }
 
 function renderRequestMetrics(m, entries) {
@@ -2672,13 +2677,13 @@ function renderExpiry(d) {
   const rows = keyed.map(({ a }) => {
     if (a.error) {
       return '<div class="exp-row"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+        '<span class="exp-nm">' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</span>' +
         '<span class="exp-main err">查询失败：' + esc(a.error) + '</span></div>';
     }
     const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
     if (!bs.length) {
       return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+        '<span class="exp-nm">' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</span>' +
         '<span class="exp-main">7 天内无到期积分</span></div>';
     }
     const first = bs[0];
@@ -2695,7 +2700,7 @@ function renderExpiry(d) {
     const rest = bs.slice(1, 4).map(b =>
       '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　') + more;
     return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
-      '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+      '<span class="exp-nm">' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</span>' +
       '<span class="exp-main">最近到期 <b>' + esc(first.date) + '</b>（' + dayWord +
       '）· 该批 <b>' + fmtTok(first.remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
       fmtTok(daily) + '</b>' +

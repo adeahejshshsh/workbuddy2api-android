@@ -211,11 +211,13 @@ public class MainActivity extends Activity {
 
         GatewayService.start(this);
         apiKey = readApiKey();
+        // 这里不再 tick()（bug #16）：onStart 会调 tick() + scheduleTick()，
+        // onCreate 里再来一次会让首屏连做两次端口探测与两次状态渲染。
         // 不再「固定 1500ms 后硬加载」（H4）：设备慢/网关冷启动/看门狗退避时那一发
         // 必然打空，而 onPageFinished 连 WebView 的错误页都会回调 —— 于是被记成
         // 「已注入」，之后再也不自动重试，用户对着错误页只能手点重载。
         // 改成由 tick 里的真实探测结果驱动（probePort 在后台线程做 connect）。
-        tick();
+        // 首帧渲染交给 onStart（见 bug #16）。
     }
 
     // ── 小控件工厂（纯代码建视图，不用 XML 布局）

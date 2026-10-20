@@ -394,7 +394,12 @@ func (s *Scheduler) Run(ctx context.Context) {
 			// 多号 × 间隔 ≈ 数分钟睡眠）不再阻塞同槽其他任务族；返回前等全部
 			// 任务收尾（下一轮 nextWake 照旧从"现在"起算，多轮重叠的风险与
 			// 串行版相同——nextWake 只挑现在之后的时点）。
-			s.runBatch(ctx, kinds)
+			// 异步派发（bug #13）：runBatch 末尾 wg.Wait() 会阻塞主循环，主循环随后用
+			// time.Now() 重算下一次唤醒 —— 若这批任务跨过了下一个时点，那次直接被跳过
+			// （checkin 末尾串跑 streak 管家 + 800ms/号节流，46 号就是数分钟）。
+			// 改为后台跑，主循环立刻回到 waitSlot 继续等下一个时点；
+			// 同族任务重入由 runBatch 内部的任务族互斥语义承担（各族自身幂等）。
+			go s.runBatch(ctx, kinds)
 		}
 	}
 }
@@ -658,6 +663,7 @@ func (s *Scheduler) RunBalanceRefreshNowCtx(ctx context.Context) {
 	sem := make(chan struct{}, 3)
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+dispatch:
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
@@ -666,13 +672,15 @@ func (s *Scheduler) RunBalanceRefreshNowCtx(ctx context.Context) {
 		if a == nil {
 			continue
 		}
-		wg.Add(1)
+		// 取消时不要提前 return（bug #10）：已经起飞的 goroutine 还在跑并占着 sem，
+		// 提前返回会让下一轮再建一个新 sem，老一批与新一批并发叠加 = 闸门失效。
+		// 这里只跳出派发循环，末尾统一 wg.Wait()。
 		select {
 		case sem <- struct{}{}: // 限并发：满 3 路就等，不堆 goroutine
 		case <-ctx.Done():
-			wg.Done()
-			return
+			break dispatch
 		}
+		wg.Add(1)
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
 			defer func() { <-sem }()

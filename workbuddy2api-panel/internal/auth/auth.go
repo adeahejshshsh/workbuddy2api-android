@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -361,11 +362,11 @@ func (a *Auth) SaveAtomic() error {
 	if err != nil {
 		return err
 	}
-	tmp := a.FilePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// 用公共的原子替换（含单文件 bind mount 的 EBUSY 兜底，bug #4）。
+	if err := ReplaceAtomic(a.FilePath, raw, 0o600); err != nil {
 		// Docker bind-mount 权限问题的典型现场：容器内 app 用户（uid 10001）
 		// 对宿主机挂载目录无写权限。给出可操作指引而不是裸 syscall 错误。
-		msg := fmt.Sprintf("写入 %s 失败: %v", tmp, err)
+		msg := fmt.Sprintf("写入 %s 失败: %v", a.FilePath, err)
 		if errors.Is(err, fs.ErrPermission) {
 			msg += "\n（Docker 部署：容器内用户对宿主机挂载目录无写权限。解法任选：" +
 				"1) 以本机 uid 运行容器：PUID=$(id -u) PGID=$(id -g) docker compose up -d；" +
@@ -374,7 +375,47 @@ func (a *Auth) SaveAtomic() error {
 		}
 		return errors.New(msg)
 	}
-	return os.Rename(tmp, a.FilePath)
+	return nil
+}
+
+// ReplaceAtomic 用 tmp 原子替换 path，并对「单文件 bind mount」做 EBUSY 兜底。
+//
+// 为什么需要（bug #4）：Docker 用 `-v ./data/state.json:/app/data/state.json` 这种
+// 单文件挂载时，rename 到挂载点恒返回 EBUSY，state.json / auths 的落盘会静默失败
+// （冷却截止、熔断计数、成本账本只留内存，重启全丢）。config.json 早已单独处理了
+// 这种情况，state/auth 一直没同步 —— 抽成公共函数三处共用。
+//
+// 返回 nil 表示内容已落盘（原子替换成功，或 bind mount 原地覆写成功）。
+func ReplaceAtomic(path string, raw []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.EBUSY) {
+		_ = os.Remove(tmp)
+		return err
+	}
+	// bind mount：原地覆写（tmp 里是完整新内容，写失败时保留供人工恢复）
+	f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, mode)
+	if openErr != nil {
+		return openErr
+	}
+	_, werr := f.Write(raw)
+	serr := f.Sync()
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	if serr != nil {
+		return serr
+	}
+	if cerr != nil {
+		return cerr
+	}
+	_ = os.Remove(tmp)
+	return nil
 }
 
 // LoadDir 扫描并解析 dir 下 workbuddy*.json；解析失败的文件静默跳过（启动日志由调用方统计）。

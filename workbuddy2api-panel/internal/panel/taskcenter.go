@@ -170,14 +170,17 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 	// （上游按账号维度限流，打了也只是排队挨 429）。4 路足够，且尊重请求取消。
 	sem := make(chan struct{}, 4)
 	ctx := r.Context()
+scanLoop:
 	for i, st := range states {
 		if st.Disabled {
 			continue
 		}
 		select {
 		case sem <- struct{}{}:
-		case <-ctx.Done(): // 客户端走了：不再起新任务（continue 结束本轮 for）
-			continue
+		case <-ctx.Done():
+			// 客户端走了：直接跳出循环（bug #11）。此前用 continue 只跳过当前账号，
+			// for 会把剩余账号全空转一遍（每次立刻再命中 ctx.Done），纯浪费且拖住返回。
+			break scanLoop
 		}
 		wg.Add(1)
 		go func(i int, uid string) {
@@ -365,6 +368,10 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var dg queueDiag
+	// 并发上限（bug #7）：每个账号打 2 次上游（ListTasks + ListTasksMP），46 个号
+	// 裸并发就是 92 个请求连发 —— 正是仓库多处专门防范的 WAF 频控形态。
+	// 与同文件 tasksScanAll 的 sem=4 对齐。
+	scanSem := make(chan struct{}, 4)
 	for _, st := range states {
 		if st.Disabled {
 			mu.Lock()
@@ -379,9 +386,11 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 			mu.Unlock()
 			continue
 		}
+		scanSem <- struct{}{}
 		wg.Add(1)
 		go func(a *auth.Auth) {
 			defer wg.Done()
+			defer func() { <-scanSem }()
 			one := queueAccount{a: a}
 			// D4 门控：global 账号无 CN 成长任务体系，不发起任何上游调用。
 			if a.IsGlobal() {
@@ -520,6 +529,18 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 		wg.Add(1)
 		go func(one queueAccount) {
 			defer wg.Done()
+			// 每个账号一层 panic 兜底（bug #1）：这些 goroutine 不是 net/http 起的，
+			// Go 不会替它们 recover —— 上游返回形状一变就可能 panic，死的是整个
+			// 网关进程，而不是"这次任务失败"。队列状态由外层 defer 复位。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERR: [panel] queue account=%s panic: %v", one.a.UID, r)
+					p.queueSet(q, one.a.UID, func(it *queueItem) {
+						it.Status = "error"
+						it.Message = fmt.Sprintf("内部错误：%v", r)
+					})
+				}
+			}()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			// per-account 互斥：与单任务/一键完成共用一把锁。

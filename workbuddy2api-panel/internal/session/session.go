@@ -233,8 +233,16 @@ func (r *Router) Bind(key, uid string) {
 	}
 	now := time.Now()
 	r.mu.Lock()
+	old, existed := r.entries[key]
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
+	// 节流镜像写（bug #9）：handler 每次 chat 成功都调本方法，而无条件 SetBind 会
+	// 把 Redis 异步队列（1024 条 / 8 worker）打满 —— 丢的不只是绑定，
+	// pool.SaveState 的快照也走同一个队列，会一起丢。touch 早有 minTouchInterval，
+	// 这里对齐：绑定值没变且在窗口内就不重复镜像。
+	if existed && old.uid == uid && now.Sub(old.lastActive) < minTouchInterval {
+		return
+	}
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
 }
 

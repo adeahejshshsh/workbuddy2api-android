@@ -264,12 +264,10 @@ func (p *Pool) saveLocked() error {
 	if dir := filepath.Dir(p.stateFp); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	tmp := p.stateFp + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		p.notePersistFail(err)
-		return err
-	}
-	if err := os.Rename(tmp, p.stateFp); err != nil {
+	// 公共原子替换（含单文件 bind mount 的 EBUSY 兜底，bug #4）：
+	// Docker 用 -v ./data/state.json:/app/data/state.json 时 rename 恒 EBUSY，
+	// 原先直接失败 → 冷却/熔断/成本账本只留内存，重启全丢。
+	if err := auth.ReplaceAtomic(p.stateFp, raw, 0o600); err != nil {
 		p.notePersistFail(err)
 		return err
 	}
