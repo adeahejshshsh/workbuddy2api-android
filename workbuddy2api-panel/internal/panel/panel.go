@@ -12,6 +12,7 @@ package panel
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -374,7 +375,15 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
 	if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
-		if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
+		// 取凭证失败要回退到下一个 uid，并记录真实原因（bug B20）：
+		// AvailableUIDsForRealm 与 AuthByUID 是两次独立加锁查询，若两次之间该账号
+		// 被移除/SyncToDir 剔除，原先静默跳过该域 → 最终 503「没有可用账号」，
+		// 而池里其实还有别的号，日志里也没有任何线索。
+		acct := pickExistingAuth(p.cfg.Pool, uids)
+		if acct == nil {
+			fetchErrs = append(fetchErrs, fmt.Sprintf("cn: %d 个可用账号在查询间隙被移除", len(uids)))
+		}
+		if acct != nil {
 			infos, err := p.cfg.Upstream.FetchModels(acct)
 			if err != nil {
 				fetchErrs = append(fetchErrs, "cn: "+err.Error())
@@ -399,7 +408,12 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// Upstream.GlobalEnabled 是探测侧同一道闸，与 main 装配的 config global.enabled 一致）。
 	if p.cfg.Upstream.GlobalEnabled {
 		if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
-			if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
+			// 同 CN 域：取凭证失败回退下一个 uid 并记录原因（bug B20）。
+			gAcct := pickExistingAuth(p.cfg.Pool, uids)
+			if gAcct == nil {
+				fetchErrs = append(fetchErrs, fmt.Sprintf("global: %d 个可用账号在查询间隙被移除", len(uids)))
+			}
+			if acct := gAcct; acct != nil {
 				infos := p.cfg.Upstream.FetchGlobalModelInfos(acct)
 				if len(infos) == 0 {
 					fetchErrs = append(fetchErrs, "global: 上游未返回可用模型")
@@ -458,6 +472,20 @@ func (p *Panel) tierHidden(model, realm string, showHidden bool) (skip bool, tag
 		return false, true
 	}
 	return true, false
+}
+
+// pickExistingAuth 按 uids 顺序返回第一个仍存在的账号凭证，全都不在返回 nil。
+//
+// 为什么需要（bug B20）：AvailableUIDsForRealm 与 AuthByUID 是两次独立加锁查询，
+// 两次之间账号可能被移除/SyncToDir 剔除。原实现只看 uids[0]，取不到就静默跳过该域，
+// 最终 503「没有可用账号」而池里其实还有别的号。
+func pickExistingAuth(p *pool.Pool, uids []string) *auth.Auth {
+	for _, uid := range uids {
+		if a := p.AuthByUID(uid); a != nil {
+			return a
+		}
+	}
+	return nil
 }
 
 func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string, remoteDefault string, httpc *http.Client) map[string]any {

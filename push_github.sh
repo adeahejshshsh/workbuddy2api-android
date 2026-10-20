@@ -31,7 +31,11 @@ else
 fi
 [ -n "$TOKEN" ] || { echo "❌ token 为空"; exit 1; }
 
-VER=$(grep -o 'android:versionName="[^"]*"' "$WS/apk-src/AndroidManifest.xml" | head -1 | sed 's/.*="//; s/"//')
+# 取不到要明确报错（bug B19 的机制其实不成立：脚本是 set -eu 且**没有** pipefail，
+# 管道的退出码取 sed，所以 grep 找不到不会让脚本退出 —— 实测会带着空版本号一路跑
+# 下去，最后打出 `版本: v` 并用空 tag 建 Release）。这里补显式判空。
+VER=$(grep -o 'android:versionName="[^"]*"' "$WS/apk-src/AndroidManifest.xml" | head -1 | sed 's/.*="//; s/"//' || true)
+[ -n "$VER" ] || { echo "❌ apk-src/AndroidManifest.xml 里没找到 versionName"; exit 1; }
 echo "== 目标仓库: $OWNER/$NAME    版本: v$VER"
 
 echo "== 1/5 暂存到 $STAGE（排除密钥/运行数据/日志/成品 APK）"

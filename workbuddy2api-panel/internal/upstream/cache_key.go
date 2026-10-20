@@ -52,6 +52,13 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 		conv = v
 	}
 	key := buildCacheKey(uid, conv)
+	if key == "" {
+		// 空会话：**不注入**（bug B9）。此前仍会用 sha256(uid+"|") 造一个恒定键，
+		// 而注释写的是「空会话不复用」—— 实际同账号的所有无会话客户端共用同一个
+		// 前缀滑块，多路交替请求互相同化槽位、把对方的缓存挤掉，前缀缓存收益接近 0
+		// （费用回到不注入的量级）。不注入 = 交回上游按前缀自行哈希，比恒定键好。
+		return body
+	}
 	obj["prompt_cache_key"] = key
 	out, err := json.Marshal(obj)
 	if err != nil {
@@ -63,9 +70,14 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 // buildCacheKey 生成 `wb2a-<uid8>-<convHex>` 格式的稳定 cache key。
 //
 // uid8 提供账号隔离段；convHex = sha256(uid + conversationID)[:16] 的 hex 提供会话段
-// （同账号同会话稳定、不同会话不同）。会话源为空时 convHex 仍由 uid 单独哈希，
-// 保证跨账号绝不碰撞但同一空会话不复用（空会话 = 新会话语义）。
+// （同账号同会话稳定、不同会话不同）。
+//
+// 会话源为空时返回 ""（bug B9）：调用方据此**不注入**。此前这里仍由 uid 单独哈希，
+// 得到一个恒定键 —— 与注释承诺的「空会话不复用」正好相反。
 func buildCacheKey(uid, conversation string) string {
+	if strings.TrimSpace(conversation) == "" {
+		return ""
+	}
 	uid8 := uid
 	if len(uid8) > 8 {
 		uid8 = uid8[:8]

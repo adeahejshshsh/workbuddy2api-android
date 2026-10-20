@@ -46,6 +46,18 @@ const (
 // desktopBase 桌面端 /v2/report 与 user-asset 走 chatBase（copilot.tencent.com）。
 func (c *Client) desktopBase(a *auth.Auth) string { return c.chatBase(a) }
 
+// Tail8 取字符串末尾 8 个字符，短于 8 时原样返回。
+//
+// 为什么需要（bug B10）：多处直接写 `req[len(req)-8:]`，上游一旦返回短 requestId
+// 或空串，这里就是 slice out of range —— 在 HTTP handler 里 panic 会被 net/http
+// recover，客户端拿到的是连接被掐断；在自动任务 goroutine 里则整项任务丢结果。
+func Tail8(s string) string {
+	if len(s) <= 8 {
+		return s
+	}
+	return s[len(s)-8:]
+}
+
 // deriveID 由 uid 稳定派生一个 36 位 hex 设备标识（machineId/qimei36 复用），
 // 幂等：同一账号每次生成相同值，模拟固定设备。
 func deriveID(a *auth.Auth, salt string) string {
@@ -360,7 +372,7 @@ func DesktopDesignCanvasSequence(conversationID, requestID string) []DesktopEven
 		},
 		DesktopEvent{
 			"eventCode": "wbx_design_canvas_open", "conversationId": conversationID,
-			"requestId": requestID, "id": "ardot-file-" + requestID[len(requestID)-8:],
+			"requestId": requestID, "id": "ardot-file-" + Tail8(requestID),
 			"source": "summon_keyword", "type": "page", "cost": 13000, "isSuccessful": true,
 		},
 	)
@@ -592,7 +604,7 @@ func desktopExpertActualUse(e MarketExpert, conversationID, requestID string) De
 		"id":        e.ExpertID, "name": e.DisplayNameZH, "expertTitle": e.ProfessionZH,
 		"type": cat, "expertType": e.ExpertType, "source": "builtin", "version": ver,
 		"cost": 9000, "characterCount": 14,
-		"conversationId": conversationID, "requestId": requestID, "messageId": "msg-" + requestID[len(requestID)-8:],
+		"conversationId": conversationID, "requestId": requestID, "messageId": "msg-" + Tail8(requestID),
 		"requestModelId": "fast-model", "requestModelName": "fast-model",
 	}
 }

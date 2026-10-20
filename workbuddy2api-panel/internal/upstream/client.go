@@ -198,7 +198,22 @@ func isPromptTooLongStatus(status int) bool {
 // alreadyCheckinMarkers "今天已签到"关键词（上游对重复签到返回 code!=0，
 // 实测 code=10001/14001 "今天已签到"/"今日已签到"）。只对 *Error.Msg 做包含匹配，
 // 网络层/解析层错误不在此识别（见 IsAlreadyCheckin）。
-var alreadyCheckinMarkers = []string{"已签到", "already"}
+// 只认明确的幂等文案（bug B4）：此前含裸 "already"，而它是极宽的子串 ——
+// "already used" / "already exists" / "already claimed" / "quota already exhausted"
+// 全部命中。IsAlreadyCheckin 只对 *Error.Msg 做包含匹配，于是任何带 already 的业务
+// 错误都被当成「今天已签到」：面板显示 checkin_done=true、调度器日志写「今天已签到
+// （幂等）」，而账号当天实际没签上 —— 用户以为签了，当天漏签。
+var alreadyCheckinMarkers = []string{
+	"已签到", "今日已签到", "今天已签到",
+	"already checked in", "already check-in", "already signed in",
+	"already checkin", "already checked-in",
+}
+
+// alreadyNegativeMarkers 命中这些就**不是**幂等成功（防御性：万一上游文案组合出
+// 「already used/exists/claimed/exhausted」这类语义完全相反的错误）。
+var alreadyNegativeMarkers = []string{
+	"used", "exist", "claim", "exhaust", "expired", "invalid", "quota",
+}
 var badParamsMarkerCode = `"code":11101`
 
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
@@ -917,7 +932,12 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
 	}
 	if env.Code != 0 {
-		kind := Classify(resp.StatusCode, env.Msg)
+		// 把 code 一起交给 Classify（bug B8）：此前只传 env.Msg，而
+		// hasBusinessCode / badParamsMarkerCode(`"code":11101`) / IsModelBlocked
+		// 都依赖原始 JSON 结构 —— 于是 14018（积分耗尽）、11102（模型不存在）、
+		// 11101（参数错）在这些走 doJSON 的路径上一律退化成 ErrClient，
+		// 按 code 判定的策略全部失效。
+		kind := Classify(resp.StatusCode, fmt.Sprintf(`{"code":%d,"msg":%s}`, env.Code, mustJSONString(env.Msg)))
 		if kind == ErrNone {
 			kind = ErrClient
 		}
@@ -2261,12 +2281,33 @@ func IsAlreadyCheckin(err error) bool {
 	if !errors.As(err, &ue) {
 		return false
 	}
+	msg := strings.ToLower(ue.Msg)
 	for _, m := range alreadyCheckinMarkers {
-		if strings.Contains(ue.Msg, m) || strings.Contains(strings.ToLower(ue.Msg), strings.ToLower(m)) {
-			return true
+		if strings.Contains(strings.ToLower(ue.Msg), strings.ToLower(m)) {
+			// 命中幂等文案后还要排除反向语义（bug B4）。
+			negated := false
+			for _, n := range alreadyNegativeMarkers {
+				if strings.Contains(msg, n) {
+					negated = true
+					break
+				}
+			}
+			if !negated {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// mustJSONString 把字符串编成 JSON 字面量（失败时退化为手工转义的最小实现），
+// 供把「code + msg」拼成可被 Classify 解析的形态（bug B8）。
+func mustJSONString(s string) string {
+	if b, err := json.Marshal(s); err == nil {
+		return string(b)
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", " ", "\r", " ")
+	return `"` + r.Replace(s) + `"`
 }
 
 func truncate(s string, n int) string {

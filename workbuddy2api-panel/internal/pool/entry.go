@@ -186,7 +186,11 @@ type entry struct {
 	// creditsExpiring 配置窗口内即将过期的可用积分子集，是 credits 的一部分。
 	// creditsEarliestExpiry / creditsEarliestRemaining 是全部未来到期批次中的最早一批；
 	// 两者均由签到/余额刷新更新，供 earliest-expiry 路由和状态观测使用。
-	creditsExpiring          int64
+	creditsExpiring int64
+	// creditFrac 不足 1 分的扣费余数（bug B6）：上游 credit 常是 0.02~0.34 量级，
+	// 此前 int64(credit+0.5) 直接抹零 → 余额只增不减，credit_floor 判据迟迟不触发。
+	// 这里累加余数，攒够 1 分再扣。
+	creditFrac               float64
 	creditsEarliestExpiry    time.Time
 	creditsEarliestRemaining int64
 	successCount             int64      // 累计成功

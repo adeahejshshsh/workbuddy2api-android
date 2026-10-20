@@ -56,7 +56,11 @@ func (p *Panel) postImportActivate(a *auth.Auth, realm string) {
 		} else if claimed {
 			log.Printf("panel: import global trial uid=%s 已领", a.UID)
 		}
-	} else {
+	} else if !a.IsEnterprise() {
+		// 企业号没有个人成长体系（上游对 daily-checkin 一律 400 code 10001
+		// "企业账号不支持该操作"）：同仓库的 login.go / panel.go / scheduler.go 都做了
+		// IsEnterprise 分流，只有导入后置动作漏了（bug B11）——导入几十个企业号
+		// 就是几十条假错误刷日志。余额查询照常走下面的 UserResource。
 		if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 			log.Printf("panel: import checkin uid=%s: %v", a.UID, err)
 		}

@@ -857,6 +857,13 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	} else {
 		after, aerr = p.taskByCodeWaiting(a, effCode)
 	}
+	// 回读被中止要如实回 504（bug B13）：此前 aerr != nil → after == nil →
+	// progress_after=""、claimable=false，但最终仍 writeJSON(200, ok:true)，
+	// 前端 toast 打「已执行」，用户以为成功，实际流水线已被中止。
+	if errors.Is(aerr, errTaskAborted) {
+		writeErr(w, http.StatusGatewayTimeout, "客户端已断开或等待超时，任务已中止（进度未回读）")
+		return
+	}
 	progressBefore, progressAfter := taskProgressText(before), ""
 	claimable := false
 	if aerr == nil && after != nil {
@@ -1113,7 +1120,7 @@ func runSkillFresh(p *Panel, a *auth.Auth) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	msgID := "msg-" + req[len(req)-8:]
+	msgID := "msg-" + upstream.Tail8(req)
 	events := upstream.DesktopChatSequence(conv, req, msgID, "fast-model", "fast-model")
 	for _, ev := range events {
 		if ev["eventCode"] == "chat_message_response" {
@@ -1165,7 +1172,7 @@ func runExpertLighthouse(p *Panel, a *auth.Auth) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	events := upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model")
+	events := upstream.DesktopChatSequence(conv, req, "msg-"+upstream.Tail8(req), "fast-model", "fast-model")
 	for _, ev := range events {
 		if ev["eventCode"] == "agent_task_created" {
 			ev["has_expert"] = true
@@ -1308,7 +1315,7 @@ func runValorantExpert(p *Panel, a *auth.Auth) (string, error) {
 		return "服务端未返回 requestId，判据不成立（跳过上报以免白跑）", nil
 	}
 	// 使用事件（JOIN 服务端 requestId）+ chat 链。
-	events := append(upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model"),
+	events := append(upstream.DesktopChatSequence(conv, req, "msg-"+upstream.Tail8(req), "fast-model", "fast-model"),
 		upstream.DesktopExpertActualUseEvent(e, conv, req))
 	if rerr = p.cfg.Upstream.ReportDesktopEvent(a, events...); rerr != nil {
 		return "使用事件上报失败: " + rerr.Error(), nil
@@ -1455,7 +1462,7 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 			continue
 		}
 		// 使用事件（JOIN 服务端 requestId）+ chat 链。
-		events := append(upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model"),
+		events := append(upstream.DesktopChatSequence(conv, req, "msg-"+upstream.Tail8(req), "fast-model", "fast-model"),
 			upstream.DesktopExpertActualUseEvent(e, conv, req))
 		if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 			fail++

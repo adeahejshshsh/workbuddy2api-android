@@ -81,6 +81,10 @@ public class GatewayService extends Service {
     // ── 被杀诊断：7863 老被杀，光说"又挂了"没用，得知道是谁杀的、杀了几次
     static final String PREF = "wb2api";
     static volatile int appRestarts = 0;        // App 进程被系统杀掉后又被拉起来的次数
+    // overlayErr 常驻图层失败原因（bug B15）：独立字段，不占用 reason（那是界面上的
+    // 「为什么不可用」，关键原因不该被次要提示覆盖）。
+    static volatile String overlayErr = "";
+    public static String overlayError() { return overlayErr; }
     static volatile String lastExit = "";       // 上一次网关退出的原因（跨 App 重启保留）
     static volatile boolean userStop = false;   // 用户在通知里点了"停止"：那就不再自愈
     static volatile boolean startCounted = false; // 本进程是否已统计过"被杀重启"（bug #5）
@@ -201,6 +205,8 @@ public class GatewayService extends Service {
         } catch (Throwable ignored) {}
         cancelAlarm(c);
         ReviveJobService.cancel(c);
+        // 状态复位（bug B3）：与 ACTION_STOP 分支同语义，否则界面永远「启动中」。
+        setState(ST_STOPPED, "已停止", "用户点了停止，不再自愈");
         try { c.stopService(new Intent(c, GatewayService.class)); } catch (Throwable ignored) {}
     }
 
@@ -233,6 +239,13 @@ public class GatewayService extends Service {
             killProc();
             releaseWake();
             stopForegroundCompat();
+            // 状态必须复位（bug B3）：此前只关通知/关端口，静态 status 仍停在
+            // ST_RUNNING，而 MainActivity.tick 把 ST_RUNNING 读成「启动中」——
+            // 用户在通知栏点了停止，界面上却一直是「启动中」，还继续每 2s 探测、
+            // 每 2s 尝试加载面板。
+            setState(ST_STOPPED, "已停止", "用户在通知栏点了停止，不再自愈");
+            appRestarts = 0;
+            refreshNotification();
             appLog(this, "用户主动停止 → 释放保活、取消 alarm/job，不再自愈");
             stopSelf();
             return START_NOT_STICKY;
@@ -723,7 +736,10 @@ public class GatewayService extends Service {
             wm.addView(v, lp);
             overlay = v;
         } catch (Throwable t) {
-            reason = "常驻图层没加上（" + t.getClass().getSimpleName() + "），系统可能仍会冻住我";
+            // 不要覆盖 reason（bug B15）：reason 是界面第三行展示的「为什么不可用」，
+            // 例如「启动被系统拒」这类关键原因会被这条次要提示盖掉，用户看到的解释
+            // 与真实故障无关。改用独立字段，由 MainActivity 拼在保活状态串里。
+            overlayErr = "常驻图层没加上（" + t.getClass().getSimpleName() + "）";
             appLog(this, "常驻图层失败：" + t + "（系统可能仍会冻结本进程）");
         }
     }

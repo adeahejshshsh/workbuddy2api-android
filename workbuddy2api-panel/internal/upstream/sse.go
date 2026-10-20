@@ -430,9 +430,17 @@ func stripToolCallNames(obj map[string]any, seen map[int]bool) {
 			if tc == nil {
 				continue
 			}
-			idx := 0
+			// 缺 index 的分片不能归到 0 号槽（bug B5）：上游常省略 index，
+			// 一旦落 0 号槽，第一个调用把 seen[0] 置真后，后面每个调用首片的
+			// function.name 都被当成「同 index 的后续分片」删掉 —— 客户端拿到
+			// 无名工具调用，直接失败（或按 index=0 合并导致参数串味）。
+			// 宁可不收敛，也不能删名字。
+			idx := -1
 			if v, ok := tc["index"].(float64); ok {
 				idx = int(v)
+			}
+			if idx < 0 {
+				continue // 无 index：原样透传
 			}
 			if seen[idx] {
 				// 已发过首片：删除本分片的 name 键（存在即删，幂等）。

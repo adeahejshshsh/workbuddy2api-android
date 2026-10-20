@@ -228,7 +228,18 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		return
 	}
 	if credit > 0 {
-		d := int64(credit + 0.5) // 四舍五入
+		// 余数累加（bug B6）：上游单次扣费常是 0.02~0.34 分，直接 int64(credit+0.5)
+		// 会全部抹零 —— credits/creditsExpiring/最早批次都不动，面板余额几乎只增不减，
+		// 而 credit_floor 用的是这个插值余额 → 触底账号迟迟不触发保底，
+		// 直到下次签到被权威值「砍回真实值」。
+		e.creditFrac += credit
+		d := int64(e.creditFrac)
+		if d <= 0 {
+			// 不足 1 分：只保留余数，不扣余额（单价账本照常记账，见下）
+			d = 0
+		} else {
+			e.creditFrac -= float64(d)
+		}
 		if d > e.credits {
 			d = e.credits // 钳 0：扣穿（对账延迟/消费早于记账）不产生负余额
 		}

@@ -35,7 +35,14 @@ key_fp() {
 running_pid() {
   if [ -f "$PIDF" ]; then
     p=$(cat "$PIDF" 2>/dev/null)
-    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && { echo "$p"; return; }
+    # 必须校验命中进程的命令行（bug B18）：pid 会被系统复用，或 pid 文件是别的实例
+    # 留下的 —— 只 kill -0 就会把无关进程当成"网关已在运行"，start 直接 exit 0，
+    # 实际服务根本没起来。
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+      if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'workbuddy2api/server'; then
+        echo "$p"; return
+      fi
+    fi
   fi
   # 锚定 argv[0]：否则会匹配到"命令行里正好提到这个路径"的无关进程（比如正在跑 run.sh 的 shell）
   pgrep -f '^[^ ]*/workbuddy2api/server( |$)' | head -1

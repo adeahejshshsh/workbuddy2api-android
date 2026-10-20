@@ -495,7 +495,24 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, err
 	}
 
-	// 3) 落盘（原子替换）。
+	// 3) 落盘用**规范化后**的值（bug B7）：此前直接写 merged（用户提交的原始值），
+	// 于是一个会被 normalize() 修正/补默认的字段呈现「进程内按修正值跑、重启后又变回
+	// 文件里的原值」—— 用户看到「改了没变 / 重启后行为又变了」。
+	//
+	// 注意不能直接写 newCfg：它已经叠过 WB2A_* 环境变量，落盘会把环境变量里的
+	// 密钥/地址写进文件（env 该保持「外部注入」语义）。所以这里用**不叠 env** 的
+	// 一份副本做规范化；它可能因「密钥只在 env 里」而在 checkListenKey 处提前失败，
+	// 那种情况下文件本身没有可规范化的密钥，保持原样即可（错误忽略）。
+	if diskCfg := Default(); ApplyJSON(mergedJSON(merged), diskCfg) == nil {
+		_ = diskCfg.normalize() // 部分场景会提前返回：落盘不需要校验结论
+		if b, merr := json.Marshal(diskCfg); merr == nil {
+			var normMap map[string]any
+			if json.Unmarshal(b, &normMap) == nil && normMap != nil {
+				// 未知键（用户手写、结构体没有的字段）从 merged 补回，避免保存时被抹掉。
+				merged = fillUnknownKeys(normMap, merged)
+			}
+		}
+	}
 	out, err := json.MarshalIndent(merged, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
@@ -627,6 +644,23 @@ func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
 		cur[k] = v
 	}
 	return cur
+}
+
+// fillUnknownKeys 把 src 里 dst 没有的键补进 dst（递归），返回 dst。
+// 用途：落盘用「规范化后的结构体」时，用户手写的未知键不会被抹掉（bug B7）。
+func fillUnknownKeys(dst, src map[string]any) map[string]any {
+	for k, v := range src {
+		if cur, ok := dst[k]; ok {
+			if dm, ok1 := cur.(map[string]any); ok1 {
+				if sm, ok2 := v.(map[string]any); ok2 {
+					dst[k] = fillUnknownKeys(dm, sm)
+				}
+			}
+			continue
+		}
+		dst[k] = v
+	}
+	return dst
 }
 
 // mergedJSON 把合并后的 map 序列化回 JSON（供 ParseConfig 校验）。

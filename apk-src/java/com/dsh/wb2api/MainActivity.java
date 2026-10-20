@@ -135,7 +135,13 @@ public class MainActivity extends Activity {
             public void onClick(View v) { keepAliveWizard(); }
         }));
         bar.addView(chip("重载面板", new View.OnClickListener() {
-            public void onClick(View v) { injected = false; web.reload(); }
+            public void onClick(View v) {
+                injected = false;
+                pageHadError = false;   // 手动重载：清错误标记，否则本次也会被判定失败（bug B2）
+                panelLoaded = false;
+                loadTries = 0;
+                web.reload();
+            }
         }));
         root.addView(bar);
 
@@ -167,8 +173,14 @@ public class MainActivity extends Activity {
             @Override public void onPageFinished(WebView v, String url) {
                 panelLoading = false;   // 本次加载结束（成功或错误页都算结束，bug #1）
                 progress.setVisibility(View.GONE);
-                // 只有真正落在面板地址上才算加载成功：错误页也会回调本方法。
-                if (url == null || !url.startsWith(PANEL_URL)) {
+                // 错误页同样用原 URL 回调本方法（bug B2）：WebView 的顺序是
+                // onReceivedError(failingUrl) → onPageFinished(failingUrl)，所以
+                // 只判 url.startsWith(PANEL_URL) 会把「加载失败」记成「加载成功」，
+                // tick 的 !panelLoaded 条件从此不成立 → 网关恢复后也不会自动重载，
+                // 只能手点「重载面板」。用一次性错误标记与之取与。
+                boolean hadError = pageHadError;
+                pageHadError = false;   // 每次加载结束复位
+                if (url == null || !url.startsWith(PANEL_URL) || hadError) {
                     panelLoaded = false;      // 让 tick 的下一拍再试
                     return;
                 }
@@ -184,6 +196,7 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onReceivedError(WebView v, int code, String desc, String failingUrl) {
+                pageHadError = true;          // 标记本次加载失败（bug B2）
                 panelLoading = false;         // 失败也算结束，允许下一拍重试（bug #1）
                 panelLoaded = false;          // 加载失败 → 交回 tick 重试（最多 MAX_LOAD_TRIES 次）
             }
@@ -306,6 +319,10 @@ public class MainActivity extends Activity {
         if (GatewayService.freezeCount() > 0) sb.append(" · 冻过 ").append(GatewayService.freezeCount());
         if (GatewayService.restartCount() > 0) sb.append(" · 自愈 ").append(GatewayService.restartCount());
         if (GatewayService.appRestartCount() > 0) sb.append(" · 系统重启 ").append(GatewayService.appRestartCount());
+        // 常驻图层失败单独提示（bug B15）：不占用 reason（那是上面的「为什么不可用」），
+        // 只在这里补一句，避免次要提示盖掉「启动被系统拒」这类关键原因。
+        String oerr = GatewayService.overlayError();
+        if (oerr != null && !oerr.isEmpty()) sb.append(" · ").append(oerr);
         String mode = GatewayService.modeText();
         sb.append(" · ").append(mode.isEmpty() ? ":7863" : mode);
         info.setText(sb.toString());
@@ -334,6 +351,7 @@ public class MainActivity extends Activity {
                 && loadTries < MAX_LOAD_TRIES) {
             panelLoading = true;
             loadTries++;
+            pageHadError = false;   // 新一次加载：清掉上一次的错误标记（bug B2）
             web.loadUrl(PANEL_URL);
         }
 
@@ -381,6 +399,7 @@ public class MainActivity extends Activity {
     // loadTries 限制自动重试次数，避免死循环打空。
     volatile boolean panelLoaded = false;
     volatile boolean panelLoading = false;   // 有一次 loadUrl 在途（防反复打断，bug #1）
+    volatile boolean pageHadError = false;   // 本次加载是否已报错（bug B2）
     volatile int loadTries = 0;
     static final int MAX_LOAD_TRIES = 30;
 
@@ -482,7 +501,12 @@ public class MainActivity extends Activity {
     void restart() {
         GatewayService.restart(this);
         injected = false;
-        ui.postDelayed(new Runnable() { public void run() { web.reload(); } }, 2000);
+        ui.postDelayed(new Runnable() { public void run() {
+            pageHadError = false;   // 重启后重载：清错误标记（bug B2）
+            panelLoaded = false;
+            loadTries = 0;
+            web.reload();
+        } }, 2000);
         toast("网关重启中…");
     }
 

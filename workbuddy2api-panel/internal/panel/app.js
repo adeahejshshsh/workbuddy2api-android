@@ -772,6 +772,10 @@ function renderModels() {
 }
 
 function resetModelFilter() {
+  // 清掉待触发的防抖定时器（bug B14）：输入关键字后 120ms 内点「重置」，
+  // 定时器到点会把上一次输入的值写回 mdFilter.q，列表「重置了又自己过滤回去」。
+  clearTimeout(mdQTimer);
+  mdQTimer = null;
   mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' };
   $('mdQ').value = ''; $('mdRealm').value = ''; $('mdCap').value = '';
   $('mdEffort').value = ''; $('mdPromo').value = ''; $('mdSort').value = 'default';

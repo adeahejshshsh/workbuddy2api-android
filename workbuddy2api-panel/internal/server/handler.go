@@ -610,6 +610,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	st := newChatStat(time.Now(), body, peek.Stream)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
+		// 补 requestID（bug B1）：全仓没有任何一处给 st.requestID 赋值，于是
+		// logging.go 里「只有 requestID != "" 才拼扩展段」的条件恒假 ——
+		// 每行流水日志永远缺 rid/out/try/credit，排查「重试了几次、哪个号扣多少」无据可依。
+		st.requestID = tr.id
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
 		// 让 stdout 流水行与归档事件共用同一份来源值，两处不会漂移。
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent

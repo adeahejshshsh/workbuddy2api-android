@@ -1,5 +1,103 @@
 # 变更记录
 
+## v1.27.3（当前）
+
+**本版 = 第九份审查报告（20 条）的落地修复。主人问「怎么感觉这些 bug 之前修过」——
+我把 20 条逐条拿当前代码核对，并标出与本会话前几轮的渊源：19 条为真、1 条机制误报。
+其中 3 条确实与之前修过的病灶同源（我改了调用方没改根、或我重构时把行为带偏了）。**
+
+### 与之前修复同源的三条（主人的直觉来源）
+
+* **B4「`already` 关键词过宽」** —— v1.26.x 我修的是 `cmd/signin` 的宽匹配（去掉
+  `code=400`/`checkin`），但**没动共享的 marker 列表**，它仍是 `["已签到","already"]`。
+  所以那条只是"堵了一个入口"，根没动。这版收窄成明确幂等文案
+  （`已签到/今日已签到/今天已签到/already checked in/...`），并加反向词过滤
+  （`already used/exists/claimed/exhausted` 一律不算）。
+* **B7「保存配置写未规范化数据」** —— v1.27.2 我重构 `saveConfig` 修 P0-1 时，
+  只改了"用什么校验"，落盘仍写 `merged`。这版改成落盘用**规范化后的值**（用不叠 env
+  的副本，避免把环境变量里的密钥写进文件），并用 `fillUnknownKeys` 把用户手写的
+  未知键补回。
+* **B13「回读被中止仍回 200」** —— 这段正是我前几轮反复重构的 `accountTaskAuto`
+  回读区。这版补 `errors.Is(aerr, errTaskAborted) → 504`。
+
+### P1
+
+* **B1 流水日志的 rid/out/try/credit 段永不输出** —— 全仓没有任何一处给
+  `st.requestID` 赋值，而 logging 的扩展段条件是 `requestID != ""`，恒假。
+  handler 里补 `st.requestID = tr.id`。【复核】真（`grep 'requestID ='` 零命中）。
+* **B2 面板加载失败被记成成功** —— WebView 顺序是 `onReceivedError(failingUrl)` →
+  `onPageFinished(failingUrl)`，只判 `url.startsWith(PANEL_URL)` 会把失败记成成功，
+  `tick` 的 `!panelLoaded` 从此不成立 → 网关恢复后也不自动重载。加一次性 `pageHadError`
+  与之取与；`tick` 发起加载、「重载面板」、`restart()` 三处都清标记。
+  【复核】真（我 v1.26.8 修的 `panelLoading` 只解决了"重复打断"，没覆盖这条竞态）。
+* **B3 点「停止」后状态不复位** —— 停止路径没有一处 `setState(ST_STOPPED, ...)`，
+  静态 `status` 停在 `ST_RUNNING`，而 `tick` 把 `ST_RUNNING` 读成「启动中」。
+  `ACTION_STOP` 分支与静态 `stop(Context)` 都补上（并清 `appRestarts`）。
+* **B5 缺 index 的 tool_call 被删工具名** —— `stripToolCallNames` 把缺 `index` 的分片
+  一律归 0 号槽，第一个之后所有调用首片的 `function.name` 被删。改成缺 index 时
+  **不收敛、原样透传**（宁可不收敛，也不能删名字）。【复核】真。
+* **B6 小额扣费被抹零** —— `int64(credit+0.5)` 对 0.02~0.34 量级的扣费全部得 0，
+  余额只增不减，而 `credit_floor` 用的就是这个插值 → 保底迟迟不触发。
+  改成余数累加（`creditFrac`），攒够 1 分才扣。【复核】真。
+
+### P2
+
+* **B8 业务错误分类丢 code** —— `Classify(status, env.Msg)` 只传 message，
+  而 `badParamsMarkerCode("\"code\":11101")` / `hasBusinessCode` / `IsModelBlocked`
+  都依赖原始 JSON。改成把 `code` 一起拼进可判定形态（新增 `mustJSONString`）。
+  【复核】真：14018/11102/11101 在 doJSON 路径上全部退化成 `ErrClient`。
+* **B9 空会话 `prompt_cache_key` 恒定** —— `buildCacheKey` 对空会话仍 `sha256(uid+"|")`，
+  同账号所有无会话客户端共用一个缓存槽、互相踩踏，与注释「空会话不复用」相反。
+  改成空会话返回 `""` 且**不注入**；同步更新了那个把 bug 固化的测试。
+  【复核】真。
+* **B10 `req[len(req)-8:]` 无长度守卫（5 处）** —— 新增 `upstream.Tail8`，
+  替换 `panel/autotask.go` 4 处 + `upstream/desktop.go` 2 处（报告只列了 1 处 desktop，
+  我核对到 `desktop.go:363` 也有同一个写法）。`runValorantExpert` 原本就有守卫。
+  【复核】真。
+* **B11 导入后置动作对企业号也签到** —— `postImportActivate` 只判了 global，
+  没判 `IsEnterprise()`；企业号 `daily-checkin` 上游必回 400 code 10001。
+  补 `else if !a.IsEnterprise()`。【复核】真。
+* **B12「全部接受」末批后仍等待** —— 末批（`end == len(codes)`）之后照样 sleep 1.05s，
+  期间客户端断开就回 504「已中止」，而任务其实全部接受完了。改成只有还有下一批才等。
+  【复核】真。
+* **B14 重置筛选未清防抖定时器** —— `resetModelFilter` 缺 `clearTimeout(mdQTimer)`，
+  120ms 后旧关键字被写回，列表「重置了又自己过滤回去」。【复核】真。
+* **B15 常驻图层失败覆盖 reason** —— `reason` 是界面第三行「为什么不可用」，
+  被这条次要提示盖掉（例如「启动被系统拒」这类关键原因）。改用独立字段
+  `overlayErr` + `overlayError()`，由状态条单独拼接显示。【复核】真。
+* **B20 模型目录取号失败静默 503** —— `AvailableUIDsForRealm` 与 `AuthByUID` 是
+  两次独立加锁查询，取不到就静默跳过该域。改成 `pickExistingAuth` 依次回退，
+  全都不在时把真实原因写进 `fetchErrs`（CN/global 两处）。【复核】真。
+
+### P3
+
+* **B16 清单声明 `QUICKBOOT_POWERON` 但接收器忽略** —— 采取报告的第二方案：
+  **从清单删掉该 action**，保持「只认受保护广播」的既有设计（加代码分支会让这个
+  exported 接收器接受任意应用可发的非受保护广播）。
+  注意：无-aapt2 打包路径复用上一版 APK 的**二进制清单**，所以已装的 APK 里这个
+  action 仍在（运行时本来就被忽略，行为无变化）；源码层面从此一致。
+* **B17 `watchdog.sh` 无单实例锁** —— 启动前检查 `watchdog.pid` 里的进程是否存活，
+  在跑就退出，避免两条看门狗互相对同一个网关 stop/start。【复核】真。
+* **B18 `run.sh` 残留 pid 误判** —— `running_pid` 的 pid 文件分支只 `kill -0`，
+  pid 被系统复用就会把无关进程当成网关。补 `/proc/<pid>/cmdline` 校验。
+  【复核】真。
+* **B19 `push_github.sh` 取版本号失败** —— **报告机制不成立**：脚本是 `set -eu`
+  且**没有** `pipefail`，管道退出码取 `sed`，grep 找不到**不会**让脚本退出。
+  我实测复现：脚本继续跑到 `版本: v`，exit 0。但由此暴露的真问题是
+  **空版本号一路跑下去、用空 tag 建 Release** —— 已补显式判空。
+
+### 误报
+
+* **B19 的机制**（"grep 失败在 set -e 下静默退出"）—— 实测不成立（见上）。
+
+### 测试
+
+`upstream 204 / server 92 / pool 184 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 51`，**698 通过 0 失败**；`gofmt -l` 为 0。
+
+B9 的语义变更同步更新了 `TestInjectPromptCacheKey_EmptyConversation`（原测试断言的
+正是"空会话也要生成非空恒定键"，等于把 bug 固化了）。
+
 ## v1.27.2（当前）
 
 **本版 = 第八份审查报告（9 条）的落地修复。按主人要求先逐条复核：9 条全部为真，0 误报。

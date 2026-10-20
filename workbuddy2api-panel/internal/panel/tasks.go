@@ -121,10 +121,15 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		accepted += end - i
-		// 批间节流（对齐脚本 1.05s 口径），可中断（bug #9）。
-		if !sleepAB(uid, acceptBatchGap) {
-			writeErr(w, http.StatusGatewayTimeout, "客户端已断开，全部接受已中止")
-			return
+		// 批间节流（对齐脚本 1.05s 口径），只在**还有下一批**时等（bug B12）。
+		// 此前末批后也无条件等 —— 若这 1.05s 内客户端断开（watchAbort 打标），
+		// 接口返回 504「全部接受已中止」，可任务其实已经全部接受完了，
+		// 用户重试等于白跑一遍上游。
+		if end < len(codes) {
+			if !sleepAB(uid, acceptBatchGap) {
+				writeErr(w, http.StatusGatewayTimeout, "客户端已断开，剩余批次未接受")
+				return
+			}
 		}
 	}
 	// 小程序口径任务单独批量接受（默认列表不含 mp 码，accept 也要求 mp 头）。

@@ -13,6 +13,16 @@ LOG="$DATA/watchdog.log"
 INTERVAL="${1:-20}"
 MAXFAIL=3
 mkdir -p "$DATA"
+# 单实例锁（bug B17）：此前无条件覆写 pid 文件，手工多跑一次（或 nohup 被重复
+# 执行）就有两条看门狗同时 stop/start 同一个网关，表现为「服务反复重启、日志里
+# 成对的 stop/start」。
+if [ -f "$DATA/watchdog.pid" ]; then
+  OLD_WD="$(cat "$DATA/watchdog.pid" 2>/dev/null || true)"
+  if [ -n "$OLD_WD" ] && [ "$OLD_WD" != "$$" ] && kill -0 "$OLD_WD" 2>/dev/null; then
+    echo "看门狗已在运行 pid=$OLD_WD（要重启先 kill 它）"
+    exit 0
+  fi
+fi
 echo $$ > "$DATA/watchdog.pid"
 say() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 say "看门狗启动 pid=$$ 间隔=${INTERVAL}s"

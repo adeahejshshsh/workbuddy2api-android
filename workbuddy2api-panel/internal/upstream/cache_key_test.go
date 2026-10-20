@@ -109,22 +109,24 @@ func TestInjectPromptCacheKey_Format(t *testing.T) {
 	}
 }
 
-// TestInjectPromptCacheKey_EmptyConversation 覆盖任务用例 3 边界：
-// 无 conversation_id 且无会话标识 → 生成键含 uid8 但 conversationHash 段为定值（不复用前缀）。
-// 不应报错、不应空串（key 非空）。
+// TestInjectPromptCacheKey_EmptyConversation 空会话**不注入**（bug B9）：
+// 此前会生成一个恒定键（sha256(uid+"|")），同账号所有无会话客户端共用同一个
+// 缓存槽、互相同化前缀、把对方的缓存挤掉 —— 与「空会话不复用」的注释相反。
 func TestInjectPromptCacheKey_EmptyConversation(t *testing.T) {
 	uid := "user-abc-123"
 	in := `{"model":"glm-5.2","messages":[]}`
 	out := InjectPromptCacheKey([]byte(in), uid, "")
-	got := extractCacheKey(t, out)
-	if got == "" {
-		t.Fatalf("expected non-empty key when no conversation, got empty")
+
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("output not json: %v", err)
 	}
-	if !strings.HasPrefix(got, "wb2a-") {
-		t.Fatalf("expected wb2a- prefix, got=%q", got)
+	if v, present := obj["prompt_cache_key"]; present {
+		t.Fatalf("空会话不应注入 prompt_cache_key（恒定键会踩踏缓存槽），got=%v", v)
 	}
-	if !strings.Contains(got, "user-abc") {
-		t.Fatalf("expected uid8 in key, got=%q", got)
+	// body 其余内容必须原样保留
+	if obj["model"] != "glm-5.2" {
+		t.Fatalf("body 被破坏: %v", obj)
 	}
 }
 
