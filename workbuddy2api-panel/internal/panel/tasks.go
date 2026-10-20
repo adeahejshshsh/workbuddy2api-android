@@ -33,6 +33,12 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	// 国际版账号无成长任务体系（bug-01）：上游 growth 只对个人 CN 用户开放，
+	// 对 global 号必然 403。调度器侧早有 D4 门控，面板入口漏了。
+	if a.IsGlobal() {
+		writeErr(w, http.StatusNotImplemented, "国际版账号无成长任务体系（上游 growth 仅对个人 CN 用户开放）")
+		return
+	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
@@ -140,14 +146,23 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			}
 			mpCodes = append(mpCodes, t.TaskCode)
 		}
-		if len(mpCodes) > 0 {
-			if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes); err != nil {
-				log.Printf("panel: mp 批量接受失败 uid=%s err=%v", uid, err)
-				failed = append(failed, mpCodes...)
+		// mp 任务同样按 20 条分片（bug-06）：随活动增长到十几条时一次性提交，
+		// 上游可能整批拒收；且此前成功后**无条件**再睡 1.05s —— 用户在最后一批
+		// 之后白白多等一秒多。与 Web 分支对齐：分片 + 只有还有下一批才节流。
+		for i := 0; i < len(mpCodes); i += batch {
+			end := i + batch
+			if end > len(mpCodes) {
+				end = len(mpCodes)
+			}
+			if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes[i:end]); err != nil {
+				log.Printf("panel: mp 批量接受失败 uid=%s codes=%v err=%v", uid, mpCodes[i:end], err)
+				failed = append(failed, mpCodes[i:end]...)
 			} else {
-				accepted += len(mpCodes)
+				accepted += end - i
+			}
+			if end < len(mpCodes) {
 				if !sleepAB(uid, acceptBatchGap) {
-					writeErr(w, http.StatusGatewayTimeout, "客户端已断开，全部接受已中止")
+					writeErr(w, http.StatusGatewayTimeout, "客户端已断开，剩余批次未接受")
 					return
 				}
 			}

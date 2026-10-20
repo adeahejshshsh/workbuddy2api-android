@@ -190,7 +190,10 @@ public class MainActivity extends Activity {
                 // 也只能靠用户手点「重载面板」）。
                 loadTries = 0;
                 if (!injected) {
-                    injected = true;
+                    // 成功后才置 injected（bug-04）：此前先置位再注入，读不到 key
+                    // （首次启动 ensureConfig 还没落盘 / 文件被清 / 解析失败）时只弹一次
+                    // toast，此后 onPageFinished 不再注入 → 面板所有 /panel/api/* 一直 401，
+                    // 用户只能手点「重载面板」再赌一次同样的时序。
                     injectKey();
                 }
             }
@@ -434,7 +437,13 @@ public class MainActivity extends Activity {
 
     void injectKey(final int attempt) {
         apiKey = readApiKey();
-        if (apiKey.isEmpty()) { toast("读不到 config.json 里的 api_key"); return; }
+        if (apiKey.isEmpty()) {
+            // 读不到就保持 injected=false（bug-04）：下一次 onPageFinished 还会再试，
+            // 而不是"弹一次 toast 然后永久放弃"。
+            injected = false;
+            toast("读不到 config.json 里的 api_key");
+            return;
+        }
         if (web == null) return;
         final String want = apiKey;
         String js = "try{localStorage.setItem('" + LS_KEY + "'," + quote(want) + ");"
@@ -444,10 +453,13 @@ public class MainActivity extends Activity {
                 // evaluateJavascript 把字符串结果再包一层 JSON：带引号才算成功写入
                 boolean ok = got != null && got.contains(want);
                 if (ok) {
+                    injected = true;   // 成功才置位（bug-04）
                     web.reload();
                     return;
                 }
                 if (attempt >= 2) {
+                    // 放弃本轮但保持 false：下一次页面加载仍会自动重试（bug-04）。
+                    injected = false;
                     logLine.setText("自动登录失败：面板拿不到 api_key，请点「重载面板」重试");
                     logLine.setTextColor(WARN);
                     return;

@@ -210,6 +210,19 @@ public class GatewayService extends Service {
         try { c.stopService(new Intent(c, GatewayService.class)); } catch (Throwable ignored) {}
     }
 
+    /** 读整个文本文件（UTF-8）；失败返回 null。 */
+    static String readTextFile(File f) {
+        try (java.io.InputStream is = new java.io.FileInputStream(f)) {
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+            return new String(bo.toByteArray(), "UTF-8");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** 指定进程是否还活着（bug P1-1：静态 alive() 只看 proc，而 killProc 已把它置 null）。 */
     static boolean isAlive(Process p) {
         if (p == null) return false;
@@ -610,8 +623,34 @@ public class GatewayService extends Service {
 
     void ensureConfig(File gwDir) {
         File cfg = new File(gwDir, "config.json");
-        if (cfg.exists() && cfg.length() > 0) return;
         String key = "wb2api-" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
+        // 文件已存在也要检查 api_key（bug-03）：首次生成被打断、或用户手改留下
+        // "CHANGE_ME"/"test_key"/空串时，网关的 checkListenKey 会直接 log.Fatalf 退出
+        // （rc=1），看门狗每 10s 一拍按退避无限重拉也永远起不来，界面只有「启动中」。
+        // 这里**只**在 api_key 仍是占位/空时原地替换，绝不碰用户其它配置。
+        if (cfg.exists() && cfg.length() > 0) {
+            String cur = readTextFile(cfg);
+            if (cur == null || cur.isEmpty()) return;
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("\"api_key\"\\s*:\\s*\"([^\"]*)\"")
+                    .matcher(cur);
+            if (!m.find()) return;                 // 没有该键：交给网关自己的默认值
+            String curKey = m.group(1).trim();
+            boolean bad = curKey.isEmpty()
+                    || "CHANGE_ME".equalsIgnoreCase(curKey)
+                    || "test_key".equalsIgnoreCase(curKey)
+                    || "sk-xxx".equalsIgnoreCase(curKey);
+            if (!bad) return;                      // 正常 key：一个字都不改
+            String fixed = m.replaceFirst("\"api_key\": \"" + key + "\"");
+            try (java.io.FileOutputStream os = new java.io.FileOutputStream(cfg)) {
+                os.write(fixed.getBytes("UTF-8"));
+            } catch (Throwable t) {
+                appLog(this, "config.json 的占位 api_key 替换失败：" + t);
+                return;
+            }
+            appLog(this, "config.json 里是占位/空 api_key，已替换为随机 key（否则网关拒绝启动）");
+            return;
+        }
         try (InputStream is = getAssets().open("config.json")) {
             // 必须读到 EOF：单次 read() 只保证「至少读到 1 字节」，assets 一旦涨过缓冲
             // 上限就被截成半截 JSON，网关读配置失败起不来；按字节切 UTF-8 还会切出乱码。

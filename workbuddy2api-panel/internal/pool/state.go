@@ -234,14 +234,20 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		// 直到下次签到被权威值「砍回真实值」。
 		e.creditFrac += credit
 		d := int64(e.creditFrac)
-		if d <= 0 {
+		switch {
+		case d <= 0:
 			// 不足 1 分：只保留余数，不扣余额（单价账本照常记账，见下）
 			d = 0
-		} else {
+		case d > e.credits:
+			// 余额不够扣：余数清零、只扣现有余额（bug-08）。
+			// 此前是"先按未钳制的 d 扣余数、再把 d 钳到余额"—— credits=1 而本次
+			// 消费 3.5 时，余数被减掉 3、余额只扣 1，另外 2 分**既没扣余额也没留在
+			// 余数里**，插值余额凭空高估 2 分 → credit_floor 延后触发，正是保底要防的
+			// "打穿"。欠的部分已无从抵扣，余数直接归零最诚实。
+			d = e.credits
+			e.creditFrac = 0
+		default:
 			e.creditFrac -= float64(d)
-		}
-		if d > e.credits {
-			d = e.credits // 钳 0：扣穿（对账延迟/消费早于记账）不产生负余额
 		}
 		e.credits -= d
 		if e.creditsExpiring > 0 {

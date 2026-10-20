@@ -762,6 +762,11 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	// 国际版账号无成长任务体系（bug-01）：与 accountTasks / 调度器 D4 门控同口径。
+	if a.IsGlobal() {
+		writeErr(w, http.StatusNotImplemented, "国际版账号无成长任务体系（上游 growth 仅对个人 CN 用户开放）")
+		return
+	}
 	var body struct {
 		TaskCode string `json:"task_code"`
 	}

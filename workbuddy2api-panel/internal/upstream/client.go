@@ -2202,7 +2202,13 @@ func (c *Client) UserResourceDetailedWithExpiryCtx(ctx context.Context, a *auth.
 		Response struct {
 			Data struct {
 				Accounts []struct {
-					PackageName         string `json:"PackageName"`
+					PackageName string `json:"PackageName"`
+					// DeductionEndTime 可抵扣窗口结束（epoch 毫秒）= **真失效时刻**（bug-02）。
+					// 与 CreditPackages 的口径一致：CycleEndTime 只是周期边界（额度重置点），
+					// 判「用不完就没了」必须以本字段为准，否则快过期的包拿不到 ×3 加权。
+					DeductionEndTime    int64  `json:"DeductionEndTime"`
+					ExpiredTime         string `json:"ExpiredTime"`
+					PackageEndTime      string `json:"PackageEndTime"`
 					CycleEndTime        string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
 					CapacitySize        int64  `json:"CapacitySize"`
 					CapacityRemain      int64  `json:"CapacityRemain"`
@@ -2237,7 +2243,20 @@ func (c *Client) UserResourceDetailedWithExpiryCtx(ctx context.Context, a *auth.
 		if r <= 0 {
 			continue
 		}
-		end, ok := parsePackageEndTime(acct.CycleEndTime)
+		// 真失效时刻优先（bug-02）：DeductionEndTime（ms）> ExpiredTime > PackageEndTime
+		// > CycleEndTime 兜底。与 CreditPackages 的解析同序，两条链路不再各说各话。
+		var end time.Time
+		var ok bool
+		switch {
+		case acct.DeductionEndTime > 0:
+			end, ok = time.UnixMilli(acct.DeductionEndTime), true
+		case acct.ExpiredTime != "":
+			end, ok = parsePackageEndTime(acct.ExpiredTime)
+		case acct.PackageEndTime != "":
+			end, ok = parsePackageEndTime(acct.PackageEndTime)
+		default:
+			end, ok = parsePackageEndTime(acct.CycleEndTime)
+		}
 		if !ok || !end.After(now) {
 			continue
 		}

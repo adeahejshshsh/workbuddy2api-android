@@ -56,7 +56,7 @@ func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context) {
 		if need <= 0 {
 			continue
 		}
-		ok, err := s.cfg.Upstream.RunNightChats(a, int(need))
+		ok, err := s.cfg.Upstream.RunNightChatsCtx(ctx, a, int(need))
 		if err != nil {
 			log.Printf("blackcat %s: %d/%d 完成，中断: %v", logfmt.Label(a.UID, a.NicknameValue()), ok, need, err)
 			continue

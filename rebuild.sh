@@ -41,16 +41,21 @@ echo "== 编译 cmd/* =="
 VER=$(tr -d ' \r\n' < "$(dirname "$0")/VERSION" 2>/dev/null || echo dev)
 LDF="-s -w -X main.appVersion=$VER"
 echo "  版本: $VER"
+# rc 累计失败（bug-09）：此前某个 cmd 编不过只打印 FAIL 就继续，脚本末尾照样 exit 0 ——
+# 接在 CI/发版流水线里就是"构建失败但流水线绿"。
+rc=0
 for c in server signin login credit trial; do
   [ -d "./cmd/$c" ] || continue
   printf "  %-8s " "$c"
   if go build -buildvcs=false -trimpath -ldflags="$LDF" -o "$OUT/$c" "./cmd/$c" 2>"$PREFIX/tmp/e_$c.log"; then
     echo "OK  $(du -h "$OUT/$c" | cut -f1)"
   else
-    echo "FAIL"; tail -6 "$PREFIX/tmp/e_$c.log"
+    echo "FAIL"; rc=1; tail -6 "$PREFIX/tmp/e_$c.log"
   fi
 done
 echo "== 产物 =="
 ls -la "$OUT"
 echo
 echo "提示: 改了 runtime/net 等标准库源码后如需彻底重编: go build -a"
+# 有失败就以非 0 退出（bug-09）
+exit "$rc"

@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -67,6 +68,9 @@ func deriveID(a *auth.Auth, salt string) string {
 
 // DesktopEvent 桌面端事件：业务字段任意（map），公共指纹由 ReportDesktopEvent 注入。
 type DesktopEvent map[string]any
+
+// desktopReqSeq 桌面事件 X-Request-ID 的进程内序号（bug-10）。
+var desktopReqSeq atomic.Uint64
 
 // desktopFingerprint 公共桌面指纹字段（注入每个事件，覆盖同名业务键）。
 func desktopFingerprint(a *auth.Auth) map[string]any {
@@ -131,7 +135,9 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("User-Agent", desktopUA)
 	req.Header.Set("X-Domain", c.desktopDomain(a))
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("X-Request-ID", deriveID(a, "req")+fmt.Sprintf("%d", time.Now().UnixNano()%1e6))
+	// 加进程内原子序号（bug-10）：deriveID 对同一账号恒定，后缀只有微秒尾数 6 位 ——
+	// 同一账号在同一微秒内发两个上报（批量任务里连续调用）会撞同一个 ID。
+	req.Header.Set("X-Request-ID", fmt.Sprintf("%s%d%04d", deriveID(a, "req"), time.Now().UnixNano()%1e6, desktopReqSeq.Add(1)%10000))
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}

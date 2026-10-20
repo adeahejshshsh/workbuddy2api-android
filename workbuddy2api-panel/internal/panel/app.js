@@ -450,10 +450,12 @@ function renderAccounts(list) {
         // 企业版无个人成长体系（签到 400「企业账号不支持该操作」/ 成长任务 403）：
         // 不渲染「签到」「任务」按钮，只留「额度」——点它走 /balance，企业额度由
         // upstream 的 get-enterprise-user-usage 口径填充。
-        (s.enterprise ? '' :
+        // 国际版（realm=global）同样没有签到/成长体系（bug-01）：与 enterprise 同口径隐藏，
+        // 否则点了必然吃上游 404/403，看起来像网关坏了。
+        ((s.enterprise || s.realm === 'global') ? '' :
           '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>') +
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>' +
-        (s.enterprise ? '' :
+        ((s.enterprise || s.realm === 'global') ? '' :
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
         // 暂停优先于冷却（bug #16）：一个"已暂停 + 正好在冷却中"的号此前会显示
         // 「解冻」（走 revive，会连带清掉暂停状态和全部冷却），与按钮文案不符。
@@ -549,7 +551,12 @@ $('accBody').addEventListener('click', async ev => {
   try {
     if (a === 'checkin') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/checkin', { method: 'POST' });
-      toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
+      // 三种结果分开说（bug-13）：跳过（global/企业）/ 成功 / 失败。
+      // 此前一律拼成「签到完成（<上游错误原文>）」，自相矛盾。
+      const bal = (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '');
+      if (r.checkin_skipped) toast((r.checkin_message || '该账号无签到体系') + bal, 'ok');
+      else if (r.checkin_done) toast('签到完成' + bal + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
+      else toast('签到失败' + bal + (r.checkin_message ? '：' + r.checkin_message : ''), 'err');
     } else if (a === 'balance') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/balance', { method: 'POST' });
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');

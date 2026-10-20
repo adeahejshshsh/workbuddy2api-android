@@ -808,7 +808,10 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 			case <-timer.C:
 				// 与面板「刷新余额」共用任务族锁（bug P0-3）：两路同时扇出会双倍打上游。
 				if s.TryBeginTask(TaskBalance) {
-					s.RunBalanceRefreshNow()
+					// 必须用 Ctx 版本（bug-05）：无 ctx 版固定 Background，
+					// SIGTERM 后 sem 抢占与账号间请求都不会被打断，最多拖 46×30s，
+					// 把最后一次 Flush 挤进强杀窗口（正是 run.sh 8s 预算要保护的）。
+					s.RunBalanceRefreshNowCtx(ctx)
 					s.EndTask(TaskBalance)
 				}
 			}

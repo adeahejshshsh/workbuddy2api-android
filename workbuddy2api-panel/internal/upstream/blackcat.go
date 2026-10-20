@@ -7,6 +7,7 @@
 package upstream
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,6 +44,15 @@ func (c *Client) BlackcatNeed(a *auth.Auth) (int64, error) {
 // RunNightChats 夜猫子：发 need 次 glm-5.2 真实对话（读干流）并上报事件链。
 // 返回成功次数。对话内容极短（1+1），消耗可忽略。
 func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
+	return c.RunNightChatsCtx(context.Background(), a, need)
+}
+
+// RunNightChatsCtx 带 ctx 版本（bug-07）：停机/客户端断开后可立刻返回，
+// 且**最后一轮不再白等 4s**（need=3 从 ≈12s 降到 ≈8s）。
+func (c *Client) RunNightChatsCtx(ctx context.Context, a *auth.Auth, need int) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var ok int64
 	for i := 0; i < need; i++ {
 		body, _ := json.Marshal(map[string]any{
@@ -63,7 +73,16 @@ func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
 			return ok, fmt.Errorf("第 %d 次上报失败: %w", i+1, err)
 		}
 		ok++
-		time.Sleep(4 * time.Second)
+		if i < need-1 {
+			// 轮间节流（可取消）；最后一轮不等 —— 等完也没人用了。
+			t := time.NewTimer(4 * time.Second)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return ok, ctx.Err()
+			case <-t.C:
+			}
+		}
 	}
 	return ok, nil
 }

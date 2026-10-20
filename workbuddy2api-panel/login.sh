@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# 用法：服务器/容器内可直接 ./login.sh（Docker 镜像里 chmod 755 后执行）；
+#      本机（Android）请用 `bash login.sh` —— /sdcard 是 noexec 挂载，
+#      直接 ./ 执行会在读 shebang 之前就 Permission denied。
+#      shebang 保持 /usr/bin/env bash 是为了 Docker（alpine + apk add bash）可用。
 # login.sh — WorkBuddy CN OAuth 登录 → 落盘 auth 文件
 #
 # 用法:

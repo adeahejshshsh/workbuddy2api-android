@@ -1,6 +1,95 @@
 # 变更记录
 
-## v1.27.7（当前）
+## v1.27.8（当前）
+
+**本版 = 第十四份审查报告（REVIEW-BUGS.md，13 条）的落地修复。逐条复核：
+12 条为真、1 条（BUG-12）机制不成立。其中 BUG-08 是我上一版（v1.27.6）修复的漏洞。**
+
+### P0
+
+* **BUG-01 国际版（global）账号在面板仍显示「签到」「任务」，点了必然报错** ——
+  调度器侧一直有 D4 门控（`if a.IsGlobal() { continue }`），但面板的单号入口
+  （`accountCheckin` / `accountTasks` / `accountTaskAuto`）只判了 `IsEnterprise`，
+  前端按钮也只看 `s.enterprise`。于是 global 号点签到 → 上游 404、点任务 → 403，
+  toast 里一串上游错误，看起来像网关坏了。
+  后端三处补 `IsGlobal()` 门控（签到退化为「只刷新额度」并带 `checkin_skipped`），
+  前端按 `s.realm === 'global'` 一并隐藏签到/任务按钮（余额按钮保留）。
+  【复核】真。
+* **BUG-02 快过期分桶用 `CycleEndTime`，与 `CreditPackages` 的 `DeductionEndTime` 冲突** ——
+  `UserResourceDetailedWithExpiryCtx` 的 Accounts 结构**根本没有 `DeductionEndTime` 字段**，
+  `earliestAt`/`expiring` 全由 `CycleEndTime` 决定；而 `CreditPackages` 的注释明确写着
+  「`DeductionEndTime` 才是真失效时刻，`CycleEndTime` 只是周期边界」。
+  结果：真快失效的包拿不到 ×3 加权（到期作废），周期重置点近的包反而被优先消耗。
+  结构体补 `DeductionEndTime`/`ExpiredTime`/`PackageEndTime`，解析按
+  `DeductionEndTime > ExpiredTime > PackageEndTime > CycleEndTime` 兜底，两条链路统一。
+  【复核】真。
+* **BUG-03 APK：已有 config.json 时不检查占位 api_key，网关起不来且看门狗无限重拉** ——
+  `ensureConfig` 见文件非空就早退。若首次生成被打断、或用户手改留下 `CHANGE_ME`/`test_key`/空串，
+  网关的 `checkListenKey` 直接 `log.Fatalf`（rc=1），看门狗按退避无限重拉也永远起不来，
+  界面只有「启动中」。
+  改成：文件存在时解析出 `api_key`，**仅当它仍是占位/空**才原地替换（其它配置一个字不动），
+  并写一条 app.log。【复核】真。
+* **BUG-04 APK：`injected` 先置真再注入，失败后永不重试 → 面板永久 401** ——
+  `if (!injected) { injected = true; injectKey(); }`：读不到 key（首次启动 `ensureConfig`
+  还没落盘 / 文件被清）时只弹一次 toast，此后 `onPageFinished` 不再注入，
+  所有 `/panel/api/*` 一直 401，只能手点「重载面板」再赌一次同样的时序。
+  改成**成功才置位**（`onReceiveValue` 里 `ok` 分支），失败分支保持 false 以便下次重试。
+  【复核】真。
+
+### P1
+
+* **BUG-05 定时余额刷新丢掉了 ctx** —— 定时分支调 `RunBalanceRefreshNow()`（内部
+  `context.Background()`），而我 v1.27.6 刚加的 `RunBalanceRefreshNowCtx(ctx)` 没人用。
+  SIGTERM 后若正赶上一轮刷新，`sem` 抢占与账号间请求都不被打断（最多 46×30s），
+  把最后一次 `Flush` 挤进强杀窗口。改成调 Ctx 版本。【复核】真（又是我"只接了一半"）。
+* **BUG-06 面板「全部接受」：mp 任务不分片、成功后无条件白睡 1.05s** ——
+  Web 侧按 20 条分片，mp 侧一次全量提交（任务变多时上游可能整批拒收），
+  且成功后无论后面还有没有事都 `sleepAB(1.05s)`。改成与 Web 分支对齐：
+  分片 + 只有还有下一批才节流。【复核】真。
+* **BUG-07 夜猫子对话：不可取消的 `time.Sleep(4s)`，且最后一轮白等** ——
+  每轮结束固定睡 4s（最后一轮也睡 → 3 次对话固定多耗 4s），且不可取消
+  （`RunNightChats` 无 ctx）。新增 `RunNightChatsCtx`，最后一轮不睡、等待可被 ctx 打断；
+  scheduler 改调 Ctx 版本。【复核】真。
+* **BUG-08 `NoteModelCost` 在余额不足时把扣费余数吞掉** —— **我 v1.27.6 的修复有漏洞**：
+  `credits=1` 而本次消费 `3.5` 时，先按未钳制的 `d=3` 扣了余数、再把 `d` 钳成 1 扣余额 ——
+  另外 2 分**既没扣余额也没留在余数里**，插值余额凭空高估 2 分 → `credit_floor` 延后触发，
+  正是保底要防的"打穿"。
+  改成 `d > e.credits` 时余数清零、只扣现有余额（欠的部分已无从抵扣）。【复核】真。
+* **BUG-09 `rebuild.sh` 编译失败仍以 0 退出** —— 循环里只打印 FAIL 就继续，末尾没有 exit，
+  接在 CI/发版流水线里就是"构建失败但流水线绿"。加 `rc` 累计 + 末尾 `exit "$rc"`。【复核】真。
+
+### P2
+
+* **BUG-10 桌面事件 `X-Request-ID` 同微秒可能重复** —— `deriveID(a,"req")` 对同账号恒定，
+  后缀只有 `UnixNano()%1e6`（6 位微秒尾数），同账号同微秒两次上报会撞 ID。
+  加进程内 `atomic.Uint64` 序号。【复核】真。
+* **BUG-11 `syncNicknames` 为每个账号起 goroutine，sem 在 goroutine 内抢** ——
+  46 个号 = 46 个 goroutine、43 个阻塞在 `sem` 上，"并发上限"形同虚设。
+  改成派发循环里先抢信号量再起 goroutine。【复核】真。
+
+### 误报（未按报告改，附理由）
+
+* **BUG-12 三个脚本 shebang 在本机不存在** —— 机制不成立：`/sdcard` 是 **noexec** 挂载、
+  文件也没有 +x，`./signin.sh` 在读到 shebang 之前就 `Permission denied`
+  （实测：`bash: ./signin.sh: Permission denied`）。所谓 `bad interpreter` 在这台机器上
+  **根本走不到**。
+  而且这三个脚本是 **Docker 镜像里要用的**（`COPY login.sh signin.sh credit.sh /app/` +
+  `chmod 755`，镜像内 `apk add bash`），把 shebang 改成 Android 绝对路径会**直接破坏容器部署**。
+  处理：shebang 统一成可移植的 `#!/usr/bin/env bash`（原 `signin.sh` 是 `#!/bin/bash`），
+  并在三个文件头加一行使用说明（容器内 `./x.sh`；本机 `bash x.sh`）。
+
+### 附带：把一条依赖外网的 flaky 测试修成"不通就跳过"
+
+`TestModelsEndpoint` 之前用 `upstream.New()` 真打外网（`/v1/models` 是**纯动态、无静态兜底**
+的目录），网络抖动时会卡满 10s 超时再变红 —— 我这轮就撞到一次（10.01s FAIL，重跑 0.65s 通过）。
+改成「拿不到目录就 `t.Skip` 并说明是环境问题」，不再伪装成回归。
+
+### 测试
+
+`upstream 213 / server 92 / pool 186 / panel 44 / session 20 / redisstore 6 / reqlog 7 /
+auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**727 通过 0 失败**；`gofmt -l` 为 0。
+
+## v1.27.7
 
 **本版 = 第十三份审查报告（17 条）的落地修复。逐条复核：17 条全部为真、0 误报。
 #1 是上一版（v1.27.6）我自己引入的；另外顺手修了一个更严重的问题 ——

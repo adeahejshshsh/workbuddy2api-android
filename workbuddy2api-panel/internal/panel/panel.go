@@ -631,11 +631,19 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	checkinMsg := ""
 	checkinDone := false
+	checkinSkipped := false // 无签到体系（global/企业）：不是失败，也不是"签到完成"（bug-13）
 	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，
 	// 端点退化为「刷新额度」——企业额度走 get-enterprise-user-usage 口径（见 upstream）。
 	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
-	if a.IsEnterprise() {
+	if a.IsGlobal() {
+		// 国际版账号没有签到体系（bug-01）：daily-checkin 端点只存在于 CN 域，
+		// 对 global 号打过去必然 404。调度器侧早有 D4 门控，面板单号入口漏了 ——
+		// 同一个事实在两处口径不一致，用户看到的是"网关坏了"。
+		checkinMsg = "国际版账号无签到体系（已跳过签到，仅刷新额度）"
+		checkinSkipped = true
+	} else if a.IsEnterprise() {
 		checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
+		checkinSkipped = true
 	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		// 幂等拒绝（今天已签到）是**正常结果**，不是错误（bug #13）：此前把
 		// err.Error() 原样回给前端，toast 会拼出「（code=10001 msg=今天已签到）」
@@ -652,8 +660,14 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		checkinDone = true
 	}
 	resp := map[string]any{"ok": true, "checkin_done": checkinDone}
+	if checkinSkipped {
+		resp["checkin_skipped"] = true // 前端据此显示"已跳过"而不是"签到完成/失败"
+	}
 	if a.IsEnterprise() {
 		resp["enterprise"] = true
+	}
+	if a.IsGlobal() {
+		resp["realm"] = "global"
 	}
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
@@ -882,6 +896,9 @@ func (p *Panel) syncNicknames() {
 		wg      sync.WaitGroup
 	)
 	for _, j := range jobs {
+		// 先抢信号量再起 goroutine（bug-11）：此前在 goroutine 内抢，46 个号就是
+		// 46 个 goroutine 同时创建、43 个阻塞在 sem 上 —— 并发上限形同虚设。
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(j job) {
 			defer wg.Done()
@@ -892,7 +909,6 @@ func (p *Panel) syncNicknames() {
 					log.Printf("ERR: [panel] syncNicknames panic uid=%s: %v", j.a.UID, r)
 				}
 			}()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 			nick, err := p.cfg.Upstream.FetchAccountProfile(j.a)
 			if err != nil {
