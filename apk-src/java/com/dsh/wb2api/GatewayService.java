@@ -204,6 +204,12 @@ public class GatewayService extends Service {
         try { c.stopService(new Intent(c, GatewayService.class)); } catch (Throwable ignored) {}
     }
 
+    /** 指定进程是否还活着（bug P1-1：静态 alive() 只看 proc，而 killProc 已把它置 null）。 */
+    static boolean isAlive(Process p) {
+        if (p == null) return false;
+        try { p.exitValue(); return false; } catch (IllegalThreadStateException e) { return true; }
+    }
+
     public static boolean alive() {
         Process p = proc;
         if (p == null) return false;
@@ -386,8 +392,16 @@ public class GatewayService extends Service {
         boot.execute(new Runnable() {
             public void run() {
                 if (old != null) {
-                    try { old.waitFor(4, java.util.concurrent.TimeUnit.SECONDS); }
-                    catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    // 等旧进程真正退出，窗口要 ≥ 网关的优雅停机预算（bug P1-1）。
+                    // Go 侧 srv.Shutdown 用的是 5s：有在途 SSE 时必然跑满，而这里原先
+                    // 只等 4s 就拉新进程 → 新进程 bind: address already in use 立刻退出
+                    // → 看门狗退避 2s 再拉一次，用户看到"重启了两次"、自愈计数 +1。
+                    // 轮询 isAlive 而不是 waitFor 固定时长：旧进程提前退出就不用干等。
+                    long deadline = System.currentTimeMillis() + 8000; // ≥ 5s 停机预算
+                    while (System.currentTimeMillis() < deadline && isAlive(old)) {
+                        try { Thread.sleep(150); }
+                        catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                    }
                 }
                 // 等待窗口里用户点了「停止」（userStop=true 且已 stopSelf）：
                 // 这时再拉起就是一个没人看门狗、没 wakelock、没 alarm 的孤儿进程，

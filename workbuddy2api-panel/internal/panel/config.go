@@ -36,9 +36,17 @@ func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "config api not available")
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	// 多读 1 字节判断超长（bug P2-3）：外层 ServeHTTP 允许 32MB，这里 1MB 之外
+	// 被静默截断 → SaveConfig 报 "unexpected end of JSON input"，用户看到的是语法
+	// 错误，根本不知道是体积超了。
+	raw, err := io.ReadAll(io.LimitReader(r.Body, panelMaxJSONBytes+1))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	if len(raw) > panelMaxJSONBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			"config body too large (limit 1MB)")
 		return
 	}
 	restartRequired, err := p.cfg.SaveConfig(raw)

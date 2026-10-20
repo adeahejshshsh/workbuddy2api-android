@@ -141,6 +141,13 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 存活探针（bug P2-2）：/healthz 是「可服务」语义（池里没有可用账号就 503），
+	// 用它做容器健康检查会让"刚起来还没加账号"的容器永远 unhealthy，
+	// 下游 depends_on: service_healthy 直接永久卡住。进程活着就该 2xx，用 /livez。
+	h.mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Service", ServiceName)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": ServiceName})
+	})
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
 	}

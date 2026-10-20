@@ -480,15 +480,16 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	merged := mergeConfigMaps(cur, incoming)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
-	newCfg, err := ParseConfig(mergedJSON(merged))
-	if err != nil {
+	// 顺序必须是「解析 → 叠 env → 校验」（bug B1 / P0-1）：
+	// ① ParseConfig 内部就 normalize，而 checkListenKey 要看 api_key —— 用
+	//    WB2A_API_KEY 起服务时文件里那个键是空的，校验会先把保存请求拒掉；
+	// ② 即便校验通过，直接把 newCfg 灌进 livecfg 也会把 env 提供的密钥/软冷却/
+	//    脱敏开关覆盖成文件值（常为空），鉴权当场失效而日志还说"已立即生效"。
+	// 所以这里跟 Load 走同一套：Default → ApplyJSON → applyEnv → normalize。
+	newCfg := Default()
+	if err := ApplyJSON(mergedJSON(merged), newCfg); err != nil {
 		return nil, err
 	}
-	// 保存路径也要叠一遍环境变量（bug B1）：ParseConfig 只做 Default+JSON+normalize，
-	// 不读 WB2A_*。而下面会把这个 newCfg 直接灌进 livecfg / upstream 的热生效字段 ——
-	// 用 WB2A_API_KEY 起服务时，面板随便改一项保存就把 APIKey 覆盖成文件里的值（常为空），
-	// 鉴权当场失效，日志还说"已立即生效"。与启动路径（Load 里 applyEnv 在 normalize 前）
-	// 保持同一口径。
 	applyEnv(newCfg)
 	if err := newCfg.normalize(); err != nil {
 		return nil, err

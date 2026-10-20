@@ -350,7 +350,10 @@ function go(v) {
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
-  if (v === 'models' && !$('mdBody').children.length) loadModels();
+  // 用「成功加载」标记判断（bug P2-4）：此前看 mdBody 有没有子节点，
+  // 而 loadModels 失败时会写一行错误进去 → children.length 非 0 → 之后
+  // 每次切回「模型与档位」都不再自动请求，一直显示那行旧错误，只能手点刷新。
+  if (v === 'models' && !mdLoaded) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
@@ -638,6 +641,9 @@ function rateCell(m) {
   return m.credits ? esc(m.credits) : '—';
 }
 
+// mdLoaded 上次 loadModels 是否成功（失败保持 false，切回来会重试）
+let mdLoaded = false;
+
 async function loadModels() {
   const tb = $('mdBody');
   tb.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
@@ -650,6 +656,7 @@ async function loadModels() {
     mdAll = d.models || [];
     mdProbes = pr.probes || {};
     if (!mdAll.length) {
+      mdLoaded = true; // 上游确实没返回：算加载成功，不必反复重试
       tb.innerHTML = '<tr><td colspan="7"><div class="empty">上游未返回模型</div></td></tr>';
       $('mdCount').textContent = '';
       $('mdNote').textContent = '上游未返回模型';
@@ -660,8 +667,10 @@ async function loadModels() {
     mdProbeOf = id => mdProbes[id] || mdProbes[probeKeys.find(k => k.endsWith(':' + id))];
     const hit = mdAll.filter(m => mdProbeOf(m.id)).length;
     $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '') + ((d.hidden_tier && !showTier) ? ' · 已按账号等级隐藏 ' + d.hidden_tier + ' 个（勾选左侧开关可显示）' : (showTier && mdAll.some(m => m.tier_denied) ? ' · 其中 ' + mdAll.filter(m => m.tier_denied).length + ' 个标记为等级不支持' : ''));
+    mdLoaded = true;
     renderModels();
   } catch (e) {
+    mdLoaded = false;
     mdAll = [];
     tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(e.message) + '</div></td></tr>';
     $('mdCount').textContent = '';

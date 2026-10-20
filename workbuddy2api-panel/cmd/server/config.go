@@ -323,22 +323,37 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
 		}
-		if _, err := ParseConfigInto(raw, c); err != nil {
+		// 只做 JSON 覆盖，**不校验**（bug P0-1）：ParseConfigInto 内部会 normalize，
+		// 而 normalize 里的 checkListenKey 要看 api_key —— 此时 applyEnv 还没跑，
+		// "文件里只写 listen、密钥走 WB2A_API_KEY" 这种最常见的容器部署会直接
+		// 报「必须配置非空 api_key」起不来，尽管环境变量里明明有。
+		if err := ApplyJSON(raw, c); err != nil {
 			return nil, err
 		}
 	}
-	applyEnv(c)
+	applyEnv(c) // 必须在 normalize 之前
 	if err := c.normalize(); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
+// ApplyJSON 只把 JSON 覆盖到 c 上，不做 normalize（不校验、不补默认）。
+//
+// 调用方必须自己保证顺序：ApplyJSON → applyEnv → normalize。
+// 顺序错了就会出现「env 里的密钥还没生效、校验已经用文件里的空值把你拦下」（bug P0-1）。
+func ApplyJSON(raw []byte, c *Config) error {
+	if err := json.Unmarshal(raw, c); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	return nil
+}
+
 // ParseConfigInto 把 JSON 覆盖到 c 上并 normalize（不做 env、不读文件）。
 // 面板保存配置走这条路径：与 Load 完全同一套解析/校验逻辑，避免两处漂移。
 func ParseConfigInto(raw []byte, c *Config) (*Config, error) {
-	if err := json.Unmarshal(raw, c); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	if err := ApplyJSON(raw, c); err != nil {
+		return nil, err
 	}
 	if err := c.normalize(); err != nil {
 		return nil, err
@@ -536,6 +551,12 @@ func (c *Config) normalize() error {
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
 	}
+	// 空值回落（bug P1-2）：与 breaker_cooldown / degrade_cooldown / soft_rate_max 同一口径。
+	// 此前这三个字段没兜底，config 里写 "" （用户以为"删掉=用默认"）会让
+	// ParseDuration("") 失败、进程直接起不来。
+	if c.Cooldown.SoftRate == "" {
+		c.Cooldown.SoftRate = "600s"
+	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
 	}
@@ -574,6 +595,12 @@ func (c *Config) normalize() error {
 	if c.DegradeCooldownMaxD, err = time.ParseDuration(c.Pool.DegradeCooldownMax); err != nil {
 		return fmt.Errorf("pool.degrade_cooldown_max: %w", err)
 	}
+	if c.SessionSticky.TTL == "" { // 空值回落（bug P1-2）
+		c.SessionSticky.TTL = "30m"
+	}
+	if c.SessionSticky.GCInterval == "" {
+		c.SessionSticky.GCInterval = "5m"
+	}
 	if c.SessionTTL, err = time.ParseDuration(c.SessionSticky.TTL); err != nil {
 		return fmt.Errorf("session_sticky.ttl: %w", err)
 	}
@@ -610,14 +637,10 @@ func (c *Config) normalize() error {
 		c.Pool.BreakerThreshold = 3
 	}
 	// 连败降权参数缺省归一（非法/未设置回落默认，与 breaker_threshold 同风格）。
+	// DegradeCooldown / DegradeCooldownMax 的空值回落已在上面的 duration 段做过
+	// （bug P2-1：这里原有一份重复判断，且那时值早已被 ParseDuration 用过，永不命中）。
 	if c.Pool.DegradeThreshold <= 0 {
 		c.Pool.DegradeThreshold = 5
-	}
-	if c.Pool.DegradeCooldown == "" {
-		c.Pool.DegradeCooldown = "10m"
-	}
-	if c.Pool.DegradeCooldownMax == "" {
-		c.Pool.DegradeCooldownMax = "2h"
 	}
 	// global 在途分档：0/负数视为未设置回落默认 2（WAF 403 修复 P1-1）。
 	if c.Pool.MaxInFlightGlobal <= 0 {

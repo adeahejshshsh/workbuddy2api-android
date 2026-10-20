@@ -703,7 +703,14 @@ func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunCheckinNow()
+	if !p.cfg.Scheduler.TryBeginTask(scheduler.TaskCheckin) {
+		writeErr(w, http.StatusConflict, "上一轮全量签到仍在执行（同一任务族不允许并发两轮），请等它结束")
+		return
+	}
+	go func() {
+		defer p.cfg.Scheduler.EndTask(scheduler.TaskCheckin)
+		p.cfg.Scheduler.RunCheckinNow()
+	}()
 	log.Printf("panel: 手动全量签到已触发（猫猫旅行是独立排程，需另点「旅行巡检」）")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
@@ -714,7 +721,14 @@ func (p *Panel) travelAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunTravelNow()
+	if !p.cfg.Scheduler.TryBeginTask(scheduler.TaskTravel) {
+		writeErr(w, http.StatusConflict, "上一轮旅行巡检仍在执行，请等它结束")
+		return
+	}
+	go func() {
+		defer p.cfg.Scheduler.EndTask(scheduler.TaskTravel)
+		p.cfg.Scheduler.RunTravelNow()
+	}()
 	log.Printf("panel: 手动全量旅行巡检已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
@@ -725,7 +739,14 @@ func (p *Panel) activityAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunActivityNow()
+	if !p.cfg.Scheduler.TryBeginTask(scheduler.TaskActivity) {
+		writeErr(w, http.StatusConflict, "上一轮活跃上报仍在执行，请等它结束")
+		return
+	}
+	go func() {
+		defer p.cfg.Scheduler.EndTask(scheduler.TaskActivity)
+		p.cfg.Scheduler.RunActivityNow()
+	}()
 	log.Printf("panel: 手动全量活跃上报已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
@@ -736,7 +757,14 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunKeepaliveNow()
+	if !p.cfg.Scheduler.TryBeginTask(scheduler.TaskKeepalive) {
+		writeErr(w, http.StatusConflict, "上一轮 token 保活仍在执行，请等它结束")
+		return
+	}
+	go func() {
+		defer p.cfg.Scheduler.EndTask(scheduler.TaskKeepalive)
+		p.cfg.Scheduler.RunKeepaliveNow()
+	}()
 	log.Printf("panel: 手动全量保活已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
@@ -752,7 +780,12 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
+	if !p.cfg.Scheduler.TryBeginTask(scheduler.TaskBalance) {
+		writeErr(w, http.StatusConflict, "上一轮余额刷新仍在执行，请稍后再试")
+		return
+	}
 	go func() {
+		defer p.cfg.Scheduler.EndTask(scheduler.TaskBalance)
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("panel: 全量余额刷新 panic: %v", rec)

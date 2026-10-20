@@ -69,7 +69,10 @@ type Scheduler struct {
 
 	// mu/adoptTried 领养当日失败记录：uid → 自然日（CST）。门槛未达的账号当日不再重试，
 	// 避免同日多趟对上游重试轰炸；进程重启即清零（无需持久化）。
-	mu         sync.Mutex
+	mu sync.Mutex
+	// taskLocks 每个任务族一把锁（bug P0-3）：同一族不允许两轮并发。
+	// runBatch 与面板手动入口共用，key 见 Task* 常量。
+	taskLocks  sync.Map // key: string → *sync.Mutex
 	adoptTried map[string]string
 
 	// schedMu 保护排程参数（时点/开关）；Reconfigure 可在运行期热改（面板保存配置时调用）。
@@ -231,6 +234,56 @@ const (
 	taskBlackcat
 	taskGrowth
 )
+
+// 任务族键：面板包看不到未导出的 taskKind，手动入口按字符串共用同一把锁（bug P0-3）。
+const (
+	TaskCheckin   = "checkin"
+	TaskTravel    = "travel"
+	TaskActivity  = "activity"
+	TaskKeepalive = "keepalive"
+	TaskBlackcat  = "blackcat"
+	TaskGrowth    = "growth"
+	TaskBalance   = "balance"
+)
+
+// taskKindKey taskKind → 任务族键。
+func taskKindKey(k taskKind) string {
+	switch k {
+	case taskCheckin:
+		return TaskCheckin
+	case taskTravel:
+		return TaskTravel
+	case taskActivity:
+		return TaskActivity
+	case taskKeepalive:
+		return TaskKeepalive
+	case taskBlackcat:
+		return TaskBlackcat
+	case taskGrowth:
+		return TaskGrowth
+	}
+	return ""
+}
+
+// TryBeginTask 尝试占用某个任务族；false = 上一轮还在跑。
+// 面板手动入口用它决定回 409 还是开跑。
+func (s *Scheduler) TryBeginTask(key string) bool {
+	if key == "" {
+		return true
+	}
+	m, _ := s.taskLocks.LoadOrStore(key, &sync.Mutex{})
+	return m.(*sync.Mutex).TryLock()
+}
+
+// EndTask 释放 TryBeginTask 占用的任务族锁。
+func (s *Scheduler) EndTask(key string) {
+	if key == "" {
+		return
+	}
+	if m, ok := s.taskLocks.Load(key); ok {
+		m.(*sync.Mutex).Unlock()
+	}
+}
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
 // 多类任务若配到同一小时（如签到与旅行都含 9），该时刻多类任务需一并执行。
@@ -412,6 +465,22 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 		wg.Add(1)
 		go func(k taskKind) {
 			defer wg.Done()
+			// 任务族互斥（bug P0-3）：此前 runBatch 完全没锁，而签到/活跃一轮在慢上游
+			// 下可达几十分钟，跨过下一个时点就两批并发跑同一批账号 —— 重复签到、
+			// 重复上报、日志与状态互相覆盖，还更容易触发上游 WAF 频控。
+			key := taskKindKey(k)
+			if !s.TryBeginTask(key) {
+				log.Printf("scheduler: %s 上一轮仍在执行，跳过本轮", key)
+				return
+			}
+			defer s.EndTask(key)
+			// panic 兜底：这些 goroutine 不是 net/http 起的，Go 不会替它们 recover，
+			// 一次 panic 打死的是整个网关（与上一轮修的任务队列同类问题）。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERR: scheduler: %s 执行 panic: %v", key, r)
+				}
+			}()
 			switch k {
 			case taskCheckin:
 				s.RunCheckinNowCtx(ctx)
@@ -697,12 +766,16 @@ dispatch:
 }
 
 // StartBalanceRefresh 后台周期性余额刷新（独立 ticker goroutine，ctx 取消即停）。
-// interval<=0 不启动（schedule.balance_refresh_enabled=false 时 main 不调用即可）。
+// interval<=0 = 起步即暂停，但**循环照样创建**（bug P0-2）：此前直接 return，
+// 协程根本没建，之后面板把 schedule.balance_refresh_enabled 打开并保存时，
+// SetBalanceInterval 只 poke(rearmBalance) —— 那个 channel 没有任何监听者，
+// 余额永不后台刷新，只能重启进程。循环体本身已经能处理 cur<=0（等 rearm），
+// 所以这里不需要提前返回。
 // 独立于 Run 的小时制排程：余额是分钟级观测量，不值得为它扩展 nextFire 的粒度。
 // 运行期可用 SetBalanceInterval 热改间隔（下一轮生效）。
 func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		return
+	if interval < 0 {
+		interval = 0
 	}
 	s.balanceInterval.Store(int64(interval))
 	go func() {
@@ -730,7 +803,11 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 			case <-s.rearmBalance:
 				timer.Stop() // 间隔已变：立刻按新值重算
 			case <-timer.C:
-				s.RunBalanceRefreshNow()
+				// 与面板「刷新余额」共用任务族锁（bug P0-3）：两路同时扇出会双倍打上游。
+				if s.TryBeginTask(TaskBalance) {
+					s.RunBalanceRefreshNow()
+					s.EndTask(TaskBalance)
+				}
 			}
 		}
 	}()

@@ -1,5 +1,82 @@
 # 变更记录
 
+## v1.27.2（当前）
+
+**本版 = 第八份审查报告（9 条）的落地修复。按主人要求先逐条复核：9 条全部为真，0 误报。
+其中 P0-1 让我上一版的修复失效、P0-3 是我上一版写了个假注释 —— 两条都在这版纠正。**
+
+### P0
+
+* **P0-1 环境变量在校验之后才生效：非回环 listen + `WB2A_API_KEY` 起不来** ——
+  `Load` 调 `ParseConfigInto`，而它内部就 `normalize()`（含 `checkListenKey`，用的是**文件里的
+  空 key**），`applyEnv` 在这之后才跑。于是「config.json 只写 listen、密钥走环境变量」这种最常见
+  的容器/自托管形态直接 `fatal: 必须配置非空 api_key`，起不来。
+  修法：新增 `ApplyJSON`（只 unmarshal、不校验），把 `Load` 与面板 `saveConfig` 都改成
+  固定顺序 **解析 → 叠 env → normalize（只跑一次）**。
+  【复核】真。并且我上一版给 `saveConfig` 补的 `applyEnv` **救不了** —— `ParseConfig` 那一步
+  就先报错了，面板连保存都做不了。
+* **P0-2 余额后台刷新在「启动时关闭」之后永远开不起来** —— `StartBalanceRefresh` 在
+  `interval <= 0` 时直接 return，循环 goroutine 根本没创建；之后面板打开开关保存，
+  `SetBalanceInterval` 只写 atomic + `poke(rearmBalance)`，而那个 channel **没有任何监听者**
+  → 余额永不后台刷新，只能重启进程。循环体本身已经能处理 `cur<=0`（等 rearm），
+  所以删掉提前 return、永远建循环即可。
+  【复核】真。
+* **P0-3 调度任务族没有互斥，批次会重叠** —— `runBatch` 每族一个 goroutine、**零互斥**
+  （全包只有 `mu` 记领养日、`schedMu` 保护配置快照）。签到一轮在慢上游下可达几十分钟，
+  跨过下一个时点就两批并发跑同一批账号；面板 5 个「全部xxx」按钮每点一次 `go RunXxxNow()`
+  可以叠出任意多轮。
+  修法：新增 `taskLocks sync.Map` + `TryBeginTask/EndTask`（按字符串任务族键，面板包也能用），
+  `runBatch` 拿不到锁就打日志跳过本轮，面板 5 个手动入口拿不到锁回 **409**，余额定时循环与
+  「刷新余额」共用 `TaskBalance` 锁。顺手给 runBatch 的 goroutine 补 `recover`
+  （同类问题：非 http 起的 goroutine 一次 panic 打死整个进程）。
+  【复核】真 —— 而且 **v1.27.1 我把 `runBatch` 改成异步时还写了句「同族重入由任务族互斥承担」，
+  那是假话**：异步反而让重叠更容易发生。这版把互斥真正做出来了。
+
+### P1
+
+* **P1-1 APK 重启只等 4s，短于网关 5s 停机预算 → 高概率撞端口** —— `restartGateway` 里
+  `old.waitFor(4s)`，而 Go 侧 `srv.Shutdown` 预算 5s（有在途 SSE 时必然跑满）→ 新进程
+  `bind: address already in use` 立刻退出 → 看门狗退避 2s 再拉一次，用户看到「重启了两次」、
+  自愈计数 +1。改成轮询 `isAlive(old)`、截止 8s（旧进程提前退出就不干等）。
+  【复核】真：`alive()` 只看静态 `proc`，而 `killProc()` 已把它置 null，等不到旧进程退出。
+* **P1-2 配置空值回落不对称：删掉一个值就起不来** —— `breaker_cooldown` /
+  `degrade_cooldown` / `soft_rate_max` 都有「空串 → 回落默认」，但
+  `cooldown.soft_rate`、`session_sticky.ttl`、`session_sticky.gc_interval` 没有 ——
+  写 `""`（用户以为「删掉 = 用默认」）→ `time.ParseDuration("")` 失败 → 启动直接失败。
+  三处补齐，位置都在 `ParseDuration` 之前。
+  【复核】真：全文件 grep 不到这三处的 `== ""` 判断。
+
+### P2
+
+* **P2-1 `normalize` 里的重复死代码** —— `Pool.DegradeCooldown == ""` 出现两次
+  （前一处已兜底并 `ParseDuration` 过），第二处永远命中不了，删掉。
+  【复核】真（删的是后一处，前一处仍在 `ParseDuration` 之前，行为不变）。
+* **P2-2 空池时容器永远 unhealthy** —— `HEALTHCHECK` 打 `/healthz`，而它在池里没有可用账号时
+  返回 503 → 新容器（还没加账号）一直 `unhealthy`，用 `depends_on: service_healthy` 的下游
+  永久卡住。新增恒 200 的 `GET /livez`（带 `X-Service` 头与 `service` 字段），
+  `HEALTHCHECK` 指过去；`/healthz` 保留「可服务」语义不变。
+  【复核】真。
+* **P2-3 面板保存配置时请求体被静默截断** —— `io.LimitReader(r.Body, 1<<20)` 把 1MB 之外
+  静默丢掉，随后报 `unexpected end of JSON input` —— 用户看到语法错误，不知道是体积超了。
+  改成多读 1 字节判断超长并回 **413**。
+  【复核】真。
+* **P2-4 模型页加载失败后不再自动重载** —— 视图切换判据是 `!$('mdBody').children.length`，
+  而 `loadModels` 失败时会往 `mdBody` 写一行错误 → children 非 0 → 之后每次切回来都不再请求，
+  一直显示旧错误。改用「成功加载」标记 `mdLoaded`（失败保持 false，切回重试；上游确实没返回
+  模型时算成功）。
+  【复核】真。
+
+### 测试
+
+新增 5 个回归：
+- `TestLoadEnvKeySatisfiesNonLoopbackListen`（env 密钥必须满足非回环守卫）
+- `TestLoadNonLoopbackWithoutKeyStillFails`（守卫不能被削弱）
+- `TestNormalizeEmptyDurationFieldsFallBack`（空时长回落默认）
+- `TestLivezAlwaysOKWithEmptyPool` / `TestHealthzStill503WhenEmpty`（两个端点的语义边界）
+
+`upstream 204 / server 92 / pool 184 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 51`，**698 通过 0 失败**；`gofmt -l` 为 0。
+
 ## v1.27.1（当前）
 
 **本版 = 第七份审查报告（18 条）的落地修复。按主人要求先逐条复核：17 条为真、1 条误报。**
