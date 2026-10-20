@@ -490,6 +490,10 @@ func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, di
 		}
 		total++
 		switch {
+		case e.needAuth:
+			// 占位号（凭证未加载）单独按 disabled 计（bug #6）：此前它落到 cooling，
+			// 运维看到"有 N 个号在冷却"，真实原因是"凭证还没加载"，排查方向完全不同。
+			disabled++
 		case e.disabled:
 			disabled++
 		case e.paused:

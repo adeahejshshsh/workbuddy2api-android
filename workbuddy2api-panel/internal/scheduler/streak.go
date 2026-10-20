@@ -86,8 +86,10 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 			log.Printf("streak-bonus %s: redeem %s: %v", logfmt.Label(a.UID, a.NicknameValue()), tier.Tier, err)
 			continue
 		}
+		// 用 logfmt.Label 保持全仓 uid8 口径（bug #10）：这一行原本直接打完整 UID，
+		// 面板日志/归档里的账号标识格式不一致，grep 与对账都要多一步。
 		log.Printf("streak-bonus %s: ★ 兑换 %s 档（+%dc +%de 卡×%d 抽奖×%d）",
-			a.UID, tier.Tier, tier.Credit, tier.Energy, tier.Cards, tier.Chances)
+			logfmt.Label(a.UID, a.NicknameValue()), tier.Tier, tier.Credit, tier.Energy, tier.Cards, tier.Chances)
 	}
 	// 抽奖：按当前 chances 全抽完（兑换刚发的次数已在服务端累加）。
 	chances, err := s.cfg.Upstream.LotteryChances(a)

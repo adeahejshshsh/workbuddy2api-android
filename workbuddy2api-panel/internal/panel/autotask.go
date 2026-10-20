@@ -1550,7 +1550,11 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 
 	for _, act := range autoActions {
 		item := map[string]any{"task_code": act.TaskCode, "desc": act.Desc}
-		before, err := p.taskByCode(a, act.TaskCode)
+		// 用**实际**任务码（bug #7）：动作可能按域换码（WorkBuddy_Valorant 国际服用
+		// 不同 code），而这里此前全程用 act.TaskCode —— 国际服账号在"一键完成全部"里
+		// before==nil → 记一条"该账号无此任务"，同一任务用单任务按钮却能跑通。
+		effCode := p.effectiveTaskCode(a, act.TaskCode)
+		before, err := p.taskByCode(a, effCode)
 		if err != nil {
 			item["status"] = "error"
 			item["message"] = "查询失败: " + err.Error()
@@ -1577,7 +1581,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			out = append(out, item)
 			continue
 		}
-		if blocked, why := p.skipBlocked(a.UID, act.TaskCode); blocked {
+		if blocked, why := p.skipBlocked(a.UID, effCode); blocked { // 同口径用实际码（bug #7）
 			item["status"] = "skipped"
 			item["message"] = "已跳过（判定做不了）：" + why
 			out = append(out, item)
@@ -1591,10 +1595,10 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			continue
 		}
 		var after *upstream.Task
-		if isMPTaskCode(act.TaskCode) {
-			after, _ = p.taskByCodeMP(a, act.TaskCode)
+		if isMPTaskCode(effCode) {
+			after, _ = p.taskByCodeMP(a, effCode)
 		} else {
-			after, _ = p.taskByCodeWaiting(a, act.TaskCode)
+			after, _ = p.taskByCodeWaiting(a, effCode)
 		}
 		item["status"] = "done"
 		item["message"] = msg
@@ -1606,10 +1610,10 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			var credit, energy int64
 			var already bool
 			var cerr error
-			if isMPTaskCode(act.TaskCode) {
-				credit, energy, already, cerr = p.cfg.Upstream.ClaimRewardMP(a, act.TaskCode)
+			if isMPTaskCode(effCode) {
+				credit, energy, already, cerr = p.cfg.Upstream.ClaimRewardMP(a, effCode)
 			} else {
-				credit, energy, already, cerr = p.cfg.Upstream.ClaimReward(a, act.TaskCode)
+				credit, energy, already, cerr = p.cfg.Upstream.ClaimReward(a, effCode)
 			}
 			if cerr == nil {
 				// 成功 = 无错误（bug #6）；already 只决定文案。

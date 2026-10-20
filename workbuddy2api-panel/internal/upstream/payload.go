@@ -99,28 +99,35 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 // API，翻译不分 realm。
 func translateMaxCompletionTokens(obj map[string]any) {
 	alias, has := obj["max_completion_tokens"]
-	delete(obj, "max_completion_tokens") // 无论翻译与否，别名一律删（减少 body 体积与排障噪音）
 	if !has {
 		return
 	}
-	if _, explicit := obj["max_tokens"]; explicit {
-		return // 显式 max_tokens 优先：别名只删不译
+	// 只在**真正翻译成功**后才删别名（bug #1）：此前第一行就 delete，于是
+	//   - 小数（1000.5）→ 别名没了、max_tokens 没写 → 上游回落自己的默认上限，长任务被截；
+	//   - 字符串（"1000"）→ 同样被删，而函数注释承诺"非数值别名不翻译、原样透传
+	//     由上游报 11101" —— 删掉之后连 11101 都报不出来。
+	// 现在：能翻成正整数就翻（小数四舍五入），翻不了就保留别名交给上游判定。
+	if _, explicit := obj["max_tokens"]; !explicit {
+		// json.Unmarshal 数字 → float64（整数去整后回写，避免 1.28e5 科学计数法/小数
+		// 尾巴进上游 body）；其他数值类型防御性兼容（int 家族——手构造 map 的调用方）。
+		switch v := alias.(type) {
+		case float64:
+			if n := int64(v + 0.5); n > 0 { // 小数四舍五入（1000.5 → 1001）
+				obj["max_tokens"] = n
+			}
+		case int64:
+			if v > 0 {
+				obj["max_tokens"] = v
+			}
+		case int:
+			if v > 0 {
+				obj["max_tokens"] = int64(v)
+			}
+		}
 	}
-	// json.Unmarshal 数字 → float64（整数去整后回写，避免 1.28e5 科学计数法/小数
-	// 尾巴进上游 body）；其他数值类型防御性兼容（int 家族——手构造 map 的调用方）。
-	switch v := alias.(type) {
-	case float64:
-		if v > 0 && v == float64(int64(v)) {
-			obj["max_tokens"] = int64(v)
-		}
-	case int64:
-		if v > 0 {
-			obj["max_tokens"] = v
-		}
-	case int:
-		if v > 0 {
-			obj["max_tokens"] = int64(v)
-		}
+	// 翻译完成（或显式 max_tokens 已存在）才删别名；翻译失败保留原样透传。
+	if _, explicit := obj["max_tokens"]; explicit {
+		delete(obj, "max_completion_tokens")
 	}
 }
 
@@ -150,7 +157,9 @@ func clampGPTMinMaxTokens(obj map[string]any) {
 	default:
 		return
 	}
-	if v < gptMinMaxTokens {
+	// 只钳「正但过小」的值（bug #19）：0 与负数在客户端语义里常表示"用模型默认上限"，
+	// 抬到 16 会把响应截成 16 token（静默截断比让上游报 11133 更糟 —— 后者可诊断）。
+	if v > 0 && v < gptMinMaxTokens {
 		obj["max_tokens"] = int64(gptMinMaxTokens)
 		log.Printf("max_tokens clamped model=%s %d -> %d", model, v, gptMinMaxTokens)
 	}

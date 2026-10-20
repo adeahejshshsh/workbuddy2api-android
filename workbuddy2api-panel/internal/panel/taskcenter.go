@@ -186,6 +186,12 @@ scanLoop:
 		go func(i int, uid string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer func() { // panic 兜底（bug #14）
+				if r := recover(); r != nil {
+					log.Printf("ERR: [panel] tasksScanAll panic uid=%s: %v", uid, r)
+					items[i].GrowthErr = "内部错误"
+				}
+			}()
 			a := p.cfg.Pool.AuthByUID(uid)
 			if a == nil {
 				return
@@ -391,6 +397,11 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 		go func(a *auth.Auth) {
 			defer wg.Done()
 			defer func() { <-scanSem }()
+			defer func() { // panic 兜底（bug #14）
+				if r := recover(); r != nil {
+					log.Printf("ERR: [panel] growth scan panic uid=%s: %v", a.UID, r)
+				}
+			}()
 			one := queueAccount{a: a}
 			// D4 门控：global 账号无 CN 成长任务体系，不发起任何上游调用。
 			if a.IsGlobal() {
@@ -788,6 +799,12 @@ func (p *Panel) schoolVouchers(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			defer func() { // panic 兜底（bug #14）
+				if r := recover(); r != nil {
+					log.Printf("ERR: [panel] schoolVouchers panic uid=%s: %v", a.UID, r)
+					out[i] = row{UID: a.UID, Nickname: a.Nickname, Err: "内部错误"}
+				}
+			}()
 			it := row{UID: a.UID, Nickname: a.Nickname}
 			switch {
 			case a.IsGlobal():

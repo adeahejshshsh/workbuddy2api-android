@@ -58,7 +58,11 @@ def load_auth(uid_or_file: str) -> dict:
     # encoding 必须显式指定：Windows 上 open() 默认用 locale 代码页（中文系统为
     # GBK），而 auth 文件是 UTF-8，非 ASCII 昵称会 UnicodeDecodeError 中断全部任务。
     d = json.load(open(p, encoding="utf-8"))
-    a, acc = d["auth"], d["account"]
+    # 兼容两种磁盘形态（bug #17）：Go 的 auth.Parse 同时支持嵌套形
+    # {"auth":{...},"account":{...}} 与扁平形 {"accessToken":...}（手写/旧版），
+    # 这里写死 d["auth"] 会在扁平文件上 KeyError 中断整批任务。
+    a = d.get("auth") or d
+    acc = d.get("account") or d
     return {"token": a["accessToken"], "domain": a.get("domain") or "",
             "uid": acc["uid"], "nick": acc.get("nickname", ""),
             "file": os.path.basename(p)}

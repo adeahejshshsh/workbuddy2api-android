@@ -340,19 +340,33 @@ func (a *Auth) SaveAtomic() error {
 	if prevRaw, rerr := os.ReadFile(a.FilePath); rerr == nil {
 		_ = json.Unmarshal(prevRaw, &doc)
 	}
-	// 已知键整组覆盖（不 merge 子键，避免残留旧 token 片段）。
-	doc["auth"] = map[string]any{
+	// 已知键覆盖、子对象里的**未知键保留**（bug #11）：此前 `doc["auth"] = map{...}`
+	// 是整组替换，用户在 auth/account 里手写的扩展键（自定义域字段、附加 token）
+	// 一次 refresh 后就消失 —— 而上面的注释承诺的是"保留手写的未知键"。
+	putMerged := func(key string, known map[string]any) {
+		dst := map[string]any{}
+		if old, ok := doc[key].(map[string]any); ok {
+			for k, v := range old {
+				dst[k] = v
+			}
+		}
+		for k, v := range known {
+			dst[k] = v
+		}
+		doc[key] = dst
+	}
+	putMerged("auth", map[string]any{
 		"accessToken":  a.AccessToken,
 		"refreshToken": a.RefreshToken,
 		"expiresAt":    a.ExpiresAt,
 		"domain":       a.Domain,
 		"realm":        a.realm,
-	}
-	doc["account"] = map[string]any{
+	})
+	putMerged("account", map[string]any{
 		"uid":          a.UID,
 		"enterpriseId": a.EnterpriseID,
 		"nickname":     a.Nickname,
-	}
+	})
 	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {

@@ -18,7 +18,10 @@ mkdir -p "$DATA"
 # 成对的 stop/start」。
 if [ -f "$DATA/watchdog.pid" ]; then
   OLD_WD="$(cat "$DATA/watchdog.pid" 2>/dev/null || true)"
-  if [ -n "$OLD_WD" ] && [ "$OLD_WD" != "$$" ] && kill -0 "$OLD_WD" 2>/dev/null; then
+  # 必须校验命令行（bug #16）：pid 会被系统复用，只 kill -0 会把无关进程当成
+  # "看门狗已在运行"直接 exit 0，实际没有任何看门狗在跑、网关挂了没人拉。
+  if [ -n "$OLD_WD" ] && [ "$OLD_WD" != "$$" ] && kill -0 "$OLD_WD" 2>/dev/null \
+     && tr '\0' ' ' < "/proc/$OLD_WD/cmdline" 2>/dev/null | grep -q 'watchdog.sh'; then
     echo "看门狗已在运行 pid=$OLD_WD（要重启先 kill 它）"
     exit 0
   fi

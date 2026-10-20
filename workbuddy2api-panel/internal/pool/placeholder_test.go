@@ -45,3 +45,49 @@ func TestSnapshotPlaceholderNotRoutableUntilCredsArrive(t *testing.T) {
 		t.Fatalf("拿到凭证后应当可选，got=%v", got)
 	}
 }
+
+// bug #4/#5 回归：needAuth 占位号不能给"模型可服务"作证、也不能计入分母。
+//
+// 场景：一个真号被模型级冷却挡住 + 一个只有 UID 的占位号。
+// 此前占位号会让 !modelCooled 命中并 return 空状态 → 全池"模型阻塞"被误报成
+// "池子没号"（503 no_healthy_account，客户端无限重试），而正确语义是 400
+// model_unavailable（换模型才有用）。
+func TestPlaceholderDoesNotVouchForModel(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	ms := &memStore{loadOK: true}
+	snap := snapshot{
+		stateFile: stateFile{Accounts: map[string]stateAccount{
+			"u1": {Credits: 100},
+			"u2": {Credits: 100}, // 这个永远拿不到凭证（占位）
+		}},
+		SavedAt: time.Now(),
+	}
+	ms.loadData, _ = json.Marshal(snap)
+	p := New(fp)
+	p.SetStore(ms)
+	p.RestoreFromSnapshot()
+
+	// u1 拿到真实凭证，u2 保持占位。
+	p.SyncToDir([]*auth.Auth{{UID: "u1", AccessToken: "at", ExpiresAt: time.Now().Add(time.Hour).Unix()}})
+	// 唯一真号对该模型进模型级冷却。
+	p.CooldownSoftForModel("u1", time.Hour, time.Now().Add(time.Hour), "glm-5.2", "6004 rate limited")
+
+	st := p.ModelBlockedForRealm("glm-5.2", "")
+	if !st.Blocked {
+		t.Fatalf("唯一真号已冷却，占位号不该救场；want Blocked=true got %+v", st)
+	}
+	if st.Count != 1 {
+		t.Errorf("Count=%d want 1（只算真正被冷却的号）", st.Count)
+	}
+
+	// 模型锁池视图：分母只算可路由的真号 → u1 被锁 1 个、Total 1 → locked 而非 starved。
+	mv := p.ModelLockView()
+	for _, r := range mv {
+		if r.Realm == "cn" || r.Realm == "" {
+			if r.Total != 1 {
+				t.Errorf("realm=%s Total=%d want 1（占位号不该计入分母）", r.Realm, r.Total)
+			}
+		}
+	}
+}

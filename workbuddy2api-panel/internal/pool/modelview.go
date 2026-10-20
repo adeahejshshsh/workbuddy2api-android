@@ -71,7 +71,10 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 
 	for _, e := range p.byUID {
 		realm := e.a.Realm()
-		if e.disabled || e.paused {
+		if e.disabled || e.paused || e.needAuth {
+			// needAuth 占位号必须跳过（bug #5）：它参与分母会让 Locked < Total 恒成立，
+			// 状态被判成 starved（"账号级冷却，等一下就好"），实际是 locked
+			// （换模型才有用）—— 面板给的处置建议是错的。
 			continue
 		}
 		routable[realm]++
@@ -113,8 +116,8 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 			Reason:        a.reason,
 		}
 		for _, e := range p.byUID {
-			if e.a.Realm() != realm {
-				continue
+			if e.a.Realm() != realm || e.needAuth {
+				continue // 占位号不可服务（bug #5，与 healthyForModel 同口径）
 			}
 			if e.healthyForModel(now, model) && !p.inFlightFull(e) {
 				row.Servable++

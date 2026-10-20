@@ -221,8 +221,11 @@ func TestBackfillZeroTraceThinkingEnabled(t *testing.T) {
 		t.Fatalf("assistant 消息数 = %d want 2 (out=%s)", len(got), out)
 	}
 	for i, rc := range got {
-		if rc != "" { // 既有 string（含空串）即满足；<absent>（键不存在）不满足
-			t.Errorf("零痕迹 enabled 形态下 assistant[%d].reasoning_content = %q want 存在且为 \"\" (out=%s)", i, rc, out)
+		// 契约升级（bug #2）：不只是"字段存在"，而是**非空**。
+		// 本文件顶部注释写明「上游 len>0 不 trim：空白串过闸、空串不过」——
+		// 留空串的 assistant 在该账号上照样 400，所以零痕迹形态必须补 " "。
+		if rc == "<absent>" || rc == "" {
+			t.Errorf("零痕迹 enabled 形态下 assistant[%d].reasoning_content = %q want 非空（\" \"）(out=%s)", i, rc, out)
 		}
 	}
 }
@@ -250,8 +253,10 @@ func TestBackfillNullAndNonStringNormalized(t *testing.T) {
 			if len(got) != 1 {
 				t.Fatalf("assistant 消息数 = %d want 1 (out=%s)", len(got), out)
 			}
-			if got[0] != "" || got[0] == "<absent>" {
-				t.Errorf("reasoning_content 应归一化为 \"\", got %q (out=%s)", got[0], out)
+			// 契约升级（bug #2）：null/非 string 归一化后必须**非空**
+			// （空串会被上游 len>0 校验拒掉，见文件顶部注释）。
+			if got[0] == "<absent>" || got[0] == "" {
+				t.Errorf("reasoning_content 应归一化为非空（\" \"）, got %q (out=%s)", got[0], out)
 			}
 		})
 	}

@@ -1085,7 +1085,16 @@ function collectConfig() {
       const raw = el.value.trim();
       // 覆盖型字段空串照发（见 CLEARABLE_CFG）；其余空 = 不下发。
       if (raw === '') v = CLEARABLE_CFG.has(name) ? '' : undefined;
-      else if (name.endsWith('_hours')) v = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
+      else if (name.endsWith('_hours')) {
+        // 非法小时必须当场拦下（bug #15）：`9, 2x` 会得到 [9, NaN]，
+        // JSON.stringify 把 NaN 变成 null，Go 反序列化 []int 时 null 保持零值 →
+        // 任务被悄悄排到 00:00 执行，前端一句提示都没有。
+        const arr = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
+        if (arr.some(n => !Number.isInteger(n) || n < 0 || n > 23)) {
+          throw new Error('小时必须是 0-23 的整数：' + name + ' = ' + raw);
+        }
+        v = arr;
+      }
       else v = raw;
     }
     if (v !== undefined) put(out, path, v);

@@ -222,7 +222,15 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 	if acct.UID == "" {
-		writeErr(w, http.StatusBadGateway, "login done but no uid（token 已发但账号信息获取失败，请重试）")
+		// 视作**终态**（bug #8）：走到这里说明 auth/token 已经成功 —— 上游已经把
+		// 这个 state 消费掉了。若按"可重试"处理（completed 保持 false → 复位
+		// consumed），下一次轮询会再打 token 端点，上游只会返回 pending/报错，
+		// 前端 {done:false} 一直循环到 15 分钟 TTL，用户拿不到"重新发起登录"的提示。
+		completed = true
+		p.loginMu.Lock()
+		delete(p.logins, state)
+		p.loginMu.Unlock()
+		writeErr(w, http.StatusBadGateway, "登录凭证已签发但账号信息获取失败（state 已消费），请重新发起添加账号")
 		return
 	}
 	// UID 来自上游响应，未经校验就用于拼文件名会被路径穿越利用

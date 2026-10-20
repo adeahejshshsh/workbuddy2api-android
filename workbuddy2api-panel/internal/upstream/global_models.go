@@ -282,6 +282,17 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	return names, infos, efforts, defaults, nil
 }
 
+// GlobalProbeInFlight 报告 global 目录探测是否正在飞（bug #18）。
+//
+// 用途：fetchGlobalModelsOnce 的 in-flight 去重对后来者返回 nil,nil（设计上不打上游），
+// 但调用方无法区分"探测中"与"真的没目录"，会把并发刷新误报成
+// "global: 上游未返回可用模型"。
+func (c *Client) GlobalProbeInFlight() bool {
+	c.globalModels.Lock()
+	defer c.globalModels.Unlock()
+	return c.globalModels.probing
+}
+
 // degradedCatalog 单路降级时的目录（bug P0-3）。
 //
 // 关键在最后那句兜底：企业端点（以及 v3 的某些形态）只回**窄表**——只有 id 名单，

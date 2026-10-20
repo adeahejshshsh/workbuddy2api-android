@@ -1224,7 +1224,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if raw, merr := json.Marshal(resp); merr == nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(raw)
+			// 写客户端失败要看错误（bug #13）：客户端在响应体写一半时断开（Agent 点
+			// 停止很常见），此前忽略错误、无条件记 200 success，流水行与 reqlog 都记成功、
+			// usage 也按成功计。流式路径早有 errClientWrite 判定，非流式漏了。
+			if _, werr := w.Write(raw); werr != nil {
+				st.status = http.StatusOK // 头已发出，状态码改不了
+				st.outcome = reqlog.OutcomeInterrupted
+				return
+			}
 			st.status = http.StatusOK
 			st.outcome = reqlog.OutcomeSuccess
 		} else {

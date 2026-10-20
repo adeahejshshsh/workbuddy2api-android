@@ -464,7 +464,10 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-IDE-Name", "WorkBuddy")
 	h.Set("X-IDE-Type", "WorkBuddy")
 	h.Set("X-IDE-Version", "5.5.6")
-	h.Set("x-codebuddy-request", "1")
+	// 必须用与 headers.go 完全相同的拼写（bug #9）：Go 会把头名规范化成
+	// X-Codebuddy-Request，而全仓其它地方是 X-CodeBuddy-Request —— 同一个风控闸门头
+	// 以两种拼写出站，按字面匹配头的上游实现会漏，排障时也容易误以为没加。
+	h.Set("X-CodeBuddy-Request", "1")
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)
 	}

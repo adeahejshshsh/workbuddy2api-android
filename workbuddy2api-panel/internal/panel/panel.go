@@ -416,7 +416,14 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 			if acct := gAcct; acct != nil {
 				infos := p.cfg.Upstream.FetchGlobalModelInfos(acct)
 				if len(infos) == 0 {
-					fetchErrs = append(fetchErrs, "global: 上游未返回可用模型")
+					// 区分"探测在飞"与"真的空"（bug #18）：fetchGlobalModelsOnce 的
+					// in-flight 去重对后来者返回 nil（设计上不打上游），此前一律写成
+					// "上游未返回可用模型" —— 连点两次"刷新模型"就会拿到一句假错误。
+					if p.cfg.Upstream.GlobalProbeInFlight() {
+						fetchErrs = append(fetchErrs, "global: 目录探测进行中，请稍后重试")
+					} else {
+						fetchErrs = append(fetchErrs, "global: 上游未返回可用模型")
+					}
 				} else {
 					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
 					for _, mi := range infos {
@@ -878,6 +885,13 @@ func (p *Panel) syncNicknames() {
 		wg.Add(1)
 		go func(j job) {
 			defer wg.Done()
+			// panic 兜底（bug #14）：这些 goroutine 不是 net/http 起的，recover 管不到，
+			// 一次 panic 死的是整个网关进程（在途请求与未落盘状态一起没）。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERR: [panel] syncNicknames panic uid=%s: %v", j.a.UID, r)
+				}
+			}()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			nick, err := p.cfg.Upstream.FetchAccountProfile(j.a)
@@ -1004,6 +1018,12 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(i int, s pool.Status) {
 			defer wg.Done()
+			defer func() { // panic 兜底（bug #14）
+				if r := recover(); r != nil {
+					log.Printf("ERR: [panel] packages panic uid=%s: %v", s.UID, r)
+					out[i] = row{UID: s.UID, Nickname: s.Nickname, Realm: s.Realm, Error: "内部错误"}
+				}
+			}()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 

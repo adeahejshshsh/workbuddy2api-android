@@ -123,13 +123,20 @@ func backfillReasoningContent(obj map[string]any) {
 		}
 		rc, hasRC := msg["reasoning_content"].(string)
 		if hasRC {
-			// rc 已有 string → 不覆盖（原有语义保留）。
-		} else if r, ok := msg["reasoning"].(string); ok {
+			// 已有 string：非空不覆盖，但**空串必须补**（bug #2）。
+			// 本函数承诺"两个字段最终都存在且非空"，而客户端普遍会发
+			// reasoning_content: ""（OpenAI 兼容实现常见）—— 原实现走 hasRC 分支
+			// 什么都不做，之后只把 reasoning 写成 " "，reasoning_content 仍是空串，
+			// 这类请求在该账号上照样 400。
+			if rc == "" {
+				msg["reasoning_content"] = " "
+			}
+		} else if r, ok := msg["reasoning"].(string); ok && r != "" {
 			rc = r
 			msg["reasoning_content"] = rc
 		} else {
 			rc = ""
-			msg["reasoning_content"] = rc
+			msg["reasoning_content"] = " "
 		}
 		// 镜像：reasoning 缺失/null/空串 → 归一化（非空 rc 优先，皆无补 " "）。
 		if r, ok := msg["reasoning"].(string); ok && r != "" {

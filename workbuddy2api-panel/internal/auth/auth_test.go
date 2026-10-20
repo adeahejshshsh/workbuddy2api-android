@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"os"
@@ -262,5 +263,46 @@ func TestLoadDirDuplicateUIDWarning(t *testing.T) {
 		!strings.Contains(string(raw), "workbuddy-a-cn.json") ||
 		!strings.Contains(string(raw), "workbuddy-z-global.json") {
 		t.Errorf("expected WARN with both paths, got output: %s", string(raw))
+	}
+}
+
+// bug #11 回归：SaveAtomic 只保留顶层未知键，auth/account 子对象里手写的键此前
+// 被整组替换抹掉 —— 与注释承诺的"保留用户/插件手写的未知键"不符。
+func TestSaveAtomicPreservesUnknownSubKeys(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-u1.json")
+	seed := `{
+	  "auth": {"accessToken":"old","refreshToken":"r","customField":"keep-me"},
+	  "account": {"uid":"u1","nickname":"n","extraAccountKey":42},
+	  "topLevelUnknown": {"a":1}
+	}`
+	if err := os.WriteFile(fp, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &Auth{UID: "u1", AccessToken: "new-at", RefreshToken: "new-rt", ExpiresAt: 123, FilePath: fp}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("saved file not json: %v\n%s", err, raw)
+	}
+	authObj, _ := doc["auth"].(map[string]any)
+	if authObj["customField"] != "keep-me" {
+		t.Errorf("auth 子对象里的未知键被抹掉了: %v", authObj)
+	}
+	if authObj["accessToken"] != "new-at" {
+		t.Errorf("已知键必须被覆盖: %v", authObj)
+	}
+	acctObj, _ := doc["account"].(map[string]any)
+	if acctObj["extraAccountKey"] != float64(42) {
+		t.Errorf("account 子对象里的未知键被抹掉了: %v", acctObj)
+	}
+	if _, ok := doc["topLevelUnknown"]; !ok {
+		t.Errorf("顶层未知键被抹掉了: %v", doc)
 	}
 }

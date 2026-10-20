@@ -1,5 +1,110 @@
 # 变更记录
 
+## v1.27.5（当前）
+
+**本版 = 第十一份审查报告（18 条 + 1 条"待确认"）的落地修复。逐条对当前代码复核：
+19 条全部成立，0 误报。其中 #3/#4/#5/#6/#18 与本会话前几轮的改动直接相关
+（我加了机制却没在所有消费点同步）。**
+
+### P1
+
+* **1 `max_completion_tokens` 非整数形态被静默丢弃** —— 函数第一行就 `delete` 别名，
+  之后才做类型判断：小数（1000.5）与字符串（"1000"）既没翻译也没保留 →
+  上游回落自己的默认上限（长任务被截），而注释承诺"非数值别名原样透传由上游报 11101"。
+  改成「能翻成正整数就翻（小数四舍五入），翻不了就保留别名交给上游判定」。
+  【复核】真。
+* **2 `reasoning_content` 为空串时没补齐** —— 客户端普遍会发 `reasoning_content: ""`，
+  原实现走 `hasRC` 分支什么都不做，只把 `reasoning` 写成 `" "` → `reasoning_content`
+  仍是空串。而本文件顶部注释明确写着「上游 len>0 不 trim：空白串过闸、**空串不过**」，
+  这类请求在该账号上照样 400。改成空串也补 `" "`。
+  同步更新了两个把旧行为固化的测试（它们断言的是"字段存在即可"，而非"非空"）。
+  【复核】真。
+* **3 签到/余额的"可取消重试"从未接线** —— v1.27.1 我加了 `retryBillingTransientCtx`，
+  但三个调用点全走 `retryBillingTransient`（内部固定 `context.Background()`），
+  可取消版本是死代码。新增 `DailyCheckinCtx` / `UserResourceDetailedWithExpiryCtx` /
+  `enterpriseResourceCtx`，并把 **scheduler** 的签到与余额刷新（ctx 在手）接到 Ctx 版本 ——
+  SIGTERM 时不再把 2s+4s 睡满，与 `srv.Shutdown(5s)` 抢时间的问题解决。
+  【复核】真（这正是我上一轮"修了机制没接线"）。
+* **4 占位号给"模型可服务"作证** —— v1.27.4 我加了 `needAuth` 标记，但
+  `ModelBlockedForRealm` 只跳过 disabled/paused：一个永远选不到的占位号会让
+  `!modelCooled` 命中并直接返回空状态 → 全池号都被模型级冷却挡住时被误报成
+  "池子没号"（503 `no_healthy_account`，客户端无限重试），正确语义是
+  400 `model_unavailable`（换模型才有用）。补 `|| e.needAuth`。【复核】真。
+* **5 模型锁池视图把占位号算进分母** —— `routable[realm]++` 无条件统计，
+  而 `Servable` 用 `healthyForModel`（排除 needAuth）→ `Locked < Total` 恒成立 →
+  状态被判 `starved`（"等一下就好"），实际是 `locked`（换模型才有用）。
+  两处都跳过 needAuth。【复核】真。
+* **6 占位号在 /status 与面板概览里被算成"冷却中"** —— `countsDetailedForRealm`
+  只有 disabled/paused/!healthy/healthy 四档，占位号落到 `cooling`。运维看到
+  "有 N 个号在冷却"，真实原因是"凭证还没加载"，排查方向完全不同。占位号改计 disabled 档。
+  【复核】真。
+* **7「一键完成全部任务」用固定任务码** —— `runAutoAll` 全程 `act.TaskCode`，
+  而单任务入口用 `effectiveTaskCode`。国际服 Valorant 在"一键完成全部"里
+  `before == nil` → 记"该账号无此任务"，同一任务用单任务按钮却能跑通。
+  循环内解析一次 `effCode` 并贯穿查询/回读/领奖/跳过名单门控。
+  【复核】真（与 v1.27.2 修的 B6 是同一个病灶的另一半）。
+* **8 登录轮询：token 成功但取 uid 失败被当成"可重试"** —— `auth/token` 成功即意味着
+  上游已消费该 state；随后 `auth/account` 失败时若按可重试处理（复位 `consumed`），
+  下次轮询再打 token 端点只会拿到 pending/报错，前端 `{done:false}` 一直循环到 15 分钟
+  TTL，用户拿不到"重新发起"的提示。改成终态：`completed = true` + 删除会话 + 明确文案。
+  【复核】真。
+* **9 风控闸门头两种拼写出站** —— `h.Set("x-codebuddy-request","1")` 被 Go 规范化成
+  `X-Codebuddy-Request`，而 headers.go 是 `X-CodeBuddy-Request`。统一成后者。
+  【复核】真。
+* **10 连登兑换日志用全量 UID** —— 全仓其它日志一律 `logfmt.Label(...)`（uid8），
+  这一行直接打完整 UID。改齐。【复核】真。
+
+### P2
+
+* **11 `SaveAtomic` 只保留顶层未知键** —— 注释承诺"保留用户/插件手写的未知键"，
+  实现却是 `doc["auth"] = map{...}` 整组替换，子对象里手写的扩展键一次 refresh 就没了。
+  改成「已知键覆盖、未知键保留」的子 map 合并。【复核】真。
+* **12「需重启字段」比对口径不一致** —— `prev` 是**原始文件**、`merged` 是**规范化后**
+  的结构；配置文件缺省某键时规范化会补默认值，`DeepEqual(nil,"120")` 直接不等 →
+  手写的最小配置（只写 listen/api_key/auth_dir）**什么都没改也会被告知需重启**。
+  新增 `normalizeForCompare` 让两侧同口径。【复核】真。
+* **13 非流式成功路径不看写客户端失败** —— `_, _ = w.Write(raw)` 忽略错误后无条件记
+  200 success；客户端写一半断开（Agent 点停止）时流水行/reqlog/usage 全记成功。
+  流式路径早有 `errClientWrite` 判定，非流式漏了。补 `OutcomeInterrupted`。
+  【复核】真。
+* **14 面板多处 goroutine 没有 panic 兜底** —— `syncNicknames`、`packages`、
+  `tasksScanAll`、`startGrowthQueue` 扫描、`schoolVouchers` 五处由 handler 起但不是
+  net/http 的 goroutine，recover 管不到 → 一次 panic 打死整个网关。逐处补 `defer recover`。
+  【复核】真（上一轮修了批量端点，这五处漏了）。
+* **15 面板"小时"非法项变 `null` → 后端当 0 点** —— `9, 2x` → `[9, NaN]` →
+  `JSON.stringify` 变 `null` → Go `[]int` 反序列化保持零值 → 任务被悄悄排到 00:00，
+  前端零提示。改成提交前校验并 `throw`（调用点在 try 内，会走 toast）。
+  【复核】真。
+* **16 `watchdog.sh` 单实例锁只看 `kill -0`** —— v1.27.3 我加锁时没校验命令行，
+  pid 被复用就会认定"已在运行"直接 exit 0，实际没有看门狗在跑。
+  补 `/proc/<pid>/cmdline` 校验（与 run.sh 的 B18 修复同口径）。【复核】真。
+* **17 脚本只认嵌套形 auth 文件** —— Go 的 `auth.Parse` 同时支持嵌套形与扁平形，
+  但 `task_common.py` / `probe_active.py` 写死 `d["auth"]`，手写扁平文件直接 KeyError
+  中断整批任务。改成 `d.get("auth") or d`。【复核】真。
+* **18 并发刷新模型页时 global 域被误报"上游未返回模型"** —— v1.27.1 我加的 in-flight
+  去重对后来者返回 `nil,nil`，而 panel 把"infos 为空"一律写成"上游未返回可用模型"。
+  新增 `Client.GlobalProbeInFlight()`，panel 区分"探测进行中"与"真的空"。【复核】真。
+
+### 待确认项（已采纳）
+
+* **19 `max_tokens <= 0` 被抬到 16** —— 报告标为"可能刻意取舍"。我判断应改：
+  `0`/负值在客户端语义里常表示"用模型默认上限"，抬到 16 会把响应**静默截断**；
+  而让它原样出站、由上游回 11133 更可诊断。改成只钳 `0 < v < 16`
+  （Claude Code 的 1..15 探针仍被修好）。【复核】成立。
+
+### 测试（+5 个回归）
+
+- `TestTranslateMaxCompletionTokensKeepsAliasWhenNotTranslatable`（#1：小数四舍五入、
+  字符串保留、显式 max_tokens 优先）
+- `TestClampGPTMinMaxTokensLeavesZeroAndNegative`（#19）
+- `TestPlaceholderDoesNotVouchForModel`（#4/#5：真号冷却 + 占位号时必须是 Blocked，
+  且分母不含占位号）
+- `TestSaveAtomicPreservesUnknownSubKeys`（#11：auth/account 子对象与顶层未知键都要留）
+- `TestNormalizeForCompareAvoidsFalseRestartHint`（#12：最小配置零改动不误报，真改了仍报）
+
+`upstream 210 / server 92 / pool 186 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
+auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**708 通过 0 失败**；`gofmt -l` 为 0。
+
 ## v1.27.4（当前）
 
 **本版 = 第十份审查报告（13 条）的落地修复。逐条对当前代码复核：13 条全部为真、0 误报。

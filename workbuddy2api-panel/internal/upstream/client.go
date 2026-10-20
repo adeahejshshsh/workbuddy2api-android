@@ -2070,9 +2070,14 @@ const (
 // cycleEndTime 作为唯一到期批次——周期末企业号会被 prefer_expiring 优先选中（期望行为）。
 // limitNum < 0（不限量）无作废语义，不参与分桶。
 func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
+	return c.enterpriseResourceCtx(context.Background(), a, soon)
+}
+
+// enterpriseResourceCtx 带 ctx（bug #3）：SIGTERM 时重试的 2s+4s 不再睡满。
+func (c *Client) enterpriseResourceCtx(ctx context.Context, a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
 	// 与个人口径一致：余额是签到后的紧邻调用，偶发 500 值得有界重试。
 	var data json.RawMessage
-	err = c.retryBillingTransient(func() error {
+	err = c.retryBillingTransientCtx(ctx, func() error {
 		var e error
 		data, e = c.billingJSON(a, http.MethodPost, "/v2/billing/meter/get-enterprise-user-usage", map[string]any{})
 		return e
@@ -2134,10 +2139,15 @@ func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, t
 // earliestAt 是最早的可用到期时刻，earliestRemaining 是同一时刻所有正余额包的剩余量之和。
 // 已过期、剩余为 0、缺少或无法解析到期时间的包都不会成为最早批次；无有效批次时返回零值。
 func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
+	return c.UserResourceDetailedWithExpiryCtx(context.Background(), a, soon)
+}
+
+// UserResourceDetailedWithExpiryCtx 带 ctx（bug #3）：停机时重试的 2s+4s 可被打断。
+func (c *Client) UserResourceDetailedWithExpiryCtx(ctx context.Context, a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
 	// 企业版额度不在「个人资源包」体系内：get-user-resource* 对 enterpriseId 非空账号
 	// 恒返回空 Accounts（实测 code 0 且 Accounts null），故分流到企业口径端点。
 	if a.IsEnterprise() {
-		return c.enterpriseResource(a, soon)
+		return c.enterpriseResourceCtx(ctx, a, soon)
 	}
 	now := time.Now()
 	body := map[string]any{
@@ -2151,7 +2161,7 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 	// 余额查询同样做瞬时错误有界重试（签到后紧接着的 user-resource 偶发 500 会让
 	// 该账号错过本次解冻/到期快照更新，只能等下一个刷新周期）。
 	var data json.RawMessage
-	err = c.retryBillingTransient(func() error {
+	err = c.retryBillingTransientCtx(ctx, func() error {
 		var e error
 		data, e = c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
 		return e
@@ -2271,7 +2281,12 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 // 偶发上游 5xx（code 10000）做有界重试（见 retryBillingTransient）——单次抖动不再
 // 让该账号整天漏签；「已签到」等业务错误不重试。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	return c.retryBillingTransient(func() error {
+	return c.DailyCheckinCtx(context.Background(), a)
+}
+
+// DailyCheckinCtx 带 ctx（bug #3）：停机时不必把重试的 2s+4s 睡满。
+func (c *Client) DailyCheckinCtx(ctx context.Context, a *auth.Auth) error {
+	return c.retryBillingTransientCtx(ctx, func() error {
 		_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
 		return err
 	})

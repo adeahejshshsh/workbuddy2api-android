@@ -36,7 +36,9 @@ def cred(prefix):
         raise SystemExit(f"no auth for {prefix}")
     with open(hits[0], encoding="utf-8") as f:   # 非 UTF-8 locale（中文 Windows GBK）下必须显式指定
         d = json.load(f)
-    a, acc = d["auth"], d["account"]
+    # 兼容嵌套形与扁平形（bug #17，同 task_common.py）
+    a = d.get("auth") or d
+    acc = d.get("account") or d
     return {"token": a["accessToken"], "domain": a.get("domain") or "",
             "uid": acc["uid"], "nick": acc.get("nickname", ""),
             "file": os.path.basename(hits[0])}

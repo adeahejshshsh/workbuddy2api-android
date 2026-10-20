@@ -379,8 +379,12 @@ func (p *Pool) ModelBlockedForRealm(model, realm string) ModelBlockStatus {
 	for _, e := range p.byUID {
 		// 暂停选号（paused）号与禁用号同口径跳过：它此刻不可选，「能服务」的
 		// 证明不成立——否则一个暂停的健康号会掩盖「其余号全被模型级冷却挡住」。
-		if e.disabled || e.paused {
-			continue // 禁用/暂停号不参与：它们的不可用与模型无关
+		if e.disabled || e.paused || e.needAuth {
+			// 禁用/暂停号不参与（它们的不可用与模型无关）；needAuth 占位号同理（bug #4）：
+			// 它永远选不到，却能让 !modelCooled 命中并 return 空状态 —— 于是"全池号都被
+			// 模型级冷却挡住"会被误报成"池子没号"回 503 no_healthy_account，
+			// 客户端会无限重试，而正确语义是 400 model_unavailable（换模型才有用）。
+			continue
 		}
 		if realm != "" && e.a != nil && e.a.Realm() != realm {
 			continue // 别的域的号不能给"本域可服务"作证

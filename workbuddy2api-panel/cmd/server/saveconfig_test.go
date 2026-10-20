@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -97,4 +98,51 @@ func splitDots(s string) []string {
 		cur += string(r)
 	}
 	return append(out, cur)
+}
+
+// bug #12 回归：手写的最小配置（只写 listen/api_key/auth_dir）保存时不该误报
+// "需重启" —— prev 是原始文件、merged 是规范化后的结构，缺省键被补默认值后
+// DeepEqual(nil, "120") 直接不等。
+func TestNormalizeForCompareAvoidsFalseRestartHint(t *testing.T) {
+	// 用户手写的最小配置
+	oldRaw := []byte(`{"listen":"127.0.0.1:7863","api_key":"sk-test","auth_dir":"./auths"}`)
+	var prev map[string]any
+	if err := json.Unmarshal(oldRaw, &prev); err != nil {
+		t.Fatal(err)
+	}
+	// 面板提交同一份（未改任何值）→ 规范化后 merged
+	cfg := Default()
+	if err := ApplyJSON(oldRaw, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(cfg)
+	var merged map[string]any
+	_ = json.Unmarshal(b, &merged)
+	merged = fillUnknownKeys(merged, prev)
+
+	got := restartRequiredFields(normalizeForCompare(oldRaw, prev), merged)
+	if len(got) != 0 {
+		t.Fatalf("什么都没改却报需重启: %v（规范化后两侧口径必须一致）", got)
+	}
+
+	// 对照：真的改了 listen 仍要报出来
+	cfg2 := Default()
+	_ = ApplyJSON([]byte(`{"listen":"0.0.0.0:7863","api_key":"sk-test","auth_dir":"./auths"}`), cfg2)
+	_ = cfg2.normalize()
+	b2, _ := json.Marshal(cfg2)
+	var merged2 map[string]any
+	_ = json.Unmarshal(b2, &merged2)
+	got2 := restartRequiredFields(normalizeForCompare(oldRaw, prev), fillUnknownKeys(merged2, prev))
+	found := false
+	for _, k := range got2 {
+		if k == "listen" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("listen 真的改了却没报需重启: %v", got2)
+	}
 }

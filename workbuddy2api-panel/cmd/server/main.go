@@ -578,7 +578,11 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
-	return restartRequiredFields(prev, merged), nil
+	// 比对前把 prev 也规范化（bug #12）：prev 是**原始文件**反序列化结果，而 merged
+	// 是规范化后的结构。配置文件里缺省某个键时规范化会补默认值，
+	// DeepEqual(nil, "120") 直接不等 → 用户什么都没改也会被告知"这些项需重启"。
+	// 触发面：手写的最小配置（只写 listen/api_key/auth_dir）必误报。
+	return restartRequiredFields(normalizeForCompare(oldRaw, prev), merged), nil
 }
 
 // restartRequiredFields 返回本次改动中**真的变了**、且无法热生效需要重启的字段名。
@@ -586,6 +590,27 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 // 此前它恒返回全量清单：改个能热生效的字段也照样提示「需要重启」，用户照着重启了
 // 一遍发现没变化，久而久之就无视这条提示了（狼来了）。现在按前后 JSON 快照做差异，
 // 只有值真的变了才列出。
+// normalizeForCompare 把「原始文件 map」过一遍与保存路径相同的规范化，
+// 让 restartRequiredFields 的前后两侧口径一致（bug #12）。
+// 规范化失败（文件本身非法）时退回原始 map —— 宁可多报，不要因为比对口径崩掉保存。
+func normalizeForCompare(raw []byte, orig map[string]any) map[string]any {
+	cfg := Default()
+	if err := ApplyJSON(raw, cfg); err != nil {
+		return orig
+	}
+	_ = cfg.normalize() // 与保存路径一致：可能因 env-only 密钥提前返回，忽略
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return orig
+	}
+	var norm map[string]any
+	if json.Unmarshal(b, &norm) != nil || norm == nil {
+		return orig
+	}
+	// 用户手写的未知键补回后再比较（否则它们会被判成"被删了"）。
+	return fillUnknownKeys(norm, orig)
+}
+
 func restartRequiredFields(prev, next map[string]any) []string {
 	// 这些字段在进程内被监听地址/HTTP client/目录句柄等装配期对象捕获，改完必须重启。
 	keys := []string{
