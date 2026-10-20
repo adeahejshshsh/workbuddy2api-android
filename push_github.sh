@@ -55,6 +55,18 @@ tar -C "$WS" \
     --exclude=./.panel-ip \
     --exclude=./.kspass \
     --exclude=./.tmp \
+    --exclude='./__pycache__' \
+    --exclude='*/__pycache__' \
+    --exclude='*.pyc' \
+    --exclude='./*-REVIEW*.md' \
+    --exclude='./REVIEW-*.md' \
+    --exclude='./CODE-REVIEW*.md' \
+    --exclude='./BUG-REVIEW*.md' \
+    --exclude='./ISSUES-*.md' \
+    --exclude='./审查报告*.md' \
+    --exclude='./代码审查报告*.md' \
+    --exclude='./缺陷*.md' \
+    --exclude='./*BUG清单*.md' \
     -cf - . | tar -C "$STAGE" -xf -
 [ -d "$STAGE/.git" ] && echo "  （沿用已有 .git，历史可累加）"
 
