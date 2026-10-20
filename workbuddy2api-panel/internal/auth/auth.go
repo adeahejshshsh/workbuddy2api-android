@@ -85,6 +85,16 @@ func (a *Auth) AccessTokenValue() string {
 	return a.AccessToken
 }
 
+// ExpiresAtValue 加锁读取 ExpiresAt（RefreshToken 在锁内改写它）。
+func (a *Auth) ExpiresAtValue() int64 {
+	if a == nil {
+		return 0
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.ExpiresAt
+}
+
 // DomainValue 加锁读取 Domain（同 AccessTokenValue：RefreshToken 在锁内改写它）。
 func (a *Auth) DomainValue() string {
 	if a == nil {
@@ -322,22 +332,58 @@ func Parse(raw []byte) (*Auth, error) {
 }
 
 // SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持嵌套形（插件可读）格式。
-// 全程持 a.mu：防止与 RefreshToken 修改 token 字段并发，杜绝写回半更新。
+// SaveAtomic 把当前凭证原子写回磁盘。
+//
+// 锁内**只做快照**，磁盘 I/O 全在锁外（bug #13）：原先全程持 a.mu 做
+// ReadFile + MarshalIndent + 写文件 + rename，而 pool.pick 持有池写锁并调用
+// e.a.Realm()（需要 a.mu.RLock）—— 一次 token 落盘就会把全池选号堵住；
+// 22:00 全量保活 46 个号依次落盘时，chat 请求会出现周期性卡顿。
+//
+// 并发写同一文件由调用方串行化（RefreshToken 与 SetNickname 各自有写前校验），
+// 且每次写的都是完整快照 + 原子替换，最坏结果是后写者覆盖先写者，不会写坏文件。
 // 防御：accessToken 为空时拒绝写回，避免误用空凭证覆盖有效文件。
 func (a *Auth) SaveAtomic() error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if strings.TrimSpace(a.AccessToken) == "" {
-		return fmt.Errorf("save refused: empty accessToken (uid=%s)", a.UID)
+		uid := a.UID
+		a.mu.Unlock()
+		return fmt.Errorf("save refused: empty accessToken (uid=%s)", uid)
 	}
 	if a.FilePath == "" {
+		a.mu.Unlock()
 		return fmt.Errorf("no FilePath set")
 	}
+	snap := authFileSnapshot{
+		path:         a.FilePath,
+		uid:          a.UID,
+		accessToken:  a.AccessToken,
+		refreshToken: a.RefreshToken,
+		expiresAt:    a.ExpiresAt,
+		domain:       a.Domain,
+		realm:        a.realm,
+		enterpriseID: a.EnterpriseID,
+		nickname:     a.Nickname,
+		deviceToken:  a.DeviceToken,
+	}
+	a.mu.Unlock()
+	return writeAuthSnapshot(snap)
+}
+
+// authFileSnapshot SaveAtomic 锁内取出的落盘快照（锁外 I/O 只读它）。
+type authFileSnapshot struct {
+	path                                          string
+	uid, accessToken, refreshToken, domain, realm string
+	enterpriseID, nickname, deviceToken           string
+	expiresAt                                     int64
+}
+
+// writeAuthSnapshot 把快照写成 auth 文件（全部 I/O 在此，不持 a.mu）。
+func writeAuthSnapshot(s authFileSnapshot) error {
 	// 先读回原文件，保留用户/插件手写的未知键（review P2-14）：此前只重写已知
 	// 字段，第一次 token 刷新后用户在文件里加的键就静默消失了。读取失败（文件
 	// 不存在/损坏）时从空 map 起，行为与旧版一致。
 	doc := map[string]any{}
-	if prevRaw, rerr := os.ReadFile(a.FilePath); rerr == nil {
+	if prevRaw, rerr := os.ReadFile(s.path); rerr == nil {
 		_ = json.Unmarshal(prevRaw, &doc)
 	}
 	// 已知键覆盖、子对象里的**未知键保留**（bug #11）：此前 `doc["auth"] = map{...}`
@@ -356,31 +402,31 @@ func (a *Auth) SaveAtomic() error {
 		doc[key] = dst
 	}
 	putMerged("auth", map[string]any{
-		"accessToken":  a.AccessToken,
-		"refreshToken": a.RefreshToken,
-		"expiresAt":    a.ExpiresAt,
-		"domain":       a.Domain,
-		"realm":        a.realm,
+		"accessToken":  s.accessToken,
+		"refreshToken": s.refreshToken,
+		"expiresAt":    s.expiresAt,
+		"domain":       s.domain,
+		"realm":        s.realm,
 	})
 	putMerged("account", map[string]any{
-		"uid":          a.UID,
-		"enterpriseId": a.EnterpriseID,
-		"nickname":     a.Nickname,
+		"uid":          s.uid,
+		"enterpriseId": s.enterpriseID,
+		"nickname":     s.nickname,
 	})
 	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
-	if a.DeviceToken != "" {
-		doc["device_token"] = a.DeviceToken
+	if s.deviceToken != "" {
+		doc["device_token"] = s.deviceToken
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
 	// 用公共的原子替换（含单文件 bind mount 的 EBUSY 兜底，bug #4）。
-	if err := ReplaceAtomic(a.FilePath, raw, 0o600); err != nil {
+	if err := ReplaceAtomic(s.path, raw, 0o600); err != nil {
 		// Docker bind-mount 权限问题的典型现场：容器内 app 用户（uid 10001）
 		// 对宿主机挂载目录无写权限。给出可操作指引而不是裸 syscall 错误。
-		msg := fmt.Sprintf("写入 %s 失败: %v", a.FilePath, err)
+		msg := fmt.Sprintf("写入 %s 失败: %v", s.path, err)
 		if errors.Is(err, fs.ErrPermission) {
 			msg += "\n（Docker 部署：容器内用户对宿主机挂载目录无写权限。解法任选：" +
 				"1) 以本机 uid 运行容器：PUID=$(id -u) PGID=$(id -g) docker compose up -d；" +

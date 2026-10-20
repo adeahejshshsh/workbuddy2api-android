@@ -36,17 +36,26 @@ func TestMonitorBodyRenewsOnActivity(t *testing.T) {
 }
 
 // TestMonitorBodyDisabledWhenIdleZero idle<=0 直接返回原底流。
+// bug #9：idle<=0 时不启动空闲监控，但**必须**把 cancel 交给返回的 body ——
+// 原先直接 `return rc` 把 cancel 丢了，派生 ctx 只能等父 ctx 结束才释放
+// （长连接场景每个请求留一个 ctx 节点，go vet 的 lostcancel 也会报）。
 func TestMonitorBodyDisabledWhenIdleZero(t *testing.T) {
-	_, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	cancelled := false
+	cancel := func() { cancelled = true }
 	rc := nopCloserBody{Reader: &oneByteReader{}}
 	out := monitorBody(rc, 0, cancel)
-	if _, ok := out.(nopCloserBody); !ok {
-		t.Fatalf("idle<=0 should return underlying body verbatim, got %T", out)
+	if _, ok := out.(*idleMonitoringBody); ok {
+		t.Fatal("idle<=0 不该启动空闲监控")
 	}
 	buf := make([]byte, 1)
 	if _, err := out.Read(buf); err != nil || buf[0] != 'a' {
 		t.Fatalf("read=%q err=%v", buf, err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !cancelled {
+		t.Fatal("Close 必须调用 cancel，否则派生 ctx 泄漏到父 ctx 结束")
 	}
 }
 

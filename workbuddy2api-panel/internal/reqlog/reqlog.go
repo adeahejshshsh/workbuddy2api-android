@@ -322,7 +322,13 @@ func (w *archiveWriter) enqueue(e Event) {
 	// 归档里少最后几条请求且查不出来。读写锁把两步变成原子。
 	w.enqMu.RLock()
 	defer w.enqMu.RUnlock()
-	if !w.enabled() {
+	// 区分「配置未启用」与「运行期已关闭」（bug #6）：归档本来就没开时**不计数** ——
+	// 否则每条请求都算一次"丢弃"，面板显示"归档已关闭"而 dropped_writes 一直涨，
+	// 接监控的人会以为归档在丢数据。
+	if !w.configured() {
+		return
+	}
+	if w.closed.Load() {
 		w.dropped.Add(1) // 停机窗口内的事件：计入丢弃，别再静默
 		return
 	}
@@ -685,11 +691,12 @@ func containsFold(haystack, needle string) bool {
 func (w *archiveWriter) stats() ArchiveStats {
 	// Enabled 报的是「配置上是否启用」，不是「当前还能不能写」：Close 之后
 	// Snapshot 仍应如实反映归档已启用（否则运维看到 Enabled 变 false 会以为配置错了）。
-	s := ArchiveStats{Enabled: w.configured(), Dir: w.cfg.Dir,
-		DroppedWrites: w.dropped.Load(), LastError: w.errString()}
+	s := ArchiveStats{Enabled: w.configured(), Dir: w.cfg.Dir, LastError: w.errString()}
 	if !s.Enabled {
+		// 未启用：不报 dropped（那是"没开"造成的，不是"丢了"，bug #6）
 		return s
 	}
+	s.DroppedWrites = w.dropped.Load()
 	entries, err := os.ReadDir(w.cfg.Dir)
 	if err != nil {
 		s.LastError = err.Error()

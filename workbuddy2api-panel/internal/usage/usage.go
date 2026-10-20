@@ -17,6 +17,7 @@ package usage
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"log"
 	"os"
 	"path/filepath"
@@ -383,12 +384,10 @@ func (r *Recorder) flush(force bool) {
 		fail("建目录失败", err)
 		return
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		fail("写临时文件失败", err)
-		return
-	}
-	if err := os.Rename(tmp, r.path); err != nil {
+	// 用公共的原子替换（bug #2）：pool/auth/config 都处理了「单文件 bind mount 上
+	// rename 恒返回 EBUSY」，usage 一直漏着 —— 用 -v ./data/usage.json:... 部署时
+	// 每 30 秒落盘都失败，用量只活在内存里，重启即清零。
+	if err := auth.ReplaceAtomic(r.path, raw, 0o600); err != nil {
 		fail("原子替换失败", err)
 	}
 }

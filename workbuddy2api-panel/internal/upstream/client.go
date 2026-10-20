@@ -1067,7 +1067,12 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	// 实测 JWT exp-iat 与 expiresIn 严格自洽（R-F），超量级值只会是上游脏数据，
 	// 照写会把 ExpiresAt 推到荒谬未来 → NeedsRefresh 永假 → token 永不刷新
 	// 反而真过期失效。
-	if tok.ExpiresIn > 0 && time.Duration(tok.ExpiresIn)*time.Second < refreshTokenExpiresInMax {
+	// 先按**秒**比较再乘（bug #5）：原写法是"乘完之后再判是否小于 10 年"，而
+	// ExpiresIn > 9.22e9（约 292 年）时乘法本身 int64 溢出成负数 —— 负数恒小于上限
+	// → 校验通过 → ExpiresAt 落在过去 → NeedsRefresh 恒真 → **每个 chat 请求前都先打
+	// 一次 refresh**，把 refresh 端点打爆，还可能触发 12153 三振禁用。
+	maxExpiresInSec := int64(refreshTokenExpiresInMax / time.Second)
+	if tok.ExpiresIn > 0 && tok.ExpiresIn <= maxExpiresInSec {
 		a.ExpiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix()
 	}
 	return nil
@@ -1125,7 +1130,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		resp, err := c.chatHTTP().Do(req)
 		if err != nil {
 			cancel()
-			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
+			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
 			// 留在空闲池里，下一个请求会继续捡到它——仅靠 IdleConnTimeout 等过期
 			// 不够，主动清池才断根。
@@ -1139,12 +1144,12 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			// body 读失败（掐流/截断）→ 传输层错误：半截 raw 不交回调用方进 Classify，
 			// 否则 handler 侧 applyErrorPolicy 会按误判分类罚号。
 			if rerr != nil {
-				log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.Nickname), rerr)
+				log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.NicknameValue()), rerr)
 				return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
 			}
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
-				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+				logfmt.Label(a.UID, a.NicknameValue()), resp.StatusCode, kind, truncate(string(raw), 200))
 			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链）。
 			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析）：
 			// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
@@ -1481,8 +1486,17 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]ModelInfo, 0, len(byID))
-	for _, mi := range byID {
+	// 按 id 排序后再输出（bug #8）：byID 是 map，迭代序随机 —— 于是 /v1/models 与
+	// 面板「模型与档位」的顺序每 10 分钟缓存过期就重排一次，mergeModelInfos 承诺的
+	// 「输出顺序 = primary 原序在前」不成立，前端按顺序做的对比/截图也无法复现。
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		mi := byID[id]
 		if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
 			continue
 		}
@@ -2252,10 +2266,15 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 		used = size - remain
 		if a.CycleCapacityUsed > used {
 			used = a.CycleCapacityUsed
-			if size >= used {
-				remain = size - used
-			}
 		}
+		// 先把 used 钳到 size、再由 used 反算 remain（bug #4）：此前只在 size>=used 时
+		// 回算，上游对账延迟给出 CycleCapacityUsed > CycleCapacitySize 时 remain 保持旧值
+		// → remain+used > size，面板出现「剩余 50 / 已用 150 / 面额 100」这种自相矛盾的行，
+		// credit_floor 与选号权重也跟着高估余额。
+		if used > size {
+			used = size
+		}
+		remain = size - used
 		return remain, used, size
 	}
 	// 非 Cycle 分支同样钳制（bug #2）：上游脏数据（CapacityRemain > Size，常见于

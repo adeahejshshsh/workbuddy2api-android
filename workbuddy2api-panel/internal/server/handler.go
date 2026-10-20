@@ -1191,7 +1191,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
+			// 上游超时/停滞：与流式路径同口径（bug #1）。非流式内部也是强制
+			// stream:true 打上游、再用 Aggregate 读完，所以上游卡住被空闲看门狗
+			// cancel / 首字节超时时，这里拿到的是 context canceled / i/o timeout。
+			// 此前一律回 502 upstream_parse —— 既不叫 upstream_timeout，也没走
+			// 「超时不换号、不罚号」的止损，客户端只能看到一句莫名的解析失败。
+			if isUpstreamTimeout(err, r.Context().Err() != nil) {
+				st.status = http.StatusServiceUnavailable
+				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, err)
+				log.Printf("WARN: [server] non-stream upstream timeout acct=%s model=%s: %v (rotation stopped, account not penalized)",
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, err)
+				break
+			}
+			// 上游中途断流：与流式路径同一个错误码（bug #1 附带项）。
+			if upstream.IsUpstreamReadError(err) {
+				writeOpenAIError(w, http.StatusBadGateway, "stream_error", err.Error())
+				st.status = http.StatusBadGateway
+				st.outcome = reqlog.OutcomeStreamError
+				return
+			}
+			// 其余解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
 			st.outcome = reqlog.OutcomeHTTPError

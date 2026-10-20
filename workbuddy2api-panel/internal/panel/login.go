@@ -237,7 +237,13 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	// （filepath.Join("./auths", "workbuddy-../../evil.json") → auths/evil.json）。
 	// UID 是腾讯侧账号标识，实测为 UUID（十六进制与连字符），故只放行 [A-Za-z0-9_-]。
 	if !validUID(acct.UID) {
-		writeErr(w, http.StatusBadGateway, "上游返回的 uid 含非法字符，拒绝落盘（防路径穿越）")
+		// 与上面 UID=="" 分支同构（bug #3）：auth/token 已成功 = 上游已消费该 state，
+		// 若按可重试处理（复位 consumed），前端会 3 秒一次空转到 15 分钟 TTL。
+		completed = true
+		p.loginMu.Lock()
+		delete(p.logins, state)
+		p.loginMu.Unlock()
+		writeErr(w, http.StatusBadGateway, "上游返回的 uid 含非法字符（state 已消费），请重新发起添加账号")
 		return
 	}
 
@@ -252,7 +258,11 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	// 「缺 expiresIn 保留旧值」的防御，登录路径没对齐：这里留 0（未知），交给首次
 	// 刷新补齐。
 	var expiresAt int64
-	if tok.ExpiresIn > 0 {
+	// 先按秒比较再乘（bug #5）：原写法没有任何上限，脏值（ExpiresIn 巨大）乘法溢出成
+	// 负数 → ExpiresAt 落在过去 → NeedsRefresh 恒真 → 每个请求先刷一次 token。
+	// 10 年上限与 upstream.RefreshToken 同口径。
+	const maxExpiresInSec = int64(10 * 365 * 24 * 3600)
+	if tok.ExpiresIn > 0 && tok.ExpiresIn <= maxExpiresInSec {
 		expiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix()
 	}
 	a := &auth.Auth{

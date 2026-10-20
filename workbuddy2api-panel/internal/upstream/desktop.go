@@ -71,12 +71,13 @@ type DesktopEvent map[string]any
 // desktopFingerprint 公共桌面指纹字段（注入每个事件，覆盖同名业务键）。
 func desktopFingerprint(a *auth.Auth) map[string]any {
 	now := time.Now().UnixMilli()
+	nick := a.NicknameValue() // 一次请求取一次快照（bug #11：锁外直读字段是数据竞争）
 	return map[string]any{
 		"timezone":     "Asia/Shanghai",
 		"reportDelay":  2000,
 		"userId":       a.UID,
-		"username":     a.Nickname,
-		"userNickname": a.Nickname,
+		"username":     nick,
+		"userNickname": nick,
 		"product":      "SaaS",
 		"releaseDate":  int64(1789036585355),
 		"commit":       "5f9692923c93033111c51ad7b003eb80204a9b75",
@@ -276,13 +277,14 @@ func DesktopAutomationCreateEvent(name string) DesktopEvent {
 // 与桌面指纹（copilot 域）不同：web 域事件是浏览器形状（os/machineId/userAgent），
 // 用于 Library_read 等页面行为类任务（实测 library_doc_intro_click 4 秒点亮）。
 func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, elementName string) error {
+	nick := a.NicknameValue() // 一次请求取一次快照（bug #11）
 	ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 	ev := map[string]any{
 		"eventCode": eventCode, "timestamp": time.Now().UnixMilli(), "reportDelay": 0,
 		"pageURL": pageURL, "elementId": elementID, "elementName": elementName,
 		"os": "Win32", "arch": "", "osVersion": "10.0", "userAgent": ua,
 		"machineId": deriveID(a, "webmachine"), "userId": a.UID,
-		"userNickname": a.Nickname, "enterpriseId": a.EnterpriseID,
+		"userNickname": nick, "enterpriseId": a.EnterpriseID,
 	}
 	raw, err := json.Marshal([]map[string]any{ev})
 	if err != nil {

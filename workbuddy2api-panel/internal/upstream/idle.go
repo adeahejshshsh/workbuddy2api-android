@@ -46,9 +46,26 @@ func (b *idleMonitoringBody) idleFor() time.Duration {
 // monitorBody 若 idle<=0 直接返回原底流（禁用空闲监控）；
 // 否则包上流中空闲监控。计时从返回 body 之后开始——首字节阶段由
 // Transport.ResponseHeaderTimeout 管，这里不抢跑。
+// cancelOnCloseBody 关闭 body 时释放派生 ctx 的 cancel（bug #9）。
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnCloseBody) Close() error {
+	c.cancel()
+	return c.ReadCloser.Close()
+}
+
 func monitorBody(rc io.ReadCloser, idle time.Duration, cancel context.CancelFunc) io.ReadCloser {
 	if idle <= 0 {
-		return rc
+		// 禁用空闲监控时也必须把 cancel 交出去（bug #9）：ChatStreamContext 为每次
+		// 出站请求 context.WithCancel(ctx)，cancel 被丢掉的话 reqCtx 只能等父 ctx
+		// 结束才释放（长连接场景每个请求留一个 ctx 节点，go vet 的 lostcancel 也会报）。
+		if cancel == nil {
+			return rc
+		}
+		return &cancelOnCloseBody{ReadCloser: rc, cancel: cancel}
 	}
 	b := &idleMonitoringBody{
 		rc:       rc,

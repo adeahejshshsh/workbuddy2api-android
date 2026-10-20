@@ -197,7 +197,7 @@ scanLoop:
 				return
 			}
 			it := &items[i]
-			it.UID, it.Nickname = uid, a.Nickname
+			it.UID, it.Nickname = uid, a.NicknameValue()
 			// D4 门控：global 账号无 CN 成长任务体系，不发起任何上游调用。
 			if a.IsGlobal() {
 				return
@@ -423,7 +423,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 					// 关键：以前这里静默吞掉 → 界面只会说"没有待办任务"，
 					// 看着就像按钮没生效。现在记进诊断账，会原样报给用户。
 					mu.Lock()
-					dg.errs = append(dg.errs, a.Nickname+"："+errBrief(err))
+					dg.errs = append(dg.errs, a.NicknameValue()+"："+errBrief(err))
 					mu.Unlock()
 				} else {
 					for _, t := range tasks {
@@ -486,7 +486,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	var items []queueItem
 	for _, one := range accts {
 		for _, t := range one.grow {
-			items = append(items, queueItem{UID: one.a.UID, Nickname: one.a.Nickname, Kind: "growth", Code: t.TaskCode, Status: "pending"})
+			items = append(items, queueItem{UID: one.a.UID, Nickname: one.a.NicknameValue(), Kind: "growth", Code: t.TaskCode, Status: "pending"})
 		}
 	}
 	if len(items) == 0 {
@@ -802,10 +802,10 @@ func (p *Panel) schoolVouchers(w http.ResponseWriter, r *http.Request) {
 			defer func() { // panic 兜底（bug #14）
 				if r := recover(); r != nil {
 					log.Printf("ERR: [panel] schoolVouchers panic uid=%s: %v", a.UID, r)
-					out[i] = row{UID: a.UID, Nickname: a.Nickname, Err: "内部错误"}
+					out[i] = row{UID: a.UID, Nickname: a.NicknameValue(), Err: "内部错误"}
 				}
 			}()
-			it := row{UID: a.UID, Nickname: a.Nickname}
+			it := row{UID: a.UID, Nickname: a.NicknameValue()}
 			switch {
 			case a.IsGlobal():
 				it.Err = "global realm（无开学季活动）"

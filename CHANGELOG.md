@@ -1,5 +1,87 @@
 # 变更记录
 
+## v1.27.6（当前）
+
+**本版 = 第十二份审查报告（13 条）的落地修复。逐条对当前代码复核：13 条全部为真、0 误报。
+其中 #3/#4/#5/#6/#9 与本会话前几轮改动同源 —— 我把机制加了一半。**
+
+### P1
+
+* **1 非流式请求把上游超时误报成 502 `upstream_parse`** —— 客户端发 `stream:false` 时网关
+  内部仍强制 `stream:true` 打上游、再用 `Aggregate` 读完；上游卡住被空闲看门狗 cancel 或
+  首字节超时时拿到的是 `context canceled` / `i/o timeout`，而这里直接回 502
+  `upstream_parse` —— 既不叫 `upstream_timeout`，也没走「超时不换号、不罚号」的止损
+  （那套只写在流式/传输层分支）。补 `isUpstreamTimeout` 判定 → 走末端统一映射
+  （503 `upstream_timeout`）；顺带把 `IsUpstreamReadError` 归到 502 `stream_error`，
+  与流式路径一致。【复核】真。
+* **2 usage.json 落盘没有 bind mount 兜底** —— `flush()` 用裸 `WriteFile`+`Rename`，
+  而 pool/auth/config 都处理了「单文件 bind mount 上 rename 恒 EBUSY」，usage 一直漏着。
+  用 `-v ./data/usage.json:...` 部署时每 30 秒落盘都失败，用量只活在内存、重启即清零。
+  改用 `auth.ReplaceAtomic`。【复核】真。
+* **3 登录：UID 非法分支不清理 state** —— v1.27.5 我修了 `acct.UID == ""` 分支（视作终态），
+  但**紧挨着的 `!validUID(acct.UID)` 分支漏了**：同样在 `auth/token` 已成功之后，
+  同样复位 `consumed`，前端 3 秒一次空转到 15 分钟 TTL。改成同构终态处理。
+  【复核】真（我上一轮只修了一半）。
+* **4 套餐聚合 `used > size` 时 remain 不回算** —— `if size >= used { remain = size - used }`
+  只在 size 足够时回算，上游对账延迟给出 `CycleCapacityUsed > CycleCapacitySize` 时
+  remain 保持旧值 → `remain+used > size`，面板出现「剩余 50 / 已用 150 / 面额 100」这种
+  自相矛盾的行，`credit_floor` 与选号权重也跟着高估余额。改成先把 used 钳到 size、
+  再由 used 反算 remain（恒等式成立）。【复核】真。
+* **5 `expiresIn` 先乘后判导致溢出** —— `time.Duration(tok.ExpiresIn)*time.Second < 上限`
+  是"乘完再判"，`ExpiresIn > 9.22e9`（约 292 年）时乘法 int64 溢出成负数 → 负数恒小于
+  上限 → 校验通过 → `ExpiresAt` 落在过去 → `NeedsRefresh` 恒真 → **每个 chat 请求前都先打
+  一次 refresh**，把 refresh 端点打爆，还可能触发 12153 三振禁用。
+  改成先按秒比较再乘；`login.go` 侧原本连上限都没有，一并补上（10 年同口径）。
+  【复核】真。
+
+### P2
+
+* **6 归档关闭时也在累加 `dropped_writes`** —— `enqueue` 里 `if !w.enabled() { dropped.Add(1) }`，
+  而归档配置上没开时 `enabled()` 恒假 → **每条请求都算一次丢弃**；`stats()` 又在
+  `if !Enabled { return }` 之前写 `DroppedWrites`。面板显示"JSONL 归档已关闭"而指标一直涨，
+  接监控的人会以为归档在丢数据。改成区分 `configured()`（没开 = 不计数）与
+  `closed`（停机窗口 = 计数），并把 `DroppedWrites` 移到启用判断之后。【复核】真。
+* **7 请求记录接口失败被吞成「空表」** —— `api('request_logs?…').catch(() => ({entries: []}))`
+  把 500/超时/密钥失效静默换成空数组，表格显示「暂无请求记录」、计数 0 条。
+  改成收集错误并透出：空表文案变「请求记录读取失败：<msg>」。【复核】真。
+* **8 模型列表顺序每次刷新随机** —— `fetchV3Models` 直接 `for _, mi := range byID`（map 迭代序
+  随机），于是 `/v1/models` 与面板「模型与档位」每 10 分钟缓存过期就重排一次，
+  `mergeModelInfos` 承诺的「输出顺序 = primary 原序在前」不成立。改成按 id 排序后输出。
+  【复核】真。
+* **9 `monitorBody` 在禁用空闲监控时丢 `cancel`** —— `if idle <= 0 { return rc }` 把
+  `ChatStreamContext` 派生 ctx 的 cancel 直接丢掉，reqCtx 只能等父 ctx 结束才释放
+  （长连接场景每请求留一个 ctx 节点，`go vet` 的 lostcancel 也会报）。
+  改成包一层 `cancelOnCloseBody`（Close 时 cancel）。
+  【复核】真。同步更新了断言"返回原对象"的旧测试 —— 新契约是"不启动监控 + Close 释放 cancel"。
+* **10 跳过名单保存失败被静默吞掉** —— `_ = os.MkdirAll(...)`、`_ = os.Rename(...)` 全吞错，
+  目录不可写/磁盘满/EBUSY 时「反复无效 → 跳过 7 天」只留内存，重启后名单回退，
+  被判"做不了"的任务又被重新执行（每次都是真实上游调用）。
+  改用 `auth.ReplaceAtomic` + 失败打 WARN。【复核】真。
+* **11 锁外直读 `a.Nickname` 与 `SetNickname` 数据竞争** —— `auth` 包为此专门加了
+  `NicknameValue()`（注释写明"这是真实数据竞争"），但 upstream（日志/请求体）与
+  panel（队列行/诊断）共 13 处仍直读字段。全部改为 `NicknameValue()`，
+  请求体构造处先取一次快照。顺带新增 `ExpiresAtValue()`（同类锁外读）。【复核】真。
+* **12 活跃上报的 conversation id 同毫秒撞车** —— `fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())`
+  在逐号循环里，同毫秒处理 2 个以上账号就拿到同一个 conversation id；上游按 conversation
+  聚合活跃事件，重复 id 可能被去重 → 「报了 N 个号，连登只涨了一部分」。拼上 `logfmt.UID8`。
+  【复核】真。
+* **13 `SaveAtomic` 持锁做磁盘 I/O** —— 全程 `a.mu.Lock()` 内做 ReadFile + Marshal + 写文件 +
+  rename，而 `pool.pick` 持池写锁调用 `e.a.Realm()`（要 `a.mu.RLock`）→ 一次 token 落盘就把
+  全池选号堵住；22:00 全量保活 46 个号依次落盘时 chat 出现周期性卡顿。
+  改成**锁内只取快照**（`authFileSnapshot`）、`writeAuthSnapshot` 在锁外做全部 I/O。
+  【复核】真。
+
+### 测试（+4 个回归，改 1 个旧断言）
+
+- `TestPackageRemainUsedKeepsIdentityWhenUsedExceedsSize`（#4：三种形态都断言
+  `remain+used == size`，含脏数据 used>size）
+- `TestRefreshTokenIgnoresOverflowingExpiresIn` + `TestRefreshTokenAppliesReasonableExpiresIn`
+  （#5：9.3e9 秒必须被忽略、正常 3600 秒仍生效）
+- `TestMonitorBodyDisabledWhenIdleZero` 改写（#9：不启动监控 + Close 必须调 cancel）
+
+`upstream 213 / server 92 / pool 186 / panel 28 / session 20 / redisstore 6 / reqlog 7 /
+auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**711 通过 0 失败**；`gofmt -l` 为 0。
+
 ## v1.27.5（当前）
 
 **本版 = 第十一份审查报告（18 条 + 1 条"待确认"）的落地修复。逐条对当前代码复核：

@@ -2,6 +2,7 @@ package panel
 
 import (
 	"encoding/json"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"log"
 	"net/http"
 	"os"
@@ -88,11 +89,12 @@ func (s *skipStore) save(st *skipState) {
 	if dir := filepath.Dir(s.path); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return
+	// 用公共原子替换并**记录失败**（bug #10）：此前 MkdirAll/Rename 全吞错，
+	// 目录不可写/磁盘满/单文件挂载 EBUSY 时，「反复无效 → 跳过 7 天」的记录只留在内存，
+	// 重启后名单回退，被判"做不了"的任务又被重新执行（每次都是真实上游调用）。
+	if err := auth.ReplaceAtomic(s.path, raw, 0o600); err != nil {
+		log.Printf("WARN: [panel] task_skip 落盘失败（本次仅内存生效）: %v", err)
 	}
-	_ = os.Rename(tmp, s.path)
 }
 
 // attemptAllowed 尝试型任务是否放行（面板开关，默认关 = 只留有把握的）。

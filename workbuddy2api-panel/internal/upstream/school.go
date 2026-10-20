@@ -60,6 +60,7 @@ const schoolOpenDayActivityID = "school_open_day_2026"
 
 // mpEventBase 小程序埋点公共指纹（appservice wQ()+Ao() 对齐）。
 func mpEventBase(a *auth.Auth) map[string]any {
+	nick := a.NicknameValue() // 一次请求取一次快照（bug #11）
 	return map[string]any{
 		"timestamp":    time.Now().UnixMilli(),
 		"ideType":      "WorkBuddy_MP",
@@ -75,7 +76,7 @@ func mpEventBase(a *auth.Auth) map[string]any {
 		"machineId":    "0655736a-607f-4d9d-b430-58176ee9a090",
 		"timezone":     "Asia/Shanghai",
 		"userId":       a.UID,
-		"userNickname": a.Nickname,
+		"userNickname": nick,
 	}
 }
 

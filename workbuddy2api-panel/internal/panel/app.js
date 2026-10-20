@@ -821,17 +821,23 @@ async function loadLogs() {
   const rq = trangeQuery('reqRange', false);
   rq.set('limit', limit);
   try {
+    // 请求记录接口失败要透出来（bug #7）：此前 `.catch(() => ({entries: []}))` 把
+    // 500/超时/密钥失效静默替换成空数组，而 archiveOn 为真 → 表格显示「暂无请求记录」、
+    // 计数显示 0 条，用户以为筛选或归档没数据，实际是接口挂了。
+    let reqErr = '';
+    const requestLogs = api('request_logs?' + rq.toString())
+      .catch(e => { reqErr = e.message; return { entries: [] }; });
     const [d, metrics, requestRows] = await Promise.all([
       api('logs'),
       api('request_metrics').catch(() => ({})),
-      api('request_logs?' + rq.toString()).catch(() => ({ entries: [] })),
+      requestLogs,
     ]);
     // 归档开启时以归档为准——「区间内没有记录」是一个真实结果，不能回落成内存里
     // 的最近 100 条（那会把筛选条件之外、时间范围之外的请求显示出来）。
     // 只有归档关闭时才回落到内存指标，保证没有归档的部署仍能看到最近请求。
     const archiveOn = !!(metrics && metrics.archive && metrics.archive.enabled);
     const recent = archiveOn ? (requestRows.entries || []) : (metrics.recent || []);
-    renderRequestMetrics(metrics, recent);
+    renderRequestMetrics(metrics, recent, reqErr);
     const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
     box.innerHTML = entries.length
       ? entries.map(e => {
@@ -855,7 +861,7 @@ async function loadLogs() {
   }
 }
 
-function renderRequestMetrics(m, entries) {
+function renderRequestMetrics(m, entries, reqErr) {
   m = m || {};
   const a = m.archive || {};
   $('reqSummary').textContent =
@@ -933,7 +939,8 @@ function renderRequestTable() {
       '<td>' + (rid ? '<span class="clip rid" title="' + esc(rid) + '">' + esc(rid) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '</tr>';
   }).join('') || '<tr><td colspan="10" class="empty">' +
-      (reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
+      (reqErr ? '请求记录读取失败：' + esc(reqErr)
+              : reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
 
   const filtered = list.length !== reqEntries.length;
   // 归档里的旧条目没有来源字段（该功能上线前写入）：这时提示开关/历史原因，
