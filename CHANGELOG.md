@@ -1,5 +1,69 @@
 # 变更记录
 
+## v1.26.5（当前）
+
+**本版 = 第三份 bug 清单（19 条）的落地修复，P1 7/7、P2 9/9、P3 3/3 全修。**
+
+### P1（会丢数据 / 让功能静默失效）
+
+* **1 落盘失败后状态不再重试** —— `saveLocked()` 改成返回 `error`，flusher 与 `Flush`
+  失败时**回置 dirty**。此前先清脏标记再落盘，一次瞬时失败（磁盘满 / rename 跨设备 /
+  权限）之后要等到下一次状态变更才重试，而 APK 场景进程随时被杀 —— 冷却截止、熔断计数、
+  成本账本就永久丢了。`usage.go` 早就按这个范式修过，pool 侧没对齐。
+* **2 面板 `writeJSON` 吞掉序列化错误** —— 面板那份是漏改的副本（server 包已按 B11 修过）：
+  marshal 失败仍 200 + 0 字节，前端 `r.json().catch(()=>({}))` 把它吞成 `{}`，
+  页面「没报错但什么都没变」。
+* **3 模型级阻塞判定不分域** —— 新增 `ModelBlockedForRealm`，handler 传入本次解析出的
+  `realm`。此前一个 `global:xxx` 请求即使所有 global 号都被该模型冷却挡住，也会因为
+  某个 CN 号「没被冷却」而判为未阻塞 → 503 `no_healthy_account`，客户端按「服务端过载」
+  无限重试，而正确处置是换模型（400 `model_unavailable`）。
+* **4 末端「等级闸门」兜底用全池判定** —— 改成 `ModelDeniedForAllAccountsInRealm`，
+  与 `/v1/models` 那边的分域口径一致。
+* **5 积分包两套 remain/size 口径** —— `CreditPackages` 删掉内联 switch，改用
+  `packageRemainUsed()`（补回「remain > size 钳制」与「CycleUsed 反算 remain」两条），
+  面板「积分构成」与「账号余额」不再互相矛盾。
+* **6 `scheduler.New` 漏了 GrowthHours 默认值** —— 其余五个槽位都有、唯独它没有，
+  空值时 `nextFire(now, nil)` 返回零时间被跳过，成长任务**永远不排程且无日志**。
+* **7 单任务入口没有 ctx / 中止标记** —— `accountTaskAuto` 补 `clearAborted` +
+  `watchAbort(r.Context().Done(), uid)`：客户端断开后长流水线（mp 45~55s/条 × 最多 10 条）
+  尽快退出并释放 per-account 锁，不再让用户重试全撞 409。
+
+### P2（行为不一致 / 边界错误）
+
+* **8 web 域请求的 Origin/Referer 硬编码 CN 域** —— 新增 `webOrigin(a)`，profile 与
+  ClaimReward 都改用它。国际版号此前因来源域与目标域不一致被拒（global 号昵称永远
+  同步不上、领奖走 Web 降级路径失败）。
+* **9 `ClaimRewardMP` 用类型断言** —— 改 `errors.As`（任何一层 `%w` 包装都会让断言
+  失败 → 400 时不再降级到 Web 领奖端点）。
+* **10 登录完成时 `expiresIn` 缺失把过期时间写成「现在」** —— `NeedsRefresh` 恒真 →
+  每个 chat 请求都先打一次 refresh。改成 `ExpiresIn > 0` 才写。
+* **11 签到账号间节流不可取消** —— 新增 `RunCheckinNowCtx(ctx)`，调度器 `runBatch`
+  传 ctx，面板手动入口走 `RunCheckinNow()`（Background）。`sleepCtx(Background, …)`
+  的 `return` 死代码随之消失。
+* **12 跳过名单 `Until` 零值永久跳过** —— 零值视为已到期并清条目（手改 / 旧版本写入 /
+  写入中途断电都会留下这种条目，7 天自动放回的承诺会失效）。
+* **13 单号签到把幂等「已签到」当错误文案回前端** —— 改回「今天已签到」，其余错误照常回显。
+* **14 手动全量签到日志文案不符** —— 删掉「（含猫猫旅行）」，改为提示旅行是独立排程。
+* **15 前端读取后端不存在的 `file_error`** —— 该分支恒为 undefined（后端删文件失败
+  直接 500 且不出池），删掉。
+* **16 暂停中的账号在冷却期显示「解冻」** —— 按钮优先级改成先判 `paused`（「恢复选号」），
+  再判 `frozen`。此前点一下会把暂停状态和全部冷却一起清掉。
+
+### P3
+
+* **17 领奖后不刷新池内积分** —— 新增 `refreshCreditsAsync()`，领奖成功后异步拉一次
+  `UserResourceDetailedWithExpiry` 写回池内，面板不用再等 5 分钟。
+* **18 面板自动加载的重试次数永不重置** —— 成功加载时 `loadTries = 0`。
+* **19 连登管家日志用完整 uid** —— 统一 `logfmt.Label(uid, nick)`，按 uid8 grep 不再漏行。
+
+### 测试
+
+`upstream 203 / server 90 / pool 184 / panel 24 / session 20 / redisstore 6 / reqlog 7 /
+auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`gofmt -l` 为 0。
+
+三个「全禁用」排程用例补了 `GrowthDisabled: true` —— bug #6 修好之后成长排程有了默认
+时点（01:00），不关它这些用例的「不应排程」断言自然不成立。
+
 ## v1.26.4（当前）
 
 **本版 = Bug 清单（B1–B15）的落地修复，15 条全修。**

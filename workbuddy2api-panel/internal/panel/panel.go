@@ -616,11 +616,15 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	if a.IsEnterprise() {
 		checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
 	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
-		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
-		// 幂等拒绝同样是「今日已签」，标记后按钮显示「已签」。
+		// 幂等拒绝（今天已签到）是**正常结果**，不是错误（bug #13）：此前把
+		// err.Error() 原样回给前端，toast 会拼出「（code=10001 msg=今天已签到）」
+		// 这种错误文本，而按钮已经显示「已签」。
 		if upstream.IsAlreadyCheckin(err) {
 			p.cfg.Pool.NoteCheckinDone(uid)
 			checkinDone = true
+			checkinMsg = "今天已签到"
+		} else {
+			checkinMsg = err.Error() // 其它业务错误照常回显，同时继续查余额
 		}
 	} else {
 		p.cfg.Pool.NoteCheckinDone(uid)
@@ -700,7 +704,7 @@ func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go p.cfg.Scheduler.RunCheckinNow()
-	log.Printf("panel: 手动全量签到已触发（含猫猫旅行）")
+	log.Printf("panel: 手动全量签到已触发（猫猫旅行是独立排程，需另点「旅行巡检」）")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
@@ -940,7 +944,16 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	raw, _ := json.Marshal(v)
+	// 序列化失败必须报 500（bug #2）：此前 `raw, _ :=` 吞掉错误照样 200 + 0 字节，
+	// 前端 api() 的 `await r.json().catch(()=>({}))` 会把它吞成 {}，r.ok 仍为 true
+	// —— 页面"没报错但什么都没变"。server 包同名函数已修，这份是漏改的副本。
+	raw, err := json.Marshal(v)
+	if err != nil {
+		log.Printf("ERR: [panel] writeJSON marshal 失败: %v", err)
+		http.Error(w, `{"ok":false,"error":"internal error: response encode failed"}`,
+			http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)

@@ -237,6 +237,25 @@ func taskDone(t *upstream.Task) bool {
 	return t.Target > 0 && t.Current >= t.Target
 }
 
+// refreshCreditsAsync 领奖成功后异步刷新该号积分（bug #17）。
+//
+// 为什么需要：ClaimReward 只把本次到账的 credit/energy 写进响应，池内 credits 不动，
+// 面板上的积分要等下一次余额刷新（默认 5 分钟）或手动点「余额」才变 —— 用户会以为
+// "领了但没到账"。这里后台拉一次 UserResourceDetailedWithExpiry 并写回池内。
+func (p *Panel) refreshCreditsAsync(a *auth.Auth) {
+	if a == nil || p.cfg.Upstream == nil || p.cfg.Pool == nil {
+		return
+	}
+	go func() {
+		remain, total, expiring, earliestAt, earliestRemaining, err :=
+			p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
+		if err != nil {
+			return
+		}
+		p.cfg.Pool.SetCreditsDetailed(a.UID, remain, total, expiring, earliestAt, earliestRemaining)
+	}()
+}
+
 // errTaskAborted 任务被中止（客户端断连 / HTTP 超时）。
 var errTaskAborted = errors.New("task aborted: client gone or request timed out")
 
@@ -684,6 +703,13 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer p.unlockAccount(uid)
+	// 断连即中止（bug #7）：单任务入口此前没有 ctx、也不打中止标记，而它调用的
+	// runMPMiniChatTask 用的是 sleepAB(uid, ...) —— 标记只有 auto_all 会设，
+	// 于是客户端断开后流水线照样跑满（mp 45~55s/条 × 最多 10 条 ≈ 8 分钟）并一直
+	// 持着 per-account 锁，用户重试全撞 409。这里补上与 auto_all 同构的看护。
+	clearAborted(uid)
+	stopWatch := watchAbort(r.Context().Done(), uid)
+	defer stopWatch()
 	// 前置读取：已完成的任务直接跳过（幂等，不浪费上游调用）。
 	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
 	before, err := p.taskByCode(a, act.TaskCode)
@@ -706,6 +732,10 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	}
 	msg, err := act.run(p, a)
 	if err != nil {
+		if errors.Is(err, errTaskAborted) {
+			writeErr(w, http.StatusGatewayTimeout, "客户端已断开或等待超时，任务已中止（未继续占用账号锁）")
+			return
+		}
 		writeErr(w, http.StatusBadGateway, "执行失败: "+err.Error())
 		return
 	}
@@ -743,6 +773,7 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 			credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, act.TaskCode)
 		}
 		if cerr == nil {
+			p.refreshCreditsAsync(a) // 领奖后刷新池内积分（bug #17）
 			resp["claimed"] = true
 			resp["credit"] = credit
 			resp["energy"] = energy
@@ -1274,6 +1305,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 				credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, act.TaskCode)
 			}
 			if cerr == nil {
+				p.refreshCreditsAsync(a) // 领奖后刷新池内积分（bug #17）
 				item["claimed"] = true
 				item["credit"] = credit
 				item["energy"] = energy

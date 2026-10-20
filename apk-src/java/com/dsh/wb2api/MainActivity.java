@@ -172,6 +172,10 @@ public class MainActivity extends Activity {
                     return;
                 }
                 panelLoaded = true;
+                // 成功加载就重置重试计数（bug #18）：否则累计到 MAX_LOAD_TRIES 之后，
+                // 本次 Activity 生命周期内再也不会自动 loadUrl（WebView 崩回错误页
+                // 也只能靠用户手点「重载面板」）。
+                loadTries = 0;
                 if (!injected) {
                     injected = true;
                     injectKey();

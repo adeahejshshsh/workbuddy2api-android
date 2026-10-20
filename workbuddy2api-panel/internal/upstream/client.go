@@ -869,6 +869,19 @@ func (c *Client) webBase(a *auth.Auth) string {
 	return "https://www.workbuddy.cn"
 }
 
+// webOrigin 返回该账号应使用的 Web 来源域（Origin/Referer 的基）。
+//
+// 为什么必须分域（bug #8）：profile / ClaimReward 的 URL 走 webBase(a)（global 号
+// 打 workbuddy.ai），但 Origin/Referer 曾写死 workbuddy.cn —— 国际版号会因来源域
+// 与目标域不一致被拒（403/风控），表现为 global 号昵称永远同步不上、领奖走 Web
+// 降级路径失败。
+func (c *Client) webOrigin(a *auth.Auth) string {
+	if c.globalOn(a) {
+		return defaultGlobalBase
+	}
+	return "https://www.workbuddy.cn"
+}
+
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
@@ -1898,23 +1911,20 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 		if p.CreateTime > 0 {
 			cp.CreatedAt = time.UnixMilli(p.CreateTime).Format(time.RFC3339)
 		}
-		if p.CycleCapacitySize > 0 {
-			cp.Cycle = true
-			cp.Remain, cp.Size = p.CycleCapacityRemain, p.CycleCapacitySize
-			cp.Used = cp.Size - cp.Remain
-			if p.CycleCapacityUsed > cp.Used {
-				cp.Used = p.CycleCapacityUsed
-				cp.Remain = cp.Size - cp.Used
-			}
-			if cp.Remain < 0 {
-				cp.Remain = 0
-			}
-		} else {
-			cp.Remain, cp.Used, cp.Size = p.CapacityRemain, p.CapacityUsed, p.CapacitySize
-			if cp.Used == 0 && cp.Size > cp.Remain {
-				cp.Used = cp.Size - cp.Remain
-			}
-		}
+		// 与 UserResourceDetailed 共用同一份口径（bug #5）：此前这里内联了一份
+		// 等价逻辑，但缺「remain > size 钳制」与「CycleUsed 反算 remain」两条。
+		// 上游脏数据（CycleCapacityRemain > Size，或 CycleUsed 与 remain 不自洽）时，
+		// 面板「积分构成」会显示"剩余 > 面额"，与「账号余额」列互相矛盾。
+		remain, used, size := packageRemainUsed(respAccount{
+			CapacityRemain:      p.CapacityRemain,
+			CapacityUsed:        p.CapacityUsed,
+			CapacitySize:        p.CapacitySize,
+			CycleCapacityRemain: p.CycleCapacityRemain,
+			CycleCapacityUsed:   p.CycleCapacityUsed,
+			CycleCapacitySize:   p.CycleCapacitySize,
+		})
+		cp.Cycle = p.CycleCapacitySize > 0
+		cp.Remain, cp.Used, cp.Size = remain, used, size
 		sumRemain += cp.Remain
 		sumSize += cp.Size
 		out = append(out, cp)

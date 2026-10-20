@@ -358,6 +358,16 @@ type ModelBlockStatus struct {
 // 口径必须与选号一致：用 modelCooled 而非直接查 map，这样 AuditOnly 条目
 // （只审计不拦截）不会被误报成阻塞。
 func (p *Pool) ModelBlocked(model string) ModelBlockStatus {
+	return p.ModelBlockedForRealm(model, "")
+}
+
+// ModelBlockedForRealm 与 ModelBlocked 同义，但只统计**本域**账号（bug #3）。
+//
+// 为什么必须分域：不分域时，一个 global:xxx 请求即便所有 global 号都被该模型冷却
+// 挡住，也会因为某个 CN 号"没被冷却"而判为未阻塞 → 最终落 503 no_healthy_account，
+// 客户端按"服务端过载"无限重试；而正确处置是换模型（400 model_unavailable）。
+// 分域口径与 ModelLockView 一致。realm 为空 = 不分域（旧行为）。
+func (p *Pool) ModelBlockedForRealm(model, realm string) ModelBlockStatus {
 	if model == "" {
 		return ModelBlockStatus{}
 	}
@@ -371,6 +381,9 @@ func (p *Pool) ModelBlocked(model string) ModelBlockStatus {
 		// 证明不成立——否则一个暂停的健康号会掩盖「其余号全被模型级冷却挡住」。
 		if e.disabled || e.paused {
 			continue // 禁用/暂停号不参与：它们的不可用与模型无关
+		}
+		if realm != "" && e.a != nil && e.a.Realm() != realm {
+			continue // 别的域的号不能给"本域可服务"作证
 		}
 		if !e.modelCooled(now, model) {
 			// 还有账号能服务这个模型 → 不是模型级阻塞。

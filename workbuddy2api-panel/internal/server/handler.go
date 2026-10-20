@@ -821,7 +821,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			//   (b) 号都在，但每个号都对这个模型处于模型级冷却（11102/6004）。
 			// 两者此前都报 no_healthy_account，导致「模型不可用」被读成「号全挂了」。
 			// 在这里取一次快照，供下方错误构造区分（issue #102 附带发现 1）。
-			modelBlock = h.cfg.Pool.ModelBlocked(bareModel)
+			modelBlock = h.cfg.Pool.ModelBlockedForRealm(bareModel, realm) // 分域判定（bug #3）
 			break
 		}
 		st.uid = acct.UID
@@ -1414,7 +1414,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 等级闸门兜底：全池都被判定"用不了这个模型"、但本轮一个上游请求都没打（号已被负缓存
 	// 避开，lastErr 为空）→ 此前会退回默认的 503 no_healthy_account，用户看到的就是
 	// "明明写了不支持，却报 503"。等级事实是确凿的，直接给精确 code + 400。
-	if !modelBlock.Blocked && h.cfg.Pool.ModelDeniedForAllAccounts(bareModel) {
+	// 分域判定（bug #4）：双域池里 global:xxx 的 global 号已被 11158 学成 deny，
+	// 但某个 CN 号等级未知 —— 全池口径会返回 false，于是以 503 no_healthy_account
+	// 结束，而不是精确的 model_not_allowed_for_account_type + 400。
+	// /v1/models 那边一直用的是分域版本，末端兜底漏了。
+	if !modelBlock.Blocked && h.cfg.Pool.ModelDeniedForAllAccountsInRealm(bareModel, realm) {
 		code = "model_not_allowed_for_account_type"
 		status = http.StatusBadRequest
 		if !upstreamMsgPassed {

@@ -126,7 +126,11 @@ func (p *Panel) skipBlocked(uid, code string) (bool, string) {
 	if e == nil || e.Fails < skipFailLimit {
 		return false, ""
 	}
-	if e.Until.IsZero() || time.Now().Before(e.Until) {
+	// Until 零值 = 已到期（bug #12）：正常路径 skipNote 一定会写 Until，但
+	// task_skip.json 被手改 / 被旧版本写入 / 写入中途断电时，会留下
+	// Fails>=3 && Until==0 的条目 —— 该 (账号,任务) 会**永远**被判"做不了"，
+	// 7 天自动放回的承诺失效，只能手动清空名单。
+	if !e.Until.IsZero() && time.Now().Before(e.Until) {
 		return true, e.Why
 	}
 	delete(st.Entries, k) // 冷却到期 → 再给它一轮机会

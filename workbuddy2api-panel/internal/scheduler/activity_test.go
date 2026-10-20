@@ -366,6 +366,7 @@ func TestCheckinDisabledTravelStillRuns(t *testing.T) {
 // TestAllFourDisabledNoSpin 四类任务全禁用：Run 不空转。
 func TestAllFourDisabledNoSpin(t *testing.T) {
 	s := New(Config{
+		GrowthDisabled:    true, // 成长排程也有默认时点（bug #6），全禁用用例必须一并关掉
 		CheckinDisabled:   true,
 		TravelDisabled:    true,
 		ActivityDisabled:  true,

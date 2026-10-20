@@ -97,8 +97,14 @@ func (p *Pool) startFlusher() {
 			select {
 			case <-t.C:
 				p.mu.Lock()
+				// 失败必须回置 dirty（bug #1）：此前先清脏标记再落盘，一次瞬时失败
+				// （磁盘满/rename 跨设备/权限）之后要等到**下一次状态变更**才会重试，
+				// 而 APK 场景进程随时会被系统杀掉 —— 冷却截止、熔断计数、成本账本
+				// 就永久丢了。usage.go 早就按这个范式修过，pool 侧没对齐。
 				if p.dirty.Swap(false) {
-					p.saveLocked()
+					if err := p.saveLocked(); err != nil {
+						p.dirty.Store(true)
+					}
 				}
 				p.mu.Unlock()
 			case <-stopCh:
@@ -112,7 +118,9 @@ func (p *Pool) startFlusher() {
 func (p *Pool) Flush() {
 	p.mu.Lock()
 	if p.dirty.Swap(false) {
-		p.saveLocked()
+		if err := p.saveLocked(); err != nil {
+			p.dirty.Store(true) // 失败回置：下次 tick / 退出前还会再试（bug #1）
+		}
 	}
 	p.mu.Unlock()
 }
@@ -242,15 +250,18 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
 	p.applyAccountsLocked(s.Accounts)
 }
-func (p *Pool) saveLocked() {
+
+// saveLocked 落盘 state.json，返回失败原因（调用方据此回置 dirty 以便重试）。
+// 返回 nil 表示成功（或未配置 stateFp，视为无事可做）。
+func (p *Pool) saveLocked() error {
 	if p.stateFp == "" {
-		return
+		return nil
 	}
 	sf := p.stateOverviewLocked()
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
 		p.notePersistFail(err)
-		return
+		return err
 	}
 	if dir := filepath.Dir(p.stateFp); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
@@ -258,11 +269,11 @@ func (p *Pool) saveLocked() {
 	tmp := p.stateFp + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		p.notePersistFail(err)
-		return
+		return err
 	}
 	if err := os.Rename(tmp, p.stateFp); err != nil {
 		p.notePersistFail(err)
-		return
+		return err
 	}
 	if p.persistFails > 0 {
 		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
@@ -276,6 +287,7 @@ func (p *Pool) saveLocked() {
 			p.store.SaveState(snapRaw)
 		}
 	}
+	return nil
 }
 
 // notePersistFail 记录一次本地 state.json 落盘失败，并按节流规则决定是否打日志：

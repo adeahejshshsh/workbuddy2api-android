@@ -101,6 +101,13 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.BlackcatHours) == 0 {
 		cfg.BlackcatHours = []int{23}
 	}
+	// GrowthHours 也必须给默认值（bug #6）：其余五个槽位都有，唯独它没有 ——
+	// 空值时 nextFire(now, nil) 返回零时间，被 `if sl.at.IsZero() { continue }`
+	// 跳过，成长任务**永远不会被排到**且没有任何日志。main.go 传了 [1] 所以线上
+	// 不显形，但任何直接 scheduler.New 的装配（测试/工具/二次开发）都会踩。
+	if len(cfg.GrowthHours) == 0 {
+		cfg.GrowthHours = []int{1}
+	}
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
@@ -402,7 +409,7 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			defer wg.Done()
 			switch k {
 			case taskCheckin:
-				s.RunCheckinNow()
+				s.RunCheckinNowCtx(ctx)
 			case taskTravel:
 				s.RunTravelNow()
 			case taskActivity:
@@ -454,6 +461,16 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 var checkinAccountDelay = 800 * time.Millisecond
 
 func (s *Scheduler) RunCheckinNow() {
+	s.RunCheckinNowCtx(context.Background())
+}
+
+// RunCheckinNowCtx 带 ctx 的全量签到（bug #11）：账号间节流用传入 ctx，
+// SIGTERM / 停机时不必把剩余账号的 0.8s 全睡完（此前传 Background，
+// sleepCtx 永远返回 true，`if !... { return }` 是死代码）。
+func (s *Scheduler) RunCheckinNowCtx(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
 	first := true
@@ -477,8 +494,8 @@ func (s *Scheduler) RunCheckinNow() {
 		// credit_floor 判定与面板额度展示的唯一数据源）。
 		// 账号间节流：第一个号不等，之后每个号之间等一次。
 		if !first && checkinAccountDelay > 0 {
-			if !sleepCtx(context.Background(), checkinAccountDelay) {
-				return
+			if !sleepCtx(ctx, checkinAccountDelay) {
+				return // 停机/取消：不再把剩余账号的节流全睡完
 			}
 		}
 		first = false

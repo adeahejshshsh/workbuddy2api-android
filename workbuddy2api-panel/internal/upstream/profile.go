@@ -27,8 +27,10 @@ func (c *Client) FetchAccountProfile(a *auth.Auth) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("x-client-platform", "web")
-	req.Header.Set("Origin", "https://www.workbuddy.cn")
-	req.Header.Set("Referer", "https://www.workbuddy.cn/profile/account-settings")
+	// 来源域随账号域走（bug #8）：global 号打 workbuddy.ai 却带 workbuddy.cn 的
+	// Origin，会被上游按跨域来源拒掉。
+	req.Header.Set("Origin", c.webOrigin(a))
+	req.Header.Set("Referer", c.webOrigin(a)+"/profile/account-settings")
 	if ua := c.userAgent(a); ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}

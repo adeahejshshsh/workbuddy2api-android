@@ -238,10 +238,19 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
 		return
 	}
+	// 上游没下发 expiresIn（或为 0）时不要写「现在」（bug #10）：那会让
+	// NeedsRefresh(10m) 恒真 → **每个** chat 请求都先打一次 refresh（多一次 RTT、
+	// 放大 refresh 竞态窗口，失败还会换号）。upstream.RefreshToken 对同一情况有
+	// 「缺 expiresIn 保留旧值」的防御，登录路径没对齐：这里留 0（未知），交给首次
+	// 刷新补齐。
+	var expiresAt int64
+	if tok.ExpiresIn > 0 {
+		expiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix()
+	}
 	a := &auth.Auth{
 		AccessToken:  tok.AccessToken,
 		RefreshToken: tok.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix(),
+		ExpiresAt:    expiresAt,
 		Domain:       tok.Domain,
 		UID:          acct.UID,
 		EnterpriseID: acct.EnterpriseID,

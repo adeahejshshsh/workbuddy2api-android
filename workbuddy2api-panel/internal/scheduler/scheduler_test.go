@@ -59,6 +59,7 @@ func TestNextWakeKeepaliveOnly(t *testing.T) {
 // TestNextWakeSameInstantFiresAll 签到与保活配到同一整点时两类任务都要执行。
 func TestNextWakeSameInstantFiresAll(t *testing.T) {
 	s := New(Config{
+		GrowthDisabled:   true, // 成长排程也有默认时点（bug #6），全禁用用例必须一并关掉
 		CheckinHours:     []int{9, 22},
 		TravelHours:      []int{}, // 禁用旅行时点干扰（仅测签到+保活同整点）
 		ActivityHours:    []int{}, // 禁用活跃时点干扰
@@ -123,6 +124,7 @@ func TestNextWakeKeepaliveDisabled(t *testing.T) {
 // TestNextWakeBothDisabledNothingScheduled 五类任务都显式禁用 → 无可唤醒时点。
 func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	s := New(Config{
+		GrowthDisabled:    true, // 成长排程也有默认时点（bug #6），全禁用用例必须一并关掉
 		CheckinDisabled:   true,
 		TravelDisabled:    true,
 		ActivityDisabled:  true,

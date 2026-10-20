@@ -443,8 +443,10 @@ function renderAccounts(list) {
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>' +
         (s.enterprise ? '' :
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
-        (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
-                : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
+        // 暂停优先于冷却（bug #16）：一个"已暂停 + 正好在冷却中"的号此前会显示
+        // 「解冻」（走 revive，会连带清掉暂停状态和全部冷却），与按钮文案不符。
+        (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
+                  : (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
@@ -548,8 +550,10 @@ $('accBody').addEventListener('click', async ev => {
     } else if (a === 'tasks') {
       openTasks(u);
     } else if (a === 'remove') {
-      const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
-      toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
+      // 后端删凭证文件失败时直接 500 并**不**移除账号（bug #15），
+      // 所以这里不再有 file_error 分支（原分支恒为 undefined，是死代码）。
+      await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
+      toast('已移除', 'ok');
     }
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; loadOverview(true); }

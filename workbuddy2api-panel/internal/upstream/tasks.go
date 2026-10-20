@@ -17,6 +17,7 @@ package upstream
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -122,7 +123,10 @@ func (c *Client) ClaimRewardMP(a *auth.Auth, taskCode string) (credit, energy in
 	data, err := c.doJSON(req)
 	if err != nil {
 		// chat 域对该路径 400（部分任务/租户形态）→ Web 域降级（已实测可领）。
-		if ue, ok := err.(*Error); ok && ue.Status == http.StatusBadRequest {
+		// 必须用 errors.As（bug #9）：类型断言只看最外层，任何一层 fmt.Errorf("%w")
+		// 包装都会让它失败 → 400 时不再降级到 Web 领奖端点，mp 领奖直接报错。
+		var ue *Error
+		if errors.As(err, &ue) && ue.Status == http.StatusBadRequest {
 			return c.ClaimReward(a, taskCode)
 		}
 		return 0, 0, err
@@ -235,8 +239,8 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://www.workbuddy.cn")
-	req.Header.Set("Referer", "https://www.workbuddy.cn/profile/growth-center")
+	req.Header.Set("Origin", c.webOrigin(a))
+	req.Header.Set("Referer", c.webOrigin(a)+"/profile/growth-center")
 	req.Header.Set("x-client-platform", "web")
 	if ua := c.userAgent(a); ua != "" {
 		req.Header.Set("User-Agent", ua)
