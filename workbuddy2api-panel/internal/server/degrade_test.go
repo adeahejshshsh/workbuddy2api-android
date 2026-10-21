@@ -47,30 +47,35 @@ func TestNextMidnightCSTCrossMonth(t *testing.T) {
 // TestDegradeGateActiveTriggered Active() 在 Trigger 后为 true，过期后为 false。
 func TestDegradeGateActiveTriggered(t *testing.T) {
 	var g degradeGate
-	if g.Active() {
+	if g.Active("k") {
 		t.Error("fresh gate should not be active")
 	}
-	g.Trigger()
-	if !g.Active() {
+	g.Trigger("k")
+	if !g.Active("k") {
 		t.Error("after Trigger should be active")
+	}
+	// 按客户端隔离（bug 4）：别的 key 不受影响 —— 一个客户端的 system 误报
+	// 不该让全站改走中性提示词。
+	if g.Active("other") {
+		t.Error("降级串味了：别的客户端不该跟着降级")
 	}
 }
 
 // TestDegradeGateTriggerNoRenewal 降级期内再次 Trigger 不续期（保持最早触发点的 00:00 重置）。
 func TestDegradeGateTriggerNoRenewal(t *testing.T) {
 	var g degradeGate
-	g.Trigger()
+	g.Trigger("k")
 	first := func() time.Time {
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		return g.until
+		return g.byKey["k"]
 	}()
 	// 再次 Trigger：仍在降级期内，until 不应改变。
-	g.Trigger()
+	g.Trigger("k")
 	second := func() time.Time {
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		return g.until
+		return g.byKey["k"]
 	}()
 	if !first.Equal(second) {
 		t.Errorf("Trigger during active should not renew: first=%v second=%v", first, second)

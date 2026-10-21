@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"sync"
 	"time"
 )
@@ -15,24 +16,50 @@ import (
 // 不进降级路径）。降级期内的请求直达 Degraded，不再先撞 400。
 type degradeGate struct {
 	mu    sync.Mutex
-	until time.Time
+	byKey map[string]time.Time
 }
 
-// Active 当前是否处于降级期（now < until）。
-func (g *degradeGate) Active() bool {
+// degradeKeyMax 降级键数量上限（UA+模型 的组合可以很多，防内存无界）。
+const degradeKeyMax = 256
+
+// Active key 是否处于降级期（now < until）。
+//
+// 为什么按 key 隔离（bug 4）：状态原本是进程级单例，**任意一个**请求被上游内容策略
+// 拦（最常见是 system 指纹误报）就把 until 设到次日 00:00，此后**所有客户端**的
+// 请求都改走中性提示词 —— Codex/Claude Code 的项目规范、工具约定被整段替换，
+// 一整个白天都退化。一个客户端的误报不该变成全站降智。
+func (g *degradeGate) Active(key string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return time.Now().Before(g.until)
+	until, ok := g.byKey[key]
+	return ok && time.Now().Before(until)
 }
 
-// Trigger 触发降级，直到次日 00:00 CST（Asia/Shanghai）。
+// Trigger 触发 key 的降级，直到次日 00:00 CST（Asia/Shanghai）。
 // 已在降级期内则不续期（保持最早触发点的 00:00 重置语义）。
-func (g *degradeGate) Trigger() {
+func (g *degradeGate) Trigger(key string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !time.Now().Before(g.until) {
-		// 已过期/未触发 → 设新的 until；未过期则保持原 until（不续期）。
-		g.until = nextMidnightCST(time.Now())
+	now := time.Now()
+	if until, ok := g.byKey[key]; ok && now.Before(until) {
+		return // 未过期：保持原 until（不续期）
+	}
+	if g.byKey == nil {
+		g.byKey = map[string]time.Time{}
+	}
+	g.byKey[key] = nextMidnightCST(now)
+	// 键数兜底：先清过期，仍超限就整体重置（降级本就是"当天抢救"，重置代价可接受）
+	if len(g.byKey) > degradeKeyMax {
+		for k, u := range g.byKey {
+			if !now.Before(u) {
+				delete(g.byKey, k)
+			}
+		}
+		if len(g.byKey) > degradeKeyMax {
+			keep := g.byKey[key]
+			g.byKey = map[string]time.Time{key: keep}
+			log.Printf("WARN: [server] degrade gate 键数超上限，已重置（只保留当前客户端）")
+		}
 	}
 }
 

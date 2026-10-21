@@ -82,6 +82,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		gotAnyContent bool
 		validEvents   int
 		sawDone       bool // 上游显式发过 data: [DONE]（正常收尾）
+		sawFinish     bool // 上游显式给过非空 finish_reason（它认为这一轮结束了）
 		toolCalls     = map[int]map[string]any{}
 		toolOrder     []int
 		// toolSeq 缺 index 的 tool_call 的分配序号源：跨帧延续「最近分配」槽位，
@@ -236,6 +237,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 							}
 							if fr, ok := c["finish_reason"].(string); ok && fr != "" {
 								finishReason = fr
+								sawFinish = true
 							}
 							if delta, ok := c["delta"].(map[string]any); ok {
 								if r2, ok := delta["role"].(string); ok && r2 != "" {
@@ -310,6 +312,16 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		if len(calls) > 0 {
 			message["tool_calls"] = calls
 		}
+	}
+	// 上游既没发 [DONE]、也没给过任何非空 finish_reason：这才是真截断（连接被掐 /
+	// 上游 EOF），必须把 finish_reason 从初始值 "stop" 改掉，否则客户端会认定
+	// 「模型说完了」，把半截答案当完整结果落库（bug 5）。
+	// 判据刻意收紧到 sawFinish==false：WorkBuddy 上游「完整结束但不发 [DONE]」是
+	// 常态（工具调用分支早有同款注释），只看 !sawDone 会把大量正常回复误标成截断。
+	if !sawDone && !sawFinish && finishReason == "stop" {
+		finishReason = "length"
+		log.Printf("WARN: [upstream] non-stream id=%s model=%s: stream ended without [DONE] or finish_reason, marking finish_reason=length",
+			id, model)
 	}
 	resp := map[string]any{
 		"id":      id,

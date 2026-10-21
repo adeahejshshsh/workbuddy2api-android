@@ -55,6 +55,8 @@ func classifyLine(line string) string {
 type Ring struct {
 	mu      sync.Mutex
 	entries []LogEntry
+	head    int // 下一次写入位置
+	size    int // 已写入条数（<= cap）
 	cap     int
 }
 
@@ -76,9 +78,17 @@ func (r *Ring) Write(p []byte) (int, error) {
 			continue
 		}
 		text := tsPrefixRe.ReplaceAllString(line, "")
-		r.entries = append(r.entries, LogEntry{TS: now, Ch: classifyLine(text), Text: text})
-		if overflow := len(r.entries) - r.cap; overflow > 0 {
-			r.entries = r.entries[overflow:]
+		// 真环写（bug 13）：此前是 `append` 再 `entries[overflow:]` —— 每写一行
+		// 容量少 1，容量耗尽时整块重分配并拷贝 cap 条，等于「每 cap 行日志一次
+		// 500 元素的拷贝 + 一次分配」，白白给 GC 加压力（聊天流水在高 QPS 下
+		// 是每请求一行）。这里固定数组 + 头指针，写入 O(1) 且零分配。
+		if r.entries == nil {
+			r.entries = make([]LogEntry, r.cap)
+		}
+		r.entries[r.head] = LogEntry{TS: now, Ch: classifyLine(text), Text: text}
+		r.head = (r.head + 1) % r.cap
+		if r.size < r.cap {
+			r.size++
 		}
 	}
 	return len(p), nil
@@ -88,7 +98,14 @@ func (r *Ring) Write(p []byte) (int, error) {
 func (r *Ring) Snapshot() []LogEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]LogEntry, len(r.entries))
-	copy(out, r.entries)
+	out := make([]LogEntry, 0, r.size)
+	if r.size < r.cap {
+		// 未写满：有效数据在 [0, size)
+		out = append(out, r.entries[:r.size]...)
+		return out
+	}
+	// 已写满：从最旧的槽位（head）绕一圈
+	out = append(out, r.entries[r.head:]...)
+	out = append(out, r.entries[:r.head]...)
 	return out
 }

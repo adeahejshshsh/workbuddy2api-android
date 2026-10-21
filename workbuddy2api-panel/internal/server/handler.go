@@ -134,7 +134,15 @@ func NewHandler(cfg Config) *Handler {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
 	if cfg.PromptMode == "" {
-		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
+		// 与 config.Load 的缺省对齐（bug 11）：以前这里是 custom，而 config 层缺省
+		// passthrough —— 走 config.Load 的路径看不出来，但任何裸用 NewHandler 的
+		// 场景（测试/工具/二次开发）拿到的是 custom，而 custom 在 PromptText=="" 时
+		// 什么都不做，语义正好相反；哪天有人给 PromptText 赋值就会静默替换掉所有
+		// 客户端的 system，排查半天找不到开关。
+		cfg.PromptMode = "passthrough"
+	}
+	if cfg.PromptMode == "custom" && cfg.PromptText == "" {
+		log.Printf("WARN: [server] prompt.mode=custom 但 prompt.text 为空：本次不会改写客户端 system（疑似配置漏项）")
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -602,6 +610,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+	// 裸名（没有任何 realm 前缀）—— 末端要用它把「裸名只路由 cn」讲清楚（bug 3）
+	bareModelName := peek.Model != "" &&
+		!strings.HasPrefix(peek.Model, "cn:") && !strings.HasPrefix(peek.Model, "global:")
 	modelRate := ""
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
@@ -631,6 +642,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
+	// 降级门的隔离键（bug 4）：优先会话键；客户端不带会话头时退化成
+	// 「UA + 模型」的客户端指纹 —— 一个客户端的 system 指纹误报不该让全站降智。
+	degradeKey := sessKey
+	if degradeKey == "" {
+		degradeKey = r.UserAgent() + "|" + peek.Model
+	}
 	stickyUID := ""
 	if h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
@@ -759,9 +776,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	degradedApplied := false
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
-	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
+	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active(degradeKey) {
 		body = prompt.Append(body, h.cfg.PromptText)
-	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
+	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active(degradeKey) {
 		body = prompt.Rewrite(body, prompt.Degraded)
 		degradedApplied = true
 	}
@@ -958,7 +975,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
 			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
-				h.degrade.Trigger()
+				h.degrade.Trigger(degradeKey)
 				body = prompt.Rewrite(body, prompt.Degraded)
 				degradedApplied = true
 				delete(tried, acct.UID) // 单账号池也能拿到重试机会
@@ -1481,6 +1498,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 但某个 CN 号等级未知 —— 全池口径会返回 false，于是以 503 no_healthy_account
 	// 结束，而不是精确的 model_not_allowed_for_account_type + 400。
 	// /v1/models 那边一直用的是分域版本，末端兜底漏了。
+	// 裸名只路由 cn（D6）：池里没有可服务的 cn 号、却有 global 号时，客户端拿到的是
+	// 503 no_healthy_account —— 而 503 是「可重试」语义，OpenAI 兼容客户端 / Claude Code
+	// / Codex 默认就发裸名（它们不会加网关私有前缀），于是会就着同一个裸名无限重试，
+	// 「加前缀 / 换模型」这条正确处置永远不会被触发（bug 3）。
+	// 这里换成 400 + 明确指引：这是客户端选错了模型标识，重试没用。
+	if status == http.StatusServiceUnavailable && bareModelName && realm == "cn" && h.cfg.Pool != nil &&
+		!h.cfg.Pool.ServableForRealm("cn") && h.cfg.Pool.ServableForRealm("global") {
+		status = http.StatusBadRequest
+		code = "realm_required"
+		msg = "bare model names route to the cn realm only; add the \"global:\" prefix for global models (see GET /v1/models)"
+		hint = "no servable cn account, but global accounts are available; this gateway routes unprefixed model names to cn"
+	}
 	if !modelBlock.Blocked && h.cfg.Pool.ModelDeniedForAllAccountsInRealm(bareModel, realm) {
 		code = "model_not_allowed_for_account_type"
 		status = http.StatusBadRequest

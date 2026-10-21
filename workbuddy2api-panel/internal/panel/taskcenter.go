@@ -435,7 +435,13 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 					dg.errs = append(dg.errs, a.NicknameValue()+"："+errBrief(err))
 					mu.Unlock()
 				} else {
+					// seen 必须登记**全量**任务码，而不是只登记进了 one.grow 的（bug 10）：
+					// 默认口径里被判成 locked/claimed/noauto/skipped 的任务不会进 one.grow，
+					// mp 列表再出现同一码时会被重判一遍 —— skipped 因此被双计，
+					// 用户看到「跳过 6 个」而实际只有 3 个。与 loadTaskMap 同口径。
+					seen := make(map[string]bool, len(tasks))
 					for _, t := range tasks {
+						seen[t.TaskCode] = true
 						if p.growthPending(a, t) {
 							one.grow = append(one.grow, t)
 							continue
@@ -457,10 +463,6 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 					// 超集，按 code 去重；失败静默）。此前此处漏合并——扫描显示
 					// mp 待办而队列报"无可执行待办"。
 					if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
-						seen := map[string]bool{}
-						for _, t := range one.grow {
-							seen[t.TaskCode] = true
-						}
 						for _, t := range mpTasks {
 							if seen[t.TaskCode] {
 								continue

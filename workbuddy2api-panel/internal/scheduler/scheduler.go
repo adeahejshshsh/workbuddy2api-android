@@ -756,6 +756,12 @@ dispatch:
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// 内层 goroutine 同样要兜底（bug 1）：否则单个号的响应解析异常 = 整进程退出。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERR: scheduler: balance uid=%s panic: %v", uid, r)
+				}
+			}()
 			remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiryCtx(ctx, a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.NicknameValue()), err)
@@ -808,11 +814,23 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 			case <-timer.C:
 				// 与面板「刷新余额」共用任务族锁（bug P0-3）：两路同时扇出会双倍打上游。
 				if s.TryBeginTask(TaskBalance) {
-					// 必须用 Ctx 版本（bug-05）：无 ctx 版固定 Background，
-					// SIGTERM 后 sem 抢占与账号间请求都不会被打断，最多拖 46×30s，
-					// 把最后一次 Flush 挤进强杀窗口（正是 run.sh 8s 预算要保护的）。
-					s.RunBalanceRefreshNowCtx(ctx)
-					s.EndTask(TaskBalance)
+					// EndTask 必须 defer + 整条链要 recover（bug 1）：`RunBalanceRefreshNowCtx`
+					// 里只要 panic 一次（上游响应形状变化、索引越界），任务族锁就永久不释放
+					// —— 面板「刷新余额」此后恒 409、后台周期刷新彻底停摆，而且没有任何日志。
+					// 同理：这个 goroutine 不是 net/http 起的，panic 无人 recover 就是整个
+					// 进程退出（同仓 panel 的各条后台路径都加了兜底，唯独这里漏了）。
+					func() {
+						defer s.EndTask(TaskBalance)
+						defer func() {
+							if r := recover(); r != nil {
+								log.Printf("ERR: scheduler: balance refresh panic: %v", r)
+							}
+						}()
+						// 必须用 Ctx 版本（bug-05）：无 ctx 版固定 Background，
+						// SIGTERM 后 sem 抢占与账号间请求都不会被打断，最多拖 46×30s，
+						// 把最后一次 Flush 挤进强杀窗口（正是 run.sh 8s 预算要保护的）。
+						s.RunBalanceRefreshNowCtx(ctx)
+					}()
 				}
 			}
 		}

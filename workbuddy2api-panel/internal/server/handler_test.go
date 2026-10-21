@@ -1443,7 +1443,7 @@ func TestContentBlockedStickyDegraded(t *testing.T) {
 	// 降级粘性：新请求 Active()=true，body 已被 Rewrite(Degraded)，上游首字节即 200。
 	// 但 fake 上游只对 firstCall 返回 400，之后都 200，无法区分"直达"与"重试"。
 	// 用 degrade.Active() 直接断言粘性生效。
-	if !h.degrade.Active() {
+	if !degradeActiveAny(&h.degrade) {
 		t.Fatal("degrade should be active after trigger")
 	}
 }
@@ -1484,7 +1484,7 @@ func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "gateway_hint") {
 		t.Errorf("content_blocked should carry gateway_hint: %s", rec.Body.String())
 	}
-	if h.degrade.Active() {
+	if degradeActiveAny(&h.degrade) {
 		t.Error("degrade should NOT be active in custom mode")
 	}
 }
@@ -1859,4 +1859,18 @@ func TestChatMarkupRepairStrictModeRejectsUndeclaredTool(t *testing.T) {
 	if _, ok := msg["tool_calls"]; ok {
 		t.Fatalf("未声明的工具名不得转换: %#v", msg["tool_calls"])
 	}
+}
+
+// degradeActiveAny 任意客户端处于降级期（bug 4 之后降级按 key 隔离，
+// 这里只断言"确实触发过一次"，具体 key 由 degrade_test.go 覆盖）。
+func degradeActiveAny(g *degradeGate) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	for _, u := range g.byKey {
+		if now.Before(u) {
+			return true
+		}
+	}
+	return false
 }

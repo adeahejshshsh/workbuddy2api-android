@@ -117,6 +117,7 @@ type chatStatsReader struct {
 	cacheMiss    int
 	hasCacheMiss bool
 	pend         []byte // 已读未返回的行缓存
+	pendErr      error  // 与 pend 伴随的 EOF（bug 12）：必须等尾巴吐完再返回
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -251,6 +252,12 @@ func (s *chatStatsReader) Read(p []byte) (int, error) {
 	if len(s.pend) > 0 {
 		n := copy(p, s.pend)
 		s.pend = s.pend[n:]
+		if len(s.pend) == 0 {
+			// 尾巴吐完，这才轮到把寄存的 EOF 交出去（bug 12）
+			err := s.pendErr
+			s.pendErr = nil
+			return n, err
+		}
 		return n, nil
 	}
 	line, err := s.br.ReadString('\n')
@@ -259,11 +266,14 @@ func (s *chatStatsReader) Read(p []byte) (int, error) {
 		n := copy(p, line)
 		if n < len(line) {
 			s.pend = []byte(line[n:])
-		} else {
-			s.pend = nil
+			// 尾巴没吐完就**不能**返回 EOF（bug 12）：调用方拿到 (n, io.EOF) 会认为
+			// 流结束，pend 里剩下的字节永远读不出去（v1.28.3 的回归 —— 当时只想着
+			// 「数据与错误一起返回」，漏了 pend 的存在）。EOF 寄存到下一次调用。
+			s.pendErr = err
+			return n, nil
 		}
-		// 数据与错误一起返回：io 契约允许 n>0 带 err（调用方必须先处理 n 字节），
-		// 以前把 err 吞到下一轮，io.CopyN 这类调用方会多读一次。
+		s.pend = nil
+		s.pendErr = nil
 		return n, err
 	}
 	return 0, err

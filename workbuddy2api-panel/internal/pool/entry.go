@@ -398,6 +398,13 @@ func (e *entry) pruneExpiredModelCooldowns(now time.Time) {
 	}
 	for m, mc := range e.modelCooldowns {
 		if mc.Until.IsZero() || !now.Before(mc.Until) {
+			// 只清冷却、**保留命中计数**（bug 9）：Hits 是 11102 负缓存的指数退避依据，
+			// 连它一起删会让 TTL 永远停在 base（6h）—— 注释承诺的 6h→12h→24h 升级
+			// 在真实调用链上不可达（pick 每次都 prune，条目一过期计数就归零）。
+			if mc.Hits > 0 {
+				e.modelCooldowns[m] = modelCooldown{Hits: mc.Hits}
+				continue
+			}
 			delete(e.modelCooldowns, m)
 		}
 	}

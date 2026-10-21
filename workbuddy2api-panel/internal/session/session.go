@@ -243,6 +243,14 @@ const minTouchInterval = 5 * time.Second
 // touch 滚动 lastActive 并异步镜像（只在快路径命中时写最后一次）。
 func (r *Router) touch(key, uid string, now time.Time) {
 	r.mu.Lock()
+	cur, ok := r.entries[key]
+	if !ok || cur.uid != uid {
+		// 归属已变就别写回去（bug 8）：并发换号的时序是「A 快路径命中 uid1 →
+		// B 因 uid1 失败轮转到 uid2 并 Bind → A 的续期迟到」，无条件覆盖会把会话
+		// 钉回那个刚失败的号（连 Redis 绑定一起写错，重启后恢复的还是错绑定）。
+		r.mu.Unlock()
+		return
+	}
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)

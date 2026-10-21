@@ -575,11 +575,13 @@ func (p *Panel) modelProbes(w http.ResponseWriter, r *http.Request) {
 // accountRevive 手动复活：清禁用 + 冷却 + 熔断（运维口径无条件恢复）。
 func (p *Panel) accountRevive(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	if _, ok := p.cfg.Pool.Status(uid); !ok {
+	// 直接用 Revive 的返回值判存在（bug 14）：此前先 Status 再 Revive，两次独立
+	// 加锁查询之间的窗口里账号被移走就会「404 之后又复活了一个不存在的号」，
+	// 而且 Revive 的 bool 被丢弃，两处口径不一致。
+	if !p.cfg.Pool.Revive(uid) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	p.cfg.Pool.Revive(uid)
 	log.Printf("panel: revive uid=%s（人工清除禁用/冷却/熔断）", uid)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -898,6 +900,10 @@ func (p *Panel) syncNicknames() {
 	for _, j := range jobs {
 		// 先抢信号量再起 goroutine（bug-11）：此前在 goroutine 内抢，46 个号就是
 		// 46 个 goroutine 同时创建、43 个阻塞在 sem 上 —— 并发上限形同虚设。
+		//
+		// 这里**刻意**不接 ctx（对照 review bug 7）：本函数由「手动刷新」在回完
+		// 200 之后的独立 goroutine 里调用，用户早已拿到「已触发」的回执 ——
+		// 没有活着的连接可断，按断连取消只会把刷新做一半，反而更难解释。
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(j job) {
@@ -1030,10 +1036,18 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 
 	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
+	ctx := r.Context()
+dispatch:
 	for i, s := range accts {
 		// 抢槽放在 go 之前（bug-09）：此前在 goroutine 内抢，N 个账号就瞬时创建 N 个
 		// goroutine、N-3 个阻塞在 channel 上，并发上限只限住了上游、没限住资源。
-		sem <- struct{}{}
+		// 抢槽要能被客户端断连打断（bug 7）：此前裸阻塞，用户关页面/断网后 handler
+		// 仍会把剩余账号全部查完（46 号、并发 3、单号 30s ≈ 7 分钟），上游一条不少照打。
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break dispatch
+		}
 		wg.Add(1)
 		go func(i int, s pool.Status) {
 			defer wg.Done()
@@ -1045,6 +1059,9 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 			}()
 			defer func() { <-sem }()
 
+			if ctx.Err() != nil {
+				return // 起飞前就已断连：这一条不用打了
+			}
 			it := row{UID: s.UID, Nickname: s.Nickname, Realm: s.Realm}
 			a := p.cfg.Pool.AuthByUID(s.UID)
 			if a == nil {

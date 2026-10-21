@@ -98,6 +98,11 @@ func (p *Pool) Revive(uid string) bool {
 	// Revive 的口径本就是「运维无条件恢复」，与 disabled/冷却/熔断一致。
 	e.consecutiveFails = 0
 	e.degradeUntil = time.Time{}
+	// needAuth 也要清（bug 14）：Redis 快照恢复出来的占位条目只有 UID、没有凭证，
+	// healthy() 因 needAuth 恒 false —— 面板「解冻」只清惩罚域，用户看到
+	// 「已恢复、请求还是 503」。解冻是运维无条件恢复口径，占位标记一并解除
+	// （真没凭证时后续会走 NeedsRefresh → no refreshToken 的熔断，不是静默失败）。
+	e.needAuth = false
 	p.dirty.Store(true)
 	return true
 }

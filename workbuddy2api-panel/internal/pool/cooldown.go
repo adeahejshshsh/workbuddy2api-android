@@ -373,8 +373,11 @@ func (p *Pool) ModelBlockedForRealm(model, realm string) ModelBlockStatus {
 	if model == "" {
 		return ModelBlockStatus{}
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	// 纯只读聚合，用读锁（bug 6）：这函数恰好在「每次选号失败」的出口被调用，
+	// 写锁会让模型限流风暴把并发的 pick / /status / /healthz 一起串行堵住，
+	// 失败越多越慢。函数体内无写、无回调、不重入 pool 的其它加锁方法。
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	now := time.Now()
 
 	var st ModelBlockStatus

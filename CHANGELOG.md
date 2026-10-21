@@ -1,6 +1,74 @@
 # 变更记录
 
-## v1.28.3（当前）
+## v1.28.4（当前）
+
+**本版 = 第十九份审查报告（CODE-REVIEW-2026-10-21.md，14 条）。13 条为真、1 条半真
+（#7 里 `syncNicknames` 那半条不成立：它在回完 200 之后的后台 goroutine 里跑，没有活连接可断）。**
+
+### P0
+
+* **#1 `StartBalanceRefresh` 任务族锁无 defer、整条链无 panic 兜底** —— `RunBalanceRefreshNowCtx`
+  只要 panic 一次（上游响应形状变化、索引越界），`TaskBalance` 永久不释放：面板「刷新余额」
+  此后恒 409、后台周期刷新彻底停摆，且没有任何日志。内层那个每号一个的 goroutine 同样没有
+  recover —— 子 goroutine panic 无人接 = 整进程退出（同仓 panel 的各条后台路径都加了兜底）。
+  EndTask 改 `defer`，两层各加 recover。
+* **#2 自愈退避 2s 短于优雅停机 5s → 新进程 `bind: address already in use`** —— `selfHeal`
+  只发 SIGTERM、`backoffMs(1)=2s` 后立刻拉起，而 Go 侧 `srv.Shutdown` 预算是 5s（有在途 SSE
+  时必然跑满）→ 旧进程还占着 7863。把 `restartGateway` 里那段「轮询等旧进程退出至多 8s」
+  抽成 `awaitExit(old, 8000)`，两处共用；`selfHeal` 先捕获旧句柄再杀（`killProc` 会置 null）。
+* **#3 裸模型名恒判 `realm=cn`：纯 global 池被硬过滤成 503** —— OpenAI 兼容客户端 / Claude Code
+  / Codex 默认发裸名，而 503 是「可重试」语义，它们会就着同一个裸名无限重试，
+  「加前缀 / 换模型」这条正确处置永远不触发。保留 D6 的裸名=cn 语义（改成跨域会把握手
+  归一给别的域，风险更大），把「本域无可服务号、但另一域有号」这个确切场景改成
+  **400 + `realm_required`**，message 写清要加 `global:` 前缀。
+* **#4 降级开关是进程级全局** —— 任意一个客户端被内容策略误拦，全站当天都改走中性提示词
+  （`append` 还会退化成 replace），Codex/Claude Code 的项目规范被整段替换。
+  改成按客户端隔离：key = 会话键，没有会话头时用「UA + 模型」指纹；键数上限 256（超限先清过期，
+  再超就重置并告警）。重置时刻仍是次日 00:00。
+
+### P1
+
+* **#5 非流式聚合断流仍报 `finish_reason:"stop"`** —— 半截答案被客户端当完整结果落库。
+  判据**刻意收紧**：只有「既没 `[DONE]` 也没给过任何非空 finish_reason」才改判 `length`。
+  只看 `!sawDone` 会把 WorkBuddy「完整结束但不发 [DONE]」的大量正常回复误标成截断
+  （工具调用分支早就有同款注释说明这是常态）。
+* **#6 `ModelBlockedForRealm` 用写锁做纯只读聚合** —— 它在「每次选号失败」的出口被调用，
+  写锁会让模型限流风暴把并发的 pick / `/status` / `/healthz` 一起串行堵住。改 `RLock`。
+* **#7 批量接口不响应断连** —— `packages` 抢槽是裸 `sem <- struct{}{}`，关页面后仍会把
+  剩余账号全部查完（46 号 ≈ 7 分钟）。改 `select` + ctx。**`syncNicknames` 那半条不成立**：
+  它由「手动刷新」在回完 200 之后的后台 goroutine 调用，没有活连接可断，按断连取消
+  只会把刷新做一半 —— 已还原并写明缘由。
+* **#8 `session.Router.touch` 不校验身份** —— 并发换号后迟到的续期会把会话写回刚失败的号
+  （连 Redis 绑定一起写错，重启后恢复的还是错绑定）。写锁内 re-check `cur.uid == uid`。
+* **#9 11102 负缓存的指数退避形同虚设** —— `prune` 过期即整条删除，`Hits` 跟着丢，
+  下次又从 0 起算 → TTL 永远 6h，注释承诺的 6h→12h→24h 不可达。改为只清冷却、保留 `Hits`。
+* **#10 mp 合并任务的 `seen` 只由已入队项构建** —— 被判成 skipped 的任务会被重判一遍，
+  「跳过 N 个」双计。`seen` 改由**全量**任务码构建（与 `loadTaskMap` 同口径）。
+
+### P2
+
+* **#11 `NewHandler` 的 `PromptMode` 缺省 `custom` 与 config 层 `passthrough` 相反** ——
+  裸用 `NewHandler` 拿到的是 custom，而 custom 在 `PromptText==""` 时什么都不做；
+  哪天给 PromptText 赋值就会静默替换所有客户端的 system。缺省对齐，并对「custom 但文本为空」告警。
+* **#12 `chatStatsReader.Read` 丢尾巴** —— 这是 **v1.28.3 我自己引入的回归**：为了「数据与错误
+  一起返回」而漏了 pend 的存在，`(n, io.EOF)` 一返回调用方就结束，pend 里的字节永远读不出去。
+  新增 `pendErr`：EOF 寄存到尾巴吐完之后。
+* **#13 日志环每次写入都切片搬家** —— `append` 后 `entries[overflow:]`：容量每写一行少 1，
+  容量耗尽整块重分配并拷贝 cap 条（= 每几百条日志一次 500 元素拷贝 + 一次分配）。
+  改真环：固定数组 + `head/size`，写 O(1) 零分配，`Snapshot` 按环序展开。
+* **#14 `accountRevive` 忽略 `Revive` 的返回值、`Revive` 不清 `needAuth`** ——
+  Redis 快照恢复的占位条目只有 UID 没凭证，`healthy()` 因 needAuth 恒 false，
+  面板「解冻」后显示已恢复、请求还是 503。`Revive` 一并清 `needAuth`，handler 改用返回值判存在。
+
+### 测试
+
+新增 5 组：`TestRingWrapKeepsOrderAndEvictsOldest`、`TestRingSnapshotBeforeFull`、
+`TestTouchDoesNotOverwriteRebind`、`TestAggregateMarksTruncationWithoutDoneOrFinish`、
+`TestAggregateKeepsExplicitFinishWithoutDone`（最后这条是反向用例：上游给过 finish_reason
+只是没发 `[DONE]` 时**不许**误标截断）。降级门的两条既有用例改成按 key 断言，并补了
+「别的客户端不受影响」。全量 **766 通过 / 0 失败**。
+
+## v1.28.3
 
 **本版 = 第十八份审查报告（CODE-REVIEW-BUGS-20261021.md，14 条）。13 条为真、1 条部分属实
 （#10 的空 buffer 分支按 `io.Reader` 约定本就合法），全部落实。**

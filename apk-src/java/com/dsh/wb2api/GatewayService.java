@@ -422,26 +422,11 @@ public class GatewayService extends Service {
         killProc();
         boot.execute(new Runnable() {
             public void run() {
-                if (old != null) {
-                    // 等旧进程真正退出，窗口要 ≥ 网关的优雅停机预算（bug P1-1）。
-                    // Go 侧 srv.Shutdown 用的是 5s：有在途 SSE 时必然跑满，而这里原先
-                    // 只等 4s 就拉新进程 → 新进程 bind: address already in use 立刻退出
-                    // → 看门狗退避 2s 再拉一次，用户看到"重启了两次"、自愈计数 +1。
-                    // 轮询 isAlive 而不是 waitFor 固定时长：旧进程提前退出就不用干等。
-                    long deadline = System.currentTimeMillis() + 8000; // ≥ 5s 停机预算
-                    while (System.currentTimeMillis() < deadline && isAlive(old)) {
-                        try { Thread.sleep(150); }
-                        catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
-                    }
-                    // 窗口结束仍活着 → 强杀再走（bug #4）：否则新进程必然撞端口。
-                    if (isAlive(old)) {
-                        try {
-                            if (Build.VERSION.SDK_INT >= 26) old.destroyForcibly();
-                            else old.destroy();
-                        } catch (Throwable ignored) {}
-                        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-                    }
-                }
+                // 等旧进程真正退出，窗口要 ≥ 网关的优雅停机预算（bug P1-1）。
+                // Go 侧 srv.Shutdown 用的是 5s：有在途 SSE 时必然跑满，窗口结束仍活着
+                // 就强杀再走（bug #4），否则新进程必然撞端口。poll 而非固定 waitFor：
+                // 旧进程提前退出就不用干等。（实现与自愈路径共用，见 awaitExit）
+                awaitExit(old, 8000);
                 // 等待窗口里用户点了「停止」（userStop=true 且已 stopSelf）：
                 // 这时再拉起就是一个没人看门狗、没 wakelock、没 alarm 的孤儿进程，
                 // 占着 7863 直到系统杀 App —— 用户还会以为"停了"。
@@ -454,13 +439,40 @@ public class GatewayService extends Service {
         });
     }
 
+    /** 等旧进程真正退出，最多 maxMs；仍活着就强杀再等一小会儿（bug 2 的共用实现）。 */
+    void awaitExit(Process old, long maxMs) {
+        if (old == null) return;
+        long deadline = System.currentTimeMillis() + maxMs;
+        while (System.currentTimeMillis() < deadline && isAlive(old)) {
+            try { Thread.sleep(150); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+        }
+        if (isAlive(old)) {
+            try {
+                if (Build.VERSION.SDK_INT >= 26) old.destroyForcibly();
+                else old.destroy();
+            } catch (Throwable ignored) {}
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+        }
+    }
+
     void selfHeal(String why) {
         int n = ++restarts;
         setState(ST_STARTING, "看门狗自愈 #" + n + "：" + why, "看门狗正在重拉网关：" + why);
         appLog(this, "看门狗自愈 #" + n + "：" + why + "（退避 " + (backoffMs(n) / 1000) + "s）");
+        // 先捕获旧句柄再杀（bug 2）：killProc 会把静态 proc 置 null，之后就拿不到它了。
+        final Process old;
+        synchronized (this) {
+            old = proc;
+        }
         killProc();
         refreshNotification();
         sleep(backoffMs(n));            // 退避，别打连环炮
+        // 退避窗口（首次 2s）短于网关优雅停机预算（Go 侧 srv.Shutdown 5s，有在途 SSE
+        // 时必然跑满）→ 旧进程还占着 7863，新进程启动即 bind: address already in use
+        // 退出，看门狗再算一次自愈，真正恢复被推迟一到两个周期（bug 2）。
+        // restartGateway 早就为此写了「轮询等旧进程退出至多 8s」，这里复用它。
+        awaitExit(old, 8000);
         if (!watching) return;
         // 退避窗口里主线程可能已经手动重启过（onStartCommand 的 killProc + startGateway）：
         // 这时再拉起就是第二个进程 —— P1 变孤儿占着 7863，P2 bind 失败退出，看门狗下一拍
