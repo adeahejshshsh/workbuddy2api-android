@@ -172,9 +172,22 @@ function inReqRange(iso) {
   if (!iso) return true;
   const t = new Date(iso).getTime();
   if (isNaN(t)) return true;
+  // 预设模式不会回写 st.from/st.to（trangeQuery 走的是 hours / now-Nh），
+  // 只读 from/to 会让「近 7 天 / 全部历史」永远按初始的「今天 00:00 → 现在」筛
+  // （报告 #5）。这里按预设现算窗口，与 trangeQuery 口径一致。
   const st = trangeState('reqRange');
-  if (st.from && t < st.from.getTime()) return false;
-  if (st.to && t > st.to.getTime()) return false;
+  let from = null, to = null;
+  if (st.preset === 'custom') {
+    from = st.from; to = st.to;
+  } else if (st.preset === '0') {
+    return true;                       // 全部历史：不筛
+  } else if (st.preset === 'today') {
+    from = trangeMidnight(); to = new Date();
+  } else {
+    from = new Date(Date.now() - Number(st.preset) * 3600 * 1000); to = new Date();
+  }
+  if (from && t < from.getTime()) return false;
+  if (to && t > to.getTime()) return false;
   return true;
 }
 
@@ -432,8 +445,11 @@ function renderAccounts(list) {
     else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
     else if (cool > 0) {
       cls = 'cool';
-      const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
-        : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
+      // cool_remaining_sec 已经是三个截止里的最大值，再拿 bl/dg 去比恒为假
+      // （报告 #6）→ 熔断/降权永远显示成「限流冷却」。直接按后端 cool_kind 映射。
+      const KIND_LABEL = { hard_credit: '积分冷却', breaker: '熔断', degraded: '连败降权', soft_rate: '限流冷却' };
+      const kind = KIND_LABEL[s.cool_kind]
+        || (bl > 0 ? '熔断' : (dg > 0 ? '连败降权' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     } else tag = '<span class="tag ok">可用</span>'; // 两个分支都返回空串的三元已删（bug-14）
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
@@ -917,7 +933,8 @@ async function loadLogs() {
     const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
     box.innerHTML = entries.length
       ? entries.map(e => {
-        const lvl = /error|失败|错误/.test(e.text) ? ' e' : /warn|冷却|熔断/.test(e.text) ? ' w' : '';
+        // 后端日志前缀是 WARN: / ERR:（大写），正则必须带 i（报告 #7）
+    const lvl = /error|失败|错误/i.test(e.text) ? ' e' : /warn|冷却|熔断/i.test(e.text) ? ' w' : '';
         const t = e.ts ? new Date(e.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '';
         const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
         return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
@@ -1295,7 +1312,14 @@ async function pollLogin() {
       stopPoll();
       $('addReady').hidden = true;
       $('addDone').hidden = false;
-      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + (r.credits >= 0 ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + '，账号已载入池中';
+      // credits_ok=false 表示「余额查询失败」，与「积分 0」必须区分开（报告 #8）：
+      // 此前只判 r.credits >= 0，undefined >= 0 为 false → 整段静默消失。
+      const credTxt = r.credits_ok === false
+        ? ' · 积分查询失败'
+        : (typeof r.credits === 'number' && r.credits >= 0
+          ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '')
+          : '');
+      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + credTxt + '，账号已载入池中';
       setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
     }
   } catch (e) {

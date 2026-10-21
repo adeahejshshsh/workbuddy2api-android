@@ -32,10 +32,17 @@ func (c *Client) BlackcatNeed(a *auth.Auth) (int64, error) {
 	}
 	for _, t := range tasks {
 		if t.TaskCode == "black_cat" {
-			if t.Claimed || t.Current >= t.Target {
+			// target=0 是「未 accept / 未下发 progress」的形态（不是已达标）：
+			// 0 >= 0 会让 BlackcatNeed 直接返回 0，runBlackCat 据此回「进度已达标」，
+			// 一次对话都不发。与 runMPMiniChatTask 的 `if target <= 0 { target = 1 }` 对齐。
+			target := t.Target
+			if target <= 0 {
+				target = 1
+			}
+			if t.Claimed || t.Current >= target {
 				return 0, nil
 			}
-			return t.Target - t.Current, nil
+			return target - t.Current, nil // 用归一化后的 target（0 已按 1 处理）
 		}
 	}
 	return 0, nil

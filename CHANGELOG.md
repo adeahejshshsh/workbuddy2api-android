@@ -1,6 +1,56 @@
 # 变更记录
 
-## v1.33.0（当前）
+## v1.34.0（当前）
+
+**本版 = 第二十七份审查报告（审查报告.md，8 条）：6 条为真、2 条误报。
+真条目里 #4/#5/#8 是我最近几版引入或改了一半的。**
+
+### 误报（附证据）
+
+* **#1「三条指纹改写规则是空操作」** —— 不成立（这是该说法第三次出现）。用编译后的二进制
+  打出每条 `sanitizeRewrites` 的**首个不同字节位置**：
+  `pair0 lenL=56→lenR=61 firstDiff=46`（`l CLI for Claude` → `l CLI tool for C`）、
+  `pair1 firstDiff=0`（`Main branc` → `Default br`）、
+  `pair2 firstDiff=47`（`ex CLI, a termin` → `ex CLI tool, a t`）、
+  `pair3 firstDiff=3`（`To give feedb` → `To provide fe`）—— 四条都在真改。
+  报告把常量（= 被替换的**原文**）读成了「已经改好的形态」，是渲染/阅读错位。
+* **#3「非 data 行不计有效帧导致误报空流」** —— 不该改。心跳/注释不是内容；
+  整条流只有 `: ping` 时按空流处理（补 error 帧 + 502）是**刻意行为**，
+  `TestStreamEmptyFramesCase/只有注释行` 钉住了它。我按报告改过一次，测试当场变红，
+  已撤回并把「为什么不计」写进注释。
+
+### 真条目
+
+* **#2 夜猫子 target=0 被当成已达标** —— `0 >= 0` 成立 → `BlackcatNeed` 返回 0 →
+  `runBlackCat` 回「进度已达标，无需补足」，一次对话都不发。按 `runMPMiniChatTask`
+  的口径补 `target<=0 → 1`，**并且返回值改用归一化后的 target**（第一版只改判据、
+  返回值仍用 `t.Target`，等于没修 —— 自己抓到并改正）。
+* **#4 非流式缓存命中率恒 100%**（我 v1.31.0 引入）—— `cacheTokensFromUsage` 在
+  `okM==false` 时把 `m` 的零值当 miss=0 上报 → `hit/(hit+0)=100%`，缓存告警永不触发。
+  改为：miss 缺失时按 `prompt-hit` 推导（与流式侧同口径）；**推不出来就 `ok=false`**
+  （不参与命中率统计，宁可不统计也不报假 100%）。
+* **#5 `inReqRange` 忽略预设**（我 v1.29.1 引入）—— 预设模式不回写 `st.from/st.to`，
+  只读 from/to 会让「近 7 天 / 全部历史」永远按初始的「今天 00:00 → 现在」筛；
+  先选过自定义再切预设，旧区间还会继续生效。改为按预设现算窗口，与 `trangeQuery` 同口径。
+* **#6 冷却标签只认 `hard_credit`** —— `cool_remaining_sec` 已是三个截止的最大值，
+  再拿 `bl`/`dg` 去比恒为假 → 熔断/降权永远显示「限流冷却」。改为按后端
+  `cool_kind` 直接映射（hard_credit/breaker/degraded/soft_rate）。
+* **#7 日志高亮正则缺 `i`** —— 后端日志前缀是 `WARN:` / `ERR:`（大写），
+  两个正则都没有 `i` 标志 → 所有 WARN/ERR 行按普通行渲染。已加 `i`。
+* **#8 `credits_ok` 只写不读**（我 v1.28.2 引入）—— 余额查询失败时后端不下发 `credits`
+  只给 `credits_ok:false`，前端判 `r.credits >= 0`（undefined >= 0 为 false）→
+  「· 积分 N」整段消失，用户分不清「积分 0」与「查询失败」。改为三态：
+  查询失败显示「· 积分查询失败」，有值显示积分，未知不显示。
+
+### 测试
+
+新增 `TestCacheTokensFromUsageMissDerivation`（hit+miss / hit+prompt 推导 /
+推不出时 ok=false / miss 反推 hit 四态）。
+`server 97 / upstream 228 / panel 54 / pool 188 / scheduler 65 / auth 29 /
+session 21 / reqlog 10 / usage 16 / redisstore 7 / cmd-server 52`，
+**767 通过 / 0 失败**（42 秒）；`app.js` 通过 `node --check`。
+
+## v1.33.0
 
 **本版 = 合并上游 `#196 补偿先查后领` + `#205 任务补领清扫`（同一族，一起改省得动两次状态机）。**
 

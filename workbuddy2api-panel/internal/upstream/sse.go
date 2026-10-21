@@ -864,6 +864,10 @@ readLoop:
 				return werr
 			}
 		case trimmed != "":
+			// 注意：注释/心跳行（": ping"）**不计**有效帧 —— 心跳不是内容。
+			// 整条流只有心跳时按空流处理（补 error 帧 + 502）是刻意行为，
+			// TestStreamEmptyFramesCase/只有注释行 钉住了这一点：客户端拿到一堆
+			// ping 却没有任何 data 帧，若报「成功」反而更误导。
 			// 注释/其他行：原样透传
 			if _, werr := io.WriteString(w, line); werr != nil {
 				return clientWriteErr(werr)

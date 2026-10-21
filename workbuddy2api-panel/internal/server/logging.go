@@ -252,7 +252,15 @@ func cacheTokensFromUsage(usage map[string]any) (hit, miss int64, ok bool) {
 	m, okM := upstream.UsageCacheMissTokens(usage)
 	switch {
 	case okH:
-		return int64(h), int64(m), true
+		// miss 缺失时按 prompt-hit 推导（与流式侧 CacheTokens 同口径，报告 #4）：
+		// 此前直接返回 m 的零值 → hit/(hit+0) 恒 100%，缓存告警也永不触发。
+		if okM {
+			return int64(h), int64(m), true
+		}
+		if p, okP := upstream.UsagePromptTokens(usage); okP && p >= h {
+			return int64(h), int64(p - h), true
+		}
+		return int64(h), 0, false // 推不出 miss：不参与命中率统计，避免假 100%
 	case okM:
 		if p, okP := upstream.UsagePromptTokens(usage); okP && p > m {
 			return int64(p - m), int64(m), true
