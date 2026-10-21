@@ -146,3 +146,40 @@ func (c *Client) UseMakeupCard(a *auth.Auth, date string) error {
 		map[string]any{"target_date": date})
 	return err
 }
+
+// CompensationInfo 官方补偿活动的状态（上游 PR #196）。
+type CompensationInfo struct {
+	Active  bool   `json:"active"`   // false = 当前无补偿活动（正常 200，不算错误）
+	Claimed bool   `json:"claimed"`  // 本账号已领
+	Credit  int64  `json:"credit"`   // 可领积分数
+	EndTime string `json:"end_time"` // 领取截止（RFC3339 或 "2006-01-02 15:04:05"）
+}
+
+// CompensationStatus 查询官方补偿活动状态（上游 PR #196「先查后领」）。
+//
+// 为什么必须先查：旧实现直接 claim-compensation，把「没有活动 / 已领过 / 领取失败」
+// 三态压成同一个业务错误静默跳过 —— 带截止日的补偿会**静默过期**，
+// 而「查询失败」与「没有补偿」也分不开，面板上完全看不出来。
+func (c *Client) CompensationStatus(a *auth.Auth) (CompensationInfo, error) {
+	var info CompensationInfo
+	data, err := c.billingJSON(a, http.MethodPost, "/billing/meter/compensation-status", map[string]any{})
+	if err != nil {
+		return info, err
+	}
+	var resp struct {
+		Active    bool   `json:"active"`
+		Claimed   bool   `json:"claimed"`
+		CreditNum int64  `json:"credit_num"`
+		EndTime   string `json:"end_time"`
+		Validity  string `json:"validity_period"`
+	}
+	_ = json.Unmarshal(data, &resp)
+	info.Active = resp.Active
+	info.Claimed = resp.Claimed
+	info.Credit = resp.CreditNum
+	info.EndTime = resp.EndTime
+	if info.EndTime == "" {
+		info.EndTime = resp.Validity
+	}
+	return info, nil
+}

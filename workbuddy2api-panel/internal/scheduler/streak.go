@@ -65,8 +65,18 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil {
 		log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(a.UID, a.NicknameValue()), credit)
 	}
-	if credit, err := s.cfg.Upstream.ClaimCompensation(a); err == nil {
-		log.Printf("streak-bonus %s: 🎊 补偿领取 +%dc", logfmt.Label(a.UID, a.NicknameValue()), credit)
+	// 先查后领（上游 PR #196）：直接 claim 会把「没有活动 / 已领 / 领取失败」
+	// 压成同一个静默错误，带截止日的补偿会静默过期。
+	if info, cerr := s.cfg.Upstream.CompensationStatus(a); cerr != nil {
+		log.Printf("streak-bonus %s: 补偿状态查询失败: %v", logfmt.Label(a.UID, a.NicknameValue()), cerr)
+	} else if info.Active && !info.Claimed {
+		if credit, err := s.cfg.Upstream.ClaimCompensation(a); err != nil {
+			log.Printf("streak-bonus %s: 补偿领取失败（截止 %s，可领 %dc）: %v",
+				logfmt.Label(a.UID, a.NicknameValue()), info.EndTime, info.Credit, err)
+		} else {
+			log.Printf("streak-bonus %s: 🎊 补偿领取 +%dc（截止 %s）",
+				logfmt.Label(a.UID, a.NicknameValue()), credit, info.EndTime)
+		}
 	}
 
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)

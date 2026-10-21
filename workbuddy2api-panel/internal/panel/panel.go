@@ -200,6 +200,7 @@ func (p *Panel) routes() {
 	// RunGrowthQueueOnce。这里把 API 挂上（纯 curl 可用，不依赖 UI）。
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
+	p.mux.HandleFunc("POST /panel/api/tasks/claim_sweep", p.withAuth(p.claimSweep))
 	p.mux.HandleFunc("GET /panel/api/queue", p.withAuth(p.tasksQueueStatus))
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))

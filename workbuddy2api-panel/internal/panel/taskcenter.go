@@ -983,3 +983,96 @@ dispatchVouchers:
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": res})
 }
+
+// ClaimSweepOnce 扫一遍全池，把「已达标未领」的成长任务奖励补领掉（上游 PR #205）。
+//
+// 与 #204 的区别：#204 是「执行动作前先补领一次」，#205 是**独立的周期清扫**——
+// 任务进度是异步计分的，达标那一刻往往没人点按钮，奖励会一直挂着直到下次执行
+// 同一任务（可能几天后）。这里主动扫，不依赖任何动作触发。
+//
+// 门控：global / 企业版没有成长体系（上游 403），直接跳过。
+func (p *Panel) ClaimSweepOnce(ctx context.Context) (accounts, claimed, failed int) {
+	accts := p.cfg.Pool.List()
+	sem := make(chan struct{}, 3)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, st := range accts {
+		a := p.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.IsGlobal() || a.IsEnterpriseSession() {
+			continue
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		}
+		wg.Add(1)
+		go func(a *auth.Auth) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERR: [panel] claim sweep panic uid=%s: %v", a.UID, r)
+				}
+			}()
+			mu.Lock()
+			accounts++
+			mu.Unlock()
+			// 两套口径都要扫：默认任务列表 + 小程序任务列表
+			var tasks []upstream.Task
+			if list, err := p.cfg.Upstream.ListTasks(a); err == nil {
+				tasks = append(tasks, list...)
+			}
+			if list, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+				tasks = append(tasks, list...)
+			}
+			seen := map[string]bool{}
+			for _, t := range tasks {
+				if seen[t.TaskCode] || t.Claimed || !t.Claimable {
+					continue
+				}
+				seen[t.TaskCode] = true
+				var cerr error
+				if isMPTaskCode(t.TaskCode) {
+					_, _, _, cerr = p.cfg.Upstream.ClaimRewardMP(a, t.TaskCode)
+				} else {
+					_, _, _, cerr = p.cfg.Upstream.ClaimReward(a, t.TaskCode)
+				}
+				mu.Lock()
+				if cerr == nil {
+					claimed++
+				} else {
+					failed++
+				}
+				mu.Unlock()
+				if cerr == nil {
+					log.Printf("panel: 补领成功 uid=%s code=%s", a.UID, t.TaskCode)
+				} else {
+					log.Printf("panel: 补领失败 uid=%s code=%s: %v", a.UID, t.TaskCode, cerr)
+				}
+			}
+		}(a)
+	}
+	wg.Wait()
+	return
+}
+
+// claimSweep 手动触发一次补领清扫（面板按钮/定时任务共用同一实现）。
+func (p *Panel) claimSweep(w http.ResponseWriter, r *http.Request) {
+	// 任务族互斥复用调度器的锁（Panel 自身没有这层），无调度器时（测试/裸用）不锁。
+	const sweepKey = "claim_sweep"
+	if p.cfg.Scheduler != nil {
+		if !p.cfg.Scheduler.TryBeginTask(sweepKey) {
+			writeErr(w, http.StatusConflict, "补领清扫正在执行中")
+			return
+		}
+		defer p.cfg.Scheduler.EndTask(sweepKey)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	accounts, claimed, failed := p.ClaimSweepOnce(ctx)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "accounts": accounts, "claimed": claimed, "failed": failed,
+	})
+}

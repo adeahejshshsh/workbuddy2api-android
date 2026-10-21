@@ -1,6 +1,45 @@
 # 变更记录
 
-## v1.32.0（当前）
+## v1.33.0（当前）
+
+**本版 = 合并上游 `#196 补偿先查后领` + `#205 任务补领清扫`（同一族，一起改省得动两次状态机）。**
+
+### #196 补偿「先查后领」
+
+* 新增 `upstream.CompensationStatus(a)`：`POST /billing/meter/compensation-status`，
+  解析 `active` / `claimed` / `credit_num` / `end_time`（`end_time` 缺失回落 `validity_period`）。
+  `active=false` 是「当前无补偿活动」的正常 200，**不算错误**。
+* 连登管家改为「查 → 判 → 领」三态：
+  - 查询失败 → **显式 WARN**（旧实现把「没有 / 已领 / 领取失败」压成同一个静默错误，
+    带截止日的补偿会**静默过期**）；
+  - 有活动且未领 → 领取，日志带上截止时间与可领积分；
+  - 已领 / 无活动 → 静默跳过（正常态）。
+
+### #205 任务补领清扫
+
+* 新增 `Panel.ClaimSweepOnce(ctx)`：并发 3 扫全池，同时拉**默认任务列表 + 小程序任务列表**，
+  对每个「已达标未领」（`Claimable && !Claimed`）的任务按口径补领
+  （mp 码走 `ClaimRewardMP`，其余走 `ClaimReward`），按 code 去重。
+* 门控：`global` 与企业上下文（`IsEnterpriseSession`）直接跳过 —— 上游对这两类没有成长体系。
+* 新增接口 `POST /panel/api/tasks/claim_sweep`，返回 `{accounts, claimed, failed}`；
+  任务族互斥复用调度器的锁（`TryBeginTask("claim_sweep")`），重复触发回 409。
+* 与 #204 的分工：#204 是「执行动作前先补领一次」，#205 是**独立清扫** ——
+  任务进度异步计分，达标那一刻往往没人点按钮，奖励会挂到下次执行同一任务（可能几天后）。
+
+### 本轮仍未合并
+
+| 上游 PR | 内容 | 说明 |
+|---|---|---|
+| **#158** | 按地区独立配置轮询/顺序耗尽调度 | ~300 行调度器 + 池策略重构 |
+| **#213** | 联网搜索端点 `POST /v1/search/messages` | 新客户端 + 新路由 + 记账 |
+
+### 测试
+
+`server 96 / upstream 228 / panel 54 / pool 188 / scheduler 65 / auth 29 /
+session 21 / reqlog 10 / usage 16 / redisstore 7 / cmd-server 52`，
+**766 通过 / 0 失败**（44 秒）。
+
+## v1.32.0
 
 **本版 = 继续合并上游能力（2 条）：`#144 dns_servers`、`#178 账号备注`。**
 每条都先加判据/字段、再接行为、最后全量测试。
