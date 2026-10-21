@@ -598,6 +598,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		RateLimitedModels:        p.rateLimitedModelsLocked(e, now),
 		Realm:                    e.a.Realm(),
 		Enterprise:               e.a.IsEnterprise(),
+		Remark:                   e.remark,
 		Nickname:                 e.a.NicknameValue(),
 		Credits:                  e.credits,
 		CreditsTotal:             e.creditsTotal,
@@ -740,4 +741,18 @@ func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedMod
 		return nil
 	}
 	return rows
+}
+
+// SetRemark 设置账号的运维备注（上游 PR #178）。纯本地标注：不参与选号/路由/
+// 上游请求，持久化在 state.json。返回 false 表示账号不存在。
+func (p *Pool) SetRemark(uid, text string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.remark = strings.TrimSpace(text)
+	p.dirty.Store(true)
+	return true
 }

@@ -63,6 +63,7 @@ type TokenUsageDelta struct {
 type Status struct {
 	UID          string `json:"uid"`
 	Nickname     string `json:"nickname,omitempty"`
+	Remark       string `json:"remark,omitempty"` // 运维备注（上游 PR #178）
 	Credits      int64  `json:"credits"`
 	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
@@ -201,6 +202,9 @@ type entry struct {
 	lastErr                  time.Time  // 最近一次错误时间
 	lastSuccess              time.Time  // 最近一次成功时间
 	tokenUsage               TokenUsage // 聊天请求 token 用量摘要（持久化）
+	// remark 运维备注（上游 PR #178）：纯本地标注，不参与选号/路由/上游请求。
+	// 持久化在 state.json，跨重启保留。
+	remark string
 	// lastCheckinDay 最近一次签到成功的本地日期（"2006-01-02"）。签到成功与上游
 	// 幂等拒绝（"今天已签到"）都算；statusOf 据此输出 CheckinDone 供面板按钮显示
 	// 签到/已签。持久化：跨重启不丢当日状态。
@@ -451,6 +455,7 @@ func (e *entry) fallbackKind(now time.Time) string {
 type stateAccount struct {
 	Credits      int64     `json:"credits"`
 	CreditsTotal int64     `json:"credits_total,omitempty"`
+	Remark       string    `json:"remark,omitempty"` // 运维备注（上游 PR #178）
 	Disabled     bool      `json:"disabled"`
 	Paused       bool      `json:"paused,omitempty"`
 	Reason       string    `json:"reason,omitempty"`

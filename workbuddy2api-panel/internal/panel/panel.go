@@ -176,6 +176,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remark", p.withAuth(p.accountRemark))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
@@ -1128,4 +1129,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"ok": false, "error": msg})
+}
+
+// accountRemark 设置账号运维备注（上游 PR #178）。纯本地标注，不触发任何上游调用。
+func (p *Panel) accountRemark(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	var body struct {
+		Remark string `json:"remark"`
+	}
+	limitJSONBody(w, r)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if !p.cfg.Pool.SetRemark(uid, body.Remark) {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "remark": strings.TrimSpace(body.Remark)})
 }

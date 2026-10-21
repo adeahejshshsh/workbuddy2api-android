@@ -6,9 +6,12 @@
 package upstream
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"net/http"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,13 +57,68 @@ const (
 	maxIdleConnsPerHost = 20
 )
 
+// dnsServers 出站域名解析用的 DNS 服务器（空 = 系统默认）。
+// 由 main 从 config upstream.dns_servers 注入（上游 PR #144）。
+var dnsServers atomic.Value // []string
+
+// SetDNSServers 注入 DNS 服务器列表（"1.1.1.1" 或 "1.1.1.1:53" 均可）。
+// 传空表示回落系统默认。必须在 newTransport 之前调用（main 启动期）。
+func SetDNSServers(list []string) {
+	clean := make([]string, 0, len(list))
+	for _, s := range list {
+		if v := strings.TrimSpace(s); v != "" {
+			clean = append(clean, v)
+		}
+	}
+	dnsServers.Store(clean)
+}
+
+// dnsServerList 当前生效的 DNS 服务器（无则 nil）。
+func dnsServerList() []string {
+	if v := dnsServers.Load(); v != nil {
+		if list, ok := v.([]string); ok && len(list) > 0 {
+			return list
+		}
+	}
+	return nil
+}
+
 // newDialer 构造出站拨号器（DialContext 的 Timeout/KeepAlive 参数集中于此，
-// 供测试回读断言）。
+// 供测试回读断言）。配置了 dns_servers 时挂自定义 Resolver（上游 PR #144）。
 func newDialer() *net.Dialer {
-	return &net.Dialer{
+	d := &net.Dialer{
 		Timeout:   dialTimeout,
 		KeepAlive: dialKeepAlive,
 	}
+	servers := dnsServerList()
+	if len(servers) == 0 {
+		return d
+	}
+	// 解析用的拨号器与出站拨号器分开：Resolver.Dial 若复用 d 会形成递归
+	// （解析目标地址本身又要解析）。DNS 服务器按 IP 给，这里只建 UDP 连接。
+	dnsDialer := &net.Dialer{Timeout: dialTimeout}
+	d.Resolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var lastErr error
+			for _, srv := range servers {
+				addr := srv
+				if _, _, err := net.SplitHostPort(srv); err != nil {
+					addr = net.JoinHostPort(srv, "53")
+				}
+				c, err := dnsDialer.DialContext(ctx, "udp", addr)
+				if err == nil {
+					return c, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = &net.DNSError{Err: "no dns_servers configured", Name: network, IsNotFound: true}
+			}
+			return nil, lastErr
+		},
+	}
+	return d
 }
 
 // newTransport 构造共享出站 Transport（HTTP 与 ChatHTTP 同一实例，连接池不重复）。

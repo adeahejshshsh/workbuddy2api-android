@@ -174,6 +174,8 @@ func main() {
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	// 出站 DNS 服务器（上游 PR #144）：必须在 New 之前注入，Dialer 在构造期读取。
+	upstream.SetDNSServers(cfg.Upstream.DNSServers)
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
@@ -634,7 +636,8 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		"upstream.device_token", "upstream.device_token_file", "upstream.passthrough_ip",
 		"global.enabled", "global.chat_base", "global.billing_base",
 		"cn.chat_base", "cn.billing_base", // base 在启动时注入（上游 PR #220）
-		"models.hidden", // 列表过滤与点名拒绝在 Handler 构造时快照（上游 PR #225）
+		"models.hidden",        // 列表过滤与点名拒绝在 Handler 构造时快照（上游 PR #225）
+		"upstream.dns_servers", // Dialer 在启动时构造（上游 PR #144）
 		"prompt.mode", "prompt.file",
 		"server.max_body_mb",
 		"upstash",

@@ -471,7 +471,9 @@ function renderAccounts(list) {
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div>' +
+        (s.remark ? '<div class="hint" style="font-size:11.5px;color:var(--accent);margin-top:2px">备注：' + esc(s.remark) + '</div>' : '') +
+        '<button class="xs remark-btn" data-uid="' + esc(s.uid) + '" style="margin-top:3px">备注</button></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
@@ -2935,3 +2937,25 @@ if ($('btnExp')) $('btnExp').onclick = () => loadExpiry(true);
 
 // 「刷新」始终实时查（显式 force，不依赖事件对象真值）
 if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
+
+// 账号备注（上游 PR #178）：委托监听，避免内联 onclick 被严格 CSP 拦掉。
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target && ev.target.closest ? ev.target.closest('.remark-btn') : null;
+  if (!btn) return;
+  const uid = btn.getAttribute('data-uid');
+  if (!uid) return;
+  const cur = (btn.parentElement && btn.parentElement.textContent || '').includes('备注：')
+    ? '' : '';
+  const input = prompt('给这个账号写个备注（留空 = 清除）：', cur);
+  if (input === null) return;           // 取消
+  try {
+    await api('accounts/' + encodeURIComponent(uid) + '/remark', {
+      method: 'POST',
+      body: JSON.stringify({ remark: input }),
+    });
+    toast('备注已保存');
+    loadOverview(true);
+  } catch (e) {
+    toast('备注保存失败：' + (e && e.message ? e.message : e), 'bad');
+  }
+});

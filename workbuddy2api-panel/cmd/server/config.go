@@ -168,6 +168,9 @@ type Config struct {
 		DeviceTokenFile string `json:"device_token_file"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// DNSServers 出站域名解析用的 DNS 服务器（上游 PR #144）：空 = 系统默认。
+		// 例：["1.1.1.1", "223.5.5.5"]。改动需重启（Dialer 在启动时构造）。
+		DNSServers []string `json:"dns_servers"`
 	} `json:"upstream"`
 
 	Features struct {
