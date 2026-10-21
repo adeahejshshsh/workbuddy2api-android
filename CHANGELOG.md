@@ -1,6 +1,69 @@
 # 变更记录
 
-## v1.28.9（当前）
+## v1.29.0（当前）
+
+**本版 = 第二十五份审查报告（代码审查报告.md，22 条）。22 条全部为真，
+其中 4 条（#1/#4/#17/#22）是我最近三版引入的。**
+
+### 高
+
+* **#1 特征表被注释吞掉一行** —— 我上一版补 `cc_version` 时那行少了换行，注释把
+  `"cc_entrypoint",` 整行吞进同一行 → 特征表里没有它。只带 `cc_entrypoint` 的正文
+  `hasFingerprint()` 返回 false，整条净化被跳过、指纹原样出站。已拆成两行并补测试。
+* **#2 导入把「已过期超过 24h」的 token 改写成 now+1h** —— `NeedsRefresh(10m)` 判据是
+  `now+10m >= ExpiresAt`，伪造成未来时间后前 50 分钟**恒不刷新**，每次 chat 都拿过期
+  access token 打上游（401/12153，三振还禁用账号）。改为写 0（未知），与登录路径同口径。
+* **#3 看门狗两条 continue 绕过 `armAlarm`** —— 一次性 `setExactAndAllowWhileIdle` 只有
+  每轮重臂才维持「每 5 分钟一次」；停在「外部实例复用」或反复自愈态时第 3 层自启失效。
+  把重臂提到两条分支之前。
+* **#4 队列绑了 HTTP 请求 ctx**（我 v1.28.4 改的）—— `startGrowthQueue` 是 `go` 之后立即
+  返回，handler 一写完响应 net/http 就 cancel ctx；派发循环里 `select` 两分支同时就绪时
+  **随机**命中 `ctx.Done()`，剩下的账号全被标成 skipped。表现为「点一次只跑前几个账号」。
+  改为 `context.Background()`（定时任务入口本来就传 Background）。
+* **#5 单域失败时把原因丢掉** —— `fetchErrs` 只在 `out` 为空时才用；CN 失败 / global 成功
+  时列表少一半却没有任何提示。响应里补 `errors` 与 `note`。
+
+### 中
+
+* **#6 异步派发后跨过的下一个时点被整天跳过** —— 批次改后台跑后主循环立刻重算
+  `nextWake`，若本批跑过了下一个时点（如 10:00 活跃上报），`nextFire` 直接返回次日。
+  记入 changelog 作为已知限制（补跑需要引入「已过未执行槽位」队列，属结构性改动）。
+* **#7 `model.json` 每条一次全量落盘** —— 冷缓存 + 30 个模型 = 30 次全量写。
+  已知限制：与 #11/#12 同属「写放大」，统一改成「置脏 + 定时落盘」需要接 pool 的 flusher
+  或新起一个 debounce 定时器，本轮未做（改动面比收益大）。
+* **#8 progress 覆盖把 target 写成 0** —— `progress:{current:3,target:0}` 时整对覆盖，
+  `Claimable` 判据恒 false → 永远不可领、队列反复重跑并累计跳过名单。改为逐字段覆盖。
+* **#9 择新恢复用 `SavedAt` 与 mtime 比较** —— 同秒/时钟回拨会选中旧快照，覆盖本地更新的
+  冷却/熔断/成本台账。已知限制：需要引入单调 revision，属 schema 变更。
+* **#10 签到日界用本地时区、硬冷却用固定 +08:00** —— 主机时区非 CST 时面板「已签」与
+  「何时解冻」互相矛盾。已知限制（统一口径需改配置语义）。
+* **#11 跳过名单过期清理在扫描热路径落盘** / **#12 11158 每命中一次落一次盘** ——
+  同 #7 的写放大族，本轮只记录。
+* **#13 超时文案说「任务仍在后台继续」但实际被中止标记掐掉** —— 文案改成「流水线已中止」。
+* **#14 登录轮询任何一次错误就永久停止** —— `api()` 现在把 `status` 挂在 Error 上，
+  轮询只在 4xx（state 真失效）时终止，网络抖动/5xx 继续重试。
+
+### 低
+
+* **#15 `/v1/models` 在 global 探测进行中静默少一半名单** —— 面板侧有
+  `GlobalProbeInFlight()` 区分，接口侧没有；记录（需要给接口加 `probing` 字段）。
+* **#16 注释说 max_body_mb 已移除、实现仍在生效** —— 注释更正（`MaxBytesReader` 默认 64MB）。
+* **#17 注释说 `Error.Status` 是真实 HTTP 状态、实现是语义状态**（我 v1.28.9 改的）——
+  注释更正，并说明真实状态在 `Error.HTTPStatus`。
+* **#18 `CooldownUntilTomorrow4AM` 名不副实** —— 注释写明实际是「当天 09:00 / 次日 04:00 /
+  次日 09:00」三选一（不改函数名，避免动调用点）。
+* **#19 日志环按单次 Write 切行** —— 多 goroutine 并发时行序会交错（内容不坏）。记录。
+* **#20 `loginTimer` 覆盖前未 clearInterval** —— 起新轮询前先 `stopPoll()`。
+* **#21 `checkAuthGate` 吞掉所有非密钥错误** —— 其余错误改为 toast 提示。
+* **#22 `recentInOrderLocked` 用长度判「未写满」** —— 目前正确但脆弱；记录。
+
+### 测试
+
+新增 `TestSanitizeCcEntrypointFeature`（只带 cc_entrypoint 也必须进净化并剥离）、
+`TestParseGrowthTasksProgressKeepsFlatTarget`（progress target=0 不许覆盖平铺 10）。
+`upstream 225 / server 96 / panel 53 / pool 188`，**全部 0 失败**（16 秒）。
+
+## v1.28.9
 
 **本版 = 第二十四份审查报告（BUG-REVIEW.md，25 条）。25 条全部为真（其中 3 条是我上一版引入的
 #5/#12/#20）。另发现并修掉一处**由本轮 UseNumber 改动引发的连带回归**。**

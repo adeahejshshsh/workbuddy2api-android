@@ -155,8 +155,12 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			expRaw /= 1000 // 毫秒（13 位）→ 秒
 		}
 		if expRaw <= 0 || expRaw < time.Now().Add(-24*time.Hour).Unix() {
-			expRaw = time.Now().Add(time.Hour).Unix()
-			log.Printf("panel: import uid=%s 的 expires_at 缺失或明显过期，按 now+1h 处理（首次请求即刷新）", acc.UID)
+			// 写 0（未知）而不是伪造 now+1h（BUG-2）：auth.NeedsRefresh(10m) 的判据是
+			// now+10m >= ExpiresAt，伪造成 now+1h 会让前 50 分钟 NeedsRefresh 恒 false，
+			// 于是每次都拿早已过期的 access token 打上游（401/12153），三振还会禁用账号。
+			// 登录路径（login.go）在同样场景下就是留 0 让首次请求立即刷新 —— 两条口径统一。
+			expRaw = 0
+			log.Printf("panel: import uid=%s 的 expires_at 缺失或明显过期，按 0（未知）处理，首次请求即刷新", acc.UID)
 		}
 		expiresAt := expRaw
 

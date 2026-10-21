@@ -365,9 +365,10 @@ func main() {
 		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
 		// ReadTimeout 覆盖整个请求读取（含 body 上传）：防慢速 body 拖死连接。
-		// 请求体已无网关侧上限（max_body_mb 移除）。缺省 300s（issue #100：旧固定
-		// 60s 会掐掉大上下文/文件块经反代链的慢速上传，客户端收到
-		// 400 "read body: ... i/o timeout"）；server.read_timeout="0" 显式关闭。
+		// 缺省 300s（issue #100：旧固定 60s 会掐掉大上下文/文件块经反代链的慢速上传，
+		// 客户端收到 400 "read body: ... i/o timeout"）；server.read_timeout="0" 显式关闭。
+		// 注意：请求体另有 server.max_body_mb 上限（handler 的 MaxBytesReader，默认 64MB）；
+		// 早先这里写的是「已无网关侧上限」，与实现相反，已更正（BUG-16）。
 		// 改动需重启进程。
 		ReadTimeout: cfg.ServerReadTimeoutDur,
 		// IdleTimeout keep-alive 空闲连接回收：配合 chat 出站 ctx 传播防连接泄漏堆积。

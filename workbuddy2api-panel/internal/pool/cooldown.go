@@ -567,7 +567,9 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.breakerUntil = time.Now().Add(d)
 }
 
-// CooldownUntilTomorrow4AM 冷却到下一个 04:00（本地时区）。
+// CooldownUntilTomorrow4AM 硬冷却截止时刻。**名不副实**（BUG-18）：实际是
+// 「当天 09:00 / 次日 04:00 / 次日 09:00」三选一（见函数体），不是恒定次日 04:00。
+// 保留函数名是为了不动调用点；读日志 kind=hard_credit 判断解冻时刻时以 until 为准。
 // 用于 ErrHardCredit 场景：积分耗尽账号等签到任务（09:00/21:00）恢复。
 func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
 	now := time.Now()

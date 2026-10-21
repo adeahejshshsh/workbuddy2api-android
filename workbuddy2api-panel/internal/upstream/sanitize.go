@@ -19,8 +19,8 @@ var sanitizeFeatures = []string{
 	"branch (you will usually use this for PRs)",      // 注入指令句（Main/Default 两种前缀都覆盖）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
-	"cc_version",                                      // 尾随 kv 族（cc_version= / cc_entrypoint=）：
-	"cc_entrypoint",                                   // 不带这些特征时整条净化被跳过，尾随 kv 原样出站
+	"cc_version",                                      // 尾随 kv 族
+	"cc_entrypoint",                                   // 同族：只带这一项时也必须进净化
 	"11-128",                                          // 上游反探测：裸数字错误码
 	"11" + "128",                                      // 同一指纹的 5 字节形态（拼接构造，不手打）
 	"11-128",                                          // 同一指纹的带连字符写法（两种都要覆盖）

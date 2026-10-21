@@ -188,8 +188,16 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 				Current int64 `json:"current"`
 				Target  int64 `json:"target"`
 			}
-			if json.Unmarshal(t.Progress, &pr) == nil && (pr.Target > 0 || pr.Current > 0) {
-				cur, tgt = pr.Current, pr.Target
+			if json.Unmarshal(t.Progress, &pr) == nil {
+				// 逐字段覆盖（BUG-8）：上游下发 progress:{current:3,target:0}（target
+				// 只在平铺字段里）时，整对覆盖会把 tgt 写成 0 → Claimable 判据
+				// `tgt > 0 && cur >= tgt` 恒 false → 永远不可领、队列反复重跑并累计跳过。
+				if pr.Current > 0 {
+					cur = pr.Current
+				}
+				if pr.Target > 0 {
+					tgt = pr.Target
+				}
 			}
 		}
 		claimed := t.AcceptStatus == "claimed"

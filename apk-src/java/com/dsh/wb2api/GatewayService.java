@@ -378,6 +378,11 @@ public class GatewayService extends Service {
                     appLog(this, freezeText);
                 }
                 lastTickAt = now;
+                // 每轮都重臂系统级 alarm（BUG-3）：armAlarm 用的是一次性
+                // setExactAndAllowWhileIdle，只有每轮重臂才维持「每 5 分钟一次」。
+                // 它原先在循环体末尾，而下面两条分支都 continue 提前跳过 ——
+                // 停在「外部实例复用」或反复自愈态时，第 3 层（App 被整体杀掉后自启）失效。
+                armAlarm(this);
                 if (!alive()) {
                     if (portUp()) {        // 端口有主但没有我的孩子 → 外部实例，不插手
                         external = true;
@@ -404,7 +409,6 @@ public class GatewayService extends Service {
                     setState(ST_RUNNING, mode + " 运行正常（自愈后已稳定）", null);
                     refreshNotification();
                 }
-                armAlarm(this);
             } catch (Throwable ignored) {
                 // 看门狗自己绝不能死：吞掉一切异常继续下一轮
             }

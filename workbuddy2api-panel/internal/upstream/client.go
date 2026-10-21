@@ -963,8 +963,10 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		// 还要给 Classify 一个**语义状态码**（bug #10）：IsModelBlocked /
 		// promptTooLongMarkers / invalidImageMarkers 都带 400/404/413 状态门槛，
 		// 而这里拿到的常是 HTTP 200 + 业务 code —— 不合成的话只有 14018/11101
-		// 两类真正受益，11102/11115/11135 仍然退化。注意只用于分类：
-		// Error.Status 仍报真实 HTTP 状态，避免影响调用方按 Status 的分支。
+		// 两类真正受益，11102/11115/11135 仍然退化。
+		// 注意（BUG-17）：Error.Status 报的是**语义状态码**（clsStatus），真实 HTTP
+		// 状态放在 Error.HTTPStatus —— 下游 ClaimRewardMP 的 400 降级正是按语义码工作。
+		// 这里早先的注释写的是「Status 仍报真实 HTTP 状态」，与实现相反，已更正。
 		clsStatus := resp.StatusCode
 		if clsStatus < 400 {
 			if s := businessCodeStatus(env.Code); s != 0 {

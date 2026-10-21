@@ -464,7 +464,15 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out, "hidden_tier": hiddenTier})
+	// 单域失败时也要把原因带回去（BUG-5）：此前 fetchErrs 只在 out 为空时才用，
+	// CN 失败 / global 成功时 out 非空 → 直接 200，列表少了一半却没有任何提示，
+	// 面板与 /v1/models 的差异无从解释。
+	resp := map[string]any{"ok": true, "models": out, "hidden_tier": hiddenTier}
+	if len(fetchErrs) > 0 {
+		resp["errors"] = fetchErrs
+		resp["note"] = "部分域查询失败（列表可能不完整）：" + strings.Join(fetchErrs, "；")
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），

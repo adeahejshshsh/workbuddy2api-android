@@ -1845,6 +1845,9 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	case <-ctx.Done():
 		// HTTP 侧超时返回，但后台流水线仍在跑——锁在流水线 goroutine 内释放，
 		// 期间重复点击会被 409 挡住，不会出现两轮并发。
-		writeErr(w, http.StatusGatewayTimeout, "执行超时（任务仍在后台继续）")
+		// 文案必须与行为一致（BUG-13）：ctx 来自 r.Context()，handler 返回后
+		// watchAbort 立刻给账号打中止标记，后台流水线在下一个节流点就退出 ——
+		// 说「仍在后台继续」会让用户干等一个已经停掉的流水线。
+		writeErr(w, http.StatusGatewayTimeout, "执行超时，流水线已中止（可在任务列表查看已完成项）")
 	}
 }

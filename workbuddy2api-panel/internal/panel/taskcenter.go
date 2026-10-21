@@ -330,7 +330,12 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	if body.Concurrency > 4 {
 		body.Concurrency = 4
 	}
-	started, total, seq, msg, lvl := p.startGrowthQueue(r.Context(), body.Concurrency, growth)
+	// 后台队列必须与请求 ctx 解耦（BUG-4）：startGrowthQueue 是 `go runQueueItems` 后
+	// 立即返回，handler 一写完响应，net/http 就会 cancel r.Context() —— 而派发循环里
+	// `select { case sem<-…: case <-ctx.Done(): }` 两个分支同时就绪时会**随机**命中
+	// ctx.Done()，剩下的账号全被标成 skipped。表现为「点一次只跑前几个账号」。
+	// 定时任务入口本来就传 Background，这里对齐。
+	started, total, seq, msg, lvl := p.startGrowthQueue(context.Background(), body.Concurrency, growth)
 	switch {
 	case seq == -1:
 		writeErr(w, http.StatusConflict, msg)

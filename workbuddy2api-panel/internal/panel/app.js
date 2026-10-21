@@ -50,7 +50,12 @@ async function api(path, opts = {}) {
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
   if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  if (!r.ok) {
+    // 带上状态码（BUG-14）：调用方要区分「state 真失效（4xx）」与「网络抖动/5xx（可重试）」
+    const e = new Error(d.error || ('HTTP ' + r.status));
+    e.status = r.status;
+    throw e;
+  }
   return d;
 }
 function toast(msg, cls) {
@@ -1294,7 +1299,12 @@ $('importFile').onchange = async () => {
   try {
     const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    if (!r.ok) {
+    // 带上状态码（BUG-14）：调用方要区分「state 真失效（4xx）」与「网络抖动/5xx（可重试）」
+    const e = new Error(d.error || ('HTTP ' + r.status));
+    e.status = r.status;
+    throw e;
+  }
     $('importDone').hidden = false;
     $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
     if (d.errors && d.errors.length) {
