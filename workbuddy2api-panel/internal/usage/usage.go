@@ -35,7 +35,8 @@ const hourlyKeep = 90 * 24 * time.Hour
 const flushInterval = 30 * time.Second
 
 // maxBuckets 桶数硬上限。超过时立即触发一次折叠，避免异常流量把内存/文件撑爆。
-const maxBuckets = 400_000
+// 变量而非常量：测试要把它压到个位数来验证「超限淘汰」这条分支（bug #9）。
+var maxBuckets = 400_000
 
 // hourLayout / dayLayout 分片键的时间格式（本地时区，与用户直觉一致）。
 const (
@@ -304,6 +305,43 @@ func (r *Recorder) Rollup(now time.Time) {
 		r.dirty = true
 		log.Printf("[usage] 折叠 %d 个小时桶为日桶（保留 %v 细粒度）", len(moves), hourlyKeep)
 	}
+
+	// 硬上限兜底（bug #9）：上面的折叠只动「早于 hourlyKeep」的小时桶，而异常流量
+	// 产生的全是「现在」的桶 —— len(buckets) 超过 maxBuckets 后一个也删不掉，
+	// 常量注释承诺的「立即折叠，避免把内存/文件撑爆」形同虚设（flush 每 30s 还是
+	// 一次 O(n) 全量序列化）。这里按时间淘汰最旧的小时桶：直接丢，不折成日桶
+	// （它们本来就是同一小时里基数爆炸的异常键，折进去也只会把日桶撑大）。
+	if len(r.buckets) > maxBuckets {
+		type aged struct {
+			key string
+			ts  time.Time
+		}
+		olds := make([]aged, 0, len(r.buckets))
+		for k, b := range r.buckets {
+			if !strings.HasPrefix(b.Scope, "h:") {
+				continue
+			}
+			ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local)
+			if err != nil {
+				continue
+			}
+			olds = append(olds, aged{key: k, ts: ts})
+		}
+		sort.Slice(olds, func(i, j int) bool { return olds[i].ts.Before(olds[j].ts) })
+		dropped := 0
+		for _, o := range olds {
+			if len(r.buckets) <= maxBuckets {
+				break
+			}
+			delete(r.buckets, o.key)
+			dropped++
+		}
+		if dropped > 0 {
+			r.dirty = true
+			log.Printf("[usage] WARN: 桶数超上限 %d，淘汰 %d 个最旧小时桶（当前 %d）",
+				maxBuckets, dropped, len(r.buckets))
+		}
+	}
 }
 
 // ---------------------------------------------------------------- 持久化 ----
@@ -320,8 +358,21 @@ func (r *Recorder) load() error {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return err
 	}
+	// 加载上限（bug #12）：以前把文件里的桶全量恢复，不校验条数 —— 文件被写坏、
+	// 或被合入超大历史后，进程启动即吃满内存，而且第一次 flush 还会把它原样写回。
+	if len(f.Buckets) > 2*maxBuckets {
+		log.Printf("[usage] WARN: %s 含 %d 个桶，超上限，按时间保留最新 %d 个",
+			r.path, len(f.Buckets), 2*maxBuckets)
+		sort.Slice(f.Buckets, func(i, j int) bool { return bucketTimeKey(f.Buckets[i]) > bucketTimeKey(f.Buckets[j]) })
+		f.Buckets = f.Buckets[:2*maxBuckets]
+	}
 	for i := range f.Buckets {
 		b := f.Buckets[i]
+		// Scope 合法性：只认 h:<时> / d:<日> 两种（脏数据直接跳过，别让它在内存里
+		// 变成永远折叠不掉的僵尸桶）。
+		if !validScope(b.Scope) {
+			continue
+		}
 		k := b.Scope + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate
 		// 同 key 累加而不是覆盖（bug #16）：文件里若出现两条同 key（手工合并、
 		// 旧版本写坏、两次落盘交错），后一条会把前一条的累计值直接顶掉 ——
@@ -347,6 +398,34 @@ func (r *Recorder) load() error {
 	}
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil
+}
+
+// bucketTimeKey 取桶的时间分片键（h:2026-10-21T15 / d:2026-10-21），
+// 字典序即时间序，供 load 的"保留最新"排序使用；解析不出来的排最前（最先被丢）。
+func bucketTimeKey(b bucket) string {
+	switch {
+	case strings.HasPrefix(b.Scope, "h:"):
+		return b.Scope[2:]
+	case strings.HasPrefix(b.Scope, "d:"):
+		return b.Scope[2:] + "T99" // 同一天里排在所有小时桶之后
+	default:
+		return ""
+	}
+}
+
+// validScope 桶的 Scope 必须是 h:<2006-01-02T15> 或 d:<2006-01-02>。
+func validScope(scope string) bool {
+	hourLen := len("2006-01-02T15")
+	dayLen := len("2006-01-02")
+	if strings.HasPrefix(scope, "h:") {
+		_, err := time.ParseInLocation(hourLayout, scope[2:], time.Local)
+		return err == nil && len(scope) == 2+hourLen
+	}
+	if strings.HasPrefix(scope, "d:") {
+		_, err := time.ParseInLocation(dayLayout, scope[2:], time.Local)
+		return err == nil && len(scope) == 2+dayLen
+	}
+	return false
 }
 
 func (r *Recorder) flush(force bool) {

@@ -8,9 +8,12 @@ package reqlog
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -133,6 +136,7 @@ type Recorder struct {
 	httpSuccess int64
 	durationSum int64
 	recent      []Event
+	recentNext  int // 环写指针：recent 满后，下一次覆盖的位置（= 当前最旧的元素）
 	archive     *archiveWriter
 }
 
@@ -186,19 +190,32 @@ func (r *Recorder) Record(e Event) {
 		r.httpSuccess++
 	}
 	r.durationSum += e.DurationMs
-	// 环形写（bug #17）：此前每条请求都 `append([]Event{e}, r.recent...)`，
-	// Event 是 20 多个字段的结构体、recent 上限 100 —— 持锁状态下搬运十几 KB，
-	// 高 QPS 下纯浪费且拉长锁持有时间。这里保留"最新的在末尾"的语义，Snapshot 再倒序。
+	// 真环写（bug #14）：此前虽然不再 append 整个切片，但仍要
+	// `copy(r.recent, r.recent[1:])` —— 持锁状态下搬 99 个 Event（20 多个字段），
+	// 高 QPS 下是每请求一次的 O(n) 无谓搬运。改成下标覆盖：写 O(1)，
+	// Snapshot 时按环序展开一次。
 	if len(r.recent) < recentLimit {
 		r.recent = append(r.recent, e)
 	} else {
-		copy(r.recent, r.recent[1:])
-		r.recent[recentLimit-1] = e
+		r.recent[r.recentNext] = e
+		r.recentNext = (r.recentNext + 1) % recentLimit
 	}
 	r.mu.Unlock()
 	if r.archive != nil {
 		r.archive.enqueue(e)
 	}
+}
+
+// recentInOrderLocked 把环写缓冲展开成"旧→新"顺序（调用方必须持 r.mu）。
+// 未写满时就是底层切片本身；写满后从最旧的槽位（recentNext）开始绕一圈。
+func (r *Recorder) recentInOrderLocked() []Event {
+	if len(r.recent) < recentLimit || r.recentNext == 0 {
+		return r.recent
+	}
+	out := make([]Event, 0, len(r.recent))
+	out = append(out, r.recent[r.recentNext:]...)
+	out = append(out, r.recent[:r.recentNext]...)
+	return out
 }
 
 // Snapshot 返回进程内指标和归档状态。
@@ -212,8 +229,8 @@ func (r *Recorder) Snapshot() Snapshot {
 		Completed: r.completed,
 		InFlight:  r.inFlight,
 		Succeeded: r.succeeded,
-		// 内部按"旧→新"存放，对外契约是"新→旧"（bug #17）。
-		Recent: reversedEvents(r.recent),
+		// 内部环序展开成"旧→新"，对外契约是"新→旧"（bug #17/#14）。
+		Recent: reversedEvents(r.recentInOrderLocked()),
 	}
 	if r.completed > 0 {
 		s.Failed = r.completed - r.succeeded
@@ -523,6 +540,9 @@ func (w *archiveWriter) prune() {
 		path  string
 		size  int64
 		mtime time.Time
+		day   string
+		idx   int
+		dated bool // 文件名里的日期可解析；否则退回 mtime
 	}
 	items := make([]item, 0, len(entries))
 	var total int64
@@ -536,17 +556,45 @@ func (w *archiveWriter) prune() {
 		if err != nil {
 			continue
 		}
-		items = append(items, item{path: path, size: info.Size(), mtime: info.ModTime()})
+		day, idx := archiveNameKey(entry.Name())
+		it := item{path: path, size: info.Size(), mtime: info.ModTime(), day: day, idx: idx}
+		if _, derr := time.ParseInLocation("2006-01-02", day, time.Local); derr == nil {
+			it.dated = true
+		}
+		items = append(items, it)
 		total += info.Size()
 	}
+	// 排序与过期判断都必须用文件名日期（bug #8）：目录被整体拷贝、从备份恢复、
+	// 容器换挂载卷之后所有文件 mtime 都变成"现在"，按 mtime 判断会让 RetentionDays
+	// 永不生效（只能靠 MaxBytes 兜底，而且 MaxBytes 淘汰同样按 mtime 优先删错文件）。
+	// 归档文件名 requests-<day>[.<idx>].jsonl 里的日期就是时间序（read 侧早已按它排序）。
 	sort.Slice(items, func(i, j int) bool {
-		if items[i].mtime.Equal(items[j].mtime) {
-			return items[i].path < items[j].path
+		a, b := items[i], items[j]
+		if a.dated && b.dated {
+			if a.day != b.day {
+				return a.day < b.day
+			}
+			if a.idx != b.idx {
+				return a.idx < b.idx
+			}
+		} else if a.dated != b.dated {
+			return a.dated // 能解析日期的排在前面（更可能有"真实"年龄）
 		}
-		return items[i].mtime.Before(items[j].mtime)
+		if a.mtime.Equal(b.mtime) {
+			return a.path < b.path
+		}
+		return a.mtime.Before(b.mtime)
 	})
+	cutoffDay := cutoff.Format("2006-01-02")
 	for _, it := range items {
-		if it.path != w.path && (it.mtime.Before(cutoff) || total > w.cfg.MaxBytes) {
+		if it.path == w.path {
+			continue
+		}
+		expired := it.mtime.Before(cutoff)
+		if it.dated {
+			expired = it.day < cutoffDay
+		}
+		if expired || total > w.cfg.MaxBytes {
 			if err := os.Remove(it.path); err == nil {
 				total -= it.size
 			}
@@ -606,12 +654,15 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 	})
 	var out []Event
 	for _, name := range names {
-		rows, err := readFile(filepath.Join(w.cfg.Dir, name), filter)
-		if err != nil {
-			return out, err
+		// 单文件读失败只跳过（bug #7）：并发 prune 刚把它删掉、目录被手工清理、
+		// 单个文件权限丢失，这些都不该让整个「运行日志」页 500 ——
+		// 少几条记录远好过整页打不开（目录级读失败在更上面已经上抛了）。
+		rows, rerr := readFileTail(filepath.Join(w.cfg.Dir, name), filter, limit-len(out))
+		if rerr != nil {
+			continue
 		}
 		out = append(out, rows...)
-		// 单文件内的事件是追加写的（时间递增），已经凑够 limit 就没必要再往前读。
+		// 凑够 limit 就没必要再往前读（文件名日期序 = 时间序）。
 		if len(out) >= limit {
 			break
 		}
@@ -634,6 +685,66 @@ func archiveNameKey(name string) (day string, idx int) {
 		}
 	}
 	return rest, 0
+}
+
+// readFileTail 从文件尾部倒着读，凑够 limit 条匹配事件就停（bug #11）。
+//
+// 归档是追加写的（旧→新），所以"最新 N 条"就在文件末尾。此前 readFile 会把
+// 整个文件（单文件上限 16MB ≈ 10 万行）逐行 Unmarshal 一遍，面板每刷一次
+// 就是一次十万行 JSON 解析；注释写的"凑够 limit 即停"只在文件之间生效。
+// 返回顺序是旧→新，调用方仍会按事件时间统一排序。
+func readFileTail(path string, filter Filter, limit int) ([]Event, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	const chunk = 64 << 10
+	var carry []byte   // 更靠后那块留下的不完整首行
+	var newest []Event // 收集到的匹配事件（新→旧）
+	offset := st.Size()
+	for offset > 0 && len(newest) < limit {
+		n := int64(chunk)
+		if offset < n {
+			n = offset
+		}
+		offset -= n
+		buf := make([]byte, n)
+		if _, rerr := f.ReadAt(buf, offset); rerr != nil && !errors.Is(rerr, io.EOF) {
+			return nil, rerr
+		}
+		data := append(buf, carry...)
+		lines := bytes.Split(data, []byte("\n"))
+		if offset > 0 {
+			// 本块首行可能被块边界切断：留给更靠前的那块拼接
+			carry = append([]byte(nil), lines[0]...)
+			lines = lines[1:]
+		} else {
+			carry = nil
+		}
+		for i := len(lines) - 1; i >= 0 && len(newest) < limit; i-- {
+			if len(lines[i]) == 0 {
+				continue
+			}
+			var e Event
+			if json.Unmarshal(lines[i], &e) != nil || !filter.match(e) {
+				continue
+			}
+			newest = append(newest, e)
+		}
+	}
+	out := make([]Event, len(newest))
+	for i, e := range newest {
+		out[len(newest)-1-i] = e
+	}
+	return out, nil
 }
 
 func readFile(path string, filter Filter) ([]Event, error) {

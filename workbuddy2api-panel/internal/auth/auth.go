@@ -508,6 +508,15 @@ func LoadDir(dir string) ([]*Auth, error) {
 		if err != nil {
 			continue
 		}
+		// 缺 uid 的文件一律不进池（bug #1）：pool 以 UID 作 map key，空 key 会让
+		// auths/ 下所有缺 uid 的文件互相顶替（只有第一个能进，其余被 seenUID 当重复
+		// 丢弃），而面板路由 /panel/api/accounts/{uid}/... 也匹配不到空路径段 ——
+		// 结果是「能发请求，但复活/禁用/签到/删除全点不动」，流水日志里 UID8 只剩 "-"。
+		// 与 Parse 的 "missing accessToken" 同口径：宁可跳过并告警，也不留半残的号。
+		if strings.TrimSpace(a.UID) == "" {
+			log.Printf("WARN: auth 文件缺 uid，已跳过（补 \"uid\" 字段后重启即恢复）：%s", f)
+			continue
+		}
 		a.FilePath = f
 		if prev, ok := seenUID[a.UID]; ok {
 			// 真的去重（bug-4）：此前只打日志、两条都 append，而 pool.upsertLocked 是

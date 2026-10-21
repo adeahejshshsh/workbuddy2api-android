@@ -531,7 +531,17 @@ public class GatewayService extends Service {
             if (lf.length() > LOG_PUMP_MAX) {           // 与 pump 上限同口径：超了先翻代，重启从小文件起算
                 File old = new File(gwDir, "data/server.log.1");
                 if (old.exists()) old.delete();
-                lf.renameTo(old);
+                // 翻代失败必须原地截断（bug #5）：renameTo 的返回值此前没看，
+                // 而 pump 起始处 `writeOn = logFile.length() <= LOG_PUMP_MAX` ——
+                // 翻代失败时原文件仍 > 上限，于是本次运行的网关日志**只读不写**，
+                // 用户看到的证据链只剩通知栏和最后一行。与 appLog 的兜底同口径。
+                if (!lf.renameTo(old)) {
+                    try (java.io.FileOutputStream os = new java.io.FileOutputStream(lf, false)) {
+                        os.write(new byte[0]);          // 截断到 0，保证 pump 的 writeOn 为 true
+                    } catch (Throwable t) {
+                        appLog(this, "日志翻代失败且截断失败：" + t);
+                    }
+                }
             }
             final File logFile = lf;
             reader = new Thread(() -> pump(p.getInputStream(), logFile));
@@ -646,8 +656,13 @@ public class GatewayService extends Service {
                 // 在最后一个 } 前插入该键，其余内容一个字不动。
                 int brace = cur.lastIndexOf('}');
                 if (brace <= 0) return;            // 不是对象：别乱改
-                String injected = cur.substring(0, brace).replaceAll("\\s+$", "")
-                        + ", \"api_key\": \"" + key + "\"\n" + cur.substring(brace);
+                // 分隔符按前缀末字符决定（bug #4）：此前无条件拼一个前导逗号，
+                // 对空对象 `{}` 会写出 `, "api_key": "..."` —— **以逗号开头的非法 JSON**，
+                // 网关 Load() 报 parse config 后 log.Fatalf 退出（rc=1），看门狗按退避
+                // 无限重拉，界面永久停在「启动中」，用户完全看不出是配置被写坏了。
+                String head = cur.substring(0, brace).replaceAll("\\s+$", "");
+                String sep = (head.isEmpty() || head.endsWith("{")) ? "" : ",";
+                String injected = head + sep + " \"api_key\": \"" + key + "\"\n" + cur.substring(brace);
                 try (java.io.FileOutputStream os = new java.io.FileOutputStream(cfg)) {
                     os.write(injected.getBytes("UTF-8"));
                 } catch (Throwable t) {

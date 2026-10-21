@@ -191,7 +191,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 				e.modelCooldowns = map[string]modelCooldown{}
 			}
 			e.modelCooldowns[model] = modelCooldown{
-				Until:   p.cappedSoftUntilLocked(now, resetAt),
+				Until:   p.cappedSoftUntilLocked(now, resetAt, base),
 				ResetAt: resetAt,
 				Reason:  reason,
 			}
@@ -440,7 +440,7 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 			return
 		}
 		if !resetAt.IsZero() {
-			next := p.cappedSoftUntilLocked(now, resetAt)
+			next := p.cappedSoftUntilLocked(now, resetAt, base)
 			if next.After(e.until) || !now.Before(e.until) {
 				e.until = next // 只延长，不缩短
 			}
@@ -460,7 +460,14 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 // cappedSoftUntilLocked 把上游重置墙钟截断到 softRateMax（now+softRateMax 与 resetAt
 // 取较早者）。resetAt 已过期（时钟偏移/文案过期）时时长钳到时间零点附近，立即恢复。
 // 调用方必须已持有 p.mu。
-func (p *Pool) cappedSoftUntilLocked(now, resetAt time.Time) time.Time {
+// base 是调用方给的退避基数：resetAt 已经过期时用它兜底，绝不再返回「1ms」。
+//
+// 为什么需要 base（bug #3）：上游文案里的重置时刻落后于本机时钟（手机时间偏移、
+// 容器时区漂移、或上游把缓存过的旧 429 正文又吐了一遍）时，原实现直接
+// `now.Add(time.Millisecond)` —— 被限流的号 1ms 后就回到选号池，handler 的
+// rotateBackoff 只等 0.5~1s，同一个号立刻又被选中，限流保护形同虚设；而且这条
+// 分支不推进 softStreak，连退避都不会触发。
+func (p *Pool) cappedSoftUntilLocked(now, resetAt time.Time, base time.Duration) time.Time {
 	cap := now.Add(p.softRateMaxOr())
 	if resetAt.After(cap) {
 		return cap
@@ -468,7 +475,13 @@ func (p *Pool) cappedSoftUntilLocked(now, resetAt time.Time) time.Time {
 	if resetAt.After(now) {
 		return resetAt
 	}
-	return now.Add(time.Millisecond)
+	if base <= 0 {
+		base = time.Minute
+	}
+	if next := now.Add(base); next.Before(cap) {
+		return next
+	}
+	return cap
 }
 
 // softRateMaxOr 返回生效的 softRateMax（未注入时按默认 2h），供封顶计算。

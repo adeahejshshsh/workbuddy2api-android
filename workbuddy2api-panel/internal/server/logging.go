@@ -243,6 +243,11 @@ func (s *chatStatsReader) SawErrorFrame() bool { return s.errorFrame }
 
 // Read 返回原始数据，同时解析统计 TTFB/token。
 func (s *chatStatsReader) Read(p []byte) (int, error) {
+	// 空 buffer 显式短路（bug #10）：io.Reader 的约定是 len(p)==0 时应返回 (0,nil)，
+	// 写清楚是为了别让阅读者以为下面那句 copy 的 0 是丢数据。
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if len(s.pend) > 0 {
 		n := copy(p, s.pend)
 		s.pend = s.pend[n:]
@@ -251,10 +256,15 @@ func (s *chatStatsReader) Read(p []byte) (int, error) {
 	line, err := s.br.ReadString('\n')
 	if line != "" {
 		s.parseSSELine(line)
-		s.pend = []byte(line)
-		n := copy(p, s.pend)
-		s.pend = s.pend[n:]
-		return n, nil
+		n := copy(p, line)
+		if n < len(line) {
+			s.pend = []byte(line[n:])
+		} else {
+			s.pend = nil
+		}
+		// 数据与错误一起返回：io 契约允许 n>0 带 err（调用方必须先处理 n 字节），
+		// 以前把 err 吞到下一轮，io.CopyN 这类调用方会多读一次。
+		return n, err
 	}
 	return 0, err
 }

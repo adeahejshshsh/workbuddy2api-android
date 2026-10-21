@@ -249,7 +249,14 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 
 	// 凭证落盘（嵌套形，与 auths/ 目录既有格式一致）→ 热加载进池。
 	if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
-		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
+		// 与上面两个分支同构（bug #2）：auth/token 已成功 = 上游已消费该 state，
+		// 这里若是「可重试」语义（completed 保持 false → defer 复位 consumed），
+		// 前端 3 秒一次 poll 会继续空转到 15 分钟 TTL，且用户拿不到明确提示。
+		completed = true
+		p.loginMu.Lock()
+		delete(p.logins, state)
+		p.loginMu.Unlock()
+		writeErr(w, http.StatusInternalServerError, "凭证已签发但创建 auths 目录失败，请重新发起添加账号："+err.Error())
 		return
 	}
 	// 上游没下发 expiresIn（或为 0）时不要写「现在」（bug #10）：那会让
@@ -286,7 +293,12 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.BackfillRealm()
 	}
 	if err := a.SaveAtomic(); err != nil {
-		writeErr(w, http.StatusInternalServerError, "save auth: "+err.Error())
+		// 同上（bug #2）：state 已被上游消费，按终态处理，别让前端空转到 TTL。
+		completed = true
+		p.loginMu.Lock()
+		delete(p.logins, state)
+		p.loginMu.Unlock()
+		writeErr(w, http.StatusInternalServerError, "凭证已签发但落盘失败，请重新发起添加账号："+err.Error())
 		return
 	}
 	p.cfg.Pool.Add(a)
@@ -332,15 +344,23 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	delete(p.logins, state)
 	p.loginMu.Unlock()
 	log.Printf("panel: 新账号已热加载 uid=%s nickname=%q realm=%s（免重启生效）", acct.UID, acct.Nickname, sess.realm)
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"done":            true,
 		"uid":             acct.UID,
 		"nickname":        acct.Nickname,
 		"realm":           sess.realm,
-		"credits":         remain,
 		"credits_total":   total,
 		"checkin_message": checkinMsg,
-	})
+	}
+	// 余额未知时**不下发** credits（bug #13）：以前下发 -1 当哨兵，契约只写在
+	// 前端那句 `r.credits >= 0` 里 —— 任何新调用方（脚本/别的前端）都会把 -1
+	// 当成真实余额。-1 = 查询失败（余额接口报错/超时），"缺字段"才是通用语义。
+	if remain >= 0 {
+		resp["credits"] = remain
+	} else {
+		resp["credits_ok"] = false
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // joinMsg 拼接 login 完成后的提示消息（多段用「；」连接，空段跳过）。

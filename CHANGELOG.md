@@ -1,6 +1,71 @@
 # 变更记录
 
-## v1.28.2（当前）
+## v1.28.3（当前）
+
+**本版 = 第十八份审查报告（CODE-REVIEW-BUGS-20261021.md，14 条）。13 条为真、1 条部分属实
+（#10 的空 buffer 分支按 `io.Reader` 约定本就合法），全部落实。**
+
+### 高危
+
+* **#1 缺 `uid` 的 auth 文件进池** —— `pool` 以 UID 作 map key，空 key 会让 `auths/` 下所有
+  缺 uid 的文件互相顶替（只有第一个能进，其余被 `seenUID` 当重复丢弃），而面板路由
+  `/accounts/{uid}/...` 匹配不到空路径段 —— 那个号**能发请求，但复活/禁用/签到/删除全点不动**。
+  改为 `LoadDir` 直接跳过并打含路径的 WARN（与 `missing accessToken` 同口径）。
+  没有采用「按文件名派生 uid」：那会把假 UID 写进 auth 文件、还会作为 `X-User-Id` 上行。
+* **#2 OAuth 登录落盘失败不置终态** —— `MkdirAll` / `SaveAtomic` 两个失败分支只 `return`，
+  而 `auth/token` 已成功（上游已消费该 state），defer 又把 `consumed` 复位 → 前端 3 秒一次
+  poll 空转到 15 分钟 TTL。与同函数里已有的两个终态分支同构：`completed=true` + `delete`。
+* **#3 429 重置时间已成过去 → 冷却 1ms** —— 上游重置时刻落后本机时钟（手机时间偏移、
+  容器时区漂移、上游重放旧正文）时，`cappedSoftUntilLocked` 返回 `now+1ms`：被限流的号
+  立刻回池，`rotateBackoff` 只等 0.5~1s，同一个号马上又被选中，限流保护形同虚设，
+  而且该分支不推进 `softStreak`、连退避都不触发。改为回落到调用方给的退避基数（再按
+  `softRateMax` 封顶）。
+* **#4 空对象 `{}` 补 `api_key` 写出非法 JSON** —— 注入时无条件拼前导逗号，对 `{}` 得到
+  `, "api_key": …`，网关 `Load()` 报 parse config 后 `log.Fatalf` 退出，看门狗按退避无限
+  重拉，界面永久「启动中」。分隔符改为按前缀末字符决定（空对象/已含 `{` 时不加逗号）。
+* **#5 日志翻代失败后本次运行不再落盘** —— `renameTo` 返回值没看，而 `pump` 起始处
+  `writeOn = logFile.length() <= 上限`；翻代失败时原文件仍超限 → 整条流只读不写。
+  翻代失败时原地截断（与 `appLog` 的兜底同口径）。
+
+### 中危
+
+* **#6 11115 大小写兜底是死条件** —— 判据 `(m != ToLower(m) && …)` 对全小写的 markers 恒假，
+  上游回 `Prompt is too long` / `PROMPT IS TOO LONG` 时判不出来，落成 `ErrNotFound`
+  （白冷却账号 60s）或 `ErrClient`（白换一次号）。改为双向比对。
+* **#7 归档单文件读失败整页 500** —— `return out, err` 把已读到的记录一起丢掉；并发 prune
+  刚删、目录被手工清理、单文件权限丢失都会命中。改为跳过该文件（目录级失败仍在上面上抛）。
+* **#8 保留期按 mtime 判断** —— 目录被整体拷贝/从备份恢复/容器换卷后 mtime 全是"现在"，
+  `RetentionDays` 永不生效；`MaxBytes` 淘汰同样按 mtime 优先删错文件。改为按文件名日期
+  （`requests-<day>[.<idx>].jsonl`，read 侧早已按它排序），日期不可解析时退回 mtime。
+* **#9 `maxBuckets` 兜不住内存** —— 折叠只动「早于 90 天」的小时桶，异常流量产生的都是
+  「现在」的桶，超限后一个也删不掉。补一条硬上限：超限时按时间淘汰最旧的小时桶（直接丢，
+  不折成日桶 —— 它们本就是同一小时里基数爆炸的异常键）。
+* **#10 `chatStatsReader.Read`** —— 空 buffer 返回 `(0,nil)` 按 `io.Reader` 约定**本就合法**
+  （这条只算部分属实）；但「有数据却把 err 吞到下一轮」确实多余。改为显式短路空 buffer +
+  数据与错误一起返回（`n>0` 带 err 是契约允许的）。
+
+### 低危
+
+* **#11 归档读取整文件扫描** —— 注释承诺的「凑够 limit 即停」只在文件之间生效，单文件
+  （上限 16MB ≈ 10 万行）仍全量解析。新增 `readFileTail`：64KiB 分块从尾部倒读、凑够即停、
+  跨块半行拼接，结果与全量读的最后 N 条逐条一致（有单测钉住）。
+* **#12 `load` 对桶数无上限** —— 文件被写坏或合入超大历史后，进程启动即吃满内存，第一次
+  flush 还会原样写回。补 `2*maxBuckets` 封顶（按时间保留最新）+ `Scope` 合法性校验。
+* **#13 `credits: -1` 哨兵** —— 余额未知时不下发该字段（并给 `credits_ok:false`），
+  契约从"靠前端 `>= 0` 判断"改成"缺字段即未知"。
+* **#14 环形写仍是 O(n) copy** —— 每请求持锁搬 99 个 `Event`（20 多字段）。改成下标覆盖
+  的真环写：写 O(1)，`Snapshot` 时按环序展开一次。
+
+### 测试
+
+新增 9 组：`TestLoadDirSkipsEmptyUID`、`TestCappedSoftUntilExpiredResetFallsBackToBase`、
+`TestClassifyPromptTooLongCaseInsensitive`、`TestReadFileTailMatchesFullRead`、
+`TestRecentRingOrderAfterWrap`、`TestPruneUsesFilenameDate`、
+`TestRollupDropsOldestHourBucketsOverCap`、`TestLoadCapsBucketCountAndSkipsBadScope`
+（后两条把 `maxBuckets` 临时压到 5，否则要造 40 万个桶）。
+全量 **761 通过 / 0 失败**。
+
+## v1.28.2
 
 **本版 = 第十七份审查报告（BUG-REVIEW-2026-10-21.md，A1-A4 / B1 / C1-C2 / D1-D4 共 11 条）。
 逐条复核后**11 条全部为真**，无一条误报。其中 A4 是唯一会造成用户可感知损失的：上游抖一次就吃 1/3 次跳过额度。**

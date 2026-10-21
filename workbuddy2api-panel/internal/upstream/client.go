@@ -569,7 +569,12 @@ func Classify(status int, body string) ErrKind {
 	// 误归 ErrNotFound 只冷却不透传；ErrClient 只换号，浪费健康号配额）。
 	if isPromptTooLongStatus(status) {
 		for _, m := range promptTooLongMarkers {
-			if strings.Contains(body, m) || (m != strings.ToLower(m) && strings.Contains(lower, strings.ToLower(m))) {
+			// 两个方向都比对（bug #6）：原条件是
+			// `body 含 m || (m 不是全小写 && lower 含 m 的小写)`，而 markers 列表里
+			// 全是小写 —— `m != ToLower(m)` 恒假，小写兜底成了死代码，上游回
+			// "Prompt is too long"/"PROMPT IS TOO LONG" 时判不出来，落成
+			// ErrNotFound（白冷却账号 60s）或 ErrClient（白换一次号）。
+			if strings.Contains(body, m) || strings.Contains(lower, strings.ToLower(m)) {
 				return ErrPromptTooLong
 			}
 		}
