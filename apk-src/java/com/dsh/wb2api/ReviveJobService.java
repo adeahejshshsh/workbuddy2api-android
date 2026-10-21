@@ -66,7 +66,8 @@ public class ReviveJobService extends JobService {
                     if (userStopped) {
                         GatewayService.appLog(ReviveJobService.this,
                                 "JobScheduler 触发：用户已主动停止，不拉起");
-                        jobFinished(p, false);
+                        // 不在这里调 jobFinished（BUG-19）：return 会走 finally，
+                        // 那里已经调过一次；重复调用会被系统记错误并按非法收尾处理。
                         return;
                     }
                     boolean up = GatewayService.portUp();

@@ -934,7 +934,13 @@ const ctx = {
   Date, Math, Number, String, Map, Array, Object, isNaN,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+// hasRealTime 定义在文件靠前的公共区（ago() 也用），单独切出来注入，
+// 不能从它开始切整段 —— 那会把顶层 $('keyForm').addEventListener 之类的
+// 副作用代码一起带进 vm，而测试桩没有 addEventListener。
+const hStart = src.indexOf('function hasRealTime');
+const hEnd = src.indexOf('function ago(');
+const helper = (hStart >= 0 && hEnd > hStart) ? src.slice(hStart, hEnd) : '';
+vm.runInContext(helper + src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
 const day = n => {
   const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
   return d.toISOString();

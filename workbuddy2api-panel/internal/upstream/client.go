@@ -1790,9 +1790,14 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	}
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// 先判空再解引用（BUG-05）：上一行直接调 a.AccessTokenValue()，下一行才判 a != nil，
+	// 真传 nil 就是 panic —— 防御代码自相矛盾。同函数里的 v3ConfigDomain 是按可空处理的。
+	if a == nil {
+		return nil, nil
+	}
 	// AccessToken 加锁快照（同 fetchEnterpriseModels）。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	if a != nil && a.UID != "" {
+	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
 	req.Header.Set("X-Domain", v3ConfigDomain(a, c.chatBase(a)))
@@ -2331,6 +2336,14 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 	}
 	if used == 0 && size > remain {
 		used = size - remain
+	}
+	// used 也要钳（BUG-07）：上游对账延迟时 CapacityUsed > CapacitySize，
+	// 不钳就会出现「剩余 50 / 已用 150 / 面额 100」这种自相矛盾的行。
+	if size > 0 && used > size {
+		used = size
+	}
+	if size > 0 && remain+used > size {
+		remain = size - used
 	}
 	return remain, used, size
 }

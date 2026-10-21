@@ -1643,6 +1643,10 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	// （内部 2 次 ListTasks）+ 主流程再 taskByCode 一次 ≈ 38~57 次列表请求。
 	// 拉失败就退回逐次查询（行为与旧版一致，只是慢）。
 	snap, snapErr := p.loadTaskMap(a)
+	// covered 记录「本次上报已经覆盖过的任务码」（BUG-15）：此前是把 A 的 *Task
+	// 直接写进 B 的键 —— after 的 TaskCode/Current/Target 都是 A 的，B 拿到 A 的
+	// 状态后：A 已达标就误判 B 已完成而跳过，A 没推进就让 B 再跑一遍（重复上报）。
+	covered := map[string]bool{}
 	for _, act := range autoActions {
 		item := map[string]any{"task_code": act.TaskCode, "desc": act.Desc}
 		// 用**实际**任务码（bug #7）：动作可能按域换码（WorkBuddy_Valorant 国际服用
@@ -1673,6 +1677,14 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		if taskDone(before) {
 			item["status"] = "skipped"
 			item["message"] = "已完成（" + taskProgressText(before) + "）"
+			out = append(out, item)
+			continue
+		}
+		if covered[strings.ToLower(effCode)] {
+			// 同一次上报已经满足过这个码（如 Buddy_App 覆盖 Buddy_App_QQ）：直接跳过，
+			// 不再重跑一遍动作链（BUG-15）
+			item["status"] = "skipped"
+			item["message"] = "同一次上报已覆盖（无需重复执行）"
 			out = append(out, item)
 			continue
 		}
@@ -1717,8 +1729,9 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			// 推进了后一个任务」的组合都会按旧状态把整条动作链再跑一遍
 			// （Buddy_App / Buddy_App_QQ 共用一次上报，最典型）。
 			snap[strings.ToLower(effCode)] = after
+			// Covers 只标记「这次上报覆盖了它」，**不写 A 的任务对象**（BUG-15）
 			for _, c := range act.Covers {
-				snap[strings.ToLower(c)] = after
+				covered[strings.ToLower(c)] = true
 			}
 		}
 		if rerr == nil {

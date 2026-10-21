@@ -402,7 +402,9 @@ func mergeGlobalCatalog(primaryNames []string, primaryInfos []ModelInfo, seconda
 		out = append(out, id)
 	}
 	var outInfos []ModelInfo
-	if primaryInfos != nil {
+	// 任一侧有对象表就初始化（BUG-06）：只在 primaryInfos != nil 时初始化时，
+	// 「主路窄表 + 副路对象表」会让 outInfos 从 nil 起 append，容量/语义都不对。
+	if primaryInfos != nil || secondaryInfos != nil {
 		outInfos = make([]ModelInfo, 0, len(primaryInfos)+len(secondaryInfos))
 		outInfos = append(outInfos, primaryInfos...)
 	}

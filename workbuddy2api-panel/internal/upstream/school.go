@@ -101,7 +101,10 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.BillingBaseCN+mpReportPath, bytes.NewReader(raw))
+	// 按 realm 取 base（BUG-08）：同族的 ClaimReward / ReportWebEvent 都这么做，
+	// 只有这里写死 CN。当前 mp 任务只在 CN 号上用所以不显形，一旦对 global 号调用
+	// 就会把请求打到 CN 域。
+	req, err := http.NewRequest(http.MethodPost, c.billingBase(a)+mpReportPath, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}

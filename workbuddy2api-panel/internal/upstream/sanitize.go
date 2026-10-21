@@ -42,6 +42,11 @@ var sanitizeBareHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-(?:hdr|heade
 // sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
 var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 
+// sanitizeCodeRe 反探测数字串的**独立出现**形态（BUG-03）：此前用 strings.ReplaceAll
+// 做子串替换，正文里任意位置的 11-128（base64 片段、ID、时间戳、代码常量）都会被改写，
+// 长度 +1、内容被篡改。这里用边界断言限定为独立 token。
+var sanitizeCodeRe = regexp.MustCompile(`(^|[^0-9A-Za-z_\-])11-?128([^0-9A-Za-z_\-]|$)`)
+
 // sanitizeRewrites 改写层：全模板句逐字替换（每句只改一个词，语义不变）。
 //
 // 身份句的匹配串**不带结尾标点**（只到 "…for Claude" 为止）：
@@ -70,10 +75,8 @@ var sanitizeRewrites = [][2]string{
 	{branchSentence, strings.Replace(branchSentence, "Main", "Default", 1)},
 	{codexInstruction, strings.Replace(codexInstruction, "Codex CLI,", "Codex CLI tool,", 1)},
 	{feedbackSentence, strings.Replace(feedbackSentence, "give", "provide", 1)},
-	// 上游反探测：请求体里出现裸数字错误码即整单拦截。两种拼写都覆盖，
-	// 且都改写成同一种打断形态（U+2011 非断连字符，显示上仍是连字符）。
-	{"11" + "128", "11\u2011-128"},
-	{"11-128", "11\u2011-128"},
+	// 数字错误码（11-128 / 11-128）不在这张表里：子串替换会篡改 base64/ID 里的
+	// 同形片段，改由 sanitizeCodeRe 的边界正则单独处理（见其注释）。
 }
 
 // sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
@@ -84,6 +87,8 @@ func sanitizeText(text string) string {
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
+	// 数字错误码单独走边界正则（见 sanitizeCodeRe 注释）
+	text = sanitizeCodeRe.ReplaceAllString(text, "${1}11\u2011-128${2}")
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
@@ -96,7 +101,10 @@ func sanitizeText(text string) string {
 	}
 	// 兜底：键值形态已在上面整段删除，这里只剩裸键名（引用/示例文本形态）。
 	text = sanitizeBareHdrRe.ReplaceAllString(text, "x-anthropic-hdr")
-	return strings.TrimSpace(text)
+	// 不能 TrimSpace（BUG-02）：只要某条消息命中任一指纹，整段正文的缩进、行首空格、
+	// 行尾空白都会被删掉，代码块/缩进结构被静默破坏，而且 sanitizeContent 因
+	// s != c 判成「已改写」，没有任何日志。剥离留下的空白留着即可。
+	return text
 }
 
 // hasFingerprint 特征预检：先走 strings.Contains 快速路径（零分配）；

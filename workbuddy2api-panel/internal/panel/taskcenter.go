@@ -564,6 +564,19 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 	defer func() {
 		q.mu.Lock()
 		q.running = false
+		// startedAt 也要清（BUG-17）：只在「无可执行待办」分支清的话，正常跑完后
+		// /panel/api/queue 会长期返回 started:true, running:false。
+		q.startedAt = time.Time{}
+		// 未执行的条目不许永远停在 pending（BUG-16）：断连/中止时把剩余项标成
+		// skipped，否则前端轮询会一直看到它们 pending。seq 守卫防写脏新一轮。
+		if q.seq == seq {
+			for i := range q.items {
+				if q.items[i].Status == "pending" {
+					q.items[i].Status = "skipped"
+					q.items[i].Message = "队列中止（客户端断开或已停止），未执行"
+				}
+			}
+		}
 		q.mu.Unlock()
 		log.Printf("panel: 队列执行结束（共 %d 项）", len(items))
 	}()
@@ -673,13 +686,6 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 type queueAccount struct {
 	a    *auth.Auth
 	grow []upstream.Task
-}
-
-// snapshotAt 锁内读条目三元组（避免锁外持有指针）。
-func (q *queueState) snapshotAt(i int) (uid, kind, code string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.items[i].UID, q.items[i].Kind, q.items[i].Code
 }
 
 // queueMarkAt 按索引更新队列条目状态（条目数组固定不再增删）。

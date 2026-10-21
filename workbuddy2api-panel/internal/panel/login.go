@@ -341,9 +341,13 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 			checkinMsg = err.Error()
 		}
 	}
-	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+	if rm, tt, exp, at, rem, uerr := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow()); uerr == nil {
 		remain, total = rm, tt
 		p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
+		// 重建到期快照（BUG-12）：ReenableIfCredits 内部会把 creditsExpiring /
+		// creditsEarliestExpiry / creditsEarliestRemaining 全部清零，不重建的话新号
+		// 在首次签到或余额刷新之前，prefer_expiring 加权与到期展示全部失效。
+		p.cfg.Pool.SetCreditsDetailed(acct.UID, rm, tt, exp, at, rem)
 	}
 
 	completed = true // 完成路径：后面的 delete 会移除 state，defer 无需复位

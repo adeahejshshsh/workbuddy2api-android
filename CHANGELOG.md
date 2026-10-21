@@ -1,6 +1,76 @@
 # 变更记录
 
-## v1.28.7（当前）
+## v1.28.8（当前）
+
+**本版 = 第二十三份审查报告（审查报告-应用缺陷.md，20 条）。20 条全部为真，
+其中 4 条（BUG-01/03/15/19）是我最近两版改动引入的。**
+
+### 我引入的四条
+
+* **BUG-01 n 钳制只在「带 realm 前缀」时执行** —— v1.28.7 我把 `clampNToOne` 放进了
+  `if bareModel != peek.Model` 分支里，而 OpenAI 兼容客户端默认发**裸名**（两者相等），
+  那条分支根本不进 —— 最需要钳制的常规请求反而漏掉。移到分支外。
+* **BUG-03 反探测改写按子串替换任意数字串** —— v1.28.7 我用 `strings.ReplaceAll` 改写
+  `11-128`，正文里任意位置的同形子串（base64 片段、ID、时间戳、代码常量）都会被改，
+  长度 +1、内容被篡改。改为边界正则 `(^|[^0-9A-Za-z_-])11-?128([^0-9A-Za-z_-]|$)`
+  只命中独立出现的 token，并从改写表里移除这两条。
+* **BUG-15 `Covers` 把 A 的任务对象写进 B 的快照键** —— v1.28.7 我为了防重复上报加的
+  `snap[lower(c)] = after`，而 `after` 是 A 的 `*upstream.Task`（TaskCode/Current/Target
+  都是 A 的）：A 已达标就误判 B 已完成，A 没推进就让 B 再跑一遍（正是我想防的重复上报）。
+  改为只记「已覆盖」标记，B 命中标记直接跳过。
+* **BUG-19 同一次 JobScheduler 任务调了两次 `jobFinished`** —— v1.28.7 我在用户已停止分支
+  写了 `jobFinished(); return;`，而 `return` 会走 `finally` 再调一次。删掉显式调用。
+
+### P1
+
+* **BUG-02 脱敏删掉正文首尾空白** —— `sanitizeText` 结尾无条件 `strings.TrimSpace`：只要
+  命中任一指纹，整段正文的缩进/行首空格/行尾空白全被删，代码块结构被静默破坏，
+  而且 `sanitizeContent` 因 `s != c` 判成「已改写」，没有任何日志。去掉 TrimSpace。
+
+### P2
+
+* **BUG-04 显式空 `stream_options: {}` 不补 include_usage** —— 只判「键是否存在」，
+  部分 SDK 默认发空对象 → 上游末帧不回 usage → token/credit/速率全缺。改为看内容。
+* **BUG-05 `fetchV3ConfigModelMap` 先解引用后判空** —— 1794 行调 `a.AccessTokenValue()`，
+  1795 行才判 `a != nil`，真传 nil 就是 panic。判空提前。
+* **BUG-06 `mergeGlobalCatalog` 只在 primaryInfos 非 nil 时初始化 outInfos** —— 改任一侧非 nil。
+* **BUG-07 非 Cycle 分支只钳 remain 不钳 used** —— 上游 `CapacityUsed > Size` 时出现
+  「剩余 50 / 已用 150 / 面额 100」。补 used 钳制并保持 remain+used ≤ size。
+* **BUG-08 `ReportMPEvent` 写死 `BillingBaseCN`** —— 同族的 ClaimReward / ReportWebEvent
+  都按 realm 取 base，只有它硬编码。改 `c.billingBase(a)`。
+* **BUG-09 `time.Time` + `omitempty` 输出 0001 年** —— `encoding/json` 对结构体的 omitempty
+  不生效。前端新增 `hasRealTime()`（拒绝 year<1970），`ago()` 与到期排序统一用它，
+  不再逐处特判。
+* **BUG-10 无到期账号被排到最前** —— 零值时间能解析成巨大负时间戳，`!isNaN` 判成"有值"，
+  排序排到所有真实到期时间之前。同上用 `hasRealTime`。
+* **BUG-11 `modelExempt` 死代码但注释仍当判据** —— 生产代码零调用（可服务性只看
+  `healthy()`），只有单测在用。函数保留（测试依赖），注释补明「不要据此推断探活语义」。
+* **BUG-12 登录/导入后到期快照被清空不重建** —— `ReenableIfCredits` 会把
+  `creditsExpiring/creditsEarliestExpiry/creditsEarliestRemaining` 全部清零。两条路径改用
+  `UserResourceDetailedWithExpiry` + `SetCreditsDetailed` 重建（与面板单号签到路径同口径）。
+* **BUG-13 `snapshotAt` 死代码且无边界检查** —— 全仓零调用，直接删除。
+* **BUG-14 `Ring` 零值 panic** —— `&Ring{}`（cap==0）时越界 + 除零。`Write`/`Snapshot` 各补设防。
+* **BUG-16 断连后队列项永久 pending** —— `runQueueItems` 收尾只复位 `running`，未执行项
+  永远停在 pending。收尾时把 pending 标成 skipped（带 seq 守卫防写脏新一轮）。
+* **BUG-17 队列结束后 `started` 恒 true** —— 只在「无可执行待办」分支清 `startedAt`。
+  收尾统一清。
+* **BUG-18 排序选择器存了废弃值时显示空白** —— 赋不存在的 option 值让 `value` 变空串，
+  回落分支只改了 JS 变量没回写 select。补一行回写。
+
+### P3
+
+* **BUG-20 watchdog 把 fail 清零导致恢复日志丢失** —— 外部实例接管分支 `fail=0` 不留痕，
+  「本实例失败 → 外部接管 → 本实例恢复」这条真实路径在 watchdog.log 里没有恢复记录。
+  清零前先打一行说明。
+
+### 测试
+
+新增 `TestSanitizeKeepsLeadingTrailingWhitespace`、`TestSanitizeCodeOnlyStandalone`
+（独立出现改写 / 长 token 内子串不动）、`TestPrepareBodyFillsEmptyStreamOptions`、
+`TestRingZeroValueDoesNotPanic`。
+`upstream 222 / server 95 / panel 52 / pool 188`，**全部 0 失败**（21 秒）。
+
+## v1.28.7
 
 **本版 = 第二十二份审查报告（CODE-REVIEW-BUGS.md，8 条）。8 条全部为真，其中 3 条
 （BUG-01 / BUG-06 / BUG-08）直接指向我最近三版的改动。**

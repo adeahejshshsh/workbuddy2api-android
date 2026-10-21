@@ -71,8 +71,18 @@ function esc(s) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+// hasRealTime 判断后端时间字段是否"有值"（BUG-09/BUG-10）：Go 的 time.Time 零值
+// 会序列化成 "0001-01-01T00:00:00Z"，new Date 能解析成一个巨大的负时间戳 ——
+// 只判 !isNaN 会把"没有时间"当成"很久以前"，排序时排到所有真实时间之前。
+function hasRealTime(v) {
+  if (!v) return false;
+  const t = new Date(v);
+  if (isNaN(t.getTime())) return false;
+  return t.getFullYear() >= 1970;
+}
+
 function ago(iso) {
-  if (!iso || iso.startsWith('0001-')) return '—';
+  if (!hasRealTime(iso)) return '—';
   const s = (Date.now() - new Date(iso)) / 1000;
   if (s < 0) return '刚刚';
   if (s < 60) return Math.floor(s) + ' 秒前';
@@ -2658,6 +2668,9 @@ if ($('pkSort')) {
   if ($('pkSort').value !== pkSortMode) {        // localStorage 里存了废弃值：回落默认
     pkSortMode = 'end_asc';
     localStorage.setItem(LS_PK_SORT, pkSortMode);   // 不用 removeItem：harness 桩无此方法
+    // 必须把回落值写回 select（BUG-18）：赋一个不存在的 option 值会让 value 变成空串，
+    // 只改 JS 变量的话用户看到的是「排序：空」且没有任何一项被选中。
+    $('pkSort').value = pkSortMode;
   }
   $('pkSort').onchange = () => {
     pkSortMode = $('pkSort').value;
@@ -2809,9 +2822,9 @@ function renderExpirySnapshot(d) {
   const keyed = list.map(a => {
     // 后端给的是 RFC3339 带时区；无到期信息（长期包/未刷新）的账号排在最后。
     let key = null, ms = 0;
-    if (a.credits_earliest_expiry) {
-      const t = new Date(a.credits_earliest_expiry);
-      if (!isNaN(t.getTime())) { ms = t.getTime(); key = ms; }
+    if (hasRealTime(a.credits_earliest_expiry)) {
+      ms = new Date(a.credits_earliest_expiry).getTime();
+      key = ms;
     }
     return { a, key, ms };
   });

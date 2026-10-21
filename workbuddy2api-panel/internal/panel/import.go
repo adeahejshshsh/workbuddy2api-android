@@ -65,8 +65,10 @@ func (p *Panel) postImportActivate(a *auth.Auth, realm string) {
 			log.Printf("panel: import checkin uid=%s: %v", a.UID, err)
 		}
 	}
-	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+	if rm, tt, exp, at, rem, uerr := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow()); uerr == nil {
 		p.cfg.Pool.ReenableIfCredits(a.UID, rm, tt)
+		// 与登录路径同口径（BUG-12）：ReenableIfCredits 会清空到期快照，必须重建。
+		p.cfg.Pool.SetCreditsDetailed(a.UID, rm, tt, exp, at, rem)
 	}
 }
 

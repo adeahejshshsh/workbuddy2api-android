@@ -45,8 +45,13 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	clampGPTMinMaxTokens(obj)
 	// stream_options 仅当 body 未显式带时补 {include_usage: true}（D7）：
 	// 官方 CLI 流式必发该字段，上游据此在末帧返回 usage 用量；显式带则不覆盖。
-	if _, has := obj["stream_options"]; !has {
+	// 不能只判「键是否存在」（BUG-04）：部分 SDK 默认发 `"stream_options": {}`，
+	// 此时不补 include_usage → 上游末帧不回 usage → token/credit/速率全缺，
+	// 用量账本记成「无观测」。已显式给 true 的照旧不动。
+	if so, has := obj["stream_options"].(map[string]any); !has {
 		obj["stream_options"] = map[string]any{"include_usage": true}
+	} else if _, ok := so["include_usage"]; !ok {
+		so["include_usage"] = true
 	}
 	normalizeToolChoice(obj)
 	normalizeToolPatterns(obj)

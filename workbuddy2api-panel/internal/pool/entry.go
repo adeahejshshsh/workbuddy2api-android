@@ -313,6 +313,9 @@ func (e *entry) healthy(now time.Time) bool {
 }
 
 // modelExempt 报告账号是否处于「6004 模型级软冷却」形态：存在任一有效的 6004
+//
+// 注意（BUG-11）：生产代码里**没有任何调用点**（可服务性只看 healthy()），
+// 现在只有单测在用它做语义断言。别按注释推断「豁免号在探活里算可服务」。
 // 模型级冷却（modelCooldowns 非空），且尚未禁用、未熔断。
 // 此形态下账号仅对限流中的模型不可用，对其他模型仍可选（issue #31）。
 // healthyForModel 与 ServableNow 共用本谓词，保证 chat 选号与探活口径一致。

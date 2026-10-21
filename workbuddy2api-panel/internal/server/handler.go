@@ -788,13 +788,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
 	if bareModel != peek.Model {
 		body = rewriteModel(body, bareModel)
-		// 非流式 n>1 必须钳掉（BUG-03）：Aggregate 把每条 choice 的 delta.content
-		// 都追加进同一个 builder，最后只输出 choices[0] —— 上游给 2 条候选时，
-		// 客户端拿到的是两条候选**首尾拼接**的一段正文。与其静默返回错误数据，
-		// 不如钳到 1 并留一行 WARN（流式路径逐帧透传，不受影响）。
-		if !peek.Stream {
-			body = clampNToOne(body)
-		}
+	}
+	// 非流式 n>1 必须钳掉（BUG-01）：上一版把这段嵌在「带 realm 前缀」的分支里，
+	// 而 OpenAI 兼容客户端默认发**裸名**（bareModel == peek.Model）—— 那条分支根本不进，
+	// 于是最需要钳制的常规请求反而没被钳。Aggregate 把所有 choice 的 delta 追加进
+	// 同一个 builder，只输出 choices[0]，客户端拿到多条候选首尾粘连的正文。
+	if !peek.Stream {
+		body = clampNToOne(body)
 	}
 
 	// 会话头族（issue #35）：后台按 X-Conversation-Request-ID（对话轮级）聚合请求，

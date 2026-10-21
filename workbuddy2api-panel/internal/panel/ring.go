@@ -73,6 +73,11 @@ func (r *Ring) Write(p []byte) (int, error) {
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// 零值设防（BUG-14）：&Ring{}（cap==0）时下面会 r.entries[0] 越界、
+	// (head+1)%0 除零 panic。NewRing 有兜底，但类型本身不该崩。
+	if r.cap <= 0 {
+		r.cap = 500
+	}
 	for _, line := range strings.Split(strings.TrimRight(string(p), "\r\n"), "\n") {
 		if line == "" {
 			continue
@@ -98,6 +103,9 @@ func (r *Ring) Write(p []byte) (int, error) {
 func (r *Ring) Snapshot() []LogEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.cap <= 0 {
+		return nil // 零值 Ring（BUG-14）：没有容量就没有内容
+	}
 	out := make([]LogEntry, 0, r.size)
 	if r.size < r.cap {
 		// 未写满：有效数据在 [0, size)
