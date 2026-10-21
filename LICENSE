@@ -1,8 +1,10 @@
-版权所有 © 2026 adeahejshshsh（本项目：workbuddy2api-android 安卓自托管移植版）
+版权所有 © 2026 adeahejshshsh
+本项目：workbuddy2api-android（安卓自托管移植版）
+
 保留所有权利（All Rights Reserved）
 
-本仓库的**全部文件**（含 `workbuddy2api-panel/`、`apk-src/`、`patches/`、`tools/`、
-根目录脚本、前端资源与全部文档）均适用上述授权。
+本仓库的全部文件——包括 workbuddy2api-panel/、apk-src/、patches/、tools/、
+根目录脚本、前端资源与全部文档——均适用上述授权。
 
 未经版权持有人事先书面许可，任何人不得：
 
@@ -23,4 +25,5 @@
 本软件按「原样」提供，不附带任何明示或暗示的担保（包括但不限于适销性、特定用途
 适用性与不侵权）。使用本软件的全部风险由使用者自行承担；因使用本项目导致的账号
 风控、封禁、条款违约或任何直接/间接损失，作者与贡献者概不负责。
+
 完整的使用声明与免责声明见 NOTICE.md 与 README.md 文末（必读）。
