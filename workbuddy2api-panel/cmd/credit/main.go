@@ -108,6 +108,15 @@ func packageRemainUsed(a resourcePackage) (remain, used, size int64) {
 	remain = a.CapacityRemain
 	used = a.CapacityUsed
 	size = a.CapacitySize
+	// 非周期包同样要钳（bug 3）：上游对账延迟时 CapacityRemain 可能 > Size 或为负，
+	// 不钳会让 `credit -pretty` 打印「剩余 150 / 面额 100」，汇总与依赖这份 JSON 的
+	// 脚本一起错。口径与 internal/upstream 的同名逻辑一致。
+	if remain < 0 {
+		remain = 0
+	}
+	if size > 0 && remain > size {
+		remain = size
+	}
 	if used == 0 && size > remain {
 		used = size - remain
 	}
@@ -201,7 +210,16 @@ func main() {
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		authDir = v
 	}
-	files, _ := filepath.Glob(filepath.Join(authDir, "workbuddy-*.json"))
+	// 扫描口径与网关 auth.LoadDir 对齐（bug 4）：网关用 workbuddy*.json，
+	// 只认 workbuddy-*.json 会漏掉手工维护的 workbuddy.json 等，静默少账号。
+	files, err := filepath.Glob(filepath.Join(authDir, "workbuddy*.json"))
+	// 空目录必须报错退出（bug 12）：此前 err 被 `_` 丢弃且不校验空数组，
+	// 空 auths/ 会输出 {"accounts":[]} 并 exit 0 —— 脚本据此分不清
+	// 「没登账号」还是「查完了没数据」，与 signin/trial 的行为也不一致。
+	if err != nil || len(files) == 0 {
+		fmt.Fprintf(os.Stderr, "no auth files in %s\n", authDir)
+		os.Exit(1)
+	}
 	sort.Strings(files)
 
 	accounts := make([]accountResult, 0, len(files))

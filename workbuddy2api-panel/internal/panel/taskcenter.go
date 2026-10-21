@@ -10,6 +10,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -322,7 +323,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	if body.Concurrency > 4 {
 		body.Concurrency = 4
 	}
-	started, total, seq, msg, lvl := p.startGrowthQueue(body.Concurrency, body.Growth)
+	started, total, seq, msg, lvl := p.startGrowthQueue(r.Context(), body.Concurrency, body.Growth)
 	switch {
 	case seq == -1:
 		writeErr(w, http.StatusConflict, msg)
@@ -340,7 +341,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 // 已在执行（冲突）；started=false 时 msg 为**讲清楚为什么**的说明（level 供前端
 // 决定弹窗颜色：err=确实出问题了，ok=单纯没事可做）。并发夹取
 // [1,4]；growth 开关同 HTTP 入参语义。
-func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, total int, seq int, msg string, level string) {
+func (p *Panel) startGrowthQueue(ctx context.Context, concurrency int, growth bool) (started bool, total int, seq int, msg string, level string) {
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -379,7 +380,11 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	// 扫描待办（复用扫描逻辑的拉取部分）。
 	states := p.cfg.Pool.List()
 
-	var accts []queueAccount
+	// 分组按 states 下标原位写入（bug 8）：此前各 goroutine 各自 append，完成顺序即
+	// 入队顺序 —— 同一批账号两次执行，队列顺序与账号间起跑顺序都不一样，而注释
+	// 承诺的是「账号分组，保持顺序」。按下标写互不冲突，wg.Wait 后顺序拼接。
+	acctsByIdx := make([]queueAccount, len(states))
+	hasGrow := make([]bool, len(states))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var dg queueDiag
@@ -387,7 +392,8 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	// 裸并发就是 92 个请求连发 —— 正是仓库多处专门防范的 WAF 频控形态。
 	// 与同文件 tasksScanAll 的 sem=4 对齐。
 	scanSem := make(chan struct{}, 4)
-	for _, st := range states {
+dispatch:
+	for idx, st := range states {
 		if st.Disabled {
 			mu.Lock()
 			dg.gated++
@@ -401,9 +407,15 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 			mu.Unlock()
 			continue
 		}
-		scanSem <- struct{}{}
+		// 抢槽要能被取消（bug 8）：裸阻塞时客户端断开后仍要等满 4 个槽位才继续，
+		// 最长要等一轮上游 ListTasks/ListTasksMP。panel 其它批量路径都已改成 select+ctx。
+		select {
+		case scanSem <- struct{}{}:
+		case <-ctx.Done():
+			break dispatch
+		}
 		wg.Add(1)
-		go func(a *auth.Auth) {
+		go func(idx int, a *auth.Auth) {
 			defer wg.Done()
 			defer func() { <-scanSem }()
 			defer func() { // panic 兜底（bug #14）
@@ -484,15 +496,19 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 					})
 				}
 			}
-			if len(one.grow) > 0 {
-				mu.Lock()
-				accts = append(accts, one)
-				mu.Unlock()
-			}
-		}(a)
+			acctsByIdx[idx] = one
+			hasGrow[idx] = len(one.grow) > 0
+		}(idx, a)
 	}
 	wg.Wait()
 
+	// 按 states 原顺序拼回（稳定）：跳过的下标本来就是零值，hasGrow 挡住它们。
+	var accts []queueAccount
+	for i := range acctsByIdx {
+		if hasGrow[i] {
+			accts = append(accts, acctsByIdx[i])
+		}
+	}
 	// 组装队列（账号分组，保持顺序）。
 	var items []queueItem
 	for _, one := range accts {
@@ -528,7 +544,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 // 每日零点解锁一环，此前只能手动扫描推进；此回调让链条每天自动走一环。
 // 异步执行（startGrowthQueue 启动 goroutine 即返），已在跑/无待办安全跳过。
 func (p *Panel) RunGrowthQueueOnce() {
-	started, total, _, _, _ := p.startGrowthQueue(1, true)
+	started, total, _, _, _ := p.startGrowthQueue(context.Background(), 1, true)
 	if started {
 		log.Printf("panel: 定时成长任务队列已启动（%d 项）", total)
 	}
@@ -559,7 +575,7 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 			defer func() {
 				if r := recover(); r != nil {
 					log.Printf("ERR: [panel] queue account=%s panic: %v", one.a.UID, r)
-					p.queueSet(q, one.a.UID, func(it *queueItem) {
+					p.queueSet(q, seq, one.a.UID, func(it *queueItem) {
 						it.Status = "error"
 						it.Message = fmt.Sprintf("内部错误：%v", r)
 					})
@@ -568,7 +584,7 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 			defer func() { <-sem }()
 			// per-account 互斥：与单任务/一键完成共用一把锁。
 			if !p.tryLockAccount(one.a.UID) {
-				p.queueSet(q, one.a.UID, func(it *queueItem) {
+				p.queueSet(q, seq, one.a.UID, func(it *queueItem) {
 					it.Status, it.Message = "skipped", "该账号有其它任务动作在执行，跳过"
 				})
 				return
@@ -676,9 +692,18 @@ func (p *Panel) queueMarkAt(seq, i int, status, msg string) {
 }
 
 // queueSet 按 uid 批量改状态。
-func (p *Panel) queueSet(q *queueState, uid string, fn func(*queueItem)) {
+// queueSet 按 UID 改条目状态；seq 与当前队列不符时丢弃（bug 7）。
+//
+// 为什么需要守卫：上一轮队列的 goroutine 还没退出、下一轮 startGrowthQueue 已经
+// 把 q.items 整体替换时，这个晚到的标记会把**新一轮**里同 UID 的条目全改成
+// skipped —— 用户看到「刚点执行就全部跳过」，而实际上一条都没跑。
+// queueMarkAt 早就有这个守卫，同文件的 queueSet 漏了。
+func (p *Panel) queueSet(q *queueState, seq int, uid string, fn func(*queueItem)) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.seq != seq {
+		return
+	}
 	for i := range q.items {
 		if q.items[i].UID == uid {
 			fn(&q.items[i])

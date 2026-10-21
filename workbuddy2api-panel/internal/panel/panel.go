@@ -1083,9 +1083,17 @@ dispatch:
 	}
 	wg.Wait()
 
+	// 断连/停机提前跳出派发循环时，未派发的下标仍是零值 row{uid:""}（bug 6）。
+	// 直接回出去就是一堆空账号行；按 schoolVouchers 的同口径过滤掉。
+	res := make([]row, 0, len(out))
+	for _, it := range out {
+		if it.UID != "" {
+			res = append(res, it)
+		}
+	}
 	// 余额降序：多的在前，便于和少的对比。
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Remain > out[j].Remain })
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": out})
+	sort.SliceStable(res, func(i, j int) bool { return res[i].Remain > res[j].Remain })
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": res})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

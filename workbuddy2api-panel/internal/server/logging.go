@@ -3,6 +3,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -285,8 +286,13 @@ func rewriteModel(body []byte, bare string) []byte {
 	if len(body) == 0 || bare == "" {
 		return body
 	}
+	// UseNumber 保住数字原文（bug 11）：默认解码把整数落成 float64，超过 2^53 的
+	// seed/微秒时间戳会回写成 9007199254740992 甚至科学计数法。对「透传型」网关
+	// 来说这属于静默改写，排查时对不上客户端实际发出的 JSON。
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	if err := dec.Decode(&obj); err != nil {
 		return body
 	}
 	if cur, ok := obj["model"].(string); !ok || cur == bare {
@@ -605,6 +611,9 @@ type cacheMissSignal struct {
 
 var cacheMissWarn = &cacheMissSignal{everHit: map[string]bool{}, last: map[string]time.Time{}}
 
+// cacheHitWarnFloor 命中率低于这个比例才算「大面积失效」（注释承诺的 10%）。
+const cacheHitWarnFloor = 0.10
+
 // cacheMissWarnEvery 冷却间隔；变量供测试缩短。
 var cacheMissWarnEvery = 10 * time.Minute
 
@@ -616,17 +625,24 @@ func (c *cacheMissSignal) noteCacheTokens(model string, prompt, hit, miss int64)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if hit > 0 {
-		c.everHit[model] = true
+	// 按命中率判定，而不是「hit>0 就当作健康」（bug 10）：原实现只要本次有 1 个
+	// 命中就 return，于是命中率 1%~9% 这种「前缀缓存大面积失效」的形态永远不告警
+	// —— 而那恰恰是费用异常最该提示的场景（注释承诺的就是 <10%）。
+	if miss < 0 {
+		miss = 0
+	}
+	total := hit + miss
+	if total <= 0 {
 		return
 	}
-	// hit==0 才可能是整段重算。小前缀（<1000 tok）的 miss 无告警价值；上游未回
-	// miss 字段时按 prompt 全量视为未命中。
+	rate := float64(hit) / float64(total)
+	if rate >= cacheHitWarnFloor {
+		c.everHit[model] = true // 只在该模型确实能命中时置位（语义与注释一致）
+		return
+	}
+	// 小前缀（<1000 tok）的 miss 无告警价值
 	if prompt < 1000 {
 		return
-	}
-	if miss <= 0 {
-		miss = prompt
 	}
 	if !c.everHit[model] {
 		return
@@ -636,5 +652,5 @@ func (c *cacheMissSignal) noteCacheTokens(model string, prompt, hit, miss int64)
 		return
 	}
 	c.last[model] = now
-	log.Printf("WARN: [server] cache miss: model=%s 本次大前缀未命中（prompt=%d miss=%d，此前观测到过命中）；上游前缀缓存重算，费用会显著升高", model, prompt, miss)
+	log.Printf("WARN: [server] cache miss: model=%s 本次大前缀命中率 %.1f%%（prompt=%d hit=%d miss=%d，此前观测到过命中）；上游前缀缓存重算，费用会显著升高", model, rate*100, prompt, hit, miss)
 }

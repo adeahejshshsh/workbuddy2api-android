@@ -1710,10 +1710,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// body 无重置文案但带 Retry-After 头 → 冷却到该时刻（不做指数堆加）。
 		// 头优先于「有界退避」，但低于 body 重置文案（文案是上游更权威的口径）。
 		if uerr != nil && uerr.RetryAfter > 0 {
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
+			until := time.Now().Add(uerr.RetryAfter)
+			// 6004 的语义是「该模型用量被限、账号其它模型还能用」（bug 2）：此前只写一条
+			// AuditOnly 台账、却把**整个账号**按 Retry-After 冷却，客户端换个模型本可继续
+			// 用也被 429 挡住 —— 和上面「带重置文案的 6004 只锁模型」直接不一致。
 			if modelRateLimited {
-				h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
+				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), until, model, "6004 model rate limit (retry-after)")
+				return
 			}
+			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), until, "429 rate limit (retry-after)")
 			return
 		}
 		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶

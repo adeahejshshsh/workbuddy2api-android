@@ -10,6 +10,7 @@
 package upstream
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,8 +37,13 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 	if len(body) == 0 {
 		return body
 	}
+	// UseNumber 保住数字原文（bug 11）：默认解码把整数落成 float64，超过 2^53 的
+	// seed/微秒时间戳会回写成 9007199254740992 甚至科学计数法。对「透传型」网关
+	// 来说这属于静默改写，排查时对不上客户端实际发出的 JSON。
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	if err := dec.Decode(&obj); err != nil {
 		return body
 	}
 	// 优先级 1：客户端已显式带 key → 绝不覆盖。

@@ -30,6 +30,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -260,13 +261,24 @@ func effectiveTaskCodeIn(m map[string]*upstream.Task, code string) string {
 		return t.TaskCode // 精确同名（大小写不敏感）：保留上游的原始大小写
 	}
 	// 名称特征兜底（仅对已知会换码的任务生效，避免误抓别的任务）
+	// 名称特征兜底必须是**确定性**的（bug 5）：此前直接 range map，Go 的 map 迭代序
+	// 是随机的 —— 账号下同时存在两个 valorant/perler 相关码（跨域变体、活动期新旧码
+	// 并存）时，同一个任务点两次可能解析成不同的 code，表现为「一次成功一次报没有
+	// 此任务」，且无法稳定复现。
 	if strings.Contains(want, "valorant") {
-		for k, t := range m {
-			if t == nil {
-				continue
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			if m[k] != nil {
+				keys = append(keys, k)
 			}
-			if strings.Contains(k, "valorant") || strings.Contains(k, "perler") {
-				return t.TaskCode
+		}
+		sort.Strings(keys)
+		// 先按关键词的固定优先级找，同优先级内按 key 字典序取第一条
+		for _, wantKey := range []string{"valorant", "perler"} {
+			for _, k := range keys {
+				if strings.Contains(k, wantKey) {
+					return m[k].TaskCode
+				}
 			}
 		}
 	}

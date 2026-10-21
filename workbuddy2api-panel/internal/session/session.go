@@ -214,6 +214,13 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	// 双段策略：优先"空闲账号"（未被任何会话绑定的可用号），其次全池。
 	bound := map[string]bool{}
 	for _, v := range r.entries {
+		// 过期绑定不算占用（bug 9）：过期条目要等 gcOnce（默认 5 分钟）或再次访问
+		// 同一 key 才清，期间它把 uid 一直钉成「非空闲」，idle 集合被低估，
+		// 第二段「全池哈希」被迫提前生效 —— TTL 配大、号少时，新会话总是撞在
+		// 同一批"看起来都被占着"的号上。读路径只判断不删除，清理仍交给 gcOnce。
+		if expired(v, now, r.cfg.TTL) {
+			continue
+		}
 		bound[v.uid] = true
 	}
 	var idle []string

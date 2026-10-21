@@ -1,6 +1,71 @@
 # 变更记录
 
-## v1.28.4（当前）
+## v1.28.5（当前）
+
+**本版 = 第二十份审查报告（审查报告-应用bug.md，13 条）。13 条全部为真，其中 #6 是
+v1.28.4 我修 #7 时引入的新问题（提前 break 留下零值行）。**
+
+### 高危
+
+* **#1 账号级冷却连带删掉 (账号,模型) 负缓存及退避计数** —— `clearRoutingModelCooldownsLocked`
+  无条件删掉全部非 AuditOnly 条目，而这些条目同时承载两种语义：6004 模型级限流 与
+  11102/11158 的**上游事实**。一次 60s 的账号级软冷却就把「这个号用不了这个模型」连同
+  `Hits` 一起清空 → 下次再去撞同一个必败模型、退避从 6h 重头学（与 v1.28.4 里
+  `pruneExpiredModelCooldowns` 刻意保留 Hits 的设计直接冲突）。改为按 reason 前缀保留
+  11102/11158 条目。
+* **#2 6004 + `Retry-After` 把整号冷却** —— 同一分支里「带重置文案的 6004」走
+  `CooldownSoftForModel`（只锁模型），「只有 Retry-After 头」却走 `CooldownSoftRate`
+  （整号），同一份上游错误两种行为：换个模型本可继续用，现在全被 429 挡掉。
+  改为 `modelRateLimited` 时走模型级冷却。
+
+### 中危
+
+* **#3 `cmd/credit` 非周期包不钳制** —— `CapacityRemain > CapacitySize` 或为负时，
+  `-pretty` 打印「剩余 150 / 面额 100」，汇总与依赖这份 JSON 的脚本一起偏大。
+  照搬 `internal/upstream` 的钳制口径。
+* **#4 三个工具的 auth 扫描口径与网关不一致** —— 网关 `workbuddy*.json`，工具只认
+  `workbuddy-*.json`：手工维护的 `workbuddy.json` 会被网关加载却被工具静默跳过
+  （signin/trial 还会直接报 "no auth files"）。三处统一。
+* **#5 任务码兜底解析遍历 map（随机序）** —— 账号下有两个 valorant/perler 相关码时，
+  同一任务点两次可能解析成不同 code，表现为「一次成功一次报没有此任务」，无法稳定复现。
+  改为固定关键词优先级 + key 字典序。
+* **#6 `packages` 断连时输出空账号行** —— 这是 **v1.28.4 我加 `break dispatch` 时引入的**：
+  `out` 是预分配切片，未派发的下标保持零值，最后无条件回出去就是一堆 `{"uid":""}`。
+  按 `schoolVouchers` 的同口径过滤。`schoolVouchers` 早就防了这个形态，我漏了。
+* **#7 队列 `queueSet` 没有 seq 守卫** —— 上一轮 goroutine 还没退出、下一轮已替换
+  `q.items` 时，晚到的 skipped 标记会写脏**新一轮**队列（用户看到「刚点执行就全部跳过」）。
+  `queueMarkAt` 早就有守卫，同一文件的 `queueSet` 漏了。
+* **#8 扫描槽位不可取消 + 分组顺序不定** —— 裸 `scanSem <- struct{}{}` 让断连后仍要等满
+  4 个槽位；各 goroutine 各自 `append` 使完成顺序成为入队顺序（注释承诺的是「保持顺序」）。
+  改成 `select` + ctx，并按 `states` 下标原位写入、`wg.Wait` 后顺序拼接。
+* **#9 过期绑定压制「优先空闲号」** —— `bound` 统计没过滤过期条目，过期绑定 5 分钟内仍把
+  uid 当成「非空闲」，`idle` 集合被低估 → 新会话总撞在同一批号上。读路径跳过过期。
+
+### 低危
+
+* **#10 缓存命中率告警阈值与实现不符** —— 注释承诺 <10%，实现只有 `hit==0` 才判断，
+  1%~9%（正是费用异常最该提示的形态）永不出 WARN。改按 `hit/(hit+miss)` 判定，
+  阈值抽常量 `cacheHitWarnFloor`，告警文案带上具体命中率。
+* **#11 出站 body 经 map 往返丢数字精度** —— `json.Unmarshal` 把整数落成 float64，
+  >2^53 的 seed/微秒时间戳回写成 `9007199254740992`，还可能出现科学计数法。
+  `rewriteModel` / `prompt.Rewrite` / `prompt.Append` / `InjectPromptCacheKey` 四处
+  统一改 `UseNumber`（数字原文进出）。
+* **#12 `cmd/credit` 空 auth 目录被当成成功** —— `Glob` 的返回值被 `_` 丢弃、也不校验空数组，
+  输出 `{"accounts":[]}` 且 `exit 0`，脚本分不清「没登账号」与「查完了没数据」。
+* **#13 `login.sh` 丢掉 cmd/login 返回的 realm** —— 写文件时按 domain 里有没有
+  `workbuddy.ai` 反推，global 号 domain 为空时会被写成 `cn`（网关随后把它路由到 CN 上游，
+  chat/签到全挂）；脚本也从不给 `--realm` 传参，国际版账号根本登不上。
+  改为优先用返回的权威 `realm`，并支持 `bash login.sh [cn|global]` 透传。
+
+### 测试
+
+新增 4 组：`TestClearRoutingKeepsModelNegativeCache`（11102/11158 保留、6004 清除）、
+`TestCacheMissWarnsAtLowHitRate`（2% 告警 / 80% 不告警 / 从未命中不告警）、
+`TestRewriteModelKeepsBigInt`（`9007199254740993` 原文保留且不出现科学计数法）、
+`TestEffectiveTaskCodeDeterministic`（100 次解析同结果）。
+全量 **770 通过 / 0 失败**。
+
+## v1.28.4
 
 **本版 = 第十九份审查报告（CODE-REVIEW-2026-10-21.md，14 条）。13 条为真、1 条半真
 （#7 里 `syncNicknames` 那半条不成立：它在回完 200 之后的后台 goroutine 里跑，没有活连接可断）。**

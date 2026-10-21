@@ -32,7 +32,17 @@ echo "  WorkBuddy OAuth 登录"
 echo "============================================================"
 echo ""
 
-AUTH_URL=$("$LOGIN_BIN" url)
+# realm 透传（bug 13）：此前脚本从不给 cmd/login 传 --realm，国际版账号走这个
+# 脚本根本登不上（cmd/login 里专门为它写的 realm 分支从未被调用）。
+# 用法：bash login.sh [cn|global]，缺省 cn（与 cmd/login 一致）。
+REALM_ARG="${1:-}"
+case "$REALM_ARG" in
+    ""|cn)   REALM_ARG="" ;;          # cn 是缺省，不必显式传
+    global)  REALM_ARG="--realm=global" ;;
+    *) echo "用法：bash login.sh [cn|global]" >&2; exit 2 ;;
+esac
+
+AUTH_URL=$("$LOGIN_BIN" $REALM_ARG url)
 
 echo "请在浏览器中打开以下链接完成登录："
 echo ""
@@ -59,7 +69,7 @@ fi
 echo ""
 echo "正在获取 token..."
 
-RESULT=$("$LOGIN_BIN" poll) || {
+RESULT=$("$LOGIN_BIN" $REALM_ARG poll) || {
     echo ""
     echo "获取 token 失败。可能原因："
     echo "  - 登录还没完成就按了 y（重新运行 ./login.sh 再试）"
@@ -74,6 +84,11 @@ DOMAIN=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin
 USER_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uid',''))")
 ENT_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('enterprise_id',''))")
 NICKNAME=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('nickname',''))")
+# realm 以 cmd/login 的返回为准（bug 13）：它按 --realm 显式值优先、再看 domain 推断，
+# 是权威口径。此前脚本只按 domain 里有没有 workbuddy.ai 反推，两种情形会写错：
+#   - global 号上游 domain 为空 → 写成 cn → 网关把它路由到 CN 上游，chat/签到全挂；
+#   - CN 号 domain 恰是 www.workbuddy.ai → 写成 global，与操作者的选择相反。
+REALM=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('realm',''))")
 
 if [[ -z "$USER_ID" ]]; then
     echo "无法获取 uid，请检查 token 是否有效"
@@ -149,6 +164,7 @@ WB2A_LOGIN_DOMAIN="$DOMAIN" \
 WB2A_LOGIN_USER_ID="$USER_ID" \
 WB2A_LOGIN_ENT_ID="$ENT_ID" \
 WB2A_LOGIN_NICKNAME="$NICKNAME" \
+WB2A_LOGIN_REALM="$REALM" \
 WB2A_LOGIN_AUTH_FILE="$AUTH_FILE" \
 WB2A_LOGIN_ACTION="$ACTION" \
 python3 - <<'PYEOF'
@@ -167,7 +183,9 @@ auth = {
         "domain": os.environ["WB2A_LOGIN_DOMAIN"],
         # 显式写 realm（issue ISSUE-19）：此前依赖 LoadDir 的存量回填，
         # 一个"看起来没有域"的 auth 文件在排障时极易误判。
-        "realm": "global" if "workbuddy.ai" in os.environ["WB2A_LOGIN_DOMAIN"] else "cn",
+        # realm 优先用 cmd/login 的权威返回值（bug 13）；拿不到时才按 domain 推断。
+        "realm": os.environ.get("WB2A_LOGIN_REALM") or
+                 ("global" if "workbuddy.ai" in os.environ.get("WB2A_LOGIN_DOMAIN", "") else "cn"),
     },
 }
 # 0600 + tmp→rename：accessToken/refreshToken 对同机其他应用不可读，且不会写半截。

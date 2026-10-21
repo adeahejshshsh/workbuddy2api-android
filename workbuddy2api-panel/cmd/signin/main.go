@@ -31,7 +31,9 @@ func main() {
 	if len(os.Args) > 1 {
 		dir = os.Args[1]
 	}
-	files, err := filepath.Glob(filepath.Join(dir, "workbuddy-*.json"))
+	// 扫描口径与网关 auth.LoadDir 对齐（bug 4）：网关用 workbuddy*.json，
+	// 只认 workbuddy-*.json 会漏掉手工维护的 workbuddy.json 等，静默少账号。
+	files, err := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
 	if err != nil || len(files) == 0 {
 		fmt.Fprintf(os.Stderr, "no auth files in %s\n", dir)
 		os.Exit(1)

@@ -250,9 +250,18 @@ func (p *Pool) RecordModelRateLimitAudit(uid, model, reason string) {
 // 调用方必须已持有 p.mu 写锁。
 func clearRoutingModelCooldownsLocked(e *entry) {
 	for model, mc := range e.modelCooldowns {
-		if !mc.AuditOnly {
-			delete(e.modelCooldowns, model)
+		if mc.AuditOnly {
+			continue
 		}
+		// 11102/11158 条目是**与账号冷却无关的上游事实**（这个号就是用不了这个模型），
+		// 不能因为一次 60s 的账号级软冷却就删掉（bug 1）：连 Hits 一起丢会让 6h→12h→24h
+		// 的退避从零重学（与 pruneExpiredModelCooldowns 刻意保留 Hits 冲突），
+		// 并且下次请求会再去撞同一个必然失败的模型。账号级 until 生效时 healthy()
+		// 本就恒 false，留着这些条目不会让"模型豁免"漏到账号级冷却里。
+		if strings.HasPrefix(mc.Reason, "11102") || strings.HasPrefix(mc.Reason, "11158") {
+			continue
+		}
+		delete(e.modelCooldowns, model)
 	}
 	if len(e.modelCooldowns) == 0 {
 		e.modelCooldowns = nil
