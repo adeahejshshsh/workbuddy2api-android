@@ -494,10 +494,11 @@ func (p *Panel) tierHidden(model, realm string, showHidden bool) (skip bool, tag
 
 func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string, remoteDefault string, httpc *http.Client) map[string]any {
 	entry := map[string]any{
-		"id":                   realm + ":" + mi.ID,
-		"name":                 mi.Name,
-		"default_effort":       mi.DefaultEffort,
-		"supported_efforts":    mi.Efforts,
+		"id":   realm + ":" + mi.ID,
+		"name": mi.Name,
+		// 这两个字段稍后可能被 EffortListing 覆盖；**先不写**，避免 mi 侧为空时
+		// 输出 `"supported_efforts": null`（报告 #14）—— /v1/models 是省略字段，
+		// 同名字段两处形态要一致。
 		"can_disable_thinking": mi.CanDisableThinking,
 		"supports_reasoning":   mi.SupportsReasoning,
 		"supports_images":      mi.SupportsImages,
@@ -534,6 +535,14 @@ func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string
 		entry["supported_efforts"] = efforts
 		if def != "" {
 			entry["default_effort"] = def
+		}
+	} else {
+		// 未命中静态表：有值才写，空值省略（与 /v1/models 同口径）
+		if len(mi.Efforts) > 0 {
+			entry["supported_efforts"] = mi.Efforts
+		}
+		if mi.DefaultEffort != "" {
+			entry["default_effort"] = mi.DefaultEffort
 		}
 	}
 	return entry

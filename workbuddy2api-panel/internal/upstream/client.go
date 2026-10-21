@@ -1014,6 +1014,12 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		kind := Classify(resp.StatusCode, string(raw))
 		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
 	}
+	// 200 + 空 body 是**成功**（报告 #6）：/v2/report、appearance/set、
+	// claim-gift、claim-compensation 这些 RPC 成功时可能回空体，
+	// 此前被 json.Unmarshal 判成 parse failed，成功记成失败。
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
+	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
@@ -2558,10 +2564,9 @@ func isChannelRefused(body string) bool {
 	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
 		return false
 	}
-	// 上游这个业务码在报文里不是合法 JSON 数字（含连字符/非断连字符变体），
-	// 按**原文子串**判，不走 JSON 解析。三种写法都覆盖。
+	// 上游这个业务码在报文里不是合法 JSON 数字（含非断连字符），按**原文子串**判。
+	// 两种真实写法：U+2011 非断连字符（上游实际下发）与 ASCII 连字符（防御）。
 	return strings.Contains(body, "11\u2011-128") ||
-		strings.Contains(body, "11‑-128") ||
 		strings.Contains(body, "11‑-128")
 }
 

@@ -293,7 +293,9 @@ func effectiveTaskCodeIn(m map[string]*upstream.Task, code string) string {
 // autoActionIndex 任务在 autoActions 中的顺序（队列执行按依赖序排；未知返回大值）。
 func autoActionIndex(code string) int {
 	for i := range autoActions {
-		if autoActions[i].TaskCode == code {
+		// 与 autoActionFor 同口径（报告 #16）：大小写不同也要命中，否则该码恒落
+		// 1<<20（排到最后），队列执行顺序与依赖序不符。
+		if strings.EqualFold(autoActions[i].TaskCode, code) {
 			return i
 		}
 	}
@@ -371,7 +373,9 @@ func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 		return nil, err
 	}
 	for i := range tasks {
-		if tasks[i].TaskCode == code {
+		// 忽略大小写（报告 #15）：autoActionFor 用 EqualFold，这里精确比较会让
+		// 「上游改一下大小写」时单任务入口判「没有此任务」，而队列扫描仍能命中。
+		if strings.EqualFold(tasks[i].TaskCode, code) {
 			return &tasks[i], nil
 		}
 	}
@@ -967,10 +971,14 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		claimable = after.Claimable
 	}
 	resp := map[string]any{
-		"ok":               true,
-		"message":          msg,
-		"progress_before":  progressBefore,
-		"progress_after":   progressAfter,
+		"ok":              true,
+		"message":         msg,
+		"progress_before": progressBefore,
+		"progress_after":  progressAfter,
+		// 回读失败（报告 #12）：progress_after 是空串，前端用
+		// `before !== after` 判「有进展」会把空串判成进展并弹绿色。
+		// 显式标记，让前端按「进度未知」渲染。
+		"progress_unknown": aerr != nil,
 		"claimable":        claimable,
 		"attempt":          act.Attempt,
 		"verify_supported": true,

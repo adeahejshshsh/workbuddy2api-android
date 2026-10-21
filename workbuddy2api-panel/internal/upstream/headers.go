@@ -297,7 +297,7 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	req.Header.Set("X-Conversation-Request-ID", HeaderSafe(convReqID))
 	req.Header.Set("X-Conversation-Message-ID", messageID)
 	req.Header.Set("X-Request-ID", messageID)
-	req.Header.Set("X-Root-Request-ID", convReqID)
+	req.Header.Set("X-Root-Request-ID", HeaderSafe(convReqID)) // 与 297/305 同口径（报告 #5）
 	traceID := meta.TraceID
 	if traceID == "" {
 		traceID = convReqID

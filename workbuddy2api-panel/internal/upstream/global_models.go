@@ -509,22 +509,31 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 		return nil, nil, nil, nil, e
 	}
 	// 信封层：code 拒绝非 0 业务码（字段缺失 = 放行，兼容无信封直出的目录端点）。
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return fail(fmt.Errorf("global models parse: %w", err))
-	}
-	if codeRaw, ok := envelope["code"]; ok {
-		var code int
-		if json.Unmarshal(codeRaw, &code) == nil && code != 0 {
-			return fail(fmt.Errorf("global models code=%d", code))
-		}
-	}
+	// 顶层是数组时**不是**信封（报告 #3）：此前先解成 map 直接报错，让下方
+	// resolveGlobalModelsArray 的「payload 本身是数组」分支永远不可达，
+	// 数组形目录一律判探测失败并进 5 分钟负缓存。
+	// 顶层是数组时**不是**信封（报告 #3）：此前先解成 map 直接报错，让
+	// resolveGlobalModelsArray 的「payload 本身是数组」分支永远不可达，
+	// 数组形目录一律判探测失败并进 5 分钟负缓存。
 	payload := json.RawMessage(raw)
-	if data, ok := envelope["data"]; ok {
-		if t := strings.TrimSpace(string(data)); t != "" && t != "null" {
-			payload = data
+	if trimmed := strings.TrimSpace(string(raw)); !strings.HasPrefix(trimmed, "[") {
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return fail(fmt.Errorf("global models parse: %w", err))
+		}
+		if codeRaw, ok := envelope["code"]; ok {
+			var code int
+			if json.Unmarshal(codeRaw, &code) == nil && code != 0 {
+				return fail(fmt.Errorf("global models code=%d", code))
+			}
+		}
+		if data, ok := envelope["data"]; ok {
+			if t := strings.TrimSpace(string(data)); t != "" && t != "null" {
+				payload = data
+			}
 		}
 	}
+
 	arr, ok := resolveGlobalModelsArray(payload)
 	if !ok {
 		return fail(fmt.Errorf("global models empty list"))

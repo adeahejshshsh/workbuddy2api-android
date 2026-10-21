@@ -54,7 +54,9 @@ running_pid() {
 
 case "${1:-start}" in
   start)
-    if [ -n "$(running_pid)" ]; then echo "已在运行 (pid $(running_pid))"; exit 0; fi
+    # 只取一次 pid（报告 #25）：两次调用之间进程可能退出，会打印空的 pid。
+    CUR_PID="$(running_pid)"
+    if [ -n "$CUR_PID" ]; then echo "已在运行 (pid $CUR_PID)"; exit 0; fi
     [ -x "$BIN" ] || { echo "缺少二进制: $BIN （先跑 rebuild.sh）"; exit 1; }
     mkdir -p "$APP_DIR/data" "$APP_DIR/auths"
     cd "$APP_DIR" || exit 1

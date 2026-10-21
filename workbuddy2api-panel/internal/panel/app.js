@@ -209,10 +209,13 @@ function trangeRender(id) {
     '</span>';
   const preset = host.querySelector('.tr-preset');
   if (preset) preset.onchange = () => {
+    // 先记下旧预设（报告 #19）：trangeState 初始化时 from/to 就有值，
+    // `!st.from || !st.to` 恒假 → 注释承诺的「重置为今天 00:00 → 现在」从不生效。
+    const prevPreset = st.preset;
     st.preset = preset.value;
     // 从别的预设切到自定义时，把区间重置为"今天 00:00 → 现在"，
     // 免得用户上次留下的半年区间被无声沿用。
-    if (st.preset === 'custom' && (!st.from || !st.to)) { st.from = trangeMidnight(); st.to = new Date(); }
+    if (st.preset === 'custom' && prevPreset !== 'custom') { st.from = trangeMidnight(); st.to = new Date(); }
     trangeRender(id);
     trangeEmit(id);
   };
@@ -489,7 +492,7 @@ function renderAccounts(list) {
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div>' +
         (s.remark ? '<div class="hint" style="font-size:11.5px;color:var(--accent);margin-top:2px">备注：' + esc(s.remark) + '</div>' : '') +
-        '<button class="xs remark-btn" data-uid="' + esc(s.uid) + '" style="margin-top:3px">备注</button></td>' +
+        '<button class="xs remark-btn" data-uid="' + esc(s.uid) + '" data-remark="' + esc(s.remark || '') + '" style="margin-top:3px">备注</button></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
@@ -1117,6 +1120,12 @@ const CFG_MAP = {
   keepalive_hours: ['schedule', 'keepalive_hours'], keepalive_enabled: ['schedule', 'keepalive_enabled'],
   balance_refresh_enabled: ['schedule', 'balance_refresh_enabled'], balance_refresh_minutes: ['schedule', 'balance_refresh_minutes'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
+  // 补齐缺失键（报告 #20）：这些字段此前在配置页既回显不了也改不了。
+  blackcat_hours: ['schedule', 'blackcat_hours'], blackcat_enabled: ['schedule', 'blackcat_enabled'],
+  growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
+  streak_hours: ['schedule', 'streak_hours'], streak_enabled: ['schedule', 'streak_enabled'],
+  request_archive_enabled: ['logging', 'request_archive_enabled'],
+  request_archive_days: ['logging', 'request_archive_days'],
   max_in_flight: ['pool', 'max_in_flight'], max_in_flight_global: ['pool', 'max_in_flight_global'],
   breaker_threshold: ['pool', 'breaker_threshold'],
   degrade_threshold: ['pool', 'degrade_threshold'], degrade_cooldown: ['pool', 'degrade_cooldown'],
@@ -1435,6 +1444,16 @@ const AUTO_TASKS = {
   'Sequential_Tasks_6': '小程序十次对话（预留）：accept → mini 对话上报 ×target（自动补差额）→ 领奖',
   'Sequential_Tasks_7': '体验灵感功能（预留，疑 PC 口径）：accept → 灵感事件组（PC+mp 双形态）→ 领奖（判据待解锁验证）'
 };
+// autoTaskLabel 忽略大小写查一键完成任务表（报告 #18）：后端 autoActionFor 用
+// EqualFold，前端精确匹配会让「上游改一下大小写」的码永远渲染成「接受」而不是
+// 「一键完成」，两个入口行为分叉。
+function autoTaskLabel(code) {
+  if (!code) return '';
+  if (AUTO_TASKS[code]) return AUTO_TASKS[code];
+  const k = Object.keys(AUTO_TASKS).find(x => x.toLowerCase() === String(code).toLowerCase());
+  return k ? AUTO_TASKS[k] : '';
+}
+
 
 function openTasks(uid) {
   taskUID = uid;
@@ -1525,7 +1544,7 @@ async function loadTasks() {
         : '<span class="tag mute">未接受</span>';
       const acted = t.claimed || t.locked ? ''
         : t.claimable ? '<button class="xs primary" data-t="claim" data-c="' + esc(t.task_code) + '">领取</button>'
-        : AUTO_TASKS[t.task_code] ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(AUTO_TASKS[t.task_code]) + '">一键完成</button>'
+        : autoTaskLabel(t.task_code) ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(autoTaskLabel(t.task_code)) + '">一键完成</button>'
         : t.accept_status === 'accepted' ? ''
         : '<button class="xs" data-t="accept" data-c="' + esc(t.task_code) + '">接受</button>';
       // 操作指引（description/task_desc）挂 title 提示：如何完成交给用户看
@@ -1560,7 +1579,9 @@ $('taskBody').addEventListener('click', async ev => {
       if (r.skipped) {
         toast(r.message || '已跳过', 'ok');
       } else {
-        const advanced = r.progress_before !== r.progress_after;
+        // 回读失败时 progress_after 是空串，与 "3/5" 不等会被判成「有进展」并弹绿色
+        // （报告 #12）。后端新增 progress_unknown 标记，这里优先认它。
+        const advanced = !r.progress_unknown && r.progress_before !== r.progress_after;
         let msg = r.message || '已执行';
         if (r.progress_after) msg += `（进度 ${r.progress_before} → ${r.progress_after}）`;
         if (r.claimed) msg += '，奖励已自动到账';
@@ -2968,8 +2989,9 @@ document.addEventListener('click', async (ev) => {
   if (!btn) return;
   const uid = btn.getAttribute('data-uid');
   if (!uid) return;
-  const cur = (btn.parentElement && btn.parentElement.textContent || '').includes('备注：')
-    ? '' : '';
+  // 初值从 data-remark 取（报告 #17）：此前三元两边都是 ''，已有备注永不回填，
+  // 改备注等于盲写 —— 用户看不到原内容，一不小心就把旧备注覆盖掉。
+  const cur = btn.getAttribute('data-remark') || '';
   const input = prompt('给这个账号写个备注（留空 = 清除）：', cur);
   if (input === null) return;           // 取消
   try {

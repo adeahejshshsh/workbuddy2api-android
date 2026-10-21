@@ -522,6 +522,11 @@ func dropReasoningContentParts(obj map[string]any) {
 			if _, hasToolCalls := msg["tool_calls"]; !hasToolCalls {
 				continue
 			}
+			// 带 tool_calls 但内容全是思考片段：**删掉 content 键**而不是写 []（报告 #7）。
+			// `"content": []` 与 `"content": null` 在上游是不同的形态，空数组可能被判非法。
+			delete(msg, "content")
+			out = append(out, rawMsg)
+			continue
 		}
 		msg["content"] = kept
 		out = append(out, rawMsg)

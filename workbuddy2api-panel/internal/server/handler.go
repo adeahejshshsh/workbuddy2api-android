@@ -559,6 +559,12 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 		dynamicModelsCache.RUnlock()
 		return out // 前一个持锁者刚拉完：直接用，不再打上游
 	}
+	// 锁内也要看负缓存（报告 #11）：锁外那次检查发生在排队之前，上游刚失败时
+	// 排在锁上的 N 个并发请求会逐个再打一次上游 —— 负缓存对突发完全失效。
+	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
+		dynamicModelsCache.RUnlock()
+		return nil
+	}
 	dynamicModelsCache.RUnlock()
 
 	uids := h.cfg.Pool.AvailableUIDsForRealm("cn")
@@ -1443,7 +1449,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 已定性为「等级不支持」时不要用通用 hint 覆盖（BUG-9）：hintOf 对
 		// ErrModelBlocked 返回的是「后端没有这个模型」，与 11158 的语义相反。
 		if code != "model_not_allowed_for_account_type" {
-			hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
+			// 保留前面拼好的池实况串（报告 #13）：hintOf 会整段覆盖，
+			// 而那段 [pool: total=… healthy=…] 是排障时最需要的信息。
+			specific := h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
+			if hint != "" && specific != "" {
+				hint = specific + " | " + hint
+			} else if specific != "" {
+				hint = specific
+			}
 		}
 		switch ue.Kind {
 		case upstream.ErrChannelRefused:

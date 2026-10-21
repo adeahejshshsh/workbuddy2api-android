@@ -11,6 +11,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
+import android.os.SystemClock;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -372,9 +373,15 @@ public class MainActivity extends Activity {
         // 必须判「上一次还在加载」（bug #1）：低端机上 WebView 冷启动 + 面板大 HTML/JS
         // 普遍超过 2 秒，不判在途的话从第 2 拍起每 2 秒把正在进行的加载打断重来，
         // 30 次（≈60 秒）后 loadTries 用尽 → 永久空白页，只能手点「重载面板」。
-        if (!panelLoaded && !panelLoading && portServing && web != null
+        // 加载在途判定加超时兜底（报告 #21）：panelLoading 只在 onPageFinished /
+        // onReceivedError 复位，而 WebView 渲染进程崩溃、页面被系统回收时两个回调
+        // 都不来 —— panelLoading 永远 true，之后不再自动加载，只能手点「重载面板」。
+        boolean loadingFresh = panelLoading
+                && (SystemClock.elapsedRealtime() - panelLoadAt) < PANEL_LOAD_TIMEOUT_MS;
+        if (!panelLoaded && !loadingFresh && portServing && web != null
                 && loadTries < MAX_LOAD_TRIES) {
             panelLoading = true;
+            panelLoadAt = SystemClock.elapsedRealtime();
             loadTries++;
             pageHadError = false;   // 新一次加载：清掉上一次的错误标记（bug B2）
             web.loadUrl(PANEL_URL);
@@ -424,6 +431,10 @@ public class MainActivity extends Activity {
     // loadTries 限制自动重试次数，避免死循环打空。
     volatile boolean panelLoaded = false;
     volatile boolean panelLoading = false;   // 有一次 loadUrl 在途（防反复打断，bug #1）
+    // panelLoadAt 本次加载开始时刻；超过 PANEL_LOAD_TIMEOUT_MS 视为「在途但已死」
+    // （报告 #21：渲染进程崩溃时 onPageFinished/onReceivedError 都不来）。
+    volatile long panelLoadAt = 0;
+    static final long PANEL_LOAD_TIMEOUT_MS = 30000;
     volatile boolean pageHadError = false;   // 本次加载是否已报错（bug B2）
     volatile int loadTries = 0;
     static final int MAX_LOAD_TRIES = 30;

@@ -1,6 +1,92 @@
 # 变更记录
 
-## v1.34.0（当前）
+## v1.35.0（当前）
+
+**本版 = 第二十八份审查报告（CODE-REVIEW-bugs.md，23 条）：22 条为真、1 条误报。
+真条目里 #1/#4/#5/#7/#12/#13/#15/#16/#17/#18/#19/#20 都与我最近几版的改动直接相关。**
+
+### 误报
+
+* **#2「导入与登录对 global 号的判定依据不一致」** —— 不成立。v1.29.1 起登录侧写的是
+  `auth2.ResolveRealm(realmIfExplicit(realm), tok.Domain)`：**未显式给 --realm 时同样按
+  domain 推断**，与导入侧 `auth.ResolveRealm("", acc.Domain)` 完全同口径。
+  唯一差异是「cockpit 导入无法表达用户显式指定的 realm」，而导出文件里本就没有 realm
+  字段 —— 属能力边界，不是缺陷。
+
+### 配置与装配
+
+* **#1 `dns_servers` 永不生效**（我 v1.32.0 引入）—— `up := upstream.New()` 在 149 行已构造
+  Dialer，`SetDNSServers` 到 178 行才调。已把注入移到 `New()` 之前，注释与实现一致。
+
+### upstream
+
+* **#3 顶层数组目录被判失败** —— 信封解析先 `Unmarshal` 成 map，数组直接报错，让
+  `resolveGlobalModelsArray` 的数组分支不可达。改为先看首字符是否为 `[`，是则跳过信封。
+* **#4 `isChannelRefused` 三个字面量完全相同** —— 三行等价于一行，ASCII 变体永远匹配不到。
+  去重成「U+2011 + ASCII」两种真实写法。
+* **#5 `X-Root-Request-ID` 未过 `HeaderSafe`** —— 与同函数另外两个会话头不同口径，
+  原值含 CR/LF 时在写请求阶段才报错。已补。
+* **#6 `doJSON` 把「200 + 空 body」判成 parse failed** —— `/v2/report`、`appearance/set`、
+  `claim-gift`、`claim-compensation` 成功回空体时被记成失败。空体按成功返回 `nil, nil`。
+* **#7 `dropReasoningContentParts` 写出 `"content": []`**（我 v1.30.0 移植）—— 带 `tool_calls`
+  的消息被写成空数组。改为**删除 content 键**。
+* **#8 `model.json` 每次请求重写** —— `Output == 0` 时仍 `modelCatalogPut`，而该模型永远过不了
+  第 3 级（要求 `MaxOutputTokens > 0`）→ `/v1/models` 每次请求落一次盘。只在 `Output > 0` 时回写。
+* **#9 `repairFrame` 合成帧失败回落整帧原文** —— 多帧拆分后任一帧 marshal 失败会把原始 payload
+  再发一遍（客户端收到重复内容）。合成帧改传空 fallback = 跳过该帧。
+* **#10 `sanitizeFeatures` 有 3 条完全重复** —— `x-anthropic-hdr` ×2、`11‑-128` ×2。已去重。
+
+### server
+
+* **#11 `/v1/models` 负缓存对并发失效** —— 锁内二次检查只看新鲜缓存、不看 `lastFail`，
+  上游失败后排队在锁上的 N 个请求会逐个再打一次。锁内补负缓存判断。
+* **#12 单任务回读失败仍回 `ok:true`**（我 v1.28.5 改动附近）—— `progress_after=""` 与
+  `"3/5"` 不等，前端判成「有进展」弹绿色。后端补 `progress_unknown`，前端优先认它。
+* **#13 池实况串被 hint 覆盖** —— `hintOf` 整段替换，前面拼好的
+  `[pool: total=… healthy=…]` 丢失。改为「具体原因 + 池实况」拼接。
+
+### panel
+
+* **#14 `panelModelEntry` 输出 `"supported_efforts": null`** —— 与 `/v1/models` 的「省略字段」
+  不一致。改为空值不写，未命中静态表时用 mi 侧非空值兜底。
+* **#15 `taskByCode` 大小写敏感** —— 与 `autoActionFor` 的 `EqualFold` 分叉：上游改大小写时
+  单任务入口判「没有此任务」而队列扫描仍能命中。已统一 `EqualFold`。
+* **#16 `autoActionIndex` 大小写敏感** —— 同上，导致排序时该码恒落 `1<<20`（排最后）。已统一。
+* **#17 备注弹窗不回填**（我 v1.32.0 引入）—— 三元两边都是 `''`，改备注等于盲写。
+  按钮加 `data-remark`，初值从它取。
+* **#18 前端 `AUTO_TASKS` 精确匹配** —— 与后端忽略大小写分叉，上游改大小写后按钮永远渲染成
+  「接受」。新增 `autoTaskLabel()` 做忽略大小写查表。
+* **#19 切「自定义」不重置区间**（我 v1.29.1 附近）—— `!st.from || !st.to` 恒假（初始化时已赋值），
+  注释承诺的重置从不生效。改为「从非 custom 切到 custom 时重置」。
+* **#20 配置页缺 10 个键** —— 补齐 `blackcat_hours/enabled`、`growth_hours/enabled`、
+  `streak_hours/enabled`、`request_archive_enabled/days` 的**表单控件 + CFG_MAP**
+  （`TestConfigFormMatchesCFGMap` 会强制两者同步）。`request_archive_max_mb`、
+  `server.read_timeout`、`upstream.dns_servers` 因是数值上限/时长串/数组，表单无法安全表达，
+  保留手工编辑并在页面提示里写清。
+
+### apk-src（Java）
+
+* **#21 `panelLoading` 永不复位** —— 只在 `onPageFinished`/`onReceivedError` 复位，
+  渲染进程崩溃或页面被回收时两个回调都不来 → 之后不再自动加载。加 `panelLoadAt` 时间戳，
+  超过 30s 视为「在途但已死」。
+* **#22 通知把「已停止」显示成「启动中」** —— 改为三态（运行中 / 已停止 / 启动中）。
+* **#23 `appLog` 无同步** —— 四处并发调用，`f.length()` 判断与 `renameTo` 之间无互斥会重复翻代
+  并丢日志。方法加 `synchronized`。
+
+### 脚本与容器
+
+* **#24 `entrypoint.sh` 无 python3 时 key 随重启变化** —— 进入该分支的前提正是「配置里没有
+  非空 api_key」，而 sed 只做替换、键缺失时什么都不改 → 校验失败 → 每次退回 env 注入。
+  改为「键存在则替换，不存在则插入」。
+* **#25 `run.sh` 两次调用 `running_pid`** —— 两次之间进程退出会打印空 pid。只取一次。
+
+### 测试
+
+`server 96 / upstream 228 / panel 54 / pool 188 / scheduler 65 / auth 29 /
+session 21 / reqlog 10 / usage 16 / redisstore 7 / cmd-server 52`，
+**766 通过 / 0 失败**；`app.js` 通过 `node --check`；`run.sh` 与 `entrypoint.sh` 通过 `bash -n`。
+
+## v1.34.0
 
 **本版 = 第二十七份审查报告（审查报告.md，8 条）：6 条为真、2 条误报。
 真条目里 #4/#5/#8 是我最近几版引入或改了一半的。**

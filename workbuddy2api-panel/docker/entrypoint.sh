@@ -33,8 +33,17 @@ with open(p, "w", encoding="utf-8") as f:
     json.dump(c, f, ensure_ascii=False, indent=2)
 PY
     else
-      # 无 python：退回 sed 替换（仅当已有该键）
-      sed -i "s|\"api_key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"api_key\": \"$KEY\"|" /app/config.json
+      # 无 python：分两种情况（报告 #24）—— 键存在则替换，键**不存在**则插入。
+      # 此前只做替换：而进入本分支的前提正是「grep 没匹配到非空 api_key」，
+      # 键缺失时 sed 什么都不改 → 下面的校验必然失败 → 每次都退回 env 注入，
+      # key 随重启变化，注释承诺的「写入后重启不变」不成立。
+      if grep -q '"api_key"' /app/config.json 2>/dev/null; then
+        sed -i "s|\"api_key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"api_key\": \"$KEY\"|" /app/config.json
+      else
+        # 在首个 { 后插入一行（GNU sed 的 \n 在替换串里有效）
+        sed -i "0,/^{/s|{|{\n  \"api_key\": \"$KEY\",|" /app/config.json 2>/dev/null \
+          || printf '{\n  "api_key": "%s"\n}\n' "$KEY" > /app/config.json
+      fi
     fi
     # 写回失败（只读挂载等）时退回 env：至少能起来，但 key 会随重启变 —— 明确告警。
     if grep -q "\"api_key\"[[:space:]]*:[[:space:]]*\"$KEY\"" /app/config.json 2>/dev/null; then

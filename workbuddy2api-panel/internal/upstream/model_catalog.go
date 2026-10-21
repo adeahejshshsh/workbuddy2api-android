@@ -281,7 +281,12 @@ func MaxOutputTokensListingV4(model string, remote int64, client *http.Client) (
 		// 与 ContextWindowListingV4 同触发：lookup 命中先入缓存再返回
 		// （两条查找链并发 miss 同一模型时，第二调用方直接拿到刚写入的值）。
 		if e, ok := modelsDev.lookup(model); ok {
-			modelCatalogPut(model, e.Context, e.Output)
+			// 只有真的能过第 3 级（MaxOutputTokens > 0）才回写（报告 #8）：
+			// Output==0 写进去也永远命中不了，反而让 /v1/models 每次请求都重写
+			// model.json（写放大）。Context 仍可回写（第 4 级用得到）。
+			if e.Output > 0 {
+				modelCatalogPut(model, e.Context, e.Output)
+			}
 			return e.Output, e.Output > 0
 		}
 		modelsDev.ensureDocAsync(client, "")

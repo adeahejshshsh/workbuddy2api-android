@@ -146,6 +146,9 @@ func main() {
 		return 0
 	}
 
+	// 出站 DNS 服务器必须在 New 之前注入（报告 #1）：Dialer/Transport 在
+	// upstream.New() 里构造，晚于它调用等于永不生效。
+	upstream.SetDNSServers(cfg.Upstream.DNSServers)
 	up := upstream.New()
 
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
@@ -174,8 +177,7 @@ func main() {
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
-	// 出站 DNS 服务器（上游 PR #144）：必须在 New 之前注入，Dialer 在构造期读取。
-	upstream.SetDNSServers(cfg.Upstream.DNSServers)
+	// （dns_servers 已在 New 之前注入，见上方）
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled

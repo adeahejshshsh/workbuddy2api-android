@@ -119,7 +119,9 @@ public class GatewayService extends Service {
      * 记一条 App 事件。为什么必须单独记：网关日志能看出"任务做了什么、上游回了什么"，
      * 但"系统什么时候冻了我/杀了我、前台服务有没有被拒启动、alarm 精不精确"只有 App 知道。
      */
-    static void appLog(Context c, String s) {
+    // synchronized（报告 #23）：onStartCommand（主线程）、watchLoop、pump、waiter
+    // 四处并发调用，f.length() 判断与 renameTo 之间无互斥会重复翻代并丢日志。
+    static synchronized void appLog(Context c, String s) {
         try {
             File f = appLogFile(c);
             if (f.length() > 512 * 1024) {
@@ -984,8 +986,12 @@ public class GatewayService extends Service {
          .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopPi);
         // 不在这里发网络探针：调用方常是主线程（onStartCommand 里要 5s 内进前台），
         // 探测最长拖 2s 会把自己拖成 ANR。只看缓存状态。
-        boolean up = (statusOf() == ST_RUNNING || statusOf() == ST_EXTERNAL);
-        String s = (up ? "运行中 · " : "启动中 · ") + "127.0.0.1:7863"
+        int stNow = statusOf();
+        boolean up = (stNow == ST_RUNNING || stNow == ST_EXTERNAL);
+        // 三态（报告 #22）：此前非运行态一律拼「启动中」，停止后也显示「启动中」。
+        String head = up ? "运行中 · "
+                : (stNow == ST_STOPPED ? "已停止 · " : "启动中 · ");
+        String s = head + "127.0.0.1:7863"
                 + (restarts > 0 ? " · 自愈 " + restarts + " 次" : "");
         b.setContentText(s);
         return b.build();

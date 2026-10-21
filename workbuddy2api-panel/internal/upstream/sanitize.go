@@ -14,7 +14,6 @@ import (
 // 普通请求全不中 → 原样返回，零分配）。
 var sanitizeFeatures = []string{
 	"x-anthropic-billing-hdr",                         // header 键值段键名
-	"x-anthropic-billing-hdr",                         // 全拼形态（同义，一并覆盖）
 	"You are Claude Code",                             // 身份句（截断前缀即可命中）
 	"branch (you will usually use this for PRs)",      // 注入指令句（Main/Default 两种前缀都覆盖）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段
@@ -23,7 +22,6 @@ var sanitizeFeatures = []string{
 	"cc_entrypoint",                                   // 同族：只带这一项时也必须进净化
 	"11-128",                                          // 上游反探测：裸数字错误码
 	"11" + "128",                                      // 同一指纹的 5 字节形态（拼接构造，不手打）
-	"11-128",                                          // 同一指纹的带连字符写法（两种都要覆盖）
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。

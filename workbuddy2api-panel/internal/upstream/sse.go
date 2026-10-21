@@ -734,6 +734,12 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		}
 		raw, err := json.Marshal(normalizeFrame(obj))
 		if err != nil {
+			// 合成帧规范化失败时**跳过这一帧**（报告 #9）：repairFrame 拆出的多个
+			// 帧若共用整帧原文做 fallback，任一帧失败就把整条原始 payload 再发一遍，
+			// 客户端会收到重复内容。空 fallback = 什么都不写。
+			if fallback == "" {
+				return nil
+			}
 			return writeSSE(fallback)
 		}
 		return writeSSE(string(raw))
@@ -835,7 +841,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			return 1, nil
 		}
 		for _, ch := range repairFrame(obj) {
-			if werr := writeChunk(ch, payload); werr != nil {
+			// 合成帧失败不要回落整帧原文（报告 #9）：传空 fallback 表示跳过该帧。
+			if werr := writeChunk(ch, ""); werr != nil {
 				return 0, werr
 			}
 		}
