@@ -259,6 +259,47 @@ func (p *Pool) RecordModelRateLimitAudit(uid, model, reason string) {
 	p.dirty.Store(true)
 }
 
+// 14003「模型繁忙」的停车窗口（misakano7545 `f728859a`）：displayMsg 是
+// 「模型繁忙，请换模型或稍后重试」，而它是**间歇**的 —— 生产日志里同一分钟既有
+// 14003 也有成功。首档取 10s 而不是分钟级：三个号冷却叠在一起时，60s 首档会把
+// 10 秒的抖动放大成一整段客户端可见的断流。同一 (号,模型) 反复命中再翻倍、封顶 1m。
+const (
+	modelBusyBase = 10 * time.Second
+	modelBusyMax  = time.Minute
+)
+
+// CooldownModelBusy 写入 (账号, 模型) 的短窗口冷却（14003 模型繁忙）。
+// 只挡这个模型，不动账号级健康 —— 号是好的，只是这个模型此刻忙。
+func (p *Pool) CooldownModelBusy(uid, model, reason string) {
+	if uid == "" || model == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	prev := e.modelCooldowns[model]
+	win := modelBusyBase
+	for i := 0; i < prev.Hits && win < modelBusyMax; i++ {
+		win *= 2
+	}
+	if win > modelBusyMax || win <= 0 {
+		win = modelBusyMax
+	}
+	until := now.Add(win)
+	if prev.Until.After(until) {
+		until = prev.Until // 已有更长的冷却（6004/11102）不要被缩短
+	}
+	if e.modelCooldowns == nil {
+		e.modelCooldowns = make(map[string]modelCooldown)
+	}
+	e.modelCooldowns[model] = modelCooldown{Until: until, Reason: reason, Hits: prev.Hits + 1}
+	p.dirty.Store(true)
+}
+
 // clearRoutingModelCooldownsLocked 删除参与选号豁免的模型冷却，保留 AuditOnly 台账。
 // 调用方必须已持有 p.mu 写锁。
 func clearRoutingModelCooldownsLocked(e *entry) {

@@ -218,6 +218,18 @@ scanLoop:
 				it.GrowthErr = err.Error()
 			} else {
 				for _, t := range tasks {
+					// 达标未领奖：**直接领**，不进动作链（misakano7545 `f89f6fc0`）。
+					// 这类任务此前被 growthPending 排除，又不在动作白名单里，
+					// 于是奖励一直挂着直到下次执行同一任务（可能几天后）。
+					// 奖励已经到手，只差点击 —— 不需要再跑一遍动作链。
+					if t.Claimable && !t.Claimed {
+						if credit, _, _, cerr := p.cfg.Upstream.ClaimReward(a, t.TaskCode); cerr == nil {
+							log.Printf("panel: 扫描期补领 uid=%s code=%s +%dc", uid, t.TaskCode, credit)
+						} else {
+							log.Printf("panel: 扫描期补领失败 uid=%s code=%s: %v", uid, t.TaskCode, cerr)
+						}
+						continue
+					}
 					if p.growthPending(a, t) {
 						it.Growth = append(it.Growth, t)
 						continue

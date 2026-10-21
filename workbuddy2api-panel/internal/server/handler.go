@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"sync"
@@ -1546,7 +1547,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 用 400 而非 503：这是"你选的这个模型当前不可用"，不是"服务端暂时过载"。
 	// 换号重试必然同样失败，客户端不该按可重试错误处理。
 	if modelBlock.Blocked {
-		code = "model_unavailable"
+		// 瞬时忙（14003 模型繁忙 / 6004 模型限流）→ **可重试**语义：503 + Retry-After +
+		// code=model_busy。号还活着，只是这个模型此刻忙，客户端该等而不是换模型
+		// （misakano7545 `c083a22f`）。确定性不可用（11102/11158）仍走下面的 400。
+		transientBusy := isTransientModelBlock(modelBlock.Reason)
+		if transientBusy {
+			code = "model_busy"
+		} else {
+			code = "model_unavailable"
+		}
 		// 有上游原文时保留它（含 requestId，用户要拿去向上游反馈），只把"有几个号
 		// 被挡、最早何时解封"这类本地调度信息放进 gateway_hint。
 		if !upstreamMsgPassed {
@@ -1560,6 +1569,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			hint += "; upstream: " + s
 		}
 		status = http.StatusBadRequest
+		if transientBusy {
+			// 可重试：503 + Retry-After（= 最早解封时刻），客户端按头等待重试。
+			status = http.StatusServiceUnavailable
+			if !upstreamMsgPassed {
+				msg = "model is temporarily busy on every account; retry after the indicated time"
+			}
+			if !modelBlock.Until.IsZero() {
+				if d := time.Until(modelBlock.Until); d > 0 {
+					w.Header().Set("Retry-After", strconv.Itoa(int(d.Seconds())+1))
+				}
+			}
+		}
 		// 阻塞原因若来自 11158（等级不够），把 code 从笼统的 model_unavailable 换成精确的
 		// model_not_allowed_for_account_type：客户端据此知道"换模型，别换号"。
 		if strings.HasPrefix(modelBlock.Reason, "11158") {
@@ -1822,6 +1843,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		if modelRateLimited {
 			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
 		}
+	case upstream.ErrModelBusy:
+		// 14003「模型繁忙」是**模型级、间歇**信号（同一分钟既有 14003 也有成功）：
+		// 号是好的，只给这个 (号,模型) 停 10s（翻倍封顶 1m），不冷却账号。
+		h.cfg.Pool.CooldownModelBusy(uid, model, "14003 model busy")
 	case upstream.ErrChannelRefused:
 		// 11‑-128 通道校验失败（上游 PR #233）：账号健康，官方客户端用同一账号正常。
 		// 零动作（不冷却/不熔断/不 NoteError）——换号不改变通道指纹。
@@ -2132,4 +2157,16 @@ func clampNToOne(body []byte) []byte {
 	}
 	log.Printf("WARN: [server] 非流式请求 n=%d：网关只支持单候选，已钳到 1（否则多条候选会被拼成一段正文）", n)
 	return out
+}
+
+// isTransientModelBlock 报告模型级阻塞原因是否为「瞬时忙 / 限流」（可重试），
+// 与确定性不可用（11102 无此模型 / 11158 等级不够）区分。
+func isTransientModelBlock(reason string) bool {
+	r := strings.ToLower(reason)
+	for _, m := range []string{"14003", "6004", "model busy", "model rate limit", "rate limit"} {
+		if strings.Contains(r, m) {
+			return true
+		}
+	}
+	return false
 }

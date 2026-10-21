@@ -48,7 +48,30 @@
   按短语**全局**替换（同一品牌词在长提示词正文里会多次出现），不是只认开头；
 * 替代词可见、可 diff；插零宽空格那条路对数字错误码无效（上游会归一化），故不采用。
 
-### 四、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 四、模型繁忙语义（misakano7545 `f728859a` / `c083a22f` / `ecbd2f78`）
+
+我们此前**完全不认识 14003**（grep 命中 0），一律当普通业务错误处理 → 换号/冷却，
+「明明有号却整段断流」。
+
+* 新增 `ErrModelBusy`：`14003` 或 `model busy` → 模型级**间歇**信号（生产日志里同一分钟
+  既有 14003 也有成功），**不罚号**；
+* 新增 `Pool.CooldownModelBusy`：只挡这个 (号,模型)，**10s 起、反复命中翻倍、封顶 1m**
+  （60s 首档会把 10 秒抖动放大成整段可见断流）；
+* `applyErrorPolicy` 对 `ErrModelBusy` 零账号惩罚，只写模型短冷却；
+* 末端映射区分两类模型级阻塞：**瞬时忙（14003/6004）→ 503 + `Retry-After` +
+  `code=model_busy`（可重试）**；确定性不可用（11102/11158）仍走 400 `model_unavailable`
+  —— 号还活着，客户端该等而不是换模型。
+
+### 五、写盘与补领（misakano7545 `4356a346` / `f89f6fc0`）
+
+* **`ReplaceAtomic` 加 fsync**：此前只 rename 不落盘，掉电可能留下「文件名已换、内容还在
+  页缓存」的半截文件 → 下次启动解析失败、状态整段丢失。auth 与 pool 两条路径同时受益；
+* **state.json 留 `.bak` 并回退**：保存前把上一版内容写 `.bak`，主文件解析失败时自动回退
+  并打 WARN，不再按空池处理；
+* **扫描期补领**：`Claimable && !Claimed` 的任务直接领，不进动作链。这类任务此前被
+  `growthPending` 排除、又不在动作白名单里，奖励会一直挂到下次执行同一任务（可能几天后）。
+
+### 六、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，
@@ -63,7 +86,9 @@
 
 ### 测试
 
-新增 `TestDeepSeekHarnessBrandRewritten`（品牌词必被改写、只带品牌词也进净化、幂等、正文多次出现全改）。
+新增 `TestClassifyModelBusy`（14003 在 400 与 200 信封里都判 `ErrModelBusy`、11101 不受影响）、
+`TestCooldownModelBusyWindow`（首档 ~10s、连击翻倍、封顶 1m）、
+`TestDeepSeekHarnessBrandRewritten`（品牌词必被改写、只带品牌词也进净化、幂等、正文多次出现全改）。
 改写 `TestClassifyChannelRefusedVsAccountRestricted`（**真实报文形态** → `ErrChannelRefused`、
 渲染形态也命中、11140 不误判成通道、内容审核变体仍归 `ErrContentBlocked`、
 带限流文案的 11140 不算账号限制）、新增 `TestNormalizeBusinessCode`；

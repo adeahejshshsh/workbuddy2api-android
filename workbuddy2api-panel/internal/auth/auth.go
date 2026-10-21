@@ -467,7 +467,11 @@ func ReplaceAtomic(path string, raw []byte, mode os.FileMode) error {
 	// Parse 失败后静默跳过 → 面板上少一个号，日志里没有任何提示。
 	// v1.27.6 把 SaveAtomic 的磁盘 I/O 挪出 a.mu（性能修复）后，这条竞争才真正可达。
 	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), atomicSeq.Add(1))
-	if err := os.WriteFile(tmp, raw, mode); err != nil {
+	// 写临时文件后**先 fsync 再 rename**（misakano7545 `4356a346`）：只 rename 不 fsync
+	// 时，掉电可能留下「文件名已换、内容还在页缓存」的半截文件 —— 表现为下次启动
+	// 解析失败、账号/冷却状态整段丢失。这一处修好，auth 与 pool 两条落盘路径同时受益。
+	if err := writeFileSync(tmp, raw, mode); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err == nil {
@@ -589,4 +593,21 @@ func jwtTokenSource(token string) string {
 		return ""
 	}
 	return strings.TrimSpace(payload.TokenSource)
+}
+
+// writeFileSync 写文件并 fsync 落盘（rename 前必须先落盘，见 ReplaceAtomic 注释）。
+func writeFileSync(path string, raw []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }

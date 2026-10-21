@@ -135,6 +135,15 @@ func (p *Pool) load() {
 	}
 	var sf stateFile
 	if json.Unmarshal(raw, &sf) != nil {
+		// 主文件坏了 → 回退 .bak（同上）；两处都坏才按空池处理。
+		if bak, berr := os.ReadFile(p.stateFp + ".bak"); berr == nil && len(bak) > 0 {
+			if json.Unmarshal(bak, &sf) == nil {
+				log.Printf("WARN: [pool] state.json 解析失败，已回退 state.json.bak（%d 字节）", len(bak))
+				raw = bak
+			}
+		}
+	}
+	if json.Unmarshal(raw, &sf) != nil {
 		// 损坏必须留档再启动（issue ISSUE-03）：此前静默 return，5 秒后 flusher 会把
 		// 空状态写回 state.json —— 冷却时长、熔断计数、成本账本、credits、"已签到"
 		// 全部不可恢复。另存一份 .corrupt-<unix> 至少还能人工捞。
@@ -269,6 +278,11 @@ func (p *Pool) saveLocked() error {
 	// 公共原子替换（含单文件 bind mount 的 EBUSY 兜底，bug #4）：
 	// Docker 用 -v ./data/state.json:/app/data/state.json 时 rename 恒 EBUSY，
 	// 原先直接失败 → 冷却/熔断/成本账本只留内存，重启全丢。
+	// 先把**上一版**内容留一份 .bak（misakano7545 `4356a346`）：state.json 被外部
+	// 截断/写坏时能回退，而不是整段运行态清零。
+	if prev, rerr := os.ReadFile(p.stateFp); rerr == nil && len(prev) > 0 {
+		_ = auth.ReplaceAtomic(p.stateFp+".bak", prev, 0o600)
+	}
 	if err := auth.ReplaceAtomic(p.stateFp, raw, 0o600); err != nil {
 		p.notePersistFail(err)
 		return err

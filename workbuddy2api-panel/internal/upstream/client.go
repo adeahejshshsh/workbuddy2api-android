@@ -43,6 +43,7 @@ const (
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrUpstreamBusy                  // 6021 queue.full 渠道级容量满载 → 不罚号、不轮转，末端 503 upstream_busy
 	ErrChannelRefused                // 11‑-128 request illegal 通道校验失败（上游认为非官方客户端）→ 不罚账号
+	ErrModelBusy                     // 14003「模型繁忙」（间歇）→ (账号,模型) 10s 起短冷却，封顶 1m
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -72,6 +73,8 @@ func (k ErrKind) String() string {
 		return "upstream_busy"
 	case ErrChannelRefused:
 		return "channel_refused"
+	case ErrModelBusy:
+		return "model_busy"
 	case ErrImageInvalid:
 		return "image_invalid"
 	case ErrAccountFault:
@@ -672,6 +675,11 @@ func Classify(status int, body string) ErrKind {
 				return ErrImageInvalid
 			}
 		}
+	}
+	// 14003「模型繁忙」是**模型级、间歇**信号（同一分钟既有 14003 也有成功）：
+	// 号是好的，别罚号，只给这个模型停 10s。判在通用 4xx 之前。
+	if hasBusinessCode(body, "14003") || strings.Contains(lower, "model busy") {
+		return ErrModelBusy
 	}
 	// 11‑-128 通道校验失败（上游 PR #233）：msg 同为 "request illegal"，但语义是
 	// 「上游认为请求不是官方客户端发出的」——账号本身健康（官方客户端用同一账号正常）。
