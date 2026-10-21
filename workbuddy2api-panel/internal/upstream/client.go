@@ -79,9 +79,14 @@ func (k ErrKind) String() string {
 
 // Error 带分类的上游错误。
 type Error struct {
-	Kind   ErrKind
+	Kind ErrKind
+	// Status 语义状态码：HTTP 错误取真实状态；HTTP 200 + 业务 code 时取
+	// businessCodeStatus 合成值（BUG-4）—— 下游按 Status 分支的逻辑
+	// （ClaimRewardMP 的 400 降级、IsBuddyTaskIncomplete）依赖它。
 	Status int
-	Msg    string
+	// HTTPStatus 上游真实 HTTP 状态（日志/排障用，不参与分支判断）。
+	HTTPStatus int
+	Msg        string
 	// RetryAfter 上游明示的等待时长（Retry-After 秒 / retry-after-ms /
 	// x-ratelimit-reset 头解析，见 ParseRetryAfter）。零值 = 上游未明示，
 	// 冷却时长回落调用方计算值。挂载点选在 Error 信封：Kind 决定「罚不罚」，
@@ -530,9 +535,17 @@ func Classify(status int, body string) ErrKind {
 	// 不得掩盖它们（429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须
 	// sessionDead——此层 marker 是精确词，比限流层的大范围子串更具体，具体优先于宽泛）。
 	for _, m := range sessionDeadMarkers {
-		if strings.Contains(body, m) {
-			return ErrSessionDead
+		if !strings.Contains(body, m) {
+			continue
 		}
+		// 裸数字标记必须带状态码门槛（BUG-3）："12153" 是上游的会话失效码，
+		// 但它也可能出现在 token 数、requestId 片段里 —— 对**任意**状态码做子串
+		// 匹配，会把 "prompt is too long ... 12153 tokens" 判成会话失效，
+		// 连续 3 次即永久禁用账号。文本标记（Offline user session not found）不设门槛。
+		if m == "12153" && status != http.StatusUnauthorized && status != http.StatusForbidden {
+			continue
+		}
+		return ErrSessionDead
 	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
@@ -962,7 +975,12 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
+		return nil, &Error{
+			Kind:       kind,
+			Status:     clsStatus, // 语义状态（BUG-4）
+			HTTPStatus: resp.StatusCode,
+			Msg:        fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160)),
+		}
 	}
 	return env.Data, nil
 }
@@ -975,7 +993,10 @@ const refreshIOTimeout = 30 * time.Second
 // refreshTokenExpiresInMax refresh 响应 expiresIn 的量级上限（10 年，纯防御值：
 // 实测 R-D 响应恒 5184000=60d）。超限视为上游脏数据，不写 ExpiresAt（保留旧值），
 // 防止 NeedsRefresh 永假导致 token 永不刷新反而真过期失效。
-const refreshTokenExpiresInMax = 10 * 365 * 24 * time.Hour
+const RefreshTokenExpiresInMax = 10 * 365 * 24 * time.Hour
+
+// refreshTokenExpiresInMax 兼容旧引用。
+const refreshTokenExpiresInMax = RefreshTokenExpiresInMax
 
 // RefreshToken 刷新 access token；成功时更新 a 的字段（缺省值保留旧值），
 // 调用方负责 SaveAtomic。

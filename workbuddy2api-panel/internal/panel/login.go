@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 const (
@@ -268,7 +269,9 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	// 先按秒比较再乘（bug #5）：原写法没有任何上限，脏值（ExpiresIn 巨大）乘法溢出成
 	// 负数 → ExpiresAt 落在过去 → NeedsRefresh 恒真 → 每个请求先刷一次 token。
 	// 10 年上限与 upstream.RefreshToken 同口径。
-	const maxExpiresInSec = int64(10 * 365 * 24 * 3600)
+	// 与 upstream.RefreshTokenExpiresInMax 同源（BUG-21）：此前两处各写一份字面量，
+	// 改一处忘另一处会让登录与刷新对「脏 expiresIn」的处理分叉。
+	const maxExpiresInSec = int64(upstream.RefreshTokenExpiresInMax / time.Second)
 	if tok.ExpiresIn > 0 && tok.ExpiresIn <= maxExpiresInSec {
 		expiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix()
 	}

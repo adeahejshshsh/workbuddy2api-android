@@ -1523,7 +1523,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		msg = "bare model names route to the cn realm only; add the \"global:\" prefix for global models (see GET /v1/models)"
 		hint = "no servable cn account, but global accounts are available; this gateway routes unprefixed model names to cn"
 	}
-	if !modelBlock.Blocked && h.cfg.Pool.ModelDeniedForAllAccountsInRealm(bareModel, realm) {
+	// 加 code/status 守卫（BUG-20）：这个分支在 realm_required 之后、没有任何前置条件，
+	// 会把 upstream_unreachable(502) / upstream_timeout(503) / waf_ip_blocked 这些
+	// 已经定性的结论改写成 model_not_allowed_for_account_type(400)，把「上游挂了」
+	// 说成「换模型」。
+	if !modelBlock.Blocked && code == "no_healthy_account" && status == http.StatusServiceUnavailable &&
+		h.cfg.Pool.ModelDeniedForAllAccountsInRealm(bareModel, realm) {
 		code = "model_not_allowed_for_account_type"
 		status = http.StatusBadRequest
 		if !upstreamMsgPassed {
@@ -1942,19 +1947,29 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 // messages[].content[] {type:"image_url"}）。畸形/其他形态一律 false（hint 侧
 // 宁缺勿滥：判不出带图就不给「模型不支持图片」指向）。
 func hasImagePart(body []byte) bool {
+	// content 用 any 解（BUG-1）：真实请求里 system 与历史轮次的 content 是**字符串**，
+	// 而旧结构要求每条消息的 content 都是数组 —— json.Unmarshal 整体报错，函数直接
+	// return false。于是只要会话里有一条纯文本消息（几乎全部带图请求都这样），
+	// reqHasImage 恒 false，11133「模型不支持图片」的 hint 分支永远不触发。
 	var peek struct {
 		Messages []struct {
-			Content []struct {
-				Type string `json:"type"`
-			} `json:"content"`
+			Content any `json:"content"`
 		} `json:"messages"`
 	}
 	if json.Unmarshal(body, &peek) != nil {
 		return false
 	}
 	for _, m := range peek.Messages {
-		for _, p := range m.Content {
-			if p.Type == "image_url" {
+		parts, ok := m.Content.([]any)
+		if !ok {
+			continue // 字符串形态（纯文本消息）：没有图片段
+		}
+		for _, raw := range parts {
+			p, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := p["type"].(string); t == "image_url" {
 				return true
 			}
 		}

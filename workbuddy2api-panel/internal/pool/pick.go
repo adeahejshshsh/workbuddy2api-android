@@ -333,6 +333,12 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
 			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
 		}
+		if model != "" && e.modelCooled(now, model) {
+			// 模型级冷却也要看（BUG-14）：此前兜底完全不查 modelCooled，
+			// ModelBlockedForRealm 判定的「整池对该模型不可用」会被兜底绕过，
+			// 请求又打到明知不可用的号上，还顺带推进它的 lastUsed 把 LRU 带偏。
+			continue
+		}
 		if p.inFlightFull(e) {
 			continue
 		}

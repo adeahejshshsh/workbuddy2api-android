@@ -11,6 +11,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -860,7 +861,12 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 				log.Printf("panel: 全量余额刷新 panic: %v", rec)
 			}
 		}()
-		p.cfg.Scheduler.RunBalanceRefreshNow()
+		// 用带 ctx 的版本并加时间上界（BUG-9）：无 ctx 版固定 Background，
+		// 46 个号、并发 3、单号最长 30s 时最坏 ≈ 7 分钟；给它一个 10 分钟上界，
+		// 至少不会无限期挂着（进程级可取消 ctx 需要更大改造，见 changelog）。
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		p.cfg.Scheduler.RunBalanceRefreshNowCtx(ctx)
 		p.syncNicknames()
 		log.Printf("panel: 手动全量余额刷新完成")
 	}()

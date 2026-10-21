@@ -9,7 +9,12 @@ import (
 	"time"
 )
 
+// SetCredits 直接写余额（不做到期快照）。生产代码无调用点，仅测试与未来扩展使用；
+// 负值一律钳 0（BUG-6）：与 SetCreditsDetailed 同口径，避免负余额进入选号权重与保底判定。
 func (p *Pool) SetCredits(uid string, credits, total int64) {
+	if credits < 0 {
+		credits = 0
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
@@ -139,7 +144,9 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 			// 未到期的硬冷却：只做「不降级」判断，**不动模型级台账**（bug 11）——
 			// 这里清表会把其它模型尚未到期的 6004 冷却一起抹掉，解冻后这些
 			// 模型立刻又被选中、再撞 429，冷却保护被削弱。
-			p.dirty.Store(true)
+			//
+			// 也不置脏（BUG-5）：这个分支没有任何字段变更，置脏只会让 startFlusher
+			// 每 5 秒全量重写一次 state.json —— 纯无谓磁盘写。
 			return
 		}
 		next := now.Add(d)
@@ -186,7 +193,9 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			// 未到期的硬冷却：只做「不降级」判断，**不动模型级台账**（bug 11）——
 			// 这里清表会把其它模型尚未到期的 6004 冷却一起抹掉，解冻后这些
 			// 模型立刻又被选中、再撞 429，冷却保护被削弱。
-			p.dirty.Store(true)
+			//
+			// 也不置脏（BUG-5）：这个分支没有任何字段变更，置脏只会让 startFlusher
+			// 每 5 秒全量重写一次 state.json —— 纯无谓磁盘写。
 			return
 		}
 		if !resetAt.IsZero() && model != "" {
@@ -454,7 +463,9 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 			// 未到期的硬冷却：只做「不降级」判断，**不动模型级台账**（bug 11）——
 			// 这里清表会把其它模型尚未到期的 6004 冷却一起抹掉，解冻后这些
 			// 模型立刻又被选中、再撞 429，冷却保护被削弱。
-			p.dirty.Store(true)
+			//
+			// 也不置脏（BUG-5）：这个分支没有任何字段变更，置脏只会让 startFlusher
+			// 每 5 秒全量重写一次 state.json —— 纯无谓磁盘写。
 			return
 		}
 		if !resetAt.IsZero() {

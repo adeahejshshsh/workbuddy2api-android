@@ -5,6 +5,7 @@
 package upstream
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"strings"
@@ -31,8 +32,14 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	if len(src) == 0 {
 		return src
 	}
+	// UseNumber 保住数字原文（BUG-2）：这是**每个** chat 请求都会走的主改写管线，
+	// 默认解码把整数落成 float64，>2^53 的 seed/微秒时间戳会被静默改写。
+	// 同仓 rewriteModel / clampNToOne / prompt.Rewrite / InjectPromptCacheKey 都用
+	// UseNumber，只有这条主路径没有 —— 口径自相矛盾。
+	dec := json.NewDecoder(bytes.NewReader(src))
+	dec.UseNumber()
 	var obj map[string]any
-	if err := json.Unmarshal(src, &obj); err != nil {
+	if err := dec.Decode(&obj); err != nil {
 		return src
 	}
 	obj["stream"] = true
@@ -116,6 +123,18 @@ func translateMaxCompletionTokens(obj map[string]any) {
 		// json.Unmarshal 数字 → float64（整数去整后回写，避免 1.28e5 科学计数法/小数
 		// 尾巴进上游 body）；其他数值类型防御性兼容（int 家族——手构造 map 的调用方）。
 		switch v := alias.(type) {
+		case json.Number:
+			// UseNumber 之后数字是 json.Number（BUG-2 的连带）：不处理就会落 default，
+			// 翻译静默失效。整数值直接用；小数值四舍五入。
+			if i, ierr := v.Int64(); ierr == nil {
+				if i > 0 {
+					obj["max_tokens"] = i
+				}
+			} else if f, ferr := v.Float64(); ferr == nil {
+				if n := int64(f + 0.5); n > 0 {
+					obj["max_tokens"] = n
+				}
+			}
 		case float64:
 			if n := int64(v + 0.5); n > 0 { // 小数四舍五入（1000.5 → 1001）
 				obj["max_tokens"] = n
@@ -153,6 +172,16 @@ func clampGPTMinMaxTokens(obj map[string]any) {
 	}
 	var v int64
 	switch n := obj["max_tokens"].(type) {
+	case json.Number:
+		// UseNumber 的连带：不认 json.Number 会让「抬到下限」静默失效，
+		// Claude Code 切模型时的极小 max_tokens 探针又会被上游 11133 拒掉。
+		if i, ierr := n.Int64(); ierr == nil {
+			v = i
+		} else if f, ferr := n.Float64(); ferr == nil {
+			v = int64(f)
+		} else {
+			return
+		}
 	case float64:
 		v = int64(n)
 	case int64:

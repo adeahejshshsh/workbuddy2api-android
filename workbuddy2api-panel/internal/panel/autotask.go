@@ -192,7 +192,10 @@ var autoActions = []autoAction{
 // autoActionFor 查任务对应的动作；无则返回 nil（不可自动化）。
 func autoActionFor(code string) *autoAction {
 	for i := range autoActions {
-		if autoActions[i].TaskCode == strings.TrimSpace(code) {
+		// 大小写不敏感（BUG-13）：taskMapByCode 用 ToLower 建键、runAutoAll 走那张表，
+		// 而这里用 == 精确比较 —— 上游一旦改大小写，队列扫描判「没有该动作」、
+		// runAutoAll 却仍命中，两个入口行为分叉。
+		if strings.EqualFold(autoActions[i].TaskCode, strings.TrimSpace(code)) {
 			return &autoActions[i]
 		}
 	}
@@ -858,7 +861,9 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	// 顺带：effectiveTaskCode 内部会 ListTasks，放在 tryLockAccount 之前也避免了
 	// "拿着账号锁打上游"。
 	effCode := p.effectiveTaskCode(a, act.TaskCode)
-	if a != nil {
+	{
+		// a 由 accountByUID 保证非 nil，这里不再判空（BUG-23：原先的 if a != nil 恒真，
+		// 反而让人以为这里允许 nil）
 		if blocked, why := p.skipBlocked(a.UID, effCode); blocked {
 			writeErr(w, http.StatusConflict, "该任务已被判定做不了并跳过："+why+
 				"；如要立即重试：打开该账号的「任务」弹窗，点「清空跳过名单」")
@@ -1723,13 +1728,17 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			// 不能写成 progress_after="" 让前端以为"进度没动"；after 为 nil 时
 			// 下面的领奖分支本来也进不去，这里只把原因如实报给前端。
 			item["progress_error"] = rerr.Error()
-		} else if after != nil && snap != nil {
+		} else if after != nil {
 			// 把回读结果写回快照（bug 4）：快照只拉一次，不回写的话循环里
 			// `before = snap[...]` 永远看启动时的状态 —— 任何「前一个动作顺手
 			// 推进了后一个任务」的组合都会按旧状态把整条动作链再跑一遍
 			// （Buddy_App / Buddy_App_QQ 共用一次上报，最典型）。
-			snap[strings.ToLower(effCode)] = after
-			// Covers 只标记「这次上报覆盖了它」，**不写 A 的任务对象**（BUG-15）
+			if snap != nil {
+				snap[strings.ToLower(effCode)] = after
+			}
+			// Covers 只标记「这次上报覆盖了它」，**不写 A 的任务对象**（BUG-15）。
+			// 登记不能依赖 snap != nil（BUG-12）：loadTaskMap 失败退化为逐次查询时，
+			// 共用一次上报的两个码会各跑一遍动作链。
 			for _, c := range act.Covers {
 				covered[strings.ToLower(c)] = true
 			}

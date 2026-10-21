@@ -1,6 +1,78 @@
 # 变更记录
 
-## v1.28.8（当前）
+## v1.28.9（当前）
+
+**本版 = 第二十四份审查报告（BUG-REVIEW.md，25 条）。25 条全部为真（其中 3 条是我上一版引入的
+#5/#12/#20）。另发现并修掉一处**由本轮 UseNumber 改动引发的连带回归**。**
+
+### 高优先级
+
+* **#1 `hasImagePart` 对混合会话永远 false** —— 结构体要求**每条**消息的 `content` 都是数组，
+  而真实请求里 system 与历史轮次是字符串 → `json.Unmarshal` 整体报错 → 直接 return false。
+  于是只要会话里有一条纯文本消息（几乎全部带图请求都这样），`reqHasImage` 恒 false，
+  11133「模型不支持图片」的 hint 永远不触发。改为 `Content any` 逐条判断。
+* **#2 主改写管线没用 UseNumber** —— `prepareBody` 是**每个** chat 请求都走的主路径，
+  默认解码把 >2^53 的 `seed`/微秒时间戳静默改写；而同仓 `rewriteModel`/`clampNToOne`/
+  `prompt.Rewrite`/`InjectPromptCacheKey` 都刻意用了 UseNumber —— 口径自相矛盾。
+  改用 UseNumber 后**连带修掉两处数字分支**：`translateMaxCompletionTokens` 与
+  `clampGPTMinMaxTokens` 只认 `float64`，不补 `json.Number` 会让「别名翻译」和
+  「GPT 系 max_tokens 抬到下限」静默失效（Claude Code 切模型的极小探针又会被 11133 拒）。
+  这两个用例当场把回归抓出来了。
+* **#3 `12153` 用整段 body 子串匹配且无状态码门槛** —— token 数/requestId 片段里出现
+  12153 就被判 `ErrSessionDead`，连续 3 次**永久禁用账号**。裸数字标记加 401/403 门槛，
+  文本标记（Offline user session not found）不设门槛。
+* **#4 业务码错误的 `Error.Status` 仍是真实 HTTP 状态（常 200）** —— 下游按 Status 分支的
+  逻辑全部失效：`ClaimRewardMP` 的 400 降级不触发、`IsBuddyTaskIncomplete` 判不出门槛未达标
+  → 每轮巡检重打一次。`Status` 改为语义状态（`businessCodeStatus` 合成值），
+  另加 `HTTPStatus` 保留真实状态供日志/排障。
+
+### 中优先级
+
+* **#5 硬冷却保护分支只置脏不改状态**（我 v1.28.6 改的）—— 每次并发软冷却都 `dirty.Store(true)`，
+  `startFlusher` 每 5 秒全量重写 state.json。去掉这三处置脏。
+* **#6 `SetCredits` 全仓无调用且不钳负值** —— 补 `<0 钳 0` 并注明仅测试/扩展使用。
+* **#7 小时校验无视「任务已禁用」** —— `checkin_enabled=false` + `checkin_hours=[-1]`
+  （用户照错误文案去关闭任务后的残留）启动直接失败。改为按各任务的 enabled 开关跳过校验。
+* **#9 手动全量刷新余额用无 ctx 版本** —— 46 号最坏 ≈ 7 分钟。改用 Ctx 版并加 10 分钟上界
+  （进程级可取消 ctx 需要更大改造，见下）。
+* **#10 归档关闭时时间范围筛选被忽略** —— `metrics.recent` 没经过 `reqRange` 过滤，
+  用户选「今天/自定义区间」仍看到区间外旧记录。补过滤。
+* **#11 `login.sh` 编译时没把 Go 加进 PATH** —— `signin.sh`/`credit.sh` 早补了，login.sh 漏了，
+  在 `set -euo pipefail` 下直接 `go: command not found` 退出。
+* **#12 `covered` 只在 `snap != nil` 时登记**（我 v1.28.8 改的）—— `loadTaskMap` 失败退化为
+  逐次查询时，共用一次上报的两个码会各跑一遍动作链。登记移出 snap 判断。
+* **#13 任务码大小写口径不一致** —— `autoActionFor` 用 `==`，`taskMapByCode` 用 ToLower；
+  上游一改大小写，队列扫描判「没有该动作」而 runAutoAll 仍命中。改 `EqualFold`。
+* **#14 全冷却兜底不校验 `modelCooled`** —— 对该模型处于 6004/11102 冷却的号照样被选中，
+  `ModelBlockedForRealm` 的结论被兜底绕过，还顺带推进该号 `lastUsed` 把 LRU 带偏。补判据。
+* **#15 `normalizeFrame` 每帧补 `usage: null`** —— 与 OpenAI chunk 形态不一致，
+  严格校验存在性的客户端会拿到 null。改为上游没带就**不写该键**（相关 6 条用例已更新）。
+* **#16 队列信号量抢占不可取消** —— 裸 `sem <- struct{}{}`，并发槽被长任务占满时派发循环卡住、
+  断连也不退出。改 `select + ctx`（`runQueueItems` 增加 ctx 参数）。
+* **#18 `loadExpiry` 在途时静默吞掉点击** —— 补一句「上一轮查询还在进行中」的反馈。
+* **#20 末端 tier 分支没有 code/status 守卫**（我 v1.28.4 那段之后的邻居）——
+  会把 `upstream_unreachable(502)`/`upstream_timeout(503)`/`waf_ip_blocked` 改写成
+  `model_not_allowed_for_account_type(400)`，把「上游挂了」说成「换模型」。补守卫。
+
+### 低优先级
+
+* **#21 `expiresIn` 上限两处各写一份字面量** —— 导出 `upstream.RefreshTokenExpiresInMax`，
+  login.go 改为引用，避免改一处忘另一处。
+* **#23 `if a != nil` 恒真** —— `a` 由 `accountByUID` 保证非 nil，去掉死条件。
+* **#25 日志频道前缀表漏项** —— `autotask ` / `panel: 领取任务奖励` / `panel: 全部接受` /
+  `panel: 跳过名单更新` 全落到 sys 频道，面板按「任务」筛选时任务日志消失。补齐。
+* **#17 / #19 / #22 / #24 死代码与文档口径**：`resolveModel` 永不返回空串（相关 `realm == ""`
+  退化分支是死代码）、若干导出 API 仅单测使用、`chatPaths` 恒单元素 —— 记录在案，
+  本轮只做最小改动（不删导出 API，避免破坏测试与外部调用）。
+
+### 测试
+
+新增 `TestHasImagePartMixedMessages`（字符串+图片混合、纯文本不误判）、
+`TestClassify12153NeedsStatusGate`（401 判死号 / 400 不判 / 文本标记不设门槛）、
+`TestAutoActionForCaseInsensitive`。
+`server 96 / upstream 223 / panel 53 / pool 188`，**全部 0 失败**（15 秒）。
+
+## v1.28.8
 
 **本版 = 第二十三份审查报告（审查报告-应用缺陷.md，20 条）。20 条全部为真，
 其中 4 条（BUG-01/03/15/19）是我最近两版改动引入的。**

@@ -879,7 +879,11 @@ async function loadLogs() {
     // 的最近 100 条（那会把筛选条件之外、时间范围之外的请求显示出来）。
     // 只有归档关闭时才回落到内存指标，保证没有归档的部署仍能看到最近请求。
     const archiveOn = !!(metrics && metrics.archive && metrics.archive.enabled);
-    const recent = archiveOn ? (requestRows.entries || []) : (metrics.recent || []);
+    // 归档关闭时回落到内存最近 100 条，但**同样要过时间范围筛选**（BUG-10）：
+    // 此前直接整份喂给表格，用户选「今天 / 自定义区间」仍会看到区间外的旧记录，
+    // 与筛选器文案自相矛盾。
+    const recent = archiveOn ? (requestRows.entries || [])
+      : (metrics.recent || []).filter(e => !e || !e.time || inReqRange(e.time));
     renderRequestMetrics(metrics, recent);
     const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
     box.innerHTML = entries.length
@@ -2872,7 +2876,11 @@ function renderExpirySnapshot(d) {
 
 async function loadExpiry(force) {
   if (!$('expBox')) return;
-  if (expFetching) return;
+  if (expFetching) {
+    // 上一轮还在飞：给一句反馈，别让用户以为按钮坏了（BUG-18）
+    $('expNote').textContent = '上一轮查询还在进行中，请稍候…';
+    return;
+  }
   const fresh = lastPackages && (Date.now() - lastPackagesAt) < EXP_FRESH_MS;
   if (fresh && !force) { renderExpiry(lastPackages); return; }
   expFetching = true;

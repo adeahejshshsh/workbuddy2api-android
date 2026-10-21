@@ -541,7 +541,7 @@ dispatch:
 	q.mu.Unlock()
 
 	scanOK = true // 成功交给 runQueueItems 负责复位
-	go p.runQueueItems(accts, items, concurrency, seq)
+	go p.runQueueItems(ctx, accts, items, concurrency, seq)
 	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v）", len(items), concurrency, growth)
 	return true, len(items), seq, "", "ok"
 }
@@ -559,7 +559,7 @@ func (p *Panel) RunGrowthQueueOnce() {
 
 // runQueueItems 队列执行主体：按账号分组，账号内串行（per-account 锁），
 // 账号间并发（信号量）。每项结果写回队列状态。
-func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurrency, seq int) {
+func (p *Panel) runQueueItems(ctx context.Context, accts []queueAccount, items []queueItem, concurrency, seq int) {
 	q := p.queue()
 	defer func() {
 		q.mu.Lock()
@@ -583,9 +583,16 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
+dispatchQueue:
 	for _, one := range accts {
-		// 抢槽前置（bug-09，与 packages / syncNicknames 同口径）
-		sem <- struct{}{}
+		// 抢槽前置（bug-09，与 packages / syncNicknames 同口径），
+		// 并且要能被断连/停机打断（BUG-16）：裸阻塞时并发槽被长任务占满，
+		// 派发循环就卡在 channel 上，客户端断开也不退出。
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break dispatchQueue
+		}
 		wg.Add(1)
 		go func(one queueAccount) {
 			defer wg.Done()

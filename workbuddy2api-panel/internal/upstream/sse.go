@@ -585,9 +585,9 @@ func normalizeFrame(obj map[string]any) map[string]any {
 		} else {
 			out["usage"] = rawUsage
 		}
-	} else {
-		out["usage"] = nil
 	}
+	// 上游没带 usage 时**不要**写 usage:null（BUG-15）：OpenAI chunk 形态是无该键，
+	// 严格校验存在性/类型的客户端会把 null 当非法值。
 	return out
 }
 

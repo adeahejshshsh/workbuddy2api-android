@@ -33,6 +33,9 @@ var taskPrefixes = []string{
 	"checkin ", "activity ", "keepalive ", "balance ", "user-resource ",
 	"panel: 任务", "panel: 一键", "panel: checkin", "panel: 手动",
 	"panel: 队列", "panel: 券码",
+	// BUG-25：以下前缀此前漏了，任务执行/领奖/跳过名单的日志全被归到 sys 频道，
+	// 面板按「任务」筛选时看不到。
+	"autotask ", "panel: 领取任务奖励", "panel: 全部接受", "panel: 跳过名单更新",
 }
 
 // tsPrefixRe log 包默认 flags（日期 时间）产生的行首时间戳。

@@ -22,6 +22,13 @@ CONTAINER="workbuddy2api"
 mkdir -p "$AUTH_DIR"
 
 # login 工具：不存在才编译（源码改动后手动 go build -o login ./cmd/login）
+# Go 必须加进 PATH（BUG-11）：本机（Android / Termux 壳）go 在 $PREFIX/lib/go/bin，
+# 不在默认 PATH 里；signin.sh / credit.sh 早就补了这一行，login.sh 漏了 ——
+# 在 set -euo pipefail 下直接 `go: command not found` 退出。
+PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
+if [[ -d "$PREFIX/lib/go/bin" ]]; then
+    export PATH="$PREFIX/lib/go/bin:$PATH"
+fi
 LOGIN_BIN="./login"
 if [[ ! -x "$LOGIN_BIN" ]]; then
     go build -o "$LOGIN_BIN" ./cmd/login

@@ -755,22 +755,38 @@ func (c *Config) normalizePrompt() error {
 // 实际可能被当成另一个整点照常执行；这里直接快速失败，并在错误信息里指向正确的开关
 // （checkin_enabled / keepalive_enabled），避免用户靠猜哨兵值来配。
 func (c *Config) validateScheduleHours() error {
-	if err := checkHourRange("schedule.checkin_hours", "checkin_enabled", c.Schedule.CheckinHours); err != nil {
-		return err
+	// 任务已显式禁用时不再校验它的小时（BUG-7）：错误文案自己写着「如要关闭该任务
+	// 请设 schedule.X_enabled=false」，用户照做之后如果 hours 里还留着哨兵值，
+	// 启动会直接失败 —— 文案与行为自相矛盾。
+	if c.Schedule.CheckinEnabled {
+		if err := checkHourRange("schedule.checkin_hours", "checkin_enabled", c.Schedule.CheckinHours); err != nil {
+			return err
+		}
 	}
-	if err := checkHourRange("schedule.travel_hours", "travel_enabled", c.Schedule.TravelHours); err != nil {
-		return err
+	if c.Schedule.TravelEnabled {
+		if err := checkHourRange("schedule.travel_hours", "travel_enabled", c.Schedule.TravelHours); err != nil {
+			return err
+		}
 	}
-	if err := checkHourRange("schedule.activity_hours", "activity_enabled", c.Schedule.ActivityHours); err != nil {
-		return err
+	if c.Schedule.ActivityEnabled {
+		if err := checkHourRange("schedule.activity_hours", "activity_enabled", c.Schedule.ActivityHours); err != nil {
+			return err
+		}
 	}
-	if err := checkHourRange("schedule.keepalive_hours", "keepalive_enabled", c.Schedule.KeepaliveHours); err != nil {
-		return err
+	if c.Schedule.KeepaliveEnabled {
+		if err := checkHourRange("schedule.keepalive_hours", "keepalive_enabled", c.Schedule.KeepaliveHours); err != nil {
+			return err
+		}
 	}
-	if err := checkHourRange("schedule.blackcat_hours", "blackcat_enabled", c.Schedule.BlackcatHours); err != nil {
-		return err
+	if c.Schedule.BlackcatEnabled {
+		if err := checkHourRange("schedule.blackcat_hours", "blackcat_enabled", c.Schedule.BlackcatHours); err != nil {
+			return err
+		}
 	}
-	return checkHourRange("schedule.growth_hours", "growth_enabled", c.Schedule.GrowthHours)
+	if c.Schedule.GrowthEnabled {
+		return checkHourRange("schedule.growth_hours", "growth_enabled", c.Schedule.GrowthHours)
+	}
+	return nil
 }
 
 func checkHourRange(field, switchKey string, hours []int) error {
