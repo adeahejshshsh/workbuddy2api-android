@@ -1,6 +1,57 @@
 # 变更记录
 
-## v1.28.1（当前）
+## v1.28.2（当前）
+
+**本版 = 第十七份审查报告（BUG-REVIEW-2026-10-21.md，A1-A4 / B1 / C1-C2 / D1-D4 共 11 条）。
+逐条复核后**11 条全部为真**，无一条误报。其中 A4 是唯一会造成用户可感知损失的：上游抖一次就吃 1/3 次跳过额度。**
+
+### 高优先级
+
+* **A4 回读失败被当成「进度未变化」→ 好账号+可做任务被砍 7 天** —— `runGrowthQueued`
+  与 `accountTaskAutoAll` 两处 `after, _ = p.taskByCode*` 把回读错误丢掉，`after==nil`
+  于是 `progressed` 恒 false，调用方 `skipNote` 记一笔「连续无效」；上游每 5xx/超时一次
+  吃 1/3 次机会，三次抖动后该 (账号, 任务) 被跳过 7 天 —— 而它什么都没做错。
+  新增哨兵 `errTaskReadback` + 判据抽成纯函数 `queueVerdictOf(err, progressed)`，
+  三档分流：有进展 → 清零；动作失败/确实没进展 → 计入跳过；**回读失败 → 两样都不做**。
+  面板侧另标 `progress_error`，不再把「不知道」显示成「没动」。
+* **A1/A2 CI 发布链** —— 版本号回落成 `dev` 导致 `-X main.appVersion=dev` 等于没注入、
+  断言 `grep "dev"` 恒真（假绿）、publish 阶段 `TAG != SRC` 任何 tag 都发不出 Release；
+  断言/打包/上传三步缺 `working-directory`，产物写进模块目录而校验在仓库根执行。
+  改成三级回落（根 VERSION → 子目录 VERSION → `git describe`）+ **取不到就 exit 1**，
+  并给三步补齐同一 `working-directory`（`uses` 步骤用显式路径）。
+  说明：该 workflow 位于 `workbuddy2api-panel/.github/`，在本仓（根目录不放 .github）
+  不会被执行；修的是它自己声明的上游布局。
+
+### 中优先级
+
+* **A3 队列接口吞掉 JSON 解析错误** —— `_ = json.NewDecoder(...).Decode(&body)` 失败后
+  仍按默认值真的启动一轮扫描与执行，前端只看到「已启动」。改为解析失败回 400
+  （`io.EOF` 仍按默认值跑），把诊断线索还回来。
+* **B1 `redisstore.Close()` 的 10s 超时形同虚设** —— 超时只约束第一段等待，
+  紧接着无界 `workerWG.Wait()` 又把耗时放开，单个 worker 卡在慢写就能拖穿
+  `run.sh` 的 8s 停机预算 → `kill -9` 把最后一次 Flush 夺走。第二段同样套
+  `select` + 超时，`Close()` 保证有界返回；两段时长提成变量供测试压到毫秒级。
+* **C2 升级后浏览器可能继续跑旧 `app.js`** —— 资源与二进制同体但 URL 没版本串，
+  启发式缓存会给出「新后端 + 旧前端」。加 `Cache-Control: no-cache` + 内容 ETag，
+  命中 `If-None-Match` 回 304 空体（启动时算一次指纹，不逐请求重算）。
+* **C1 到期卡片文案与判据各说一套** —— 过滤条件是「未来有批次」（无 7 天上限），
+  空态却写「7 天内无到期积分」。文案改成「无未到期积分」，与判据对齐。
+
+### 低优先级（潜伏雷区）
+
+* **D1** `for _, st := range` 遮蔽外层 `*chatStat st` → 循环变量改名 `as`。
+* **D2** `names, infos := ...` 遮蔽命名返回值 → 改赋值，避免日后改裸 return 退化成零值。
+* **D3** 构造期 `loadTierLocked()` 无锁调用（注释要求持锁）→ 显式 `p.mu.Lock()`。
+* **D4** `model_tier.json.tmp` 固定名 → 复用 `auth.ReplaceAtomic`（唯一 tmp + 原子替换）。
+
+### 测试
+
+* 新增 `TestQueueVerdictOf`（5 条分流，含「回读失败但已确认有进展」）、
+  `TestTasksRunQueueRejectsBadJSON`、`TestStaticAssetCacheValidation`（200 + ETag + 304 空体 +
+  两个资源指纹不许撞）、`TestCloseBoundedWhenWorkerStuck`（卡死 worker 下 Close 0.06s 返回）。
+  全量 **753 通过 / 0 失败**（panel 45→48，redisstore 6→7）。
+
+## v1.28.1
 
 **本版 = 面板「模型与档位」新增 `1017` 版本徽标：WorkBuddy 目录里的 DeepSeek 4.1 Flash
 （`cn:` / `global:` / `-sg` 三条线）跟官方直连的 `deepseek-flash` 用同一套判据，一眼看出是哪个版本。**

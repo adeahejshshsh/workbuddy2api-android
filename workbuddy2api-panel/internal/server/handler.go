@@ -1306,13 +1306,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		degraded, modelCooled, realmHealthy := 0, 0, 0
 		var parts []string
-		for _, st := range h.cfg.Pool.List() {
-			deg := !st.DegradeUntil.IsZero() && now.Before(st.DegradeUntil)
+		// 循环变量必须另起名（bug D1）：外层 st 是本请求的 *chatStat，这里再用 st
+		// 就是遮蔽 —— 目前循环体只读所以没出事，但只要有人在循环里写 st.status
+		// 想改统计，改的是 pool.Status 的副本，静默无效、日志照旧显示 200。
+		for _, as := range h.cfg.Pool.List() {
+			deg := !as.DegradeUntil.IsZero() && now.Before(as.DegradeUntil)
 			if deg {
 				degraded++
 			}
 			cooled := false
-			for _, m := range st.RateLimitedModels {
+			for _, m := range as.RateLimitedModels {
 				if m.Model == bareModel {
 					cooled = true
 					break
@@ -1323,29 +1326,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			// 该号是否属于本次请求的域：跨域号即使健康也不会被选中（选号有 realm 谓词），
 			// 必须显式标出来，否则"有个号显示 ok 却依然 503"读不懂（用户实测）。
-			inRealm := realm == "" || st.Realm == realm
-			if inRealm && !st.Disabled && !st.Paused && !deg && !cooled {
+			inRealm := realm == "" || as.Realm == realm
+			if inRealm && !as.Disabled && !as.Paused && !deg && !cooled {
 				realmHealthy++
 			}
 			if len(parts) < 4 {
-				short := st.UID
+				short := as.UID
 				if len(short) > 8 {
 					short = short[:8]
 				}
-				if st.Realm != "" {
-					short += "/" + st.Realm
+				if as.Realm != "" {
+					short += "/" + as.Realm
 				}
 				switch {
-				case st.Disabled:
+				case as.Disabled:
 					parts = append(parts, short+":disabled")
-				case st.Paused:
+				case as.Paused:
 					parts = append(parts, short+":paused")
 				case deg:
-					parts = append(parts, short+":degraded "+time.Until(st.DegradeUntil).Truncate(time.Second).String())
+					parts = append(parts, short+":degraded "+time.Until(as.DegradeUntil).Truncate(time.Second).String())
 				case cooled:
 					parts = append(parts, short+":model_cooled")
-				case st.InFlight > 0:
-					parts = append(parts, short+":in_flight="+fmt.Sprintf("%d", st.InFlight))
+				case as.InFlight > 0:
+					parts = append(parts, short+":in_flight="+fmt.Sprintf("%d", as.InFlight))
 				default:
 					parts = append(parts, short+":ok")
 				}

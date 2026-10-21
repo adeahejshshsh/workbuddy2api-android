@@ -1672,14 +1672,22 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			continue
 		}
 		var after *upstream.Task
+		var rerr error
 		if isMPTaskCode(effCode) {
-			after, _ = p.taskByCodeWaitingMP(a, effCode) // 与 Web 口径同等待（bug #6）
+			after, rerr = p.taskByCodeWaitingMP(a, effCode) // 与 Web 口径同等待（bug #6）
 		} else {
-			after, _ = p.taskByCodeWaiting(a, effCode)
+			after, rerr = p.taskByCodeWaiting(a, effCode)
 		}
 		item["status"] = "done"
 		item["message"] = msg
-		item["progress_after"] = taskProgressText(after)
+		if rerr != nil {
+			// 回读失败（bug A4）：动作已执行，但拿不到执行后的进度。
+			// 不能写成 progress_after="" 让前端以为"进度没动"；after 为 nil 时
+			// 下面的领奖分支本来也进不去，这里只把原因如实报给前端。
+			item["progress_error"] = rerr.Error()
+		} else {
+			item["progress_after"] = taskProgressText(after)
+		}
 		// 进度达标即自动领奖（mp 任务走 chat 域 mp 口径，其余 Web 端接口）。
 		// 领奖失败不掩盖主流程结果：status 仍为 done，附加 claim_error 供前端提示。
 		if after != nil && after.Claimable {

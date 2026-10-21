@@ -188,6 +188,12 @@ func (u *Upstash) Dropped() int64 {
 	return u.dropped.Load()
 }
 
+// Close 的两段等待上限（变量而非常量：测试要把它们压到毫秒级来验证「有界返回」）。
+var (
+	closeDrainTimeout  = 10 * time.Second // 等在途/排队的写跑完
+	closeWorkerTimeout = 5 * time.Second  // 等 worker 退出
+)
+
 // Close 等待已提交的异步写全部执行完毕，再关底层 redis 连接；幂等。
 // 之后新提交的写直接丢弃（goWrite 的 done 检查）。停机路径在 pool.Close() 后调用：
 // pool 的最后一次 Flush→SaveState 已提交，本方法保证它写完才返回。
@@ -203,7 +209,7 @@ func (u *Upstash) Close() error {
 	go func() { u.wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(closeDrainTimeout):
 		// 兜底超时（单写上限 5s，10s 富余）：卡死的写不应阻塞进程退出。
 		log.Printf("[redisstore] WARN: Close 等待在途写超时，放弃（镜像可能未写完）")
 	}
@@ -214,7 +220,17 @@ func (u *Upstash) Close() error {
 		u.qClosed = true
 	}
 	u.submitMu.Unlock()
-	u.workerWG.Wait()
+	// worker 退出也必须**有界**（bug B1）：上面那个 10s 超时只约束了第一段等待，
+	// 紧接着无界的 workerWG.Wait() 又把 Close 的实际耗时放开——单个 worker 卡在
+	// 一次慢写（Upstash 重连时可达 Read/WriteTimeout 量级）就能把 main 的
+	// `defer store.Close()` 拖穿 run.sh 的 8s 停机预算，最后 kill -9 把那次 Flush 夺走。
+	drained := make(chan struct{})
+	go func() { u.workerWG.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(closeWorkerTimeout):
+		log.Printf("[redisstore] WARN: Close 等待 worker 退出超时，放弃（镜像可能未写完）")
+	}
 	return u.closeClient()
 }
 

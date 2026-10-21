@@ -61,10 +61,22 @@ jobs:
       - name: 取版本号与 Go 模块目录
         id: ver
         run: |
-          V=$(cat VERSION 2>/dev/null || cat workbuddy2api-panel/../VERSION 2>/dev/null || echo dev)
+          # 三级回落：仓库根 VERSION → 子目录 VERSION → git describe。
+          # 都取不到就**明确失败**（bug A1）：以前回落成 "dev"，于是
+          #   · -X main.appVersion=dev 等于没注入；
+          #   · 断言 grep "dev" 在二进制里到处命中 → 假绿；
+          #   · publish 阶段 TAG(1.28.1) != SRC(dev) → 任何 tag 都发不出 Release。
+          V=$(cat VERSION 2>/dev/null || cat workbuddy2api-panel/VERSION 2>/dev/null \
+              || git describe --tags --abbrev=0 2>/dev/null || true)
+          V="${V#v}"
+          if [ -z "$V" ] || [ "$V" = dev ]; then
+            echo "::error::取不到版本号（仓库根 VERSION 缺失且无可用 tag），拒绝用 dev 继续"
+            exit 1
+          fi
           if [ -f go.mod ]; then D="."; else D="workbuddy2api-panel"; fi
           echo "v=$V" >> "$GITHUB_OUTPUT"
           echo "dir=$D" >> "$GITHUB_OUTPUT"
+          echo "版本号 $V，模块目录 $D"
 
       - name: 构建（剥离符号 + 注入版本，对齐本地发布口径）
         env:
@@ -75,7 +87,10 @@ jobs:
         run: go build -ldflags "-s -w -X main.appVersion=${{ steps.ver.outputs.v }}" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
 
       # 版本串断言：二进制必须含源码 appVersion（防交叉编译矩阵里编错树/漏 ldflags）
+      # working-directory 必须与构建步一致（bug A2）：产物写在 ${{ steps.ver.outputs.dir }}，
+      # 断言/打包若在仓库根执行，产物不在 cwd → grep 报 No such file、zip/tar 也找不到文件。
       - name: 断言二进制版本串
+        working-directory: ${{ steps.ver.outputs.dir }}
         run: |
           BIN="wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}"
           if ! grep -qa "${{ steps.ver.outputs.v }}" "$BIN"; then
@@ -85,6 +100,7 @@ jobs:
           echo "version assert OK: ${{ steps.ver.outputs.v }}"
 
       - name: 打包（windows=zip 三件套，其余=tar.gz）
+        working-directory: ${{ steps.ver.outputs.dir }}
         run: |
           V="${{ steps.ver.outputs.v }}"
           V="${V%-panel}"   # 文件名不带 -panel 后缀（wb2api-panel-v1.2.3-... 既有惯例）
@@ -100,10 +116,11 @@ jobs:
           esac
           echo "name=$NAME" >> "$GITHUB_ENV"
 
+      # uses 步骤没有 working-directory，路径要显式带上模块目录（bug A2）
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.name }}
-          path: ${{ env.name }}
+          path: ${{ steps.ver.outputs.dir }}/${{ env.name }}
           retention-days: 7
 
   # 仅 tag 触发：校验 tag == 源码版本（-ci 演练 tag 豁免）→ 汇总资产 → 建 Release
@@ -119,8 +136,16 @@ jobs:
           fetch-depth: 0   # 取历史 tag 算 compare 链接
       - name: tag 与源码版本一致性断言
         run: |
-          # 版本唯一来源：仓库根 VERSION（不要再从 main.go 里 grep —— 那里是 "dev"）
-          SRC=$(cat VERSION 2>/dev/null || echo dev)
+          # 版本唯一来源：仓库根 VERSION（不要再从 main.go 里 grep —— 那里是 "dev"）。
+          # 与 build 阶段同口径的三级回落 + 明确失败（bug A1）：回落到 "dev" 会让
+          # 一致性断言永远不等，任何非 -ci tag 都发不出 Release。
+          SRC=$(cat VERSION 2>/dev/null || cat workbuddy2api-panel/VERSION 2>/dev/null \
+                || git describe --tags --abbrev=0 2>/dev/null || true)
+          SRC="${SRC#v}"
+          if [ -z "$SRC" ] || [ "$SRC" = dev ]; then
+            echo "::error::取不到源码版本号（仓库根 VERSION 缺失），拒绝建 Release"
+            exit 1
+          fi
           TAG="${GITHUB_REF_NAME#v}"
           if [[ "$GITHUB_REF_NAME" != *-ci ]]; then
             if [[ "$TAG" != "$SRC" ]]; then

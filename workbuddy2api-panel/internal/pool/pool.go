@@ -116,7 +116,13 @@ func New(stateFp string) *Pool {
 	p.tierFile = tierFile
 	// 构造时就把等级事实读进内存（文件很小、每进程一次）：ModelDeniedForAllAccounts
 	// 在 /v1/models 与面板模型页的热路径上被调用，不该在那里做惰性 IO。
+	//
+	// 显式持锁调用（bug D3）：loadTierLocked 的注释要求「调用方必须持 p.mu」，
+	// 构造期单线程所以现在安全，但契约已经失效 —— 以后 New() 里插入任何 goroutine
+	// 或把 New 改成可并发调用，这里就是对 p.tier 的数据竞争。
+	p.mu.Lock()
 	p.loadTierLocked()
+	p.mu.Unlock()
 	return p
 }
 

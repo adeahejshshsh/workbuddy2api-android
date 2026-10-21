@@ -11,7 +11,9 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -303,7 +305,14 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 		Concurrency int  `json:"concurrency"`
 		Growth      bool `json:"growth"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	// 解析失败必须回 400（bug A3）：以前 `_ = ...Decode(...)` 把错误丢掉，
+	// 畸形/空 JSON 也照样按默认值（concurrency=1, growth=true）真的启动一轮扫描与执行，
+	// 前端只看到"已启动"，参数为什么不生效完全查不到，运维也丢掉 400 这条诊断线索。
+	// 空 body 是合法输入（按默认值跑），所以只放过 io.EOF。
+	if derr := json.NewDecoder(r.Body).Decode(&body); derr != nil && !errors.Is(derr, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+derr.Error())
+		return
+	}
 	if !body.Growth {
 		body.Growth = true
 	}
@@ -596,9 +605,17 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				} else {
 					p.queueMarkAt(seq, i, "done", msg)
 				}
-				// 执行了但没进展 → 记一笔；连续 skipFailLimit 次就把该 (账号,任务码)
-				// 砍出待办，别再天天"做了也没用"（7 天后自动放回，或一键清空）。
-				if err != nil || !progressed {
+				switch queueVerdictOf(err, progressed) {
+				case verdictReadbackFailed:
+					// 回读失败（bug A4）：动作已经执行过，只是拿不到执行后的进度。
+					// **既不计入跳过名单、也不清零计数** —— 上游一次 5xx/超时就白吃
+					// 1/3 次机会，三次抖动后好账号 + 可做任务被砍出待办 7 天。
+					p.queueMarkAt(seq, i, "error", msg+"；"+err.Error())
+					log.Printf("panel: 任务回读失败 uid=%s code=%s（本轮不计入跳过名单）: %v",
+						one.a.UID, code, err)
+				case verdictNoProgress:
+					// 执行了但没进展 → 记一笔；连续 skipFailLimit 次就把该 (账号,任务码)
+					// 砍出待办，别再天天"做了也没用"（7 天后自动放回，或一键清空）。
 					why := "进度未变化（上游未计入这次行为）"
 					if err != nil {
 						why = errBrief(err)
@@ -615,7 +632,7 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 						p.queueMarkAt(seq, i, "done", msg+note)
 					}
 					log.Printf("panel: 任务无效 uid=%s code=%s %s（%s）", one.a.UID, code, note, why)
-				} else {
+				default:
 					p.skipReset(one.a.UID, code) // 有效 → 清掉历史失败计数
 				}
 				if !sleepAB(one.a.UID, reportGap) {
@@ -690,10 +707,44 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 	return len(codes)
 }
 
+// errTaskReadback 回读失败（动作已执行，但拿不到执行后的进度）。
+//
+// 与动作失败严格区分：动作失败是「做了没用」，回读失败是「不知道有没有用」。
+// 后者绝不能喂跳过名单（bug A4）—— 上游一次列表 5xx/超时抖动就白吃
+// 1/3 次机会，三次抖动后好账号 + 可做任务被砍出待办 7 天，而它什么都没做错。
+var errTaskReadback = errors.New("上游回读失败")
+
+// queueVerdict 队列一项执行结果的三种归宿。
+type queueVerdict int
+
+const (
+	verdictProgress       queueVerdict = iota // 有进展（或已领奖）→ 清零跳过计数
+	verdictNoProgress                         // 执行了但没进展 → 计入跳过名单
+	verdictReadbackFailed                     // 回读失败 → 两样都不做（不知道 ≠ 没做）
+)
+
+// queueVerdictOf 把 (err, progressed) 判成三种归宿。
+//
+// 抽成纯函数是为了让 bug A4 的判据可以单测：跳过名单一旦被回读抖动污染，
+// 要等 7 天或者用户手动清空才恢复，靠人工回归太难发现。
+func queueVerdictOf(err error, progressed bool) queueVerdict {
+	switch {
+	case progressed:
+		// 已知有进展（进度前进或已领奖）：不需要猜，直接清零计数。
+		return verdictProgress
+	case errors.Is(err, errTaskReadback):
+		return verdictReadbackFailed
+	default:
+		// 动作失败与「执行了但没进展」同归：都是确凿的"这次没换来东西"。
+		return verdictNoProgress
+	}
+}
+
 // runGrowthQueued 执行一项队列任务（动作 + 回读 + 自动领奖；与 accountTaskAuto
 // 同语义，结果以文字返回）。
 // v1.22.0 起多返回一个 progressed：本次执行到底有没有换来进展（进度前进 / 领到奖）。
-// 调用方用它喂跳过名单 —— "执行了但没进展"正是要把该任务砍出待办的判据。
+// 调用方用它喂跳过名单 —— "执行了但没进展"正是要把该任务砍出待办的判据；
+// 回读失败（errTaskReadback）则是第三档，既不计入跳过名单也不清零计数。
 func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, bool, error) {
 	act := autoActionFor(code)
 	if act == nil {
@@ -716,10 +767,18 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, bool, error)
 		return "", false, err
 	}
 	var after *upstream.Task
+	var rerr error
 	if isMP {
-		after, _ = p.taskByCodeMP(a, code)
+		after, rerr = p.taskByCodeMP(a, code)
 	} else {
-		after, _ = p.taskByCodeWaiting(a, code)
+		after, rerr = p.taskByCodeWaiting(a, code)
+	}
+	// 回读失败 ≠ 没进展（bug A4）：动作已经执行过，只是拿不到执行后的状态。
+	// 以前 rerr 被 `_` 丢掉 → after==nil → progressed 恒 false → 调用方记一次
+	// 「连续无效」，上游每抖动一次吃 1/3 次机会，三次后该 (账号,任务) 被跳过 7 天。
+	// 用哨兵错误把这种「不知道」交给调用方，由它决定不计入跳过名单。
+	if rerr != nil {
+		return msg, false, fmt.Errorf("%w: %v（动作已执行，但拿不到执行后的进度）", errTaskReadback, rerr)
 	}
 	claimed := false
 	if after != nil && after.Claimable {

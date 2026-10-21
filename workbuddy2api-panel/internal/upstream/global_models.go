@@ -111,7 +111,11 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 
 	c.globalModels.Lock()
 	if len(c.globalModels.names) > 0 && time.Since(c.globalModels.fetched) < globalModelsTTL {
-		names, infos := c.globalModels.names, c.globalModels.infos
+		// 用赋值而不是 :=（bug D2）：函数的返回值是命名返回 (names, infos)，
+		// 这里 `names, infos := ...` 会造两个同名局部变量 —— 现在因为紧跟一行
+		// `return names, infos` 恰好还正确，但只要以后改成裸 return 或加 defer，
+		// 缓存命中就会退化成返回零值。
+		names, infos = c.globalModels.names, c.globalModels.infos
 		c.globalModels.Unlock()
 		return names, infos
 	}

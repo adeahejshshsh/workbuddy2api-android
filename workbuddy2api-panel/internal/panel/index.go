@@ -9,8 +9,11 @@
 package panel
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"net/http"
+	"strings"
 )
 
 //go:embed index.html
@@ -44,18 +47,50 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 }
 
+// contentETag 静态资源内容指纹（sha256 前 8 字节）。
+// 包级变量只算一次：资源是 go:embed 的常量，内容不会在进程生命周期内变化。
+func contentETag(body []byte) string {
+	sum := sha256.Sum256(body)
+	return `"` + hex.EncodeToString(sum[:8]) + `"`
+}
+
+// 内容指纹（启动即算好，避免每次请求重算 300KB 的 sha256）。
+var (
+	indexHTMLETag = contentETag(indexHTML)
+	appJSETag     = contentETag(appJS)
+)
+
+// writeStaticAsset 输出静态资源并处理条件请求（bug C2）。
+//
+// 为什么必须带缓存校验：app.js / index.html 与二进制同体，URL 却固定不变
+// （引用路径没有版本串）。换二进制升级后，浏览器的启发式缓存可能继续用旧 JS：
+// 新后端 + 旧前端 → 新字段不显示、按钮报 400，用户会以为后端坏了。
+// 这里用 no-cache + ETag：每次都回源校验，内容没变就回 304，既不跑旧代码也不浪费带宽。
+func writeStaticAsset(w http.ResponseWriter, r *http.Request, contentType, etag string, body []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("ETag", etag)
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		for _, tag := range strings.Split(inm, ",") {
+			// 兼容弱校验前缀 W/
+			if strings.TrimPrefix(strings.TrimSpace(tag), "W/") == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
 // index 输出面板页面（静态无秘密；数据接口 /panel/api/* 才走鉴权）。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(indexHTML)
+	writeStaticAsset(w, r, "text/html; charset=utf-8", indexHTMLETag, indexHTML)
 }
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(appJS)
+	writeStaticAsset(w, r, "text/javascript; charset=utf-8", appJSETag, appJS)
 }

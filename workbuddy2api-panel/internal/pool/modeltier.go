@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
 // tierFacts 落盘形态（与 state.json 同目录的 model_tier.json，独立文件避免动
@@ -74,13 +76,12 @@ func (p *Pool) saveTierLocked() {
 	if err != nil {
 		return
 	}
-	tmp := p.tierFile + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// 唯一临时名 + 原子替换（bug D4）：固定 `p.tierFile+".tmp"` 时，同目录两个写入方
+	// （双实例、并行测试）会共用同一个临时文件 —— A 写完、B 覆盖、A 再 rename，
+	// 落盘的就成了 B 的内容（或者 rename 直接失败）。auth.ReplaceAtomic 已经是
+	// 「唯一 tmp 名 + 原子替换 + EBUSY 原地覆写」的标准写法，这里对齐复用它。
+	if err := auth.ReplaceAtomic(p.tierFile, raw, 0o600); err != nil {
 		log.Printf("WARN: [pool] model_tier 落盘失败: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, p.tierFile); err != nil {
-		log.Printf("WARN: [pool] model_tier 改名失败: %v", err)
 	}
 }
 

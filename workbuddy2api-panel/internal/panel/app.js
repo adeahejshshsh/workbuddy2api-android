@@ -2737,7 +2737,7 @@ function renderExpiry(d) {
   // "最快过期的排最前"这个唯一重要的顺序成立，且不分域。
   //
   // 排序键用最早到期批次的日期（expBatches 已按日期升序，故 [0] 即最早）。
-  // 查询失败的账号、以及 7 天内无到期的账号没有可比较的到期时间，统一排在最后，
+  // 查询失败的账号、以及无未到期批次的账号没有可比较的到期时间，统一排在最后，
   // 保持它们原本的相对顺序（稳定排序）。
   const keyed = list.map(a => {
     let key = null;
@@ -2763,7 +2763,7 @@ function renderExpiry(d) {
     if (!bs.length) {
       return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
         '<span class="exp-nm">' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</span>' +
-        '<span class="exp-main">7 天内无到期积分</span></div>';
+        '<span class="exp-main">无未到期积分</span></div>';
     }
     const first = bs[0];
     const days = expDaysLeft(first.date, today);
