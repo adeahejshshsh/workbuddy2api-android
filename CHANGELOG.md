@@ -31,6 +31,11 @@
 * expert 路径的 `X-IDE-Version` 由硬编码 `5.5.6` 改为按 realm 生成；
 * 新增 `upstream.client_version_global` / `cli_version_global`（空 = 内置默认），
   优先级：realm 专用显式 > 通用显式 > realm 内置默认。
+* **global 目录探测收敛为单路**（kk-cao `9a4a4a87` 第二部分）：此前并发桌面端 / IDE / CLI
+  三路取并集，能多拿 auto-chat / deep-model / o4-mini / enhance-1.0 四个 chat 模型，
+  代价是**同一账号在几毫秒内出现三种客户端身份** —— 风控视角就是「一个账号同时换三个客户端」。
+  那四个模型用处不大，换身份一致性更划算。CN 目录探测仍用 IDE 身份（实测桌面 UA 会多出
+  约 8 条 CN 基址根本不存在的死条目）。
 
 ### 三、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
@@ -43,7 +48,6 @@
 | kk-cao 提交 | 内容 | 判断 |
 |---|---|---|
 | `9214bf72` | `rateLimitMeta` 未声明 `detail` 导致账号池表格空白 | **不需要** —— 我们 v1.29.0 起就是 `let detail;`（`app.js:311`） |
-| `9a4a4a87` 二 | global 目录探测只留桌面端一路（去掉并发 IDE/CLI） | 可选：能减少「同一账号秒级三种身份」，但会少拿 4 个 chat 模型 |
 | `c515ae1c` / `cbefb1bb` | 面板可改目录探测 UA / 版本字段成对排列 | 纯 UI，按需 |
 
 ### 测试
