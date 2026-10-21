@@ -9,7 +9,7 @@
 > [!IMPORTANT]
 > **使用声明与免责声明见文末（必读）**：本项目仅供个人管理自己的账号；反对并禁止批量注册、
 > 售卖额度、二次加壳与卡密分发。上游已于 2026-10-21 停止维护，上游随时可能彻底收紧导致不可用，
-> 风险自担。协议为**保留所有权利（All Rights Reserved）**。
+> 风险自担。本项目协议为**保留所有权利（All Rights Reserved）**。
 
 * 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34
 * 下载：[Releases](../../releases) —— 装 APK，覆盖安装即升级（账号与 api_key 保留）
