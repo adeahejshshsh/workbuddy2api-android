@@ -9,6 +9,8 @@ COPY . .
 # 优先级：构建参数 APP_VERSION → 上下文里的 VERSION → git tag → dev。
 # 用法：docker build --build-arg APP_VERSION=$(cat VERSION) .
 ARG APP_VERSION=""
+# 构建源改用国内镜像（上游 PR #230）：默认 proxy.golang.org 在国内常被墙。
+ENV GOPROXY=https://goproxy.cn,direct
 RUN VER="${APP_VERSION:-$(cat VERSION 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo dev)}" \
  && VER="${VER#v}" \
  && LDF="-s -w -X main.appVersion=$VER" \

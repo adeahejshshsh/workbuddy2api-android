@@ -42,6 +42,7 @@ const (
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrUpstreamBusy                  // 6021 queue.full 渠道级容量满载 → 不罚号、不轮转，末端 503 upstream_busy
+	ErrChannelRefused                // 11‑-128 request illegal 通道校验失败（上游认为非官方客户端）→ 不罚账号
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -69,6 +70,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrUpstreamBusy:
 		return "upstream_busy"
+	case ErrChannelRefused:
+		return "channel_refused"
 	case ErrImageInvalid:
 		return "image_invalid"
 	case ErrAccountFault:
@@ -552,6 +555,12 @@ func Classify(status int, body string) ErrKind {
 		}
 		return ErrSessionDead
 	}
+	// 通道校验失败必须先于 accountFault 判（上游 PR #233）：11‑-128 的 msg 与
+	// 11140 同为 "request illegal"，而 accountFaultMarkers 里就有这句 —— 先判会把
+	// 健康账号判成账号故障并硬禁用。双条件（code 11‑-128 + 文案）才分流到通道。
+	if isChannelRefused(body) {
+		return ErrChannelRefused
+	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
 			return ErrAccountFault
@@ -628,6 +637,13 @@ func Classify(status int, body string) ErrKind {
 				return ErrImageInvalid
 			}
 		}
+	}
+	// 11‑-128 通道校验失败（上游 PR #233）：msg 同为 "request illegal"，但语义是
+	// 「上游认为请求不是官方客户端发出的」——账号本身健康（官方客户端用同一账号正常）。
+	// 必须 code + 文案双条件：11‑-128 还承载内容审核变体（"blocked by security policy"，
+	// 归 ErrContentBlocked），按 code 一刀切会误判。
+	if isChannelRefused(body) {
+		return ErrChannelRefused
 	}
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
@@ -2531,4 +2547,29 @@ func truncate(s string, n int) string {
 // 该形态与具体账号无关：换号在任何时刻都撞同一堵墙，正确处置是不罚号不轮转。
 func isQueueFullBody(lower string) bool {
 	return strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full")
+}
+
+// accountRestrictedMsg 账号级限制与通道校验失败共用的文案（上游 PR #233）。
+// 注意它**不能**当通用 marker：11‑-128（通道校验）与 11140（账号限制）都是这句。
+const accountRestrictedMsg = "request illegal"
+
+// isChannelRefused 11‑-128 通道校验失败（code + 文案双条件）。
+func isChannelRefused(body string) bool {
+	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
+		return false
+	}
+	// 上游这个业务码在报文里不是合法 JSON 数字（含连字符/非断连字符变体），
+	// 按**原文子串**判，不走 JSON 解析。三种写法都覆盖。
+	return strings.Contains(body, "11\u2011-128") ||
+		strings.Contains(body, "11‑-128") ||
+		strings.Contains(body, "11‑-128")
+}
+
+// IsAccountRestricted 11140 账号级限制（code + 文案双条件）：账号被上游风控限制，
+// 解除只能走官方渠道申诉，重登无效 —— 与 11‑-128 通道校验失败严格区分。
+func IsAccountRestricted(body string) bool {
+	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
+		return false
+	}
+	return hasBusinessCode(body, "11140")
 }

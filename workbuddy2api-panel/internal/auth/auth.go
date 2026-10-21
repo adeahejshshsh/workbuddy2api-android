@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -549,4 +550,43 @@ func LoadDir(dir string) ([]*Auth, error) {
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// IsEnterpriseSession 报告当前凭证是否处于「企业上下文」（上游 PR #162）：
+// 账号本身是企业版，或 AccessToken 签发自**企业切换会话**（JWT payload 带
+// token_source=enterprise_switch —— 浏览器在企业空间状态下完成 OAuth 时签发）。
+//
+// 为什么单独一站：企业切换会话与真企业版的上游表现不同 —— 成长任务列表/额度查询
+// 等**读端点照常**，但 /v2/report 行为事件**返回 200 却被静默丢弃**（任务进度永不
+// 跳动、连登/签到无效）。不跳过的话，队列每轮白跑全部行为任务且无任何报错。
+//
+// 每次现解码 JWT（RefreshToken 会整体换发，企业切换状态可能翻转；解码只是一次
+// base64 + 小 JSON，成本可忽略）。
+func (a *Auth) IsEnterpriseSession() bool {
+	if a == nil {
+		return false
+	}
+	if a.IsEnterprise() {
+		return true
+	}
+	return jwtTokenSource(a.AccessTokenValue()) == "enterprise_switch"
+}
+
+// jwtTokenSource 从 JWT 的 payload 段取 token_source（非 JWT / 解不出 → 空串）。
+func jwtTokenSource(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		TokenSource string `json:"token_source"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.TokenSource)
 }

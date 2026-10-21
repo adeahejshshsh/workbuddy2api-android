@@ -1,6 +1,62 @@
 # 变更记录
 
-## v1.30.0（当前）
+## v1.31.0（当前）
+
+**本版 = 继续合并上游能力（P1 全部 + P2/P3 的一部分，共 6 条），每条都带判据与测试。**
+上游已于 2026-10-21 停止维护，此后无上游更新。
+
+### P1（正确性，防误罚号）
+
+* **#233 `11‑-128` 通道校验分流** —— 新增 `ErrChannelRefused`：`11‑-128` +
+  `request illegal` 是「上游认为请求不是官方客户端发出的」，**账号本身健康**
+  （官方客户端用同一账号正常），此前会落 `ErrAccountFault` 并把**健康账号硬禁用**。
+  判据必须 **code + 文案双条件**：`11‑-128` 还承载内容审核变体
+  （`blocked by security policy`，归 `ErrContentBlocked`），按 code 一刀切会误判。
+  同时把 `11140` 的判定从「只看 `request illegal` 文案」收紧成 `IsAccountRestricted`
+  （code 11140 + 文案），并在 `applyErrorPolicy` 里对「有文案但 code 不是 11140」直接
+  不罚账号。末端映射 400 `channel_refused`。
+* **#162 企业切换会话门控** —— 新增 `auth.IsEnterpriseSession()`：账号是企业版，或
+  AccessToken 的 JWT payload 带 `token_source=enterprise_switch`（浏览器在企业空间下
+  完成 OAuth 时签发）。这类会话的上游行为是「**读得见、记不上账**」：任务列表/额度查询
+  正常，但 `/v2/report` 返回 200 却被**静默丢弃**，任务进度永不跳动、连登/签到无效。
+  已门控调度器的行为类任务（活跃上报 / 连登 / 旅行 / 夜猫子）与面板「一键完成全部」；
+  **保活、余额刷新、签到、任务列表扫描不门控**（它们有显式错误或读端点可用）。
+
+### P2
+
+* **#225 `models.hidden` 模型黑名单** —— 新增 `models.hidden` 配置：裸名=两域都藏，
+  `"cn:x"`/`"global:x"`=只藏该域。生效点：`/v1/models` 列表过滤 + chat **点名拒绝**
+  （400 `model_unavailable`，不换号不罚号）。改动需重启（Handler 构造时快照）。
+* **#220 `cn.chat_base` / `cn.billing_base`** —— 国内版上游 base 可覆盖（此前只有 global 段），
+  空则回落内置默认；已加入重启清单。
+
+### P3
+
+* **#223 出站代理走环境变量** —— `newTransport` 加 `Proxy: http.ProxyFromEnvironment`
+  （`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`）；未设时返回 nil = 直连，行为零变化。
+* **#230 Dockerfile 构建源** —— 加 `ENV GOPROXY=https://goproxy.cn,direct`。
+
+### 本轮未合并（下一批）
+
+| 上游 PR | 内容 | 状态 |
+|---|---|---|
+| **#196** | 补偿**先查后领** + 倒计时 | 未做（我们有裸 `ClaimCompensation`） |
+| **#205** | 任务补领清扫（周期幂等补「已达标未领」） | 未做 |
+| **#178** | 账号备注 + 到期卡片折叠 | 未做（要加 pool entry 字段 + 持久化 + 面板） |
+| **#144** | `dns_servers` 可指定 | 未做 |
+| **#158** | 按地区独立配置轮询/顺序耗尽调度 | 未做（~300 行，调度器重构） |
+| **#213** | 联网搜索端点 `POST /v1/search/messages` | 未做（新功能） |
+| **#232** | 裸模型名跨域回退 | **不做**（与我们 `400 realm_required` 方案冲突，会双重解释） |
+
+### 测试
+
+新增 `TestClassifyChannelRefusedVsAccountRestricted`：`11‑-128` → `ErrChannelRefused`、
+`11140` 不误判成通道、`11‑-128` 的内容审核变体仍归 `ErrContentBlocked`、
+只有文案缺 code 时不算账号限制。
+全量 **766 通过 / 0 失败**（server 96 / upstream 228 / panel 54 / pool 188 /
+scheduler 65 / auth 29 / session 21 / reqlog 10 / usage 16 / redisstore 7 / cmd-server 52）。
+
+## v1.30.0
 
 **本版 = 合并上游能力（6 条）+ 协议改为「保留所有权利」+ 上游免责声明全部搬入 NOTICE.md。**
 上游已于 2026-10-21 声明停止维护，此后不再有上游更新；本次按优先级挑「不修就会掉号/必失败」

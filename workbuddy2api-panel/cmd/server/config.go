@@ -128,6 +128,20 @@ type Config struct {
 		BillingBase string `json:"billing_base"`
 	} `json:"global"`
 
+	// Models 模型目录（上游 PR #225）。
+	Models struct {
+		// Hidden 不对外暴露的模型黑名单：裸名=两域都藏；"cn:x"/"global:x"=只藏该域。
+		// 生效点：/v1/models 列表过滤 + chat 点名拒绝（400 model_unavailable）。改动需重启。
+		Hidden []string `json:"hidden"`
+	} `json:"models"`
+
+	// Cn 国内版上游 base 覆盖（上游 PR #220）：空 = 回落内置默认
+	// https://copilot.tencent.com。base 在启动时注入，改动需重启。
+	Cn struct {
+		ChatBase    string `json:"chat_base"`
+		BillingBase string `json:"billing_base"`
+	} `json:"cn"`
+
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
 		TimeoutSeconds int `json:"timeout_seconds"`

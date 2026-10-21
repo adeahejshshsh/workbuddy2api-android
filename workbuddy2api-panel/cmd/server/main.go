@@ -179,6 +179,13 @@ func main() {
 	up.GlobalEnabled = cfg.Global.Enabled
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
+	// 国内版 base 覆盖（上游 PR #220）：空则保持内置默认，不覆盖。
+	if cfg.Cn.ChatBase != "" {
+		up.ChatBaseCN = cfg.Cn.ChatBase
+	}
+	if cfg.Cn.BillingBase != "" {
+		up.BillingBaseCN = cfg.Cn.BillingBase
+	}
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
 	// model.json 本地缓存接线（context_length/max_output_tokens 四级查找链第 3 级）：
 	// 数据目录与 state.json 同风格（Docker volume 持久化路径）。首次缺失/损坏自动
@@ -321,6 +328,7 @@ func main() {
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
 		MaxBodyMB:    cfg.ServerMaxBodyMB,
+		ModelsHidden: cfg.Models.Hidden, // 模型黑名单（上游 PR #225）
 		Panel:        pn,
 		Live:         live,
 		Usage:        rec,
@@ -625,6 +633,8 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		"upstream.client_version", "upstream.cli_version", "upstream.client_name",
 		"upstream.device_token", "upstream.device_token_file", "upstream.passthrough_ip",
 		"global.enabled", "global.chat_base", "global.billing_base",
+		"cn.chat_base", "cn.billing_base", // base 在启动时注入（上游 PR #220）
+		"models.hidden", // 列表过滤与点名拒绝在 Handler 构造时快照（上游 PR #225）
 		"prompt.mode", "prompt.file",
 		"server.max_body_mb",
 		"upstash",

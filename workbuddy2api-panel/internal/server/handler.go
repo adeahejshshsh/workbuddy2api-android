@@ -35,6 +35,9 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
 	MaxRotate int    // 单请求最多换号次数，默认 3
+	// ModelsHidden 模型黑名单（上游 PR #225）：裸名=两域都藏；"cn:x"/"global:x"=只藏该域。
+	// 生效点：/v1/models 列表过滤 + chat 点名拒绝（400 model_unavailable）。
+	ModelsHidden []string
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -383,11 +386,37 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 // modelList 模型列表：CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel
 // 对称）；global.enabled=true 时追加 global: 前缀的国际版名单。
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
+// modelHidden 报告该模型是否在黑名单里（上游 PR #225）：
+// 裸名=两域都藏；"cn:x"/"global:x"=只藏该域。大小写不敏感（与模型名口径一致）。
+func (h *Handler) modelHidden(realm, bare string) bool {
+	for _, raw := range h.cfg.ModelsHidden {
+		e := strings.TrimSpace(raw)
+		if e == "" {
+			continue
+		}
+		if r, b := resolveModel(e); strings.Contains(e, ":") && (r == "cn" || r == "global") {
+			// 带合法前缀：只藏该域
+			if r == realm && strings.EqualFold(b, bare) {
+				return true
+			}
+			continue
+		}
+		// 裸名：两域都藏
+		if strings.EqualFold(e, bare) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
 		// 账号等级闸门：该域**每个**号都已知用不了该模型 → 不列出（避免客户端挑中必失败）。
 		// 必须分域：CN 条目只会派给 CN 号，拿全池判定会被"另一个域等级未知的号"放过。
+		if h.modelHidden("cn", mi.ID) {
+			continue // 黑名单（上游 PR #225）
+		}
 		if h.cfg.Pool.ModelDeniedForAllAccountsInRealm(mi.ID, "cn") {
 			continue
 		}
@@ -435,6 +464,9 @@ func (h *Handler) modelList() []map[string]any {
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
 			// 同上，且按 global 域判定（global 条目只会派给 global 号）。
+			if h.modelHidden("global", id) {
+				continue // 黑名单（上游 PR #225）
+			}
 			if h.cfg.Pool.ModelDeniedForAllAccountsInRealm(id, "global") {
 				continue
 			}
@@ -612,6 +644,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
 	// 裸名（没有任何 realm 前缀）—— 末端要用它把「裸名只路由 cn」讲清楚（bug 3）
+	// 黑名单点名拒绝（上游 PR #225）：/v1/models 已隐藏，但客户端可能硬编码模型名。
+	// 给 400 + model_unavailable（换模型才有用），不换号、不罚号。
+	if h.modelHidden(realm, bareModel) {
+		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
+			"model is hidden by gateway config (models.hidden); pick another model")
+		return
+	}
 	bareModelName := peek.Model != "" &&
 		!strings.HasPrefix(peek.Model, "cn:") && !strings.HasPrefix(peek.Model, "global:")
 	modelRate := ""
@@ -1407,6 +1446,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
 		}
 		switch ue.Kind {
+		case upstream.ErrChannelRefused:
+			// 11‑-128 通道校验失败（上游 PR #233）：400 + 明确 code，客户端换号无益，
+			// 需要「像官方客户端那样重新发送」或检查通道指纹。
+			status = http.StatusBadRequest
+			code = "channel_refused"
+			msg = "upstream rejected the request as non-official client (channel verification failed, 11‑-128); resend from the official client or check the channel fingerprint"
 		case upstream.ErrUpstreamBusy:
 			// 6021 queue.full 渠道级容量满载（上游 PR #185）：503 + 可重试语义。
 			// 上游原文（下方统一透传）含 requestId，客户端按 SDK 退避重试即可。
@@ -1764,6 +1809,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		if modelRateLimited {
 			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
 		}
+	case upstream.ErrChannelRefused:
+		// 11‑-128 通道校验失败（上游 PR #233）：账号健康，官方客户端用同一账号正常。
+		// 零动作（不冷却/不熔断/不 NoteError）——换号不改变通道指纹。
 	case upstream.ErrUpstreamBusy:
 		// 6021 queue.full 渠道级容量满载（上游 PR #185）：账号余额健康、未限流、
 		// session 未死，换号也撞同一堵墙。零动作（不冷却/不熔断/不 NoteError）。
@@ -1793,8 +1841,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
+		// 双条件判定（上游 PR #233）：11‑-128 通道校验失败的 msg 也是 "request illegal"，
+		// 但那是「上游认为请求不是官方客户端发的」，账号本身健康 —— 只看文案会把
+		// 健康账号硬禁用（issue 1849）。Classify 已把 11‑-128 分流到 ErrChannelRefused，
+		// 这里再用 code+文案双条件兜一层。
+		if upstream.IsAccountRestricted(body) {
+			h.cfg.Pool.Disable(uid, "account restricted by upstream (11140 request illegal); appeal in WorkBuddy to lift it")
+			return
+		}
 		if strings.Contains(strings.ToLower(body), "request illegal") {
-			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
+			// 有文案但 code 不是 11140：多半是 11‑-128 通道校验，不罚账号
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")

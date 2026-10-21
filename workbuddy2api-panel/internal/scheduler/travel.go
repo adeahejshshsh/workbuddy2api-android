@@ -61,6 +61,9 @@ func (s *Scheduler) RunTravelNowCtx(ctx context.Context) {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
+		if s.skipBehaviorTask(a) {
+			continue
+		}
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}

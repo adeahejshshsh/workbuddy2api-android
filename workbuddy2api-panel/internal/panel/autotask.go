@@ -1591,6 +1591,14 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 // 再逐项执行行为链路。accept 不是进度产生的必要条件，但让后续状态流转规范。
 func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	var out []map[string]any
+	// 企业上下文不做行为类任务（上游 PR #162）：/v2/report 返回 200 却静默丢弃，
+	// 跑了也记不上账，只会白烧配额。
+	if a.IsEnterpriseSession() {
+		return append(out, map[string]any{
+			"task_code": "(pipeline)", "status": "skipped",
+			"message": "企业上下文（token_source=enterprise_switch）：上游静默丢弃行为上报，已跳过",
+		})
+	}
 
 	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
 	if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {

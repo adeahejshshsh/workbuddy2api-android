@@ -75,6 +75,9 @@ func newTransport() *http.Transport {
 	dialer := newDialer()
 	return &http.Transport{
 		DialContext: dialer.DialContext,
+		// 出站代理走标准环境变量（上游 PR #223）：HTTP_PROXY / HTTPS_PROXY / NO_PROXY。
+		// 未设时返回 nil = 直连，行为与之前完全一致。
+		Proxy: http.ProxyFromEnvironment,
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
 		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。

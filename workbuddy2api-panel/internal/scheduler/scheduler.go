@@ -630,6 +630,9 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		if a == nil || a.AccessTokenValue() == "" {
 			continue
 		}
+		if s.skipBehaviorTask(a) {
+			continue
+		}
 		// 企业版跳过活跃上报：/v2/report 本身返回 200（不报错），但它唯一的作用是
 		// 点亮 growth 连登天数 / 解锁 first_buddy 领养——这两者对企业号都是 403
 		// （「growth system is only available for personal users」），即**零收益**。
@@ -864,4 +867,17 @@ func (s *Scheduler) SetBalanceInterval(d time.Duration) {
 	}
 	s.balanceInterval.Store(int64(d))
 	poke(s.rearmBalance)
+}
+
+// skipBehaviorTask 企业上下文（企业版 / 企业切换会话）不做**行为类**任务
+// （上游 PR #162）：上游 /v2/report 对这类会话返回 200 却**静默丢弃**，
+// 任务进度永不跳动、连登/签到无效，跑了纯粹白烧配额且没有任何报错。
+// 额度查询、保活、签到照常（它们有显式错误或读端点可用）。
+func (s *Scheduler) skipBehaviorTask(a *auth.Auth) bool {
+	if a == nil || !a.IsEnterpriseSession() {
+		return false
+	}
+	log.Printf("scheduler: %s 处于企业上下文（token_source=enterprise_switch），跳过行为类任务",
+		logfmt.Label(a.UID, a.NicknameValue()))
+	return true
 }
