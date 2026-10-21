@@ -326,33 +326,68 @@ func IsModelBlocked(status int, body string) bool {
 // hasBusinessCode reports whether a JSON error envelope contains an exact
 // business code in a field named "code". Upstream envelopes vary between
 // top-level and nested error/data objects, so walk the decoded structure.
-func hasBusinessCode(body, want string) bool {
-	var root any
-	if err := json.Unmarshal([]byte(body), &root); err != nil {
-		return false
-	}
-	var walk func(any) bool
-	walk = func(value any) bool {
-		switch node := value.(type) {
-		case map[string]any:
-			if code, ok := node["code"]; ok && strings.TrimSpace(fmt.Sprint(code)) == want {
-				return true
-			}
-			for _, child := range node {
-				if walk(child) {
-					return true
-				}
-			}
-		case []any:
-			for _, child := range node {
-				if walk(child) {
-					return true
-				}
-			}
+// normalizeBusinessCode 只保留数字。
+//
+// 上游这条错误路径实际发的是 `{"code":11‑-128,...}` —— **数字里带连字符，
+// 不是合法 JSON**；日志/终端又常把它渲染成 `11‑-128` 或 `"11‑-128"`。
+// 三者必须归一到同一个键，否则按字面比较永远不命中（我们 v1.31.0 的
+// 通道校验检测就是这样全程失效的）。
+func normalizeBusinessCode(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
 		}
+	}
+	return b.String()
+}
+
+// reBusinessCode 从原文抓 code 字段（允许带引号、允许数字里含连字符）。
+// 只锚定 `"code":` 前缀，requestId 等十六进制串不会误命中。
+// 字符类含 ASCII 连字符与 U+2011 非断连字符（上游真实报文用的是后者）。
+var reBusinessCode = regexp.MustCompile(`(?i)"code"\s*:\s*"?([0-9][0-9\x{2011}-]*)"?`)
+
+// hasBusinessCode 报告报文里是否有指定的业务码。
+// 先按 JSON 结构走（兼容嵌套 error/data 对象），解析失败再按原文正则兜底 ——
+// 真实报文（及被截断的日志行）常常不是合法 JSON。
+func hasBusinessCode(body, want string) bool {
+	want = normalizeBusinessCode(want)
+	if want == "" {
 		return false
 	}
-	return walk(root)
+	var root any
+	if err := json.Unmarshal([]byte(body), &root); err == nil {
+		var walk func(any) bool
+		walk = func(value any) bool {
+			switch node := value.(type) {
+			case map[string]any:
+				if code, ok := node["code"]; ok && normalizeBusinessCode(fmt.Sprint(code)) == want {
+					return true
+				}
+				for _, child := range node {
+					if walk(child) {
+						return true
+					}
+				}
+			case []any:
+				for _, child := range node {
+					if walk(child) {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		if walk(root) {
+			return true
+		}
+	}
+	for _, m := range reBusinessCode.FindAllStringSubmatch(body, -1) {
+		if normalizeBusinessCode(m[1]) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // hasBusinessEnvelope 报告错误 body 是否携带上游业务信封形态（JSON 且含
@@ -2564,17 +2599,24 @@ func isChannelRefused(body string) bool {
 	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
 		return false
 	}
-	// 上游这个业务码在报文里不是合法 JSON 数字（含非断连字符），按**原文子串**判。
-	// 两种真实写法：U+2011 非断连字符（上游实际下发）与 ASCII 连字符（防御）。
-	return strings.Contains(body, "11\u2011-128") ||
-		strings.Contains(body, "11‑-128")
+	// 业务码归一比较（11‑-128 / 11‑-128 / 11‑-128 视为同一个）。
+	return hasBusinessCode(body, "11‑-128")
 }
 
 // IsAccountRestricted 11140 账号级限制（code + 文案双条件）：账号被上游风控限制，
 // 解除只能走官方渠道申诉，重登无效 —— 与 11‑-128 通道校验失败严格区分。
 func IsAccountRestricted(body string) bool {
-	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
+	lower := strings.ToLower(body)
+	if !strings.Contains(lower, accountRestrictedMsg) {
 		return false
+	}
+	// 11140 也承载**模型级限流**文案（displayMsg "The model provider is
+	// rate-limiting requests."）：那时账号健康，属软限流。code + 文案双条件仍会命中，
+	// 故必须显式排除限流语义 —— 误禁用的代价远高于一次短冷却。
+	for _, m := range softRateMarkers {
+		if strings.Contains(lower, m) {
+			return false
+		}
 	}
 	return hasBusinessCode(body, "11140")
 }

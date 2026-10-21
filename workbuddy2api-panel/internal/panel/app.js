@@ -303,8 +303,11 @@ function rateLimitMeta(row, now) {
     return {
       model,
       kind,
-      detail: remaining ? '预计 ' + dur(remaining) + ' 后重试' : '等待重新探测',
-      title: model + '\n模型当前不可用' + (deadline ? '\n最早重试：' + fmtLocalDateTime(deadline) : ''),
+      // 11102「该后端无此模型」是**确定性**负缓存（6h 起、指数退避）：重试无意义。
+      // 写「预计 X 后重试」既误导又刷屏（一次目录差异能堆出二十多行）。
+      detail: '该账号无此模型（不重试）',
+      title: model + '\n上游 11102：该后端无此模型，重试无意义' +
+        (deadline ? '\n负缓存到期：' + fmtLocalDateTime(deadline) + '（到期后才会重新探测）' : ''),
     };
   }
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
@@ -326,13 +329,27 @@ function rateLimitMeta(row, now) {
   return { model, kind, detail, title: title.join('\n') };
 }
 function rateLimitRowsHtml(rows, now) {
-  const list = Array.isArray(rows) ? rows.filter(row => row && row.model) : [];
-  if (!list.length) return '';
-  return '<div class="rate-limits">' + list.map(row => {
-    const m = rateLimitMeta(row, now);
-    return '<div class="rate-limit ' + (m.kind === 'model_unavailable' ? 'model-unavailable' : '') +
-      '" title="' + esc(m.title) + '"><b>' + esc(m.model) + '</b><span>' + esc(m.detail) + '</span></div>';
-  }).join('') + '</div>';
+  const all = Array.isArray(rows) ? rows.filter(row => row && row.model) : [];
+  if (!all.length) return '';
+  // 11102 负缓存逐条列成「预计 X 后重试」既误导又刷屏（一次目录差异就能堆出二十多行）。
+  // 折叠成一条汇总，模型名放 title；可重试的限流仍逐条显示。
+  const unavailable = all.filter(row => String(row.kind || '') === 'model_unavailable');
+  const list = all.filter(row => String(row.kind || '') !== 'model_unavailable');
+  let html = '';
+  if (list.length) {
+    html += list.map(row => {
+      const m = rateLimitMeta(row, now);
+      return '<div class="rate-limit" title="' + esc(m.title) + '"><b>' + esc(m.model) +
+        '</b><span>' + esc(m.detail) + '</span></div>';
+    }).join('');
+  }
+  if (unavailable.length) {
+    const names = unavailable.map(r => String(r.model));
+    const title = '上游 11102：以下模型该账号不可用，重试无意义\n' + names.join('\n');
+    html += '<div class="rate-limit model-unavailable" title="' + esc(title) + '"><b>' +
+      unavailable.length + ' 个模型</b><span>该账号无此模型（不重试）</span></div>';
+  }
+  return html ? '<div class="rate-limits">' + html + '</div>' : '';
 }
 
 function formatTokenCount(tokens) {

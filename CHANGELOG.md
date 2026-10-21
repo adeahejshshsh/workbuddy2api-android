@@ -1,6 +1,47 @@
 # 变更记录
 
-## v1.35.0（当前）
+## v1.36.0（当前）
+
+**本版 = 从 kk-cao 的 fork 里拣回 2 条（上游 2026-10-21 停更后它又推了 7 个提交）。**
+
+### 已合并
+
+* **业务码归一（关键修复）** —— kk-cao `ba71bf25` 的核心。上游这条错误路径实际发的是
+  `{"code":11‑-128,...}`：**数字里带连字符，不是合法 JSON**；日志/终端又把它渲染成
+  `11‑-128`。我们 v1.31.0 的通道校验检测用的是字面子串比较 + 要求合法 JSON，
+  **在线上从未生效过**（真实报文一律落 `ErrAccountFault` → 健康账号被硬禁用）。
+  - 新增 `normalizeBusinessCode`（只保留数字），三种写法归一到同一个键；
+  - `hasBusinessCode` 改为「JSON 结构遍历（归一比较）+ 原文正则兜底」
+    （`"code"\s*:\s*"?([0-9][0-9\x{2011}-]*)"?`）；
+  - `isChannelRefused` 改用归一比较；
+  - `IsAccountRestricted` 补**排除软限流文案** —— 11140 也承载模型级限流
+    （`The model provider is rate-limiting requests.`），那时账号健康，
+    误禁用的代价远高于一次短冷却。
+* **11102 负缓存 UI** —— kk-cao `b7bcfb9f`。`model_unavailable` 是确定性负缓存
+  （6h 起、指数退避），重试无意义；此前显示「预计 X 后重试」既误导又刷屏
+  （一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」+ 多条折叠成一条汇总，
+  模型名放 title。
+
+### 未合并（需要决策或纯 UI）
+
+| kk-cao 提交 | 内容 | 判断 |
+|---|---|---|
+| `ba71bf25` 二 | 出站指纹对齐官方安装包：补 `X-Private-Data: true`、UA 版本 CN 5.8.3 / intl 5.8.4、CLI 2.161.0，**平台段不再按 realm 切换**（intl 也用字面量 `WorkBuddy`） | **建议做**，但与现有注释「intl 用 `WorkBuddy AI`」冲突（我们当初的逆向结论），属指纹策略变更，等确认 |
+| `9a4a4a87` | global 目录探测统一 desktop UA，CN 保留 IDE 探测 | 与上条同族，一起做 |
+| `aa452c55` | 目录探测 UA 版本号跟到官方当前版 | 同上 |
+| `c515ae1c` | 面板可查看/修改目录探测 UA | 依赖上条，纯 UI |
+| `cbefb1bb` | 客户端版本字段改「左 CN / 右国际版」成对排列 | 纯 UI |
+| `9214bf72` | `rateLimitMeta` 未声明 `detail` 导致账号池表格空白 | **不需要** —— 我们 v1.29.0 起就是 `let detail;` 声明好的（`app.js:311`） |
+
+### 测试
+
+新增/改写 `TestClassifyChannelRefusedVsAccountRestricted`（真实报文形态 → `ErrChannelRefused`、
+渲染形态也命中、11140 不误判成通道、内容审核变体仍归 `ErrContentBlocked`、
+带限流文案的 11140 不算账号限制）与 `TestNormalizeBusinessCode`（三种写法归一）。
+`server 97 / upstream 229 / panel 54 / pool 188 / scheduler 65 / auth 29 /
+session 21 / reqlog 10 / usage 16 / redisstore 7 / cmd-server 52`，**768 通过 / 0 失败**。
+
+## v1.35.0
 
 **本版 = 第二十八份审查报告（CODE-REVIEW-bugs.md，23 条）：22 条为真、1 条误报。
 真条目里 #1/#4/#5/#7/#12/#13/#15/#16/#17/#18/#19/#20 都与我最近几版的改动直接相关。**
