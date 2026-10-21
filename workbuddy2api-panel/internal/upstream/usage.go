@@ -117,7 +117,10 @@ func UsageCacheMissTokens(usage map[string]any) (float64, bool) {
 	if usage == nil {
 		return 0, false
 	}
-	if miss, ok := usageNumber(usage, "prompt_cache_miss_tokens"); ok {
+	// 0 值别名不可信（BUG-05）：上游会同时下发真实命中数与 0 值的兼容别名
+	// （本文件头已记录同形态的 cache_read_input_tokens:0 / cached_tokens:0）。
+	// 直接采信 0 会让命中率显示 100%，并让 server 侧「大前缀整段重算」的告警永不触发。
+	if miss, ok := usageNumber(usage, "prompt_cache_miss_tokens"); ok && miss > 0 {
 		return miss, true
 	}
 	prompt, okP := usageNumber(usage, "prompt_tokens")

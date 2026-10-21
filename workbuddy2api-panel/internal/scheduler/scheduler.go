@@ -214,7 +214,10 @@ func nextFire(now time.Time, hours []int) time.Time {
 	for _, h := range hours {
 		t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
 		if !t.After(now) {
-			t = t.Add(24 * time.Hour)
+			// 跨日必须**重建日期**（BUG-04）：Add(24h) 加的是绝对时长，碰上夏令时
+			// 切换日会偏一小时（春季次日 09:00 变 10:00、秋季变 08:00），
+			// 夜猫子那种窗口任务会提前触发、整轮白跑还计一次失败。
+			t = time.Date(now.Year(), now.Month(), now.Day()+1, h, 0, 0, 0, now.Location())
 		}
 		if earliest.IsZero() || t.Before(earliest) {
 			earliest = t

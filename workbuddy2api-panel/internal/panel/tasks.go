@@ -61,11 +61,22 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tasks": tasks})
 }
 
+// rejectNoGrowth 国际版账号没有成长任务体系：上游 growth 端点对 global 号一律 403，
+// 不门控就会被包成 502 "accept: ..."，让用户以为网关坏了（BUG-07）。
+// accountTasks / accountTaskAuto 早就门控了，accept / accept_all / claim 三个漏了。
+func (p *Panel) rejectNoGrowth(w http.ResponseWriter, a *auth.Auth) bool {
+	if a == nil || !a.IsGlobal() {
+		return false
+	}
+	writeErr(w, http.StatusNotImplemented, "国际版账号无成长任务体系（上游 growth 仅对个人 CN 用户开放）")
+	return true
+}
+
 // accountTaskAccept 接受任务（报名；幂等）。
 func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
-	if a == nil {
+	if a == nil || p.rejectNoGrowth(w, a) {
 		return
 	}
 	var body struct {
@@ -93,7 +104,7 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
-	if a == nil {
+	if a == nil || p.rejectNoGrowth(w, a) {
 		return
 	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
@@ -180,7 +191,7 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
-	if a == nil {
+	if a == nil || p.rejectNoGrowth(w, a) {
 		return
 	}
 	var body struct {

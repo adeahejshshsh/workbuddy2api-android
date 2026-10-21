@@ -199,8 +199,11 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		//
 		// 但要限并发（bug 18）：导入几百个号时裸 go 会同时发起几百组上游请求，
 		// 正是仓库其它地方用 sem=3/4 专门防的 WAF 频控形态。
-		importSem <- struct{}{}
+		// 抢槽必须在 goroutine **内部**（BUG-01）：放在外面时，从第 4 个账号起
+		// handler 会卡在 channel 上等前 3 个后台动作跑完 —— 后台化被同步信号量抵消，
+		// 100 个账号的导入接口要几分钟才回包，浏览器/反代先超时，用户重试又重复导入。
 		go func(a *auth.Auth, realm string) {
+			importSem <- struct{}{}
 			defer func() { <-importSem }()
 			defer func() {
 				if r := recover(); r != nil {

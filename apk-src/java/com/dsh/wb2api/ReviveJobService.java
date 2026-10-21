@@ -53,6 +53,22 @@ public class ReviveJobService extends JobService {
         new Thread(new Runnable() {
             public void run() {
                 try {
+                    // 用户已主动停止就不再拉起（BUG-06）：BootReceiver 判了这个标记，
+                    // JobScheduler 这条复活路径此前没判 —— cancel() 抛异常被吞、或
+                    // 系统已重排时，网关会被重新拉起，与「点了停止就不再自愈」相反。
+                    boolean userStopped;
+                    try {
+                        userStopped = getSharedPreferences(GatewayService.PREF, MODE_PRIVATE)
+                                .getBoolean("user_stop", false);
+                    } catch (Throwable t) {
+                        userStopped = false;
+                    }
+                    if (userStopped) {
+                        GatewayService.appLog(ReviveJobService.this,
+                                "JobScheduler 触发：用户已主动停止，不拉起");
+                        jobFinished(p, false);
+                        return;
+                    }
                     boolean up = GatewayService.portUp();
                     GatewayService.appLog(ReviveJobService.this,
                             "JobScheduler 触发：7863 " + (up ? "在服务，不打扰" : "不在服务 → 拉起服务"));

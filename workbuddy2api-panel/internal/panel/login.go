@@ -285,7 +285,14 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	// global 登录：落盘 auth.realm=global（Realm() 按此判域；不写则依赖 domain 后缀回落）。
 	if sess.realm == "global" {
 		if _, err := auth.BackfillRealmFor(a, "global"); err != nil {
-			writeErr(w, http.StatusInternalServerError, "set realm: "+err.Error())
+			// 与同文件另外四个终态分支同构（BUG-02）：auth/token 已成功 = 上游已消费
+			// 该 state，若按"可重试"处理（completed 保持 false → defer 复位 consumed），
+			// 前端 3 秒一次 poll 会空转到 15 分钟 TTL，用户拿不到"请重新发起"的提示。
+			completed = true
+			p.loginMu.Lock()
+			delete(p.logins, state)
+			p.loginMu.Unlock()
+			writeErr(w, http.StatusInternalServerError, "凭证已签发但写入 realm 失败，请重新发起添加账号："+err.Error())
 			return
 		}
 	} else {

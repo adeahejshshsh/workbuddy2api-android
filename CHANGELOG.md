@@ -1,6 +1,55 @@
 # 变更记录
 
-## v1.28.6（当前）
+## v1.28.7（当前）
+
+**本版 = 第二十二份审查报告（CODE-REVIEW-BUGS.md，8 条）。8 条全部为真，其中 3 条
+（BUG-01 / BUG-06 / BUG-08）直接指向我最近三版的改动。**
+
+### 高危
+
+* **BUG-01 导入的「后台化」被同步信号量抵消** —— 这是 **v1.28.6 我加 `importSem` 时的错**：
+  抢槽写在了 `go func` **外面**，从第 4 个账号起 handler 会卡在 channel 上等前 3 个后台
+  动作跑完。100 个账号的导入接口要几分钟才回包 → 浏览器/反代先超时 → 用户重试 →
+  账号被重复导入。抢槽挪进 goroutine（并发上限仍是 3）。
+  教训：同仓其它「先抢槽再起 goroutine」的写法都对，是因为它们后面有 `wg.Wait()`；
+  这里没有等待点，同一个模式就变成了阻塞。
+* **BUG-02 global 登录的 realm 回填失败漏了终态** —— 同文件另外四个失败分支都在 v1.28.2
+  被我改成终态（completed=true + delete），唯独这一处漏了。`auth/token` 已成功即上游
+  已消费 state，不置终态前端会空转到 15 分钟 TTL。
+* **BUG-03 非流式 `n>1` 把多条候选拼成一条** —— `Aggregate` 把所有 choice 的 delta 追加进
+  同一个 builder，只输出 `choices[0]`，客户端拿到两条候选首尾粘连的正文。
+  采用报告的兜底方案：非流式把 `n` 钳到 1 并打 WARN（流式逐帧透传不受影响）。
+
+### 中危
+
+* **BUG-04 排程跨日靠 `+24h`** —— `Add(24h)` 是绝对时长，夏令时切换日会偏一小时
+  （春季次日 09:00 变 10:00、秋季变 08:00；夜猫子 23:00 窗口会提前到 22:00 白跑一轮）。
+  改为重建日期 `time.Date(..., Day()+1, ...)`。本机时区是 Asia/Shanghai 无 DST，
+  但容器/别的部署时区会中招。
+* **BUG-05 `prompt_cache_miss_tokens: 0` 被当权威值** —— 上游会同时下发真实命中数与 0 值
+  兼容别名（本文件头已记录同形态的 `cache_read_input_tokens:0`）。采信 0 → 命中率显示
+  100% → 「大前缀整段重算」的告警永不触发。改为 0 值时回落 `prompt-hit` 推导。
+* **BUG-06 JobScheduler 兜底不检查「用户已停止」** —— 这是 **v1.28.6 我补 `user_stop` 时
+  只改了 BootReceiver**，JobScheduler 这条复活路径没判：`cancel()` 抛异常被吞或系统已重排时，
+  网关仍会被拉起。补同一门控。
+
+### 低危
+
+* **BUG-07 三个任务入口缺 global 门控** —— `accountTasks` / `accountTaskAuto` 都返回 501，
+  而 accept / accept_all / claim 直接打上游 growth 端点 → 403 → 被包成 `502 accept: ...`，
+  用户以为网关坏了。抽出 `rejectNoGrowth` 三个入口复用。
+* **BUG-08 `realm_required` 覆盖掉真实原因** —— 这是 **v1.28.4 我加的那段**：`status` 的默认值
+  就是 503，而上游超时/5xx/WAF/传输抖动这些分支只改 code/msg 不改 status，于是**任何** 503
+  都被改写成「请给模型名加 global: 前缀」，真实原因（上游挂了 / IP 被拦）被抹掉，
+  两者排查方向完全相反。补 `code == "no_healthy_account"` 守卫。
+
+### 测试
+
+新增 `TestClampNToOne`（钳制生效 + 无 n/n<=1/非法 body 一律原样）、
+`TestUsageCacheMissTokensIgnoresZeroAlias`（0 值别名 → 按 prompt-hit 推导 800；非 0 显式值仍优先）。
+改动涉及的 4 个包：`server 95 / upstream 219 / panel 51 / scheduler 65`，**全部 0 失败**。
+
+## v1.28.6
 
 **本版 = 第二十一份审查报告（CODE-REVIEW.md，22 条）。21 条为真、1 条部分属实。
 #1「脱敏层整体失效」结论对、成因错 —— 我逐字节验过：那 5 组改写左右值确实不同、

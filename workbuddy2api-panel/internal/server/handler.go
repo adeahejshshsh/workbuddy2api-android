@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -787,6 +788,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
 	if bareModel != peek.Model {
 		body = rewriteModel(body, bareModel)
+		// 非流式 n>1 必须钳掉（BUG-03）：Aggregate 把每条 choice 的 delta.content
+		// 都追加进同一个 builder，最后只输出 choices[0] —— 上游给 2 条候选时，
+		// 客户端拿到的是两条候选**首尾拼接**的一段正文。与其静默返回错误数据，
+		// 不如钳到 1 并留一行 WARN（流式路径逐帧透传，不受影响）。
+		if !peek.Stream {
+			body = clampNToOne(body)
+		}
 	}
 
 	// 会话头族（issue #35）：后台按 X-Conversation-Request-ID（对话轮级）聚合请求，
@@ -1503,7 +1511,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// / Codex 默认就发裸名（它们不会加网关私有前缀），于是会就着同一个裸名无限重试，
 	// 「加前缀 / 换模型」这条正确处置永远不会被触发（bug 3）。
 	// 这里换成 400 + 明确指引：这是客户端选错了模型标识，重试没用。
-	if status == http.StatusServiceUnavailable && bareModelName && realm == "cn" && h.cfg.Pool != nil &&
+	// 必须带 code 守卫（BUG-08）：status 的默认值就是 503，上游超时/5xx/WAF/传输抖动
+	// 这些分支只改 code/msg 不改 status —— 不判 code 的话，任何 503 形态的失败都会被
+	// 覆盖成「请给模型名加 global: 前缀」，而真实原因可能是上游挂了或 IP 被拦，
+	// 排查方向完全相反。
+	if code == "no_healthy_account" && status == http.StatusServiceUnavailable &&
+		bareModelName && realm == "cn" && h.cfg.Pool != nil &&
 		!h.cfg.Pool.ServableForRealm("cn") && h.cfg.Pool.ServableForRealm("global") {
 		status = http.StatusBadRequest
 		code = "realm_required"
@@ -1982,4 +1995,44 @@ func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage
 		msg = uerr.Msg
 	}
 	return upstream.GatewayHint(kind, msg, h.hintContext(bareModel, hasImage))
+}
+
+// clampNToOne 把非流式请求的 n 钳到 1（BUG-03）。
+//
+// 网关的非流式聚合只支持单候选：Aggregate 把所有 choice 的 delta 拼进同一个
+// content builder，n>1 时客户端会拿到多条候选首尾粘连的正文。钳掉比静默返回
+// 错误数据诚实；流式路径逐帧透传，不受影响。
+func clampNToOne(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var obj map[string]any
+	if dec.Decode(&obj) != nil {
+		return body
+	}
+	nv, ok := obj["n"]
+	if !ok {
+		return body
+	}
+	var n int64
+	switch v := nv.(type) {
+	case json.Number:
+		n, _ = v.Int64()
+	case float64:
+		n = int64(v)
+	default:
+		return body
+	}
+	if n <= 1 {
+		return body
+	}
+	obj["n"] = 1
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	log.Printf("WARN: [server] 非流式请求 n=%d：网关只支持单候选，已钳到 1（否则多条候选会被拼成一段正文）", n)
+	return out
 }
