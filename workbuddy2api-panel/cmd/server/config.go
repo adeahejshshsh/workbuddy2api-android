@@ -156,8 +156,13 @@ type Config struct {
 		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
 		// X-IDE-Version）。空 = 内置默认（对齐官方 5.5.4 分发包）。
 		ClientVersion string `json:"client_version"`
+		// ClientVersionGlobal global realm 专用版本段（空 = 内置默认 5.8.4）。
+		// CN 与 intl 是两条独立发版线，单值会让一侧 UA 与真实安装包不符。
+		ClientVersionGlobal string `json:"client_version_global"`
 		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
 		CliVersion string `json:"cli_version"`
+		// CliVersionGlobal global realm 专用 CLI 版本段（空 = 内置默认 2.161.0）。
+		CliVersionGlobal string `json:"cli_version_global"`
 		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
 		ClientName string `json:"client_name"`

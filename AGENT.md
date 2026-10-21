@@ -171,6 +171,12 @@ shell 的管道）关掉了读端，网关立刻 141 退出，日志上看不出
   `data/state.json`、`data/server.log`）—— 这个 uid 读不到，只能 `adb`/`run-as` 取。
 * 面板与 API 都在 `:7863`；默认监听 `127.0.0.1`，对外必须显式改 `listen` + 配 `api_key`。
 * 端口上如果已经有一个不是本服务拉起的实例，服务会判成「运行中（外部）」并**不抢端口**。
+* **版本号规矩**（2026-10-22 起）：
+  - **纯修 bug 不递增 `VERSION`** —— 直接改代码 + 在 `CHANGELOG` 当前段落追加条目即可。
+  - **有实际变更**（新功能 / 策略调整 / 指纹变更）才递增，且**只升最小位**
+    （`1.35.0` → `1.35.1`），不发 minor。
+  - `VERSION` 与 `apk-src/AndroidManifest.xml` 的 `versionName`/`versionCode` 必须同步
+    （`versionCode = major*10000 + minor*100 + patch`）。
 * 发布分两档（**默认只提交，不发版**）：
   - **日常改 bug / 小改动 → 只推源码**：`bash push_github.sh`
     （提交并推到 main，**不建 Release、不上传 APK**）。

@@ -795,6 +795,10 @@ type Client struct {
 
 	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（官方内置 CLI 2.137.1）。
 	CliVersion string
+	// ClientVersionGlobal / CliVersionGlobal global realm 专用版本段（空 = 内置默认
+	// 5.8.4 / 2.161.0）。CN 与 intl 是两条独立发版线，单值会让一侧 UA 与安装包不符。
+	ClientVersionGlobal string
+	CliVersionGlobal    string
 
 	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 	// 空 = 旧行为：X-Product="SaaS"，不设 X-IDE-*（向后兼容，不突变归因）。

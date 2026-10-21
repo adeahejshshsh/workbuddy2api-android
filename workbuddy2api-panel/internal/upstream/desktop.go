@@ -40,7 +40,9 @@ import (
 const (
 	desktopReportPath    = "/v2/report"
 	desktopAppearanceSet = "/v2/user-asset/appearance/set"
-	// desktopUA 实测桌面客户端 UA（5.5.6 内嵌 CLI 2.137.1）。
+	// desktopUA 旧的固定桌面 UA（5.5.6 / CLI 2.137.1）。**已不再用于出站**：
+	// 版本段与平台段改为按 realm 由 defaultWorkBuddyUAFor 生成（CN 5.8.3 / intl 5.8.4）。
+	// 保留常量仅供测试与兼容引用。
 	desktopUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
 )
 
@@ -132,7 +134,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.defaultWorkBuddyUAFor(a))
 	req.Header.Set("X-Domain", c.desktopDomain(a))
 	req.Header.Set("X-Product", "SaaS")
 	// 加进程内原子序号（bug-10）：deriveID 对同一账号恒定，后缀只有微秒尾数 6 位 ——
@@ -235,7 +237,7 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.defaultWorkBuddyUAFor(a))
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
@@ -413,7 +415,7 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.defaultWorkBuddyUAFor(a))
 	req.Header.Set("X-Domain", c.desktopDomain(a))
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
@@ -461,7 +463,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
-	h.Set("User-Agent", desktopUA)
+	h.Set("User-Agent", c.defaultWorkBuddyUAFor(a))
 	h.Set("X-Domain", c.desktopDomain(a))
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
@@ -471,7 +473,9 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-Agent-Type", "main")
 	h.Set("X-IDE-Name", "WorkBuddy")
 	h.Set("X-IDE-Type", "WorkBuddy")
-	h.Set("X-IDE-Version", "5.5.6")
+	h.Set("X-IDE-Version", c.clientVersionFor(a))
+	// 官方桌面端还带这一项（解包实测），此前漏发。
+	h.Set("X-Private-Data", "true")
 	// 必须用与 headers.go 完全相同的拼写（bug #9）：Go 会把头名规范化成
 	// X-Codebuddy-Request，而全仓其它地方是 X-CodeBuddy-Request —— 同一个风控闸门头
 	// 以两种拼写出站，按字面匹配头的上游实现会漏，排障时也容易误以为没加。

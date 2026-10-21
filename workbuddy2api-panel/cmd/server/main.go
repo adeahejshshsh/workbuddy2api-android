@@ -173,6 +173,8 @@ func main() {
 	up.UserAgent = cfg.Upstream.UserAgent
 	up.ClientVersion = cfg.Upstream.ClientVersion
 	up.CliVersion = cfg.Upstream.CliVersion
+	up.ClientVersionGlobal = cfg.Upstream.ClientVersionGlobal
+	up.CliVersionGlobal = cfg.Upstream.CliVersionGlobal
 	up.ClientName = cfg.Upstream.ClientName
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
