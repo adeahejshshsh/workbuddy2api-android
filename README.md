@@ -1,7 +1,7 @@
 # WorkBuddy2API · Android 自托管网关
 
 把 [workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（上游
-[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，其服务端部分仍为 MIT）打包成**能装在手机上常驻运行**的安卓 App：
+[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)）打包成**能装在手机上常驻运行**的安卓 App：
 网关二进制 + 管理面板 + 看门狗 + 保活，全部塞进一个 APK。
 
 一台手机 = 一个 OpenAI 兼容网关：`http://127.0.0.1:7863/v1`（局域网访问把 `127.0.0.1` 换成手机 IP）。
@@ -105,11 +105,12 @@ CHANGELOG.md             变更记录
 
 ## 许可与致谢
 
-* 上游服务端与面板：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（MIT，见
-  `workbuddy2api-panel/LICENSE`），本移植基于 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
-* **安卓移植与运维部分（`apk-src/`、`patches/`、`run.sh` 等）：保留所有权利（All Rights Reserved）**，见 `LICENSE`
-* 上游服务端与面板部分（`workbuddy2api-panel/`）仍依其原始 MIT 授权，原始版权声明与许可声明完整保留在 `NOTICE.md`
-* **使用声明 / 免责声明 / 上游停止维护声明：本文文末已全文收录**，`NOTICE.md` 保留同一份原文与上游 MIT 授权全文
+* 上游来源：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（原始项目），
+  本移植基于 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)；
+  其版权声明作为来源归属保留在 `NOTICE.md`
+* **本仓库全部文件：保留所有权利（All Rights Reserved）**，见 `LICENSE`（含 `workbuddy2api-panel/`）
+* 上游版权声明（Copyright Sliverkiss / linguo2625469）作为**来源归属**保留在 `NOTICE.md`，不构成本仓库的授权来源
+* **使用声明 / 免责声明 / 上游停止维护声明：本文文末已全文收录**，`NOTICE.md` 保留同一份原文与上游版权声明
 * 本仓库**不含**任何账号凭据、签名密钥与本机运行数据（见 `.gitignore`）
 
 ---
@@ -166,8 +167,8 @@ CodeBuddy 账号**——自动签到、保活、给自己的本地工具提供�
 
 ### 本项目的授权
 
-**保留所有权利（All Rights Reserved）** —— 未经书面许可不得复制、分发、修改、商用、二次打包
-或以「公益服 / 低价中转 / 卡密」名义对外服务，也不得移除声明。详见 `LICENSE`。
+**本仓库全部文件保留所有权利（All Rights Reserved）** —— 未经书面许可不得复制、分发、修改、
+商用、二次打包或以「公益服 / 低价中转 / 卡密」名义对外服务，也不得移除声明。详见 `LICENSE`。
 
-例外：`workbuddy2api-panel/` 属第三方，仍依其原始 **MIT** 授权，原始版权声明与许可全文保留在
-`NOTICE.md`（含上游双版权：Sliverkiss/workbuddy2api 与 linguo2625469/workbuddy2api-panel）。
+上游版权声明（Copyright Sliverkiss / linguo2625469）作为**来源归属**保留在 `NOTICE.md`，
+不构成本仓库的授权来源。

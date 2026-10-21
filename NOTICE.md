@@ -1,53 +1,35 @@
 # 授权与来源说明（必读）
 
-本项目（`workbuddy2api-android`）**保留所有权利（All Rights Reserved）**，见 `LICENSE`。
+本仓库（`workbuddy2api-android`）的**全部文件**——含 `workbuddy2api-panel/`、`apk-src/`、
+`patches/`、`tools/`、根目录脚本、前端资源与全部文档——**保留所有权利（All Rights Reserved）**，
+详见 `LICENSE`。
 
-内容分两部分，授权状态不同：
-
-| 部分 | 目录 / 文件 | 授权 |
-|---|---|---|
-| 上游服务端与面板（第三方） | `workbuddy2api-panel/` | **MIT**（原始授权，声明见下） |
-| 安卓移植与运维层（本项目） | `apk-src/`、`patches/`、`run.sh`、`rebuild.sh`、`watchdog.sh`、`push_github.sh`、`README.md`、`AGENT.md`、`CHANGELOG.md` | **保留所有权利** |
+上游版权声明作为**来源归属**保留在下方，不构成本仓库的授权来源。
 
 ---
 
-## 一、上游来源与原始 MIT 授权
+## 一、来源与上游版权声明
 
-`workbuddy2api-panel/` 来自：
+`workbuddy2api-panel/` 的代码来自：
 
 * 原始项目：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（上游仓库已删除）
-* 本项目基于的镜像：[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
+* 本项目所基于的镜像：[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
 
-该目录按上游源码原样放置（未含 `.git`），仅注入手机端 CSS 补丁
+上游版权声明（原样保留）：
+
+```
+Copyright (c) 2026 Sliverkiss
+  原始项目：https://github.com/Sliverkiss/workbuddy2api
+Copyright (c) 2026 linguo2625469
+  本项目所基于的镜像：https://github.com/linguo2625469/workbuddy2api-panel
+```
+
+该目录内的 `workbuddy2api-panel/LICENSE` 是上游随源码附带的原始文本，**仅作来源存档**，
+不构成本仓库的授权（本仓库授权以上方与 `LICENSE` 为准）。
+
+该目录按上游源码放置（未含 `.git`），本项目的改动为：注入手机端 CSS 补丁
 （`internal/panel/index.html` 内 `DSH-MOBILE-PATCH-BEGIN/END` 夹住，内容来自
-`patches/panel-mobile.css`），其余为本项目自行修复的缺陷（见 `CHANGELOG.md`）。
-
-原始 MIT 授权全文（按上游 LICENSE 原样保留）：
-
-```
-MIT License
-
-Copyright (c) 2026 Sliverkiss (original project: https://github.com/Sliverkiss/workbuddy2api)
-Copyright (c) 2026 linguo2625469 (this fork: https://github.com/linguo2625469/workbuddy2api-panel)
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
+`patches/panel-mobile.css`），以及本项目自行修复的缺陷（逐条见 `CHANGELOG.md`）。
 
 ---
 
@@ -109,14 +91,18 @@ CodeBuddy 账号**——自动签到、保活、给自己的本地工具提供�
 
 ---
 
-## 五、本项目的额外声明
+## 五、本仓库的授权
 
-1. **保留所有权利**：除上表标注为 MIT 的第三方部分外，本项目的安卓移植、构建脚本、运维脚本与
-   文档均为「保留所有权利」，未经书面许可不得复制、分发、修改或商用。
-2. **不含敏感数据**：本仓库不含任何账号凭据、签名密钥、本机运行数据与日志（见 `.gitignore`；
+**全部文件保留所有权利（All Rights Reserved）** —— 未经书面许可不得复制、分发、修改、
+商用、二次打包或以「公益服 / 低价中转 / 卡密」名义对外服务，也不得移除本文件与
+`LICENSE` 中的声明。详见 `LICENSE`。
+
+补充说明：
+
+1. **不含敏感数据**：本仓库不含任何账号凭据、签名密钥、本机运行数据与日志（见 `.gitignore`；
    `workbuddy2api-panel/data/`、`auths/`、`config.json`、`apk-src/wb2api.keystore`、成品 APK
    都被排除，成品只走 Releases 分发）。
-3. **风险自担**：使用本软件进行账号自动化（签到 / 保活 / 任务）可能触发上游风控；因使用本项目
+2. **风险自担**：使用本软件进行账号自动化（签到 / 保活 / 任务）可能触发上游风控；因使用本项目
    导致的账号封禁、条款违约或任何损失，本项目作者概不负责。
-4. **不提供担保与支持**：本项目按「原样」提供，不承诺可用性、不承诺跟进上游协议变化、不提供
+3. **不提供担保与支持**：本项目按「原样」提供，不承诺可用性、不承诺跟进上游协议变化、不提供
    任何形式的商业支持。
