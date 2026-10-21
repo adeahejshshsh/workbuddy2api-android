@@ -5,6 +5,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"log"
 	"time"
 
@@ -35,7 +36,7 @@ var adoptReportGap = 1050 * time.Millisecond
 
 // cstZone 上游每日重置按自然日 00:00 CST（Asia/Shanghai）。中国无夏令时，固定 +8 即可，
 // 不依赖容器 tzdata。
-var cstZone = time.FixedZone("CST", 8*60*60)
+var cstZone = cst.Loc // 统一走 internal/cst（misakano7545 025cc107）
 
 // travelDay 返回 t 所属的上游自然日（CST），格式 2006-01-02。
 func travelDay(t time.Time) string {
@@ -75,7 +76,7 @@ func (s *Scheduler) RunTravelNowCtx(ctx context.Context) {
 		}
 		if !first {
 			// 可中断等待（issue ISSUE-17）：关机/停机信号到来时不要卡在节流里。
-			if !sleepCtx(ctx, travelAccountDelay) {
+			if !sleepCtx(ctx, s.accountDelay()) {
 				return
 			}
 		}

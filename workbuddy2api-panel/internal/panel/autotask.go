@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"io"
 	"log"
 	"math/rand/v2"
@@ -1197,7 +1198,9 @@ func runLibraryRead(p *Panel, a *auth.Auth) (string, error) {
 // 判据 = 夜间窗口内 glm-5.2 真实对话 + chat 事件上报（WorkBuddy-Daily 实测口径）。
 // 窗口外不做（提示等排程）；网关 blackcat_hours（默认 23 点）排程会自动补足。
 func runBlackCat(p *Panel, a *auth.Auth) (string, error) {
-	if !upstream.InNightWindow(time.Now()) {
+	// 窗口按北京时间判（misakano7545 `025cc107`）：上游的 23:00–08:00 是北京时间的
+	// 夜间窗口，按宿主时区判会在 UTC 主机上整体错位 8 小时。
+	if !upstream.InNightWindow(cst.Now()) {
 		return "当前不在 23:00–08:00 计数窗口，行为不计分；网关会在每日 23 点自动补足", nil
 	}
 	need, err := p.cfg.Upstream.BlackcatNeed(a)

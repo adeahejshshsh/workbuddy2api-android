@@ -199,14 +199,15 @@ func main() {
 	upstream.SetModelCatalogPath(stateSibling(cfg.StateFile, "model.json"))
 
 	sch := scheduler.New(scheduler.Config{
-		Pool:           p,
-		Upstream:       up,
-		CheckinHours:   cfg.Schedule.CheckinHours,
-		TravelHours:    cfg.Schedule.TravelHours,
-		ActivityHours:  cfg.Schedule.ActivityHours,
-		KeepaliveHours: cfg.Schedule.KeepaliveHours,
-		BlackcatHours:  cfg.Schedule.BlackcatHours,
-		GrowthHours:    cfg.Schedule.GrowthHours,
+		Pool:                 p,
+		Upstream:             up,
+		AccountSpreadSeconds: cfg.Schedule.AccountSpreadSeconds,
+		CheckinHours:         cfg.Schedule.CheckinHours,
+		TravelHours:          cfg.Schedule.TravelHours,
+		ActivityHours:        cfg.Schedule.ActivityHours,
+		KeepaliveHours:       cfg.Schedule.KeepaliveHours,
+		BlackcatHours:        cfg.Schedule.BlackcatHours,
+		GrowthHours:          cfg.Schedule.GrowthHours,
 		// 快过期积分优先消耗：签到/余额刷新按此窗口分桶（issue:积分过期）。
 		ExpiringSoonWindow: cfg.ExpiringSoonDur,
 		CheckinDisabled:    !cfg.Schedule.CheckinEnabled,

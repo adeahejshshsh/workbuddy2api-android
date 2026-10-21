@@ -71,12 +71,17 @@ type Config struct {
 	} `json:"cooldown"`
 
 	Schedule struct {
-		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
-		TravelHours    []int `json:"travel_hours"`    // [9,21]
-		ActivityHours  []int `json:"activity_hours"`  // [10]
-		KeepaliveHours []int `json:"keepalive_hours"` // [22]
-		BlackcatHours  []int `json:"blackcat_hours"`  // [23] 夜猫子窗口（23:00–08:00 计数）
-		GrowthHours    []int `json:"growth_hours"`    // [1] 成长任务队列（Sequential 族每日零点解锁，01:00 自动扫描执行）
+		// AccountSpreadSeconds 账号遍历型任务的**账号间最小间隔**（秒），
+		// 0 = 关闭（同一秒打全池）。默认 0 保持既有行为。
+		// 一批任务同一秒打几十个号，上游看到的是「同一瞬间几十个客户端」；
+		// 按账号错开能显著降低相关性风控（misakano7545 `3dfe46c3` issue #45）。
+		AccountSpreadSeconds int   `json:"account_spread_seconds"`
+		CheckinHours         []int `json:"checkin_hours"`   // [9,21]
+		TravelHours          []int `json:"travel_hours"`    // [9,21]
+		ActivityHours        []int `json:"activity_hours"`  // [10]
+		KeepaliveHours       []int `json:"keepalive_hours"` // [22]
+		BlackcatHours        []int `json:"blackcat_hours"`  // [23] 夜猫子窗口（23:00–08:00 计数）
+		GrowthHours          []int `json:"growth_hours"`    // [1] 成长任务队列（Sequential 族每日零点解锁，01:00 自动扫描执行）
 		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/BlackcatEnabled 显式禁用开关（缺省 true）。
 		//
 		// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：

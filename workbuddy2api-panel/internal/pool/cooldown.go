@@ -4,6 +4,7 @@
 package pool
 
 import (
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"log"
 	"strings"
 	"time"
@@ -613,7 +614,9 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 // 保留函数名是为了不动调用点；读日志 kind=hard_credit 判断解冻时刻时以 until 为准。
 // 用于 ErrHardCredit 场景：积分耗尽账号等签到任务（09:00/21:00）恢复。
 func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
-	now := time.Now()
+	// 用北京时间算「次日 04:00 / 当天 09:00」（misakano7545 `025cc107`）：
+	// 按宿主时区算时，UTC 主机上的 04:00 会落在 CST 12:00，签到早结束、白等 8 小时。
+	now := cst.Now()
 	p.Cooldown(uid, CoolHard, nextHardCooldownDeadline(now).Sub(now), reason)
 }
 

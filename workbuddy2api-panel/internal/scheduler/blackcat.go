@@ -65,7 +65,7 @@ func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context) {
 			continue
 		}
 		log.Printf("blackcat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.NicknameValue()), ok)
-		if !sleepCtx(ctx, activityAccountDelay) {
+		if !sleepCtx(ctx, s.accountDelay()) {
 			return
 		}
 	}

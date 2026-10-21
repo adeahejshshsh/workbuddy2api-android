@@ -48,7 +48,7 @@ func (s *Scheduler) RunStreakBonusNowCtx(ctx context.Context) {
 			continue // 企业版门控：无成长体系（/activity/growth/streak 上游一律 403）
 		}
 		if !first && activityAccountDelay > 0 {
-			if !sleepCtx(ctx, activityAccountDelay) {
+			if !sleepCtx(ctx, s.accountDelay()) {
 				return // 停机/取消：不再把剩余账号的节流全睡完
 			}
 		}

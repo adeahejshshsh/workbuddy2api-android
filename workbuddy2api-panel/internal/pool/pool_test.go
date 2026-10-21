@@ -3,6 +3,7 @@ package pool
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -624,7 +625,9 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 		t.Errorf("until %v is in the past (call span %v..%v)", st.Until, before, after)
 	}
 	// 09:00 前触发 → 当天 09:00（下一次签到）；其余时段 → 次日 04:00（bug #11）。
-	if h := st.Until.Hour(); h != 4 && h != 9 {
+	// 截止时刻按**北京时间**构造（misakano7545 025cc107），断言也要换到 CST：
+	// 宿主是 UTC 时 .Hour() 会差 8 小时，而语义一直是「北京 04:00 / 09:00」。
+	if h := st.Until.In(cst.Loc).Hour(); h != 4 && h != 9 {
 		t.Errorf("until hour=%d want 4 (次日) 或 9 (当天首个签到点)", h)
 	}
 	if d := st.Until.Sub(after); d > 24*time.Hour {
@@ -647,7 +650,7 @@ func TestCooldownUntilTomorrow4AMPersists(t *testing.T) {
 	p2.Add(&auth.Auth{UID: "u1"})
 	st, ok := p2.Status("u1")
 	// 09:00 前触发落当天 09:00，其余落次日 04:00（bug #11）。
-	if h := st.Until.Hour(); !ok || (h != 4 && h != 9) || st.Reason != "余额不足" {
+	if h := st.Until.In(cst.Loc).Hour(); !ok || (h != 4 && h != 9) || st.Reason != "余额不足" {
 		t.Errorf("status after reload=%+v ok=%v", st, ok)
 	}
 }

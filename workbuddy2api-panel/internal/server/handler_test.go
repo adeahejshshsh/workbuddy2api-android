@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -607,7 +608,9 @@ func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	}
 	// 硬信贷冷却的目标是"下一次签到之后"：09:00 前触发落当天 09:00，其余落次日 04:00
 	// （bug #11：签到时点是 09:00/21:00，04:00 时余额仍是 0）。
-	if h := st.Until.Hour(); h != 4 && h != 9 {
+	// 硬冷却截止按**北京时间**构造（misakano7545 025cc107），断言也换到 CST：
+	// 宿主是 UTC 时 .Hour() 会差 8 小时，语义一直是「北京 04:00 / 09:00」。
+	if h := st.Until.In(cst.Loc).Hour(); h != 4 && h != 9 {
 		t.Errorf("until hour=%d want 4 (next-day) 或 9 (today 09:00)", h)
 	}
 	// 距次日 04:00 最长 28h（凌晨 00:00~04:00 间运行时 now→次日 04:00 跨度 > 24h，属正常）。
@@ -644,7 +647,7 @@ func TestChat429Code14018UsesHardCreditCooldown(t *testing.T) {
 	if !ok || !st.Cooling {
 		t.Fatalf("14018 account should be cooling: %+v ok=%v", st, ok)
 	}
-	if h := st.Until.Hour(); st.Reason != "余额不足" || (h != 4 && h != 9) {
+	if h := st.Until.In(cst.Loc).Hour(); st.Reason != "余额不足" || (h != 4 && h != 9) {
 		t.Fatalf("14018 should use hard-credit cooldown, got reason=%q until=%v", st.Reason, st.Until)
 	}
 	if got := p.Pick(); got == nil || got.UID != "good" {

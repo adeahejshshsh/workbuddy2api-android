@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -22,14 +23,16 @@ import (
 // 任务开关用「禁用」命名而非「启用」：零值 Config 即四类任务都启用（hours 回落默认），
 // 与引入开关前的行为逐字一致（老调用方/老测试无需改动）。
 type Config struct {
-	Pool           *pool.Pool
-	Upstream       *upstream.Client
-	CheckinHours   []int // 默认 [9, 21]
-	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
-	ActivityHours  []int // 默认 [10]
-	KeepaliveHours []int // 默认 [22]
-	BlackcatHours  []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
-	GrowthHours    []int // 默认 [1]：成长任务队列（Sequential 族每日零点解锁一环，
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	// AccountSpreadSeconds 账号遍历型任务的账号间最小间隔（秒），0 = 关闭。
+	AccountSpreadSeconds int
+	CheckinHours         []int // 默认 [9, 21]
+	TravelHours          []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
+	ActivityHours        []int // 默认 [10]
+	KeepaliveHours       []int // 默认 [22]
+	BlackcatHours        []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
+	GrowthHours          []int // 默认 [1]：成长任务队列（Sequential 族每日零点解锁一环，
 	// 01:00 自动扫描+执行；避开零点整防解锁竞态）
 
 	// ExpiringSoonWindow 快过期积分窗口：签到/余额刷新查余额时，把到期时间
@@ -423,7 +426,9 @@ func (s *Scheduler) waitSlot(ctx context.Context, next time.Time, step time.Dura
 // Reconfigure 触发 rearmSchedule 时提前唤醒重算（新时点/开关立即生效）。
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
-		next, kinds := s.nextWake(time.Now())
+		// 用北京时间算时点（misakano7545 `025cc107`）：上游的「今天」是北京自然日，
+		// 而网关可能跑在 UTC 主机上 —— 配 activity_hours=[10] 实际会在 CST 18:00 跑。
+		next, kinds := s.nextWake(cst.Now())
 		if next.IsZero() {
 			// 四类任务全部禁用：不空转，等重排通知（在线改配置重新启用）或退出信号。
 			select {
@@ -646,7 +651,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 判断不成立——国际版 /v2/report 可用，跳过即国际版账号永远点不亮连登（上游
 		// a190252 同口径修复）。checkin/travel 的 global 门控不受影响，仍跳过。
 		if !first {
-			if !sleepCtx(ctx, activityAccountDelay) {
+			if !sleepCtx(ctx, s.accountDelay()) {
 				return // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}
 		}
@@ -696,6 +701,15 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 46 个号在 22:00 一次性连发 46 个 refresh，正是仓库多处注释列为 WAF 频控
 // 触发条件的形态（bug 7）。
 var keepaliveAccountDelay = 800 * time.Millisecond
+
+// accountDelay 账号遍历型任务的账号间等待：配置了 schedule.account_spread_seconds
+// 就用它，否则回落既有的 800ms 默认（misakano7545 `3dfe46c3` issue #45）。
+func (s *Scheduler) accountDelay() time.Duration {
+	if s.cfg.AccountSpreadSeconds > 0 {
+		return time.Duration(s.cfg.AccountSpreadSeconds) * time.Second
+	}
+	return keepaliveAccountDelay
+}
 
 // RunKeepaliveNow 无 ctx 版本（保留给旧调用方）。
 func (s *Scheduler) RunKeepaliveNow() { s.RunKeepaliveNowCtx(context.Background()) }
