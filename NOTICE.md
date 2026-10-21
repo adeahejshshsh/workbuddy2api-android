@@ -1,25 +1,122 @@
-# 授权与来源说明
+# 授权与来源说明（必读）
 
-本仓库以 **MIT** 授权（见 `LICENSE`）。内容分两部分：
+本项目（`workbuddy2api-android`）**保留所有权利（All Rights Reserved）**，见 `LICENSE`。
 
-## 1. 上游服务端与面板 —— `workbuddy2api-panel/`
+内容分两部分，授权状态不同：
 
-* 原作者：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（MIT，见该目录内 `LICENSE`）
-* 本移植基于的镜像：[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
+| 部分 | 目录 / 文件 | 授权 |
+|---|---|---|
+| 上游服务端与面板（第三方） | `workbuddy2api-panel/` | **MIT**（原始授权，声明见下） |
+| 安卓移植与运维层（本项目） | `apk-src/`、`patches/`、`run.sh`、`rebuild.sh`、`watchdog.sh`、`push_github.sh`、`README.md`、`AGENT.md`、`CHANGELOG.md` | **保留所有权利** |
 
-该目录是按上游源码原样放置的（未含 `.git`），只做了两处改动：
+---
 
-* `internal/panel/index.html` 内注入手机端 CSS 补丁（`DSH-MOBILE-PATCH-BEGIN/END` 夹住，
-  内容来自 `patches/panel-mobile.css`，可重跑 `patches/apply_panel_mobile.sh` 覆盖）
-* 无其它代码改动
+## 一、上游来源与原始 MIT 授权
 
-## 2. 安卓自托管移植部分
+`workbuddy2api-panel/` 来自：
 
-`apk-src/`、`patches/`、`run.sh`、`rebuild.sh`、`watchdog.sh`、`push_github.sh`、
-`README.md`、`AGENT.md`、`CHANGELOG.md` —— 同样以 MIT 发布，保留上游版权声明。
+* 原始项目：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（上游仓库已删除）
+* 本项目基于的镜像：[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
 
-## 不含什么
+该目录按上游源码原样放置（未含 `.git`），仅注入手机端 CSS 补丁
+（`internal/panel/index.html` 内 `DSH-MOBILE-PATCH-BEGIN/END` 夹住，内容来自
+`patches/panel-mobile.css`），其余为本项目自行修复的缺陷（见 `CHANGELOG.md`）。
 
-本仓库**不含**任何账号凭据、签名密钥、本机运行数据与日志（见 `.gitignore`；
-`workbuddy2api-panel/data/`、`auths/`、`config.json`、`apk-src/wb2api.keystore`、
-成品 APK 都被排除，成品只走 Releases 分发）。
+原始 MIT 授权全文（按上游 LICENSE 原样保留）：
+
+```
+MIT License
+
+Copyright (c) 2026 Sliverkiss (original project: https://github.com/Sliverkiss/workbuddy2api)
+Copyright (c) 2026 linguo2625469 (this fork: https://github.com/linguo2625469/workbuddy2api-panel)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
+## 二、使用声明（必读）—— 上游原文
+
+本项目（含上游 Sliverkiss/workbuddy2api，下同）的开发初衷只有一个：**方便个人管理自己的
+CodeBuddy 账号**——自动签到、保活、给自己的本地工具提供一个 OpenAI 兼容入口。它是免费、
+按「原样」提供的个人自用工具。
+
+近期发现有人将本项目用于以下行为：
+
+- **批量注册小号 / 收购账号，对外提供付费 API、共享池、代充等业务**；
+- **二次加壳、捆绑卡密（授权码）售卖**，或以「公益服」「低价中转」等名义变相收费分发。
+
+我们对上述行为**表达最强烈的反对**，并声明如下：
+
+1. **一切商用 / 售卖行为与本项目及作者无关。** 本项目不授权、不支持、不参与任何面向公众的
+   API 售卖、账号池出租、卡密收费分发；行为人由此产生的一切后果（包括但不限于账号封禁、
+   条款违约与法律风险）由其自行承担，与作者和贡献者无任何关系。
+2. **批量注册与转售接口配额违反目标平台服务条款。** CodeBuddy / 腾讯系服务条款禁止批量注册
+   账号及商业转售接口。上游仓库已删除、停止公开维护——我们无法断定具体原因，但此类滥用行为
+   正在毁掉所有正常使用者的环境，请勿再消耗社区的善意。
+3. **请勿购买任何「收费版」「卡密版」「公益中转版」。** 本项目永远免费。任何加壳、加密、捆绑
+   收费的「版本」都是他人篡改的产物，与本项目无关；且此类分发无法审计，存在被植入后门、回传
+   并窃取你 CodeBuddy 凭证的风险（`auths/` 中保存的是明文 accessToken / refreshToken）。
+4. **关于开源协议的诚实说明。** 上游基于 MIT 协议开源，协议允许自由使用与修改源码——这是开源
+   的本意；但 MIT 赋予的是代码层面的自由，**不赋予**以本项目名义宣传、售卖、捆绑分发，或要求
+   作者提供支持与背书的权利。作者不为任何第三方分发版本提供支持、更新承诺或安全保证。
+5. **作者保留止损的权利。** 若滥用行为持续，作者可能随时停止维护、关闭或删除仓库，且不另行通知。
+
+如果你的用途是管理自己的账号，欢迎正常使用。
+
+---
+
+## 三、免责声明 —— 上游原文
+
+本项目仅供学习和研究使用。使用者需遵守 CodeBuddy 服务条款，自行承担使用风险
+（包括账号封禁、条款违约等）。作者不对任何因使用本项目产生的直接或间接损失负责。
+
+---
+
+## 四、停止维护声明 —— 上游原文（2026-10-21）
+
+> **项目已停止维护（2026-10-21）**：后续不再更新代码、不跟进上游变化、不再处理新的
+> issue / PR。
+>
+> 原因有三：
+> 1. **上游已开始禁用反代**——WorkBuddy 对非官方客户端的识别与拦截正在收紧（通道校验、
+>    账号限制等），反代通道的稳定性与存活周期已不可控，继续做适配意义有限；
+> 2. **个人精力有限**——本项目本就是个人自用工具，无力长期跟进协议变化与风控对抗；
+> 3. **非法转卖泛滥**——发现大量批量注册小号、对外售卖额度、二次加壳 / 卡密分发的滥用行为，
+>    与本项目初衷完全相悖。
+>
+> 仓库保持现状可用（已合入的修复不会回退），但请自行评估风险：**上游随时可能彻底收紧导致
+> 不可用**；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
+>
+> **维护方式披露**：上游近期的 issue / PR 处置、代码审查、测试与修复实现**大量由 AI 辅助完成**
+> （自动化编码 agent），合并与发布决策由维护者作出。
+
+---
+
+## 五、本项目的额外声明
+
+1. **保留所有权利**：除上表标注为 MIT 的第三方部分外，本项目的安卓移植、构建脚本、运维脚本与
+   文档均为「保留所有权利」，未经书面许可不得复制、分发、修改或商用。
+2. **不含敏感数据**：本仓库不含任何账号凭据、签名密钥、本机运行数据与日志（见 `.gitignore`；
+   `workbuddy2api-panel/data/`、`auths/`、`config.json`、`apk-src/wb2api.keystore`、成品 APK
+   都被排除，成品只走 Releases 分发）。
+3. **风险自担**：使用本软件进行账号自动化（签到 / 保活 / 任务）可能触发上游风控；因使用本项目
+   导致的账号封禁、条款违约或任何损失，本项目作者概不负责。
+4. **不提供担保与支持**：本项目按「原样」提供，不承诺可用性、不承诺跟进上游协议变化、不提供
+   任何形式的商业支持。

@@ -1257,9 +1257,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		credit, total, hasCredit := usageCreditTotal(resp)
 		if usage, ok := resp["usage"].(map[string]any); ok {
-			if hit, okH := upstream.UsageCacheHitTokens(usage); okH {
-				miss, _ := upstream.UsageCacheMissTokens(usage)
-				st.cacheHit, st.cacheMiss, st.hasCache = int64(hit), int64(miss), true
+			// 对称口径（上游 issue #170）：hit 不可得但 miss 可信时按 prompt-miss 反推
+			if hit, miss, okC := cacheTokensFromUsage(usage); okC {
+				st.cacheHit, st.cacheMiss, st.hasCache = hit, miss, true
 			}
 		}
 		recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, 0)
@@ -1407,6 +1407,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
 		}
 		switch ue.Kind {
+		case upstream.ErrUpstreamBusy:
+			// 6021 queue.full 渠道级容量满载（上游 PR #185）：503 + 可重试语义。
+			// 上游原文（下方统一透传）含 requestId，客户端按 SDK 退避重试即可。
+			status = http.StatusServiceUnavailable
+			code = "upstream_busy"
+			msg = "upstream capacity is full (queue.full); retry after a short wait"
 		case upstream.ErrSoftRate:
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
@@ -1758,6 +1764,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		if modelRateLimited {
 			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
 		}
+	case upstream.ErrUpstreamBusy:
+		// 6021 queue.full 渠道级容量满载（上游 PR #185）：账号余额健康、未限流、
+		// session 未死，换号也撞同一堵墙。零动作（不冷却/不熔断/不 NoteError）。
 	case upstream.ErrWafBlock:
 		// WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族：基数
 		// wafCooldownBase（60s，抖动后落 [45s,75s]）、softStreak 指数升级、封顶

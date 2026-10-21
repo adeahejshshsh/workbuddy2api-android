@@ -41,6 +41,7 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrUpstreamBusy                  // 6021 queue.full 渠道级容量满载 → 不罚号、不轮转，末端 503 upstream_busy
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -66,6 +67,8 @@ func (k ErrKind) String() string {
 		return "waf_block"
 	case ErrPromptTooLong:
 		return "prompt_too_long"
+	case ErrUpstreamBusy:
+		return "upstream_busy"
 	case ErrImageInvalid:
 		return "image_invalid"
 	case ErrAccountFault:
@@ -566,6 +569,12 @@ func Classify(status int, body string) ErrKind {
 	// 信号：上游既然给了 429，就按限流语义处理（宁可短冷却自愈，不可长冷却弃号）；
 	// 真正的余额耗尽由 402（上层）或 14018（上层）捕获，非 429 状态码的 quota
 	// 措辞仍走下方 hardMarkers（历史语义不变）。
+	// 6021 queue.full 渠道级容量满载（上游 PR #185）：判在 429 兜底**之前** ——
+	// 它是比「限流」更具体的渠道级信号。上游集群排队打满时换任何号都撞同一堵墙，
+	// 按限流处置会逐号软冷却（实测 2 秒绞杀整池），换号白撞还把无效请求放大 MaxRotate 倍。
+	if isQueueFullBody(lower) {
+		return ErrUpstreamBusy
+	}
 	if status == http.StatusTooManyRequests {
 		return ErrSoftRate
 	}
@@ -676,8 +685,21 @@ type apiEnvelope struct {
 }
 
 // Client 上游 HTTP 客户端。Base 字段可覆盖便于测试。
+// refreshFlight 一次在途 refresh 的完成信号（上游 PR #217 单飞）。
+type refreshFlight struct {
+	done chan struct{}
+	err  error
+}
+
 type Client struct {
 	HTTP *http.Client
+
+	// refreshMu/refreshInFlight 同账号 refresh 单飞（按 UID 分桶）：同一时刻只允许
+	// 一个 refresh 在途，其余调用等待并复用首个结果。上游对 refreshToken 反重放，
+	// 并发第二发会带着已被消费的 RT 撞 12153 并整链作废（账号从此恒 401，只能人工重登）。
+	// 单飞在这里是**保号手段**，不只是省流量。
+	refreshMu       sync.Mutex
+	refreshInFlight map[string]*refreshFlight
 
 	// ChatHTTP 聊天 SSE 专用 client：无总时长上限（Timeout=0），首字节由
 	// Transport.ResponseHeaderTimeout 约束，流中空闲由 IdleTimeout 约束。
@@ -1036,7 +1058,39 @@ const refreshTokenExpiresInMax = RefreshTokenExpiresInMax
 //     独占 a.mu，阻塞同账号的 SaveAtomic / 其他刷新（issue:持锁 120s I/O）。
 //   - 写回前重新校验快照一致性：若锁外期间另一 goroutine 已完成刷新（refreshToken
 //     已变），本次结果直接采用（新 token 已生效），不再重复写回。
+//
+// RefreshToken 同账号单飞（上游 PR #217）：并发调用共享首个结果。
 func (c *Client) RefreshToken(a *auth.Auth) error {
+	key := a.UID
+	if key == "" {
+		// 无 UID 的临时 auth：按对象指针去重，仍保证同一对象串行
+		key = fmt.Sprintf("%p", a)
+	}
+	c.refreshMu.Lock()
+	if c.refreshInFlight == nil {
+		c.refreshInFlight = make(map[string]*refreshFlight)
+	}
+	if f, ok := c.refreshInFlight[key]; ok {
+		c.refreshMu.Unlock()
+		<-f.done
+		return f.err
+	}
+	f := &refreshFlight{done: make(chan struct{})}
+	c.refreshInFlight[key] = f
+	c.refreshMu.Unlock()
+
+	err := c.refreshTokenOnce(a)
+
+	c.refreshMu.Lock()
+	delete(c.refreshInFlight, key)
+	c.refreshMu.Unlock()
+	f.err = err
+	close(f.done)
+	return err
+}
+
+// refreshTokenOnce 实际执行一次刷新（原 RefreshToken 的实现体）。
+func (c *Client) refreshTokenOnce(a *auth.Auth) error {
 	// 第 1 段（锁内）：读快照。
 	a.Lock()
 	rtSnapshot := a.RefreshToken
@@ -2471,4 +2525,10 @@ func mustJSONString(s string) string {
 
 func truncate(s string, n int) string {
 	return logfmt.Truncate(s, n)
+}
+
+// isQueueFullBody 判定渠道级容量满载文案（6021 queue.full 家族，上游 PR #185）。
+// 该形态与具体账号无关：换号在任何时刻都撞同一堵墙，正确处置是不罚号不轮转。
+func isQueueFullBody(lower string) bool {
+	return strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full")
 }

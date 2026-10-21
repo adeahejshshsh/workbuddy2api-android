@@ -1,7 +1,7 @@
 # WorkBuddy2API · Android 自托管网关
 
 把 [workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（上游
-[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，MIT）打包成**能装在手机上常驻运行**的安卓 App：
+[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，其服务端部分仍为 MIT）打包成**能装在手机上常驻运行**的安卓 App：
 网关二进制 + 管理面板 + 看门狗 + 保活，全部塞进一个 APK。
 
 一台手机 = 一个 OpenAI 兼容网关：`http://127.0.0.1:7863/v1`（局域网访问把 `127.0.0.1` 换成手机 IP）。
@@ -102,5 +102,7 @@ CHANGELOG.md             变更记录
 
 * 上游服务端与面板：[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)（MIT，见
   `workbuddy2api-panel/LICENSE`），本移植基于 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
-* 安卓移植部分（`apk-src/`、`patches/`、`run.sh` 等）同样以 MIT 发布，保留上游版权声明
+* **安卓移植与运维部分（`apk-src/`、`patches/`、`run.sh` 等）：保留所有权利（All Rights Reserved）**，见 `LICENSE`
+* 上游服务端与面板部分（`workbuddy2api-panel/`）仍依其原始 MIT 授权，原始版权声明与许可声明完整保留在 `NOTICE.md`
+* **使用声明 / 免责声明 / 上游停止维护声明已全部搬入 `NOTICE.md`（必读）**
 * 本仓库**不含**任何账号凭据、签名密钥与本机运行数据（见 `.gitignore`）

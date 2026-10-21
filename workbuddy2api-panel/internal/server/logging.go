@@ -226,7 +226,10 @@ func (s *chatStatsReader) parseSSELine(line string) {
 // CacheTokens 返回末帧 usage 的缓存命中 / 未命中 token 数。miss 缺失时按
 // prompt - hit 推导；hit 与 miss 均不可得时 ok=false（不参与命中率统计）。
 func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
-	if !s.hasCacheHit {
+	// 对称推导（上游 issue #170）：miss 缺失时按 prompt-hit 推；反过来，hit 为 0
+	// 或缺失但 miss 可信（prompt > miss，即确有命中量）时按 prompt-miss 反推 hit。
+	// 不反推的话，上游「接近全命中时回 hit=0 + miss=3」会被误判成整段未命中。
+	if !s.hasCacheHit && !s.hasCacheMiss {
 		return 0, 0, false
 	}
 	hit = int64(s.cacheHit)
@@ -236,8 +239,27 @@ func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
 			return hit, 0, true
 		}
 		miss = int64(s.promptTokens - s.cacheHit)
+	} else if s.cacheHit == 0 && s.hasPromptTokens && s.promptTokens > s.cacheMiss {
+		hit = int64(s.promptTokens - s.cacheMiss)
 	}
 	return hit, miss, true
+}
+
+// cacheTokensFromUsage 从非流式聚合响应的 usage 里取缓存命中/未命中，
+// 与流式侧 CacheTokens 的推导口径对称（上游 issue #170）。
+func cacheTokensFromUsage(usage map[string]any) (hit, miss int64, ok bool) {
+	h, okH := upstream.UsageCacheHitTokens(usage)
+	m, okM := upstream.UsageCacheMissTokens(usage)
+	switch {
+	case okH:
+		return int64(h), int64(m), true
+	case okM:
+		if p, okP := upstream.UsagePromptTokens(usage); okP && p > m {
+			return int64(p - m), int64(m), true
+		}
+		return 0, int64(m), true
+	}
+	return 0, 0, false
 }
 
 // SawErrorFrame 报告流中是否透传过 SSE error 帧。

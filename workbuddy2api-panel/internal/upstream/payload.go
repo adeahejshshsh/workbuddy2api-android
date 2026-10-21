@@ -42,6 +42,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	if err := dec.Decode(&obj); err != nil {
 		return src
 	}
+	// 先剔思考片段（上游 PR #159）：Codex 经 responses→chat 转换后会把
+	// reasoning_text 透传进来，上游 content 白名单不含它 → 400 code=11101。
+	dropReasoningContentParts(obj)
 	obj["stream"] = true
 	// max_completion_tokens → max_tokens 翻译（吸收上游 PR #116，Closes #117）：
 	// OpenAI 规范里 max_tokens 已 deprecated、max_completion_tokens 是新字段；
@@ -479,4 +482,49 @@ func unescapePatternLiteralEscapes(node any) {
 			unescapePatternLiteralEscapes(v)
 		}
 	}
+}
+
+// dropReasoningContentParts 剔除 chat content 数组里的 reasoning_text / reasoning 片段
+// （上游 PR #159）。Codex 只走 /v1/responses，responses→chat 的转换器会把助手历史里的
+// 思考片段原样透传进 /v1/chat/completions；上游 content 类型白名单不含 reasoning_text，
+// 命中即 HTTP 400 code=11101。思考片段是模型私有推理，下游续写不需要，剔除无副作用。
+func dropReasoningContentParts(obj map[string]any) {
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return
+	}
+	out := make([]any, 0, len(msgs))
+	for _, rawMsg := range msgs {
+		msg, ok := rawMsg.(map[string]any)
+		if !ok {
+			out = append(out, rawMsg)
+			continue
+		}
+		parts, ok := msg["content"].([]any)
+		if !ok {
+			out = append(out, rawMsg)
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				kept = append(kept, rawPart)
+				continue
+			}
+			ptype, _ := part["type"].(string)
+			if tv := strings.TrimSpace(ptype); tv == "reasoning_text" || tv == "reasoning" {
+				continue
+			}
+			kept = append(kept, rawPart)
+		}
+		if len(kept) == 0 {
+			if _, hasToolCalls := msg["tool_calls"]; !hasToolCalls {
+				continue
+			}
+		}
+		msg["content"] = kept
+		out = append(out, rawMsg)
+	}
+	obj["messages"] = out
 }

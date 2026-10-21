@@ -1,22 +1,20 @@
-MIT License
+版权所有 © 2026 adeahejshshsh（本项目：workbuddy2api-android 安卓自托管移植版）
+保留所有权利（All Rights Reserved）
 
-Copyright (c) 2026 Sliverkiss (original project: https://github.com/Sliverkiss/workbuddy2api)
-Copyright (c) 2026 WorkBuddy2API Android port
+未经版权持有人事先书面许可，任何人不得：
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. 复制、分发、公开传播本项目的全部或任何部分（源码或二进制形式）；
+2. 修改、改编、翻译、反编译、反汇编，或以其它方式创作衍生作品；
+3. 将本项目或其衍生作品用于商业用途，包括但不限于出售、出租、收费分发、捆绑销售，
+   或以「公益服 / 低价中转 / 卡密授权」等名义对外提供付费服务；
+4. 移除、遮蔽或篡改本文件以及 NOTICE.md 中的版权声明、授权声明与免责声明；
+5. 以本项目名义对外宣传、背书、承诺支持或提供更新。
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+例外与边界：本项目内含的第三方组件（workbuddy2api-panel 上游服务端与 Web 面板）
+依其原始 MIT 协议授权，原始版权声明与许可声明完整保留在 NOTICE.md 中。
+该 MIT 授权仅覆盖那一部分第三方代码，不改变本项目其余部分的「保留所有权利」状态。
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+本软件按「原样」提供，不附带任何明示或暗示的担保（包括但不限于适销性、特定用途
+适用性与不侵权）。使用本软件的全部风险由使用者自行承担；因使用本项目导致的账号
+风控、封禁、条款违约或任何直接/间接损失，作者与贡献者概不负责。
+完整的使用声明与免责声明见 NOTICE.md（必读）。
