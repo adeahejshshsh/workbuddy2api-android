@@ -171,5 +171,9 @@ shell 的管道）关掉了读端，网关立刻 141 退出，日志上看不出
   `data/state.json`、`data/server.log`）—— 这个 uid 读不到，只能 `adb`/`run-as` 取。
 * 面板与 API 都在 `:7863`；默认监听 `127.0.0.1`，对外必须显式改 `listen` + 配 `api_key`。
 * 端口上如果已经有一个不是本服务拉起的实例，服务会判成「运行中（外部）」并**不抢端口**。
-* 发布：`bash push_github.sh release`（token 走 `GITHUB_TOKEN` 环境变量或 `/sdcard/public_repo`；
-  脚本会先扫敏感串，命中就中止）。
+* 发布分两档（**默认只提交，不发版**）：
+  - **日常改 bug / 小改动 → 只推源码**：`bash push_github.sh`
+    （提交并推到 main，**不建 Release、不上传 APK**）。
+  - **需要可安装包时才发版**：`bash push_github.sh release`（建 Release + 上传 APK）。
+    多个修复攒到一起再发，避免 Release 列表被刷爆。
+  - token 走 `GITHUB_TOKEN` 环境变量或 `/sdcard/public_repo`；脚本会先扫敏感串，命中就中止。
