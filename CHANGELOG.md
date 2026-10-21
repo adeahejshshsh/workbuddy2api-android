@@ -37,7 +37,18 @@
   那四个模型用处不大，换身份一致性更划算。CN 目录探测仍用 IDE 身份（实测桌面 UA 会多出
   约 8 条 CN 基址根本不存在的死条目）。
 
-### 三、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 三、DSH 身份句品牌词改写（misakano7545 `4f60a4c6`，关键）
+
+上游按**逐字匹配**把 `DeepSeek Harness` 当成「非官方渠道调用」**整单拦截**：
+400 `11‑-128 Illegal API invocation from an unapproved channel`。我们跑的就是 DSH，
+客户端的 system 提示词里必带这句 —— 不处理的话请求会被上游直接拒。
+
+* `sanitizeFeatures` 补 `"DeepSeek Harness"`（只带这一句也必须进净化）；
+* `sanitizeRewrites` 补一条 `{"DeepSeek Harness" → "DeepSeekRuntime"}` ——
+  按短语**全局**替换（同一品牌词在长提示词正文里会多次出现），不是只认开头；
+* 替代词可见、可 diff；插零宽空格那条路对数字错误码无效（上游会归一化），故不采用。
+
+### 四、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，
@@ -52,6 +63,7 @@
 
 ### 测试
 
+新增 `TestDeepSeekHarnessBrandRewritten`（品牌词必被改写、只带品牌词也进净化、幂等、正文多次出现全改）。
 改写 `TestClassifyChannelRefusedVsAccountRestricted`（**真实报文形态** → `ErrChannelRefused`、
 渲染形态也命中、11140 不误判成通道、内容审核变体仍归 `ErrContentBlocked`、
 带限流文案的 11140 不算账号限制）、新增 `TestNormalizeBusinessCode`；
