@@ -413,6 +413,16 @@ func writeAuthSnapshot(s authFileSnapshot) error {
 		"enterpriseId": s.enterpriseID,
 		"nickname":     s.nickname,
 	})
+	// 扁平形遗留键必须清掉（bug 16）：把扁平文件升级成嵌套形时只 putMerged 了
+	// auth/account，顶层的 accessToken/refreshToken/... 原样留着 —— 功能上暂时正确
+	// （Parse 优先读嵌套形），但文件里永久多一份旧 token，任何按扁平键读的外部
+	// 工具/插件都会拿到过期凭证。只删已知键，用户手写的未知键继续保留。
+	for _, k := range []string{
+		"accessToken", "refreshToken", "expiresAt", "domain", "realm",
+		"uid", "enterpriseId", "nickname",
+	} {
+		delete(doc, k)
+	}
 	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if s.deviceToken != "" {

@@ -241,6 +241,12 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
+        // 用户主动打开 App = 明确要跑：清掉「用户停止」标记（bug 22），
+        // 否则下次开机 BootReceiver 会继续跳过自启，用户以为坏了。
+        try {
+            getSharedPreferences(GatewayService.PREF, MODE_PRIVATE).edit()
+                    .putBoolean("user_stop", false).apply();
+        } catch (Throwable ignored) {}
         GatewayService.start(this);
         apiKey = readApiKey();
         // 这里不再 tick()（bug #16）：onStart 会调 tick() + scheduleTick()，

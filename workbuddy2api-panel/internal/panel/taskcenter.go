@@ -53,7 +53,11 @@ type skipRow struct {
 // v1.22.0 起是**方法**：判定要带账号 —— "反复无效"是按 (账号,任务码) 记的，
 // 同一个任务码在 A 账号能做、在 B 账号上游不计数。
 func (p *Panel) growthPending(a *auth.Auth, t upstream.Task) bool {
-	if t.Claimed {
+	if t.Claimed || t.Claimable {
+		// 已达标未领奖也不进队列（bug 3）：单任务入口与 runAutoAll 用的都是
+		// taskDone()（Claimed || Claimable），只有队列这条漏了 —— 于是「进度已满
+		// 但还没点领取」的任务进队列后会把整条动作链再跑一遍（expert_5 是 5 次
+		// 真实对话 + 5 组召唤事件），最后才领奖，白烧上游配额。
 		return false
 	}
 	// 上游锁定的任务不出待办：Sequential 族每日零点解锁一环，刚做完上一环时
@@ -303,8 +307,8 @@ func (p *Panel) queue() *queueState {
 // school 逐账号跑闭环），账号内串行、账号间受并发信号量约束。
 func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Concurrency int  `json:"concurrency"`
-		Growth      bool `json:"growth"`
+		Concurrency int   `json:"concurrency"`
+		Growth      *bool `json:"growth"`
 	}
 	// 解析失败必须回 400（bug A3）：以前 `_ = ...Decode(...)` 把错误丢掉，
 	// 畸形/空 JSON 也照样按默认值（concurrency=1, growth=true）真的启动一轮扫描与执行，
@@ -314,8 +318,11 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+derr.Error())
 		return
 	}
-	if !body.Growth {
-		body.Growth = true
+	// 指针区分「未传」与「显式 false」（bug 15）：此前 `if !body.Growth { body.Growth = true }`
+	// 让调用方永远关不掉 growth 队列，字段形同虚设。
+	growth := true
+	if body.Growth != nil {
+		growth = *body.Growth
 	}
 	if body.Concurrency < 1 {
 		body.Concurrency = 1
@@ -323,7 +330,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	if body.Concurrency > 4 {
 		body.Concurrency = 4
 	}
-	started, total, seq, msg, lvl := p.startGrowthQueue(r.Context(), body.Concurrency, body.Growth)
+	started, total, seq, msg, lvl := p.startGrowthQueue(r.Context(), body.Concurrency, growth)
 	switch {
 	case seq == -1:
 		writeErr(w, http.StatusConflict, msg)
@@ -789,6 +796,23 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, bool, error)
 	if before.Claimed {
 		return "已完成（已领取）", true, nil
 	}
+	// 已达标未领奖：直接领，不重跑动作链（bug 3，与 growthPending 的过滤同口径）
+	if before.Claimable {
+		var credit, energy int64
+		var already bool
+		var cerr error
+		if isMP {
+			credit, energy, already, cerr = p.cfg.Upstream.ClaimRewardMP(a, code)
+		} else {
+			credit, energy, already, cerr = p.cfg.Upstream.ClaimReward(a, code)
+		}
+		if cerr == nil {
+			if !already {
+				p.refreshCreditsAsync(a)
+			}
+			return fmt.Sprintf("已达标，直接领奖 +%d 分 +%d 能", credit, energy), true, nil
+		}
+	}
 	msg, err := act.run(p, a)
 	if err != nil {
 		return "", false, err
@@ -885,6 +909,8 @@ func (p *Panel) schoolVouchers(w http.ResponseWriter, r *http.Request) {
 	out := make([]row, len(accts))
 	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
+	ctx := r.Context()
+dispatchVouchers:
 	for i, st := range accts {
 		if st.Disabled {
 			continue // 未占位，行末统一压掉
@@ -895,7 +921,13 @@ func (p *Panel) schoolVouchers(w http.ResponseWriter, r *http.Request) {
 		}
 		// 抢槽前置（bug-11）：与 tasksScanAll / startGrowthQueue / packages 同款，
 		// 别再"先起 N 个 goroutine 再排队"。
-		sem <- struct{}{}
+		// 并且要能被断连打断（bug 20）：裸阻塞时用户关掉页面，handler 仍会把剩余
+		// 账号全部查完 —— packages 早改成 select+ctx 了，这里漏了。
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break dispatchVouchers
+		}
 		wg.Add(1)
 		go func(i int, a *auth.Auth) {
 			defer wg.Done()

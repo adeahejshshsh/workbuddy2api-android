@@ -134,32 +134,45 @@ func fetchUserResource(af *authFile) (remain, used, size int64, packs int, err e
 		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
 	})
 	base := billingBaseFor(af)
-	// global 域无 /v2 前缀（与 internal/upstream 的 billingMeterPaths 同口径）。
-	path := "/v2/billing/meter/get-user-resource"
+	// 与 internal/upstream 的 billingMeterPaths 同口径（bug 14）：global 域是
+	// 「先无 /v2，404 再换带 /v2」的双路径候选；cn 域固定带 /v2。
+	// 此前 CLI 只试第一条，上游若只认 /v2，全部 global 号都会报 http 404。
+	paths := []string{"/v2/billing/meter/get-user-resource"}
 	if base == billingBaseGlobal {
-		path = "/billing/meter/get-user-resource"
-	}
-	req, err := http.NewRequest(http.MethodPost, base+path, bytes.NewReader(body))
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+af.Auth.AccessToken)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-	if af.Account.UID != "" {
-		req.Header.Set("X-User-Id", af.Account.UID)
-	}
-	if af.Account.EnterpriseID != "" {
-		req.Header.Set("X-Enterprise-Id", af.Account.EnterpriseID)
-		req.Header.Set("X-Tenant-Id", af.Account.EnterpriseID)
-	}
-	if af.Auth.Domain != "" {
-		req.Header.Set("X-Domain", af.Auth.Domain)
+		paths = []string{"/billing/meter/get-user-resource", "/v2/billing/meter/get-user-resource"}
 	}
 	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, 0, 0, 0, err
+	var resp *http.Response
+	for i, path := range paths {
+		req, rerr := http.NewRequest(http.MethodPost, base+path, bytes.NewReader(body))
+		if rerr != nil {
+			return 0, 0, 0, 0, rerr
+		}
+		req.Header.Set("Authorization", "Bearer "+af.Auth.AccessToken)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
+		if af.Account.UID != "" {
+			req.Header.Set("X-User-Id", af.Account.UID)
+		}
+		if af.Account.EnterpriseID != "" {
+			req.Header.Set("X-Enterprise-Id", af.Account.EnterpriseID)
+			req.Header.Set("X-Tenant-Id", af.Account.EnterpriseID)
+		}
+		if af.Auth.Domain != "" {
+			req.Header.Set("X-Domain", af.Auth.Domain)
+		}
+		resp, rerr = client.Do(req)
+		if rerr != nil {
+			return 0, 0, 0, 0, rerr
+		}
+		if resp.StatusCode == http.StatusNotFound && i < len(paths)-1 {
+			resp.Body.Close()
+			continue // 换下一个候选路径
+		}
+		break
+	}
+	if resp == nil {
+		return 0, 0, 0, 0, fmt.Errorf("no billing path tried")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {

@@ -13,6 +13,16 @@ public class BootReceiver extends BroadcastReceiver {
         // 等于给了外部一个「随时拉起本 App 前台服务」的开关。
         if (Intent.ACTION_BOOT_COMPLETED.equals(a)
                 || Intent.ACTION_MY_PACKAGE_REPLACED.equals(a)) {
+            // 用户明确停止过就不再自启（bug 22）：GatewayService.stop() 会置这个标记，
+            // 用户在 App 里重新开启服务时由 MainActivity 清掉。
+            boolean userStopped;
+            try {
+                userStopped = c.getSharedPreferences(GatewayService.PREF, Context.MODE_PRIVATE)
+                        .getBoolean("user_stop", false);
+            } catch (Throwable t) {
+                userStopped = false;
+            }
+            if (userStopped) return;
             GatewayService.start(c);
         }
     }

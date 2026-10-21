@@ -118,6 +118,8 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	var total, imported, skipped int
 	var errs []string
 
+	// 后置动作并发上限（bug 18）：与 packages / syncNicknames 同款 sem=3
+	importSem := make(chan struct{}, 3)
 	for _, acc := range accounts {
 		uid := strings.TrimSpace(acc.UID)
 		at := strings.TrimSpace(acc.AccessToken)
@@ -194,7 +196,19 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		// 后置动作（签到/注册激活/领 trial/查余额）**丢到后台**（bug #23）：
 		// 每号 2 次上游调用，几十个号串行 = 几十秒到几分钟，全部跑完才返回 →
 		// 浏览器/反代先超时，前端报失败但账号其实已导入一半，用户重试又重复导入。
-		go p.postImportActivate(a, realm)
+		//
+		// 但要限并发（bug 18）：导入几百个号时裸 go 会同时发起几百组上游请求，
+		// 正是仓库其它地方用 sem=3/4 专门防的 WAF 频控形态。
+		importSem <- struct{}{}
+		go func(a *auth.Auth, realm string) {
+			defer func() { <-importSem }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERR: [panel] postImportActivate panic uid=%s: %v", a.UID, r)
+				}
+			}()
+			p.postImportActivate(a, realm)
+		}(a, realm)
 		continue
 	}
 

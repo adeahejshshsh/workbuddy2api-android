@@ -188,7 +188,10 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			// 包装成 errUpstreamRead（bug #3）：非流式路径靠 IsUpstreamReadError 判
 			// 「上游中途断流」回 502 stream_error，与流式路径同码；此前 Aggregate
 			// 原样返回裸错误 → 该分支永远不可达，错误码与流式不一致。
-			return nil, fmt.Errorf("%w: %v", errUpstreamRead, err)
+			// 双 %w（bug 12）：用 %v 会把底层 net.Error.Timeout / DeadlineExceeded
+			// 的链断掉，isUpstreamTimeout 全部判否 → 超时被报成 502 stream_error，
+			// 而不是可区分的 503 upstream_timeout，也就走不到"超时不换号不罚号"。
+			return nil, fmt.Errorf("%w: %w", errUpstreamRead, err)
 		}
 		line = strings.TrimRight(line, "\r\n")
 		// SSE 规范里 "data:" 后的空格是可选的（"data:{...}" 同样合法）。只认

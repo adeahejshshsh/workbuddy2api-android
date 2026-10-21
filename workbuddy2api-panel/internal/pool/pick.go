@@ -135,6 +135,16 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		key := realm + "\x1f" + reqModel
 		if hasTier1 && now.Sub(p.exploreLast[key]) >= p.costExploreInterval {
 			p.exploreLast[key] = now
+			// 顺手清理过旧条目（bug 17）：客户端可以传任意模型名（上游 400 也算一次
+			// pick 尝试），这个 map 会随「历史出现过的 (域,模型)」单调增长，
+			// /status 还会把它整体序列化输出。低频 O(n) 清理，代价可忽略。
+			if len(p.exploreLast) > 512 {
+				for k, ts := range p.exploreLast {
+					if now.Sub(ts) > 24*time.Hour {
+						delete(p.exploreLast, k)
+					}
+				}
+			}
 			p.costExploreEvents++
 			bestTier = 1
 			explored = true
@@ -310,8 +320,12 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if realm != "" && e.a.Realm() != realm {
 			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底
 		}
-		if e.disabled || e.paused {
-			continue // 禁用/暂停选号的账号永不参与兜底
+		if e.disabled || e.paused || e.needAuth {
+			// 禁用/暂停号永不参与兜底；needAuth 占位号（Redis 快照恢复出来的、
+			// 只有 UID 没有凭证）同样必须排除（bug 2）：它带着从 state.json 恢复的
+			// 冷却截止时 expiry 非零，会被兜底选中 → handler 拿到 AccessToken=="" 的号
+			// → RefreshToken 报 no refreshToken → 熔断+轮转，整池 503。
+			continue
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402

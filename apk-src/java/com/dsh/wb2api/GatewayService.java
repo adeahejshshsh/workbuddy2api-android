@@ -201,7 +201,12 @@ public class GatewayService extends Service {
     public static void stop(Context c) {
         userStop = true;
         try {
-            c.getSharedPreferences(PREF, MODE_PRIVATE).edit().putBoolean("service_up", false).apply();
+            // 持久化「用户主动停止」（bug 22）：只置内存标记的话，重启手机后
+            // BootReceiver 会无条件把网关拉起来 —— 与「不再自愈」的承诺相反。
+            c.getSharedPreferences(PREF, MODE_PRIVATE).edit()
+                    .putBoolean("service_up", false)
+                    .putBoolean("user_stop", true)
+                    .apply();
         } catch (Throwable ignored) {}
         cancelAlarm(c);
         ReviveJobService.cancel(c);

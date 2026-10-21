@@ -60,7 +60,10 @@ func (c *Client) RunNightChatsCtx(ctx context.Context, a *auth.Auth, need int) (
 			"messages": []map[string]any{{"role": "user", "content": "1+1等于几？直接回答。"}},
 			"stream":   true,
 		})
-		rc, status, respBody, err := c.ChatStream(a, body, "", ChatMeta{})
+		// ctx 必须传进对话请求（bug 8）：此前用 ChatStream（内部 Background），
+		// ctx 只在两轮之间的睡眠里生效 —— 一条正在生成的长回复无法被打断，
+		// 停机时要等它跑完，与函数名/注释承诺的"立刻返回"相反。
+		rc, status, respBody, err := c.ChatStreamContext(ctx, a, body, "", ChatMeta{})
 		if err != nil || status >= 400 {
 			if rc != nil {
 				rc.Close()

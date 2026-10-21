@@ -291,7 +291,10 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 		// → 传输层错误 → 轮转/503，而客户端本身只是 ID 里带了奇怪字符。
 		req.Header.Set("X-Conversation-ID", HeaderSafe(meta.ConversationID))
 	}
-	req.Header.Set("X-Conversation-Request-ID", convReqID)
+	// 客户端传来的会话头必须清洗（bug 9）：原值含 \r/\n 时 net/http 在写请求阶段
+	// 才报 "invalid header field value" → 传输层错误 → 每次轮转都失败 → 最终 503。
+	// X-Conversation-ID 早就做了，这两个漏了。
+	req.Header.Set("X-Conversation-Request-ID", HeaderSafe(convReqID))
 	req.Header.Set("X-Conversation-Message-ID", messageID)
 	req.Header.Set("X-Request-ID", messageID)
 	req.Header.Set("X-Root-Request-ID", convReqID)
@@ -299,7 +302,7 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	if traceID == "" {
 		traceID = convReqID
 	}
-	req.Header.Set("X-Trace-ID", traceID)
+	req.Header.Set("X-Trace-ID", HeaderSafe(traceID))
 	b3Trace := convReqID
 	if !validTraceID(b3Trace) {
 		b3Trace = messageID // 非法 B3 TraceId → 回落恒 32 hex 的消息级 ID

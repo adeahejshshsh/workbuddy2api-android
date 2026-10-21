@@ -4,8 +4,16 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
+# 版本号（bug 13）：镜像此前只注入 -s -w，main.appVersion 保持兜底值 "dev"，
+# /status 与面板左上角全显示 vdev，排障/升级判断没有依据。
+# 优先级：构建参数 APP_VERSION → 上下文里的 VERSION → git tag → dev。
+# 用法：docker build --build-arg APP_VERSION=$(cat VERSION) .
+ARG APP_VERSION=""
+RUN VER="${APP_VERSION:-$(cat VERSION 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo dev)}" \
+ && VER="${VER#v}" \
+ && LDF="-s -w -X main.appVersion=$VER" \
+ && echo "构建版本: $VER" \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="$LDF" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit \

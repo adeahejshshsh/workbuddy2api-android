@@ -65,21 +65,54 @@ func TestFeedbackSentenceRewritten(t *testing.T) {
 	}
 }
 
-// 上游反探测：请求体里出现裸数字 11128 即整单拦截（与上下文无关）。
-// 回归用例：该串会被改写为 11-128 以打断精确匹配。
+// 上游反探测：请求体里出现裸数字错误码即整单拦截。
+// 两种拼写都必须被改写掉（此前表里只有一种形态，另一种原样出站）。
 func TestUpstreamErrorCodeRewritten(t *testing.T) {
-	in := "upstream returned code=11128 for this request"
-	out := sanitizeText(in)
-	if strings.Contains(out, "11128") {
-		t.Errorf("error code not rewritten: %q", out)
-	}
-	if !strings.Contains(out, "11-128") {
-		t.Errorf("error code not rewritten as expected: %q", out)
+	for _, in := range []string{
+		"upstream returned code=11-128 for this request",
+		"upstream returned code=11-128 for this request",
+	} {
+		out := sanitizeText(in)
+		if out == in {
+			t.Fatalf("%q 未被改写（脱敏层空转）", in)
+		}
+		if strings.Contains(out, "11-128") || strings.Contains(out, "11-128") {
+			t.Fatalf("%q 改写后仍含被拦串: %q", in, out)
+		}
 	}
 }
 
-// 回归：工具调用消息的 content 常为 null，而旧版 sanitizeMessages 在 content 缺失时
-// 直接 continue，整条消息连 tool_calls 一起被跳过 → arguments 里的被拦字符串原样漏出。
+// 回归：任何一组改写都不许是「左右值相同」的空操作，也不许写了不生效。
+// 这个文件里两次出现「手写两遍 → 左右相同 / 左右写反」，肉眼看 diff 发现不了
+// （两个形态只差一个词，渲染出来几乎一样）。
+func TestSanitizeRewritesAllFire(t *testing.T) {
+	for i, rw := range sanitizeRewrites {
+		if rw[0] == rw[1] {
+			t.Fatalf("pair %d 是空操作：%q", i, rw[0])
+		}
+		if out := sanitizeText(rw[0]); out == rw[0] {
+			t.Fatalf("pair %d 写了但没生效：%q", i, rw[0])
+		}
+	}
+}
+
+// header 指纹：键值形态整段剥离、裸键名缩写（两种拼写都要覆盖）。
+func TestSanitizeHeaderFingerprints(t *testing.T) {
+	kv := sanitizeText("x-anthropic-billing-hdr: abc; tail")
+	if strings.Contains(strings.ToLower(kv), "x-anthropic-billing") {
+		t.Fatalf("键值段未剥离: %q", kv)
+	}
+	for _, in := range []string{
+		"see x-anthropic-billing-hdr here",
+		"see x-anthropic-billing-hdr here",
+	} {
+		out := sanitizeText(in)
+		if strings.Contains(strings.ToLower(out), "x-anthropic-billing") {
+			t.Fatalf("裸键名未缩写: %q -> %q", in, out)
+		}
+	}
+}
+
 func TestToolCallArgumentsSanitized(t *testing.T) {
 	msgs := []any{
 		map[string]any{"role": "user", "content": "run"},

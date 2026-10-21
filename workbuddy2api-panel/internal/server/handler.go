@@ -1606,6 +1606,14 @@ func usageCreditTotal(resp map[string]any) (credit float64, total int, ok bool) 
 	}
 	t, _ := usage["total_tokens"].(float64)
 	if t <= 0 {
+		// 上游只回 credit + prompt/completion、不回 total 时，此前整笔 credit 被丢
+		// （ok=false → hasCredit=false → 账本/reqlog/NoteModelCost 全当"没观测到"）。
+		// 流式路径用 *float64 判存在性没有这个问题，两条口径要一致（bug 10）。
+		pt, _ := usage["prompt_tokens"].(float64)
+		ct, _ := usage["completion_tokens"].(float64)
+		t = pt + ct
+	}
+	if t <= 0 {
 		return 0, 0, false
 	}
 	return c, int(t), true

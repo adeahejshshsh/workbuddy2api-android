@@ -489,7 +489,7 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			case taskActivity:
 				s.runActivity(ctx)
 			case taskKeepalive:
-				s.RunKeepaliveNow()
+				s.RunKeepaliveNowCtx(ctx)
 			case taskBlackcat:
 				s.RunBlackcatNowCtx(ctx)
 			case taskGrowth:
@@ -685,8 +685,19 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
-func (s *Scheduler) RunKeepaliveNow() {
+// keepaliveAccountDelay 账号间节流（变量供测试缩短）。
+// 签到/旅行/活跃/夜猫子/连登兑换都有同款延迟，唯独 keepalive 是裸循环 ——
+// 46 个号在 22:00 一次性连发 46 个 refresh，正是仓库多处注释列为 WAF 频控
+// 触发条件的形态（bug 7）。
+var keepaliveAccountDelay = 800 * time.Millisecond
+
+// RunKeepaliveNow 无 ctx 版本（保留给旧调用方）。
+func (s *Scheduler) RunKeepaliveNow() { s.RunKeepaliveNowCtx(context.Background()) }
+
+// RunKeepaliveNowCtx 带 ctx：停机时可打断，账号之间做节流。
+func (s *Scheduler) RunKeepaliveNowCtx(ctx context.Context) {
 	includeDisabled := s.includeDisabledInTasks()
+	first := true
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
@@ -695,6 +706,12 @@ func (s *Scheduler) RunKeepaliveNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
+		if !first && keepaliveAccountDelay > 0 {
+			if !sleepCtx(ctx, keepaliveAccountDelay) {
+				return // 停机/取消：立刻退出
+			}
+		}
+		first = false
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error

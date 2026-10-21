@@ -1,6 +1,87 @@
 # 变更记录
 
-## v1.28.5（当前）
+## v1.28.6（当前）
+
+**本版 = 第二十一份审查报告（CODE-REVIEW.md，22 条）。21 条为真、1 条部分属实。
+#1「脱敏层整体失效」结论对、成因错 —— 我逐字节验过：那 5 组改写左右值确实不同、
+而且都真的 fire，真正的坏点是 header 正则写成全拼、`11-128` 只覆盖一种拼写。**
+
+### P0
+
+* **#1 出站脱敏层** —— 报告说「4 组左右值逐字节相同、是空操作」。**实测不成立**：
+  用 Go 打出每组左右值的 hex 与 `sanitizeText(rw[0])` 的结果，5 组都是 `eq=false / fire=true`。
+  但脱敏确实基本没在工作，真实原因是四处：
+  1. `sanitizeBareHdrRe` 写成 `x-anthropic-billing-hdr`（**全拼 header**），而真实键名与
+     特征表都是 `billing-hdr` —— 差一个单词，整个裸键名兜底永远匹配不到；
+  2. `sanitizeHdrRe` 的正则丢了键名，只剩 `(?i)\n]*;?\s*` —— 不删 header，反而会吃掉正文里的
+     换行与右括号（数据损坏）；
+  3. 裸键名替换成 `x-anthropic-billing-hdr` 它自己 —— 等于没改；
+  4. `11-128` 只覆盖一种拼写（表里是 5 字节形态），另一种原样出站。
+  修法：两种 header 拼写都用 `billing-(?:hdr|header)` 覆盖；剥离层要求「键:值」形态；
+  裸键名缩写为 `x-anthropic-hdr`；`11-128` 两种拼写都改写成 U+2011 形态；
+  并把**改写右值一律由左值 `strings.Replace` 派生**（结构上杜绝「左右相同 / 左右写反」）。
+  另外补了 `cc_version` / `cc_entrypoint` 到特征表 —— 只有 cc_ kv 的文本此前连净化入口都进不去。
+* **#2 全冷却兜底选中「无凭证占位号」** —— `pickEarliestExpiryLocked` 只判了 disabled/paused，
+  漏了 `needAuth`。占位号带着从 state.json 恢复的冷却截止时 `expiry` 非零，会被兜底选中 →
+  handler 拿到 `AccessToken==""` 的号 → `no refreshToken` 熔断+轮转 → 整池 503。
+* **#3 队列把「已达标未领奖」的任务整条重跑** —— `growthPending` 只排除 `Claimed`，
+  而单任务入口与 `runAutoAll` 用的都是 `taskDone()`（Claimed||Claimable）。
+  `expert_5` 是 5 次真实对话 + 5 组召唤事件，白烧一遍。补 `Claimable` 过滤 +
+  `runGrowthQueued` 里「已达标直接领奖」分支。
+* **#4 `runAutoAll` 用启动快照判完成** —— 快照只拉一次、动作后不回写，任何「前一个动作顺手
+  推进了后一个任务」的组合都按旧状态再跑一遍（`Buddy_App`/`Buddy_App_QQ` 共用一次上报最典型）。
+  回读结果写回快照，并给 `autoAction` 加 `Covers` 标注「一次上报覆盖多个码」。
+
+### P1
+
+* **#5 `runSequentialEventTask` accept 后不回读 target** —— target 兜底成 1，上报 1 条就误判达标
+  → `ClaimRewardMP` 撞 400 → 队列记一次无效，3 次进跳过名单。accept 后回读真实 target。
+* **#6 单任务入口的 mp 回读不等待** —— 用 `taskByCodeMP` 只读一次，而上游计分异步（3–8s），
+  几乎总是 `claimable=false`；「一键完成全部」用的是 `taskByCodeWaitingMP`。两入口对齐。
+* **#7 keepalive 没有账号间节流** —— 签到/旅行/活跃/夜猫子都有 800ms 级延迟，唯独它是裸循环：
+  46 个号在 22:00 连发 46 个 refresh（仓库多处注释列为 WAF 频控形态）。补 `keepaliveAccountDelay`
+  + `RunKeepaliveNowCtx`（停机可打断），`runBatch` 改调 Ctx 版。
+* **#8 `RunNightChatsCtx` 的 ctx 没传进对话** —— 用的是 `ChatStream`（内部 Background），
+  ctx 只在两轮间的睡眠生效，一条长回复无法被打断。改 `ChatStreamContext`。
+* **#9 两个会话头没做 header 安全清洗** —— `X-Conversation-Request-ID` / `X-Trace-ID` 直接取客户端
+  原值，含 `\r\n` 时 net/http 在写请求阶段报 invalid header value → 传输层错误 → 轮转全失败 → 503。
+* **#10 非流式缺 `total_tokens` 时整笔 credit 被丢** —— 上游只回 credit+prompt+completion 时
+  `ok=false`，账本/reqlog/NoteModelCost 全当没观测到。缺 total 时用 prompt+completion 兜底。
+* **#11 硬冷却分支顺手清掉其它模型的 6004 冷却** —— 一个号余额耗尽硬冷却到次日 04:00，期间另一条
+  在途请求撞了模型 A 的 6004，就把模型 B/C 未到期的冷却一起抹了。硬冷却守卫改为「只判断不清理」。
+* **#12 `Aggregate` 用 `%v` 包装读错误** —— 链断了，`net.Error.Timeout` / `DeadlineExceeded`
+  全部判否 → 超时报成 502 stream_error，而不是 503 upstream_timeout，也走不到「超时不罚号」。
+* **#13 Dockerfile 没注入版本号** —— 镜像里 `main.appVersion` 恒为 `dev`，面板左上角显示 vdev。
+  改为 `APP_VERSION` 构建参数 → `VERSION` → `git describe` 三级回落。
+
+### P2
+
+* **#14 `cmd/credit` 的 global 域只试一条路径** —— 主程序是「无 /v2 → 404 再 /v2」双候选，
+  CLI 只取第一条，上游只认 /v2 时全部 global 号报 404。补齐 fallback。
+* **#15 `growth` 参数被强制改成 true** —— `if !body.Growth { body.Growth = true }` 让调用方
+  永远关不掉。改 `*bool` 区分「未传」与「显式 false」。
+* **#16 `writeAuthSnapshot` 不清扁平形遗留键** —— 升级成嵌套形后顶层 `accessToken` 等原样留着，
+  按扁平键读的外部工具会拿到过期凭证。写嵌套形时删已知扁平键（未知手写键保留）。
+* **#17 `exploreLast` 只增不减** —— 客户端可传任意模型名，map 随历史单调增长，`/status` 还整体
+  序列化输出。超过 512 条时清理 24 小时前的条目。
+* **#18 cockpit 导入的后置动作没有并发上限** —— 导入几百个号同时发起几百组上游请求。
+  补 `sem=3` + panic 兜底。
+* **#19 脱敏测试的断言自相矛盾** —— 同一条断言里既要求「包含」又要求「不包含」，两条不可能
+  同时成立；实际上两条查的是**两个只差一个连字符的不同字符串**（这也是它一直没抓到 #1 的原因）。
+  重写为「改写后不再含被拦原文」，并新增 `TestSanitizeRewritesAllFire`（左右不许相同、写了必须生效）
+  与 header 指纹用例。
+* **#20 券码批量抢槽不可取消** —— 裸 `sem <- struct{}{}`，关页面后仍把剩余账号查完。改 select+ctx。
+* **#21 `model.json` 落盘用固定临时名** —— 多实例/并行测试会互相覆盖。复用 `auth.ReplaceAtomic`。
+* **#22 用户点「停止」后重启手机仍会自启** —— `stop()` 只写了 `service_up=false`，没持久化
+  「用户主动停止」；`BootReceiver` 无条件拉起。补 `user_stop` 标记：停止时置位、开机时判、
+  用户打开 App 时清除。
+
+### 测试
+
+`upstream 218 / pool 188 / panel 51 / server 94 / scheduler 65 / auth 29 / session 21`，
+本轮改动涉及的 7 个包 **全部 0 失败**。
+
+## v1.28.5
 
 **本版 = 第二十份审查报告（审查报告-应用bug.md，13 条）。13 条全部为真，其中 #6 是
 v1.28.4 我修 #7 时引入的新问题（提前 break 留下零值行）。**

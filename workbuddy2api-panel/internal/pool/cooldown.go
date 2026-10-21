@@ -136,7 +136,9 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		// 后果二：reviveCoolingLocked 只认 CoolHard 解冻，状态机从此错位。
 		if e.coolKind == CoolHard && kind != CoolHard && now.Before(e.until) {
 			// 未到期的硬冷却：软冷却既不能缩短也不能降级，只做模型豁免清理。
-			clearRoutingModelCooldownsLocked(e)
+			// 未到期的硬冷却：只做「不降级」判断，**不动模型级台账**（bug 11）——
+			// 这里清表会把其它模型尚未到期的 6004 冷却一起抹掉，解冻后这些
+			// 模型立刻又被选中、再撞 429，冷却保护被削弱。
 			p.dirty.Store(true)
 			return
 		}
@@ -181,7 +183,9 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 		// 硬冷却到次日 04:00 的号会被 6004 砍成默认 10 分钟，提前回池继续撞 402；
 		// 且 coolKind 被改成 CoolSoft，reviveCoolingLocked 只认 CoolHard，状态机错位。
 		if e.coolKind == CoolHard && now.Before(e.until) {
-			clearRoutingModelCooldownsLocked(e)
+			// 未到期的硬冷却：只做「不降级」判断，**不动模型级台账**（bug 11）——
+			// 这里清表会把其它模型尚未到期的 6004 冷却一起抹掉，解冻后这些
+			// 模型立刻又被选中、再撞 429，冷却保护被削弱。
 			p.dirty.Store(true)
 			return
 		}
@@ -447,7 +451,9 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 		// 未到期的硬冷却（余额耗尽）不被软限流降级/缩短：否则零积分账号 10 分钟后
 		// 回池继续撞 402，形成 402/429 抖动（review P0-3）。
 		if e.coolKind == CoolHard && now.Before(e.until) {
-			clearRoutingModelCooldownsLocked(e)
+			// 未到期的硬冷却：只做「不降级」判断，**不动模型级台账**（bug 11）——
+			// 这里清表会把其它模型尚未到期的 6004 冷却一起抹掉，解冻后这些
+			// 模型立刻又被选中、再撞 429，冷却保护被削弱。
 			p.dirty.Store(true)
 			return
 		}

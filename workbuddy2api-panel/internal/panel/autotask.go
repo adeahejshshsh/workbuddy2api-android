@@ -41,9 +41,10 @@ import (
 
 // autoAction 一个可自动化的任务动作。
 type autoAction struct {
-	TaskCode string // 目标任务 code
-	Desc     string // 展示用说明
-	Attempt  bool   // true = 尝试型（上游未证实可脚本化，跑了可能不点亮）
+	TaskCode string   // 目标任务 code
+	Desc     string   // 展示用说明
+	Attempt  bool     // true = 尝试型（上游未证实可脚本化，跑了可能不点亮）
+	Covers   []string // 同一次上报顺带满足的其它任务码（如 Buddy_App / Buddy_App_QQ）
 	run      func(p *Panel, a *auth.Auth) (string, error)
 }
 
@@ -72,6 +73,7 @@ var autoActions = []autoAction{
 	},
 	{
 		TaskCode: "Buddy_App",
+		Covers:   []string{"Buddy_App_QQ"}, // 共用 runBuddyApp：一次五连事件两个任务都算
 		Desc:     "上报「进入 Buddy 应用」事件链（已验证：纯 API 可点亮）",
 		run:      runBuddyApp,
 	},
@@ -644,6 +646,15 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 		if !p.acceptWithVerifyMP(a, code) {
 			return "accept 未登记生效（任务可能处于每日锁定窗口，等解锁后自动重试）", nil
 		}
+		// accept 前 progress 为 null、target 兜底成 1；不回读就会「上报 1 条即判达标」
+		// → ClaimRewardMP 撞 400 task not completed → 队列记一次「无效」，连续 3 次
+		// 进跳过名单（bug 5）。与 runMPMiniChatTask 的 accept 后回读同口径。
+		if t2, rerr := p.taskByCodeMP(a, code); rerr == nil && t2 != nil {
+			t = t2
+			if t.Target > 0 {
+				target = t.Target
+			}
+		}
 	}
 	if err := primary(); err != nil {
 		return fmt.Sprintf("判据上报失败: %v", err), nil
@@ -930,7 +941,10 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	var after *upstream.Task
 	var aerr error
 	if isMP {
-		after, aerr = p.taskByCodeMP(a, effCode)
+		// mp 也要有界轮询（bug 6）：上游计分是异步的（3–8s），只读一次几乎必然
+		// claimable=false → 单任务入口永远不自动领奖，而「一键完成全部」用的是
+		// taskByCodeWaitingMP、能领到 —— 同一个任务两个入口行为不一致。
+		after, aerr = p.taskByCodeWaitingMP(a, effCode)
 	} else {
 		after, aerr = p.taskByCodeWaiting(a, effCode)
 	}
@@ -1697,7 +1711,17 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			// 不能写成 progress_after="" 让前端以为"进度没动"；after 为 nil 时
 			// 下面的领奖分支本来也进不去，这里只把原因如实报给前端。
 			item["progress_error"] = rerr.Error()
-		} else {
+		} else if after != nil && snap != nil {
+			// 把回读结果写回快照（bug 4）：快照只拉一次，不回写的话循环里
+			// `before = snap[...]` 永远看启动时的状态 —— 任何「前一个动作顺手
+			// 推进了后一个任务」的组合都会按旧状态把整条动作链再跑一遍
+			// （Buddy_App / Buddy_App_QQ 共用一次上报，最典型）。
+			snap[strings.ToLower(effCode)] = after
+			for _, c := range act.Covers {
+				snap[strings.ToLower(c)] = after
+			}
+		}
+		if rerr == nil {
 			item["progress_after"] = taskProgressText(after)
 		}
 		// 进度达标即自动领奖（mp 任务走 chat 域 mp 口径，其余 Web 端接口）。

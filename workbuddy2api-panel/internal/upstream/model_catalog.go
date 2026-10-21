@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
 // modelSeedFS 仓库种子版 model.json（context_catalog 静态表 27 值迁移，source=seed）。
@@ -159,13 +161,11 @@ func (c *modelCatalog) saveLocked() {
 	if dir := filepath.Dir(c.path); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	tmp := c.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// 唯一临时名 + 原子替换（bug 21）：固定 `path+".tmp"` 时，同目录两个网关实例
+	// （或并行测试）会共用同一个临时文件 —— A 写、B 覆盖、A rename，落盘内容成了 B 的。
+	// auth.ReplaceAtomic 已是「唯一 tmp + EBUSY 原地覆写」的标准写法，直接复用。
+	if err := auth.ReplaceAtomic(c.path, raw, 0o600); err != nil {
 		log.Printf("WARN: [upstream] model.json 落盘失败（内存缓存仍生效）: path=%s err=%v", c.path, err)
-		return
-	}
-	if err := os.Rename(tmp, c.path); err != nil {
-		log.Printf("WARN: [upstream] model.json 落盘改名失败: path=%s err=%v", c.path, err)
 	}
 }
 
