@@ -1401,7 +1401,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var upBrief *upstream.ErrorBrief
 	var ue *upstream.Error
 	if errors.As(lastErr, &ue) {
-		hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
+		// 已定性为「等级不支持」时不要用通用 hint 覆盖（BUG-9）：hintOf 对
+		// ErrModelBlocked 返回的是「后端没有这个模型」，与 11158 的语义相反。
+		if code != "model_not_allowed_for_account_type" {
+			hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
+		}
 		switch ue.Kind {
 		case upstream.ErrSoftRate:
 			status = http.StatusTooManyRequests

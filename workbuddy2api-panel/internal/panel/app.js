@@ -16,7 +16,6 @@ let reqEntries = [];
 let reqErrText = '';
 let usDim = 'account', usCreditDim = 'account', usSort = 'total';
 let usageData = null;
-let reqRangeState = null; // 请求记录的时间范围（用量页的见 trangeState）
 
 const $ = id => document.getElementById(id);
 
@@ -162,6 +161,21 @@ function trangeState(id) {
     trangeStates.set(id, { preset: TRANGE_DEFAULT, from: trangeMidnight(), to: new Date() });
   }
   return trangeStates.get(id);
+}
+
+// inReqRange 判断一条记录的时间是否落在「请求记录」的时间范围里（BUG-2）。
+// 归档开启时由服务端按时间取；归档关闭时只剩内存里的最近 100 条，
+// 必须在客户端用同一套范围状态筛一遍，否则区间外的旧记录照样显示。
+// 注意：v1.29.0 曾在 loadLogs 里直接调这个函数却忘了定义它 —— 归档关闭时
+// 整页抛 ReferenceError，运行日志固定显示「读取失败」。
+function inReqRange(iso) {
+  if (!iso) return true;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return true;
+  const st = trangeState('reqRange');
+  if (st.from && t < st.from.getTime()) return false;
+  if (st.to && t > st.to.getTime()) return false;
+  return true;
 }
 
 // trangeRender 画出控件骨架（幂等：重复调用会保留当前状态）。

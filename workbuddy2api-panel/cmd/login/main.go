@@ -133,6 +133,12 @@ const (
 
 // parseRealmArgs 解析开头的 --realm=cn|global（或分离式 --realm <v>）flag，缺省 cn。
 // 大小写不敏感归一化；非法值/缺值报错。桌椅剩余参数（子命令）顺序不变。
+// realmExplicit 用户是否**显式**指定了 --realm（BUG-5）。
+// 缺省 cn 只用于选上游端点；写 auth 文件时的 realm 按「显式优先、否则按 domain 推断」，
+// 否则 ResolveRealm 的 domain 推断分支永远不可达 —— 不传 --realm 登录国际版账号
+// 会被写成 realm=cn，网关随后按 CN 域路由。
+var realmExplicit bool
+
 func parseRealmArgs(args []string) (realm string, rest []string, err error) {
 	realm = realmCN
 	for i := 0; i < len(args); i++ {
@@ -147,6 +153,7 @@ func parseRealmArgs(args []string) (realm string, rest []string, err error) {
 				return "", nil, fmt.Errorf("invalid --realm %q (want cn|global)", args[i+1])
 			}
 			realm = v
+			realmExplicit = true
 			i++
 		case strings.HasPrefix(a, "--realm="):
 			v := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(a, "--realm=")))
@@ -154,6 +161,7 @@ func parseRealmArgs(args []string) (realm string, rest []string, err error) {
 				return "", nil, fmt.Errorf("invalid --realm %q (want cn|global)", v)
 			}
 			realm = v
+			realmExplicit = true
 		default:
 			rest = append(rest, a)
 		}
@@ -296,7 +304,7 @@ func buildLoginOutput(tok struct {
 		"refresh_token": tok.RefreshToken,
 		"expires_in":    tok.ExpiresIn,
 		"domain":        tok.Domain,
-		"realm":         auth2.ResolveRealm(realm, tok.Domain),
+		"realm":         auth2.ResolveRealm(realmIfExplicit(realm), tok.Domain),
 		"uid":           acct.UID,
 		"enterprise_id": acct.EnterpriseID,
 		"nickname":      acct.Nickname,
@@ -333,4 +341,13 @@ func main() {
 	default:
 		fatal("unknown subcommand %q (want url|poll|realm)", rest[0])
 	}
+}
+
+// realmIfExplicit 只在用户显式给了 --realm 时返回它，否则返回空串让
+// ResolveRealm 按 domain 推断（BUG-5）。
+func realmIfExplicit(realm string) string {
+	if realmExplicit {
+		return realm
+	}
+	return ""
 }

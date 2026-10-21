@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // cockpitAccount 映射 cockpit tools 导出格式的单个账号。
@@ -62,6 +64,10 @@ func (p *Panel) postImportActivate(a *auth.Auth, realm string) {
 		// IsEnterprise 分流，只有导入后置动作漏了（bug B11）——导入几十个企业号
 		// 就是几十条假错误刷日志。余额查询照常走下面的 UserResource。
 		if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+			// 同上（BUG-8）：已签到的形态也要标记，否则导入的号一直显示「签到」
+			if upstream.IsAlreadyCheckin(err) {
+				p.cfg.Pool.NoteCheckinDone(a.UID)
+			}
 			log.Printf("panel: import checkin uid=%s: %v", a.UID, err)
 		}
 	}

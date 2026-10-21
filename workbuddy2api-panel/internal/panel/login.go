@@ -164,6 +164,14 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	p.loginMu.Lock()
 	sess, known := p.logins[state]
+	if known && time.Since(sess.created) > loginTTL {
+		// 超过 TTL 的 state 不该还能完成（BUG-19）：此前只有 loginStart 清理过期会话，
+		// 轮询路径不校验 —— 15 分钟前的 state 仍能被 poll 完成。
+		delete(p.logins, state)
+		p.loginMu.Unlock()
+		writeErr(w, http.StatusGone, "登录会话已过期，请重新发起添加账号")
+		return
+	}
 	if known && sess.consumed {
 		// 另一路 poll 正在处理同一个 state（前端 3s 轮询 + 完成路径 4 次上游调用
 		// 各 30s 超时，慢一次就会叠第二发）。让后来的这一路先回去，别重复执行
@@ -341,6 +349,11 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		// 400 code 10001「企业账号不支持该操作」，发了只会把该错误写进登录返回。
 		// 下方 UserResource 余额查询照常（企业额度走 get-enterprise-user-usage 口径）。
 		if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+			// 「今天已签到」也算已签（BUG-8）：不记的话账号行一直显示「签到」，
+			// 用户点一次才提示「今天已签到」。与 panel.go / scheduler.go 同口径。
+			if upstream.IsAlreadyCheckin(err) {
+				p.cfg.Pool.NoteCheckinDone(acct.UID)
+			}
 			checkinMsg = err.Error()
 		}
 	}

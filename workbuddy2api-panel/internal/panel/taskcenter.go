@@ -382,6 +382,9 @@ func (p *Panel) startGrowthQueue(ctx context.Context, concurrency int, growth bo
 		}
 		if rec := recover(); rec != nil {
 			log.Printf("panel: 队列扫描 panic（已复位，队列可用）: %v", rec)
+			// 命名返回值此时仍是零值（BUG-14）：不回填的话前端会弹一条空 toast
+			msg = "队列扫描阶段异常（已复位，队列可用）"
+			level = "bad"
 		}
 		q.mu.Lock()
 		q.running = false

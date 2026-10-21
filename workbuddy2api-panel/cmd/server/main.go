@@ -628,7 +628,9 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		"prompt.mode", "prompt.file",
 		"server.max_body_mb",
 		"upstash",
-		"session_sticky.ttl", "session_sticky.gc_interval",
+		// enabled 决定启动时是否创建 Router（main.go 初始化段），saveConfig 不做热应用 ——
+		// 漏了它会让面板提示「已保存并立即生效」，实际要重启（BUG-4）。
+		"session_sticky.enabled", "session_sticky.ttl", "session_sticky.gc_interval",
 		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
 		"server.read_timeout",
 	}

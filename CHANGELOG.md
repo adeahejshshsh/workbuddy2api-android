@@ -1,6 +1,67 @@
 # 变更记录
 
-## v1.29.0（当前）
+## v1.29.1（当前）
+
+**本版 = 第二十六份审查报告（BUG-REVIEW.md，22 条）。21 条为真、1 条误报（#1）。
+真条目里 #2/#4/#10/#17/#22 是我最近三版引入或改了一半的。**
+
+### 误报（附证据）
+
+* **#1「四条 sanitizeRewrites 左右值相同、改写层空转」** —— 不成立。用编译后的二进制打出每组 hex：
+  `pair0 L=…"CLI for Claude"` → `R=…"CLI tool for Claude"`、`pair1 Main→Default`、
+  `pair2 Codex CLI→Codex CLI tool`、`pair3 give→provide`，四条都真的在改；
+  `TestSanitizeRewritesAllFire`（断言左右不同 + 写了必须生效）也一直绿。
+  报告读到的应是渲染弄花的视图 —— 这个坑我自己也踩过一次（v1.28.9）。
+
+### 功能错误
+
+* **#2 `inReqRange` 未定义**（我 v1.29.0 引入）—— 归档关闭时 `loadLogs` 调它抛
+  ReferenceError，整页固定显示「日志读取失败」。补上定义（用 `trangeState('reqRange')` 的
+  from/to 筛内存记录），删掉从未使用的 `reqRangeState` 声明，并加「调用了但没定义」的守卫用例。
+* **#3 `#view-models` 的标题栏整段丢失** —— 只剩孤立的 `</span></h3>`，该页没有标题、
+  `.box > header` 样式不生效。补回 `<header><h3>模型与档位…</h3>`。
+* **#4 `session_sticky.enabled` 不在重启清单** —— 它只在启动时决定是否创建 Router，
+  面板保存后提示「已保存并立即生效」，实际要重启。补进清单。
+* **#5 `cmd/login` 的 realm 恒为 cn，domain 推断分支不可达** —— 不传 `--realm` 登录国际版账号
+  会被写成 `realm=cn`，网关按 CN 域路由。改为：显式 `--realm` 优先，否则交给 `ResolveRealm`
+  按 domain 推断（新增 `realmExplicit` 标记与 `realmIfExplicit`）。
+* **#8 登录/导入自动签到后不记「今日已签」** —— 账号行一直显示「签到」。补 `NoteCheckinDone`
+  （含「今天已签到」形态）。
+* **#9 11158 的 hint 被通用文案覆盖** —— `GatewayHint(ErrModelBlocked)` 是「后端没有这个模型」，
+  与「等级不支持」相反。已定性为 `model_not_allowed_for_account_type` 时不再覆盖 hint。
+* **#10 `cmd/credit` 非周期分支仍缺 `used` 钳制** —— v1.28.9 只钳了 `remain`，
+  补 `used > size` 与 `remain = size - used` 回算。
+
+### 逻辑与一致性
+
+* **#11 一键完成整批 accept** —— 面板单任务入口早按 20 条分片，一键完成整批发；
+  任务多时第一步整批被拒。改为 20 条分片。
+* **#14 队列扫描 panic 时返回空文案** —— 命名返回值保持零值，前端弹空 toast。
+  在 recover 里回填 msg/level。
+* **#15 `apiEnvelope.Code` 是 int** —— 上游把业务码写成 `"11102"` 时整个 Unmarshal 失败，
+  按 code 分类的策略全失效。新增 `flexInt`（数字/字符串都吃，非数字按 0）。
+* **#17 `hasBusinessEnvelope` 只认紧凑 `"code":`** —— `"code" :` 会被判成 WAF 拦截页，
+  走 IP 级 fail-fast。改为只认字段名。
+* **#19 `loginPoll` 不校验 TTL** —— 超过 15 分钟的 state 仍可被轮询完成。补校验。
+* **#22 `covered` 只在回读成功时登记**（我 v1.28.9 改的）—— 回读失败时 Buddy_App 与
+  Buddy_App_QQ 共用的那次上报不被标记，紧接着的会再报一遍。改为动作跑过就登记。
+
+### 已知限制（本轮记录未改）
+
+* **#7** `parseGlobalModelNames` 不支持顶层数组（要动两处解析入口）
+* **#12** `/v1/models` 在 global 探测中静默少一半（要给接口加 `probing` 字段）
+* **#13** promo 时区解析后未使用（需整条链路带 zone）
+* **#16** `upstreamBaseForRealm` 硬编码 base（配置要透到 hint 层）
+* **#18** 服务端 requestId 只认紧凑 `"id":"`（改动落在 SSE 扫描热路径）
+* **#20** `skipBlocked` 每条过期记录落一次盘（写放大族）
+* **#21** 非流式先记账再写响应（调整顺序会影响成功路径的统计时机）
+
+### 测试
+
+新增 `TestAppJSInReqRangeDefined`（app.js 里「调用了但没定义」的守卫）。
+`upstream 225 / server 96 / panel 54 / pool 188`，**全部 0 失败**（20 秒）。
+
+## v1.29.0
 
 **本版 = 第二十五份审查报告（代码审查报告.md，22 条）。22 条全部为真，
 其中 4 条（#1/#4/#17/#22）是我最近三版引入的。**

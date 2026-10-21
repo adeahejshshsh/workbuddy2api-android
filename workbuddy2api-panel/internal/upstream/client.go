@@ -356,7 +356,9 @@ func hasBusinessCode(body, want string) bool {
 // 畸形 JSON 但含 `"msg":` 字样仍按业务响应保守处理（宁漏判 WAF 也不误罚
 // 业务 403，后者有各自的权威分类）。
 func hasBusinessEnvelope(body string) bool {
-	return strings.Contains(body, `"code":`) || strings.Contains(body, `"msg":`)
+	// 只认字段名、不认紧邻冒号（BUG-17）：`"code" :` 这种带空格的写法会被
+	// 判成「无业务信封」→ 403 走 WAF 的 IP 级 fail-fast，而不是业务分类。
+	return strings.Contains(body, `"code"`) || strings.Contains(body, `"msg"`)
 }
 
 // IsWafBlocked 报告 403 响应是否为 WAF 拦截形态：HTTP 403 且 body 无业务信封
@@ -641,9 +643,34 @@ func Classify(status int, body string) ErrKind {
 	return ErrNone
 }
 
+// flexInt 兼容上游把业务码写成数字或字符串（BUG-15）。
+//
+// `"code":"11102"` 时 int 字段会让整个 json.Unmarshal 失败 → doJSON 直接报
+// "parse failed" → 按 code 分类的策略（14018/11102/11101/11115）在这条链路上全失效。
+// 非数字码按 0 处理：宁可当成功信封，也别把整条响应判成解析失败。
+type flexInt int64
+
+func (f *flexInt) UnmarshalJSON(b []byte) error {
+	t := strings.TrimSpace(string(b))
+	if t == "" || t == "null" {
+		*f = 0
+		return nil
+	}
+	if len(t) >= 2 && t[0] == '"' && t[len(t)-1] == '"' {
+		t = strings.TrimSpace(t[1 : len(t)-1])
+	}
+	n, err := strconv.ParseInt(t, 10, 64)
+	if err != nil {
+		*f = 0
+		return nil
+	}
+	*f = flexInt(n)
+	return nil
+}
+
 // apiEnvelope 上游统一信封。
 type apiEnvelope struct {
-	Code int             `json:"code"`
+	Code flexInt         `json:"code"`
 	Msg  string          `json:"msg"`
 	Data json.RawMessage `json:"data"`
 }
@@ -969,7 +996,7 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		// 这里早先的注释写的是「Status 仍报真实 HTTP 状态」，与实现相反，已更正。
 		clsStatus := resp.StatusCode
 		if clsStatus < 400 {
-			if s := businessCodeStatus(env.Code); s != 0 {
+			if s := businessCodeStatus(int(env.Code)); s != 0 {
 				clsStatus = s
 			}
 		}

@@ -120,6 +120,14 @@ func packageRemainUsed(a resourcePackage) (remain, used, size int64) {
 	if used == 0 && size > remain {
 		used = size - remain
 	}
+	// used 也要钳（BUG-10）：上游 CapacityUsed > Size 时会出现「剩余 50 / 已用 150 / 面额 100」，
+	// 与 internal/upstream 的同名逻辑对齐。
+	if size > 0 && used > size {
+		used = size
+	}
+	if size > 0 && remain+used > size {
+		remain = size - used
+	}
 	return remain, used, size
 }
 

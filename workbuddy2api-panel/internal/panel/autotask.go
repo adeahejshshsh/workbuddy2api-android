@@ -1601,7 +1601,21 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			}
 		}
 		if len(codes) > 0 {
-			if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
+			// 按 20 条分片（BUG-11）：上游对 task_codes 数组长度无公开上限，
+			// 面板单任务入口（tasks.go）早就这么做了，一键完成这边整批发，
+			// 任务多时第一步整批被拒（只记一条 error，后续动作照跑）。
+			var acceptErr error
+			for i := 0; i < len(codes); i += 20 {
+				end := i + 20
+				if end > len(codes) {
+					end = len(codes)
+				}
+				if err := p.cfg.Upstream.AcceptTasks(a, codes[i:end]); err != nil {
+					acceptErr = err
+					break
+				}
+			}
+			if err := acceptErr; err != nil {
 				out = append(out, map[string]any{
 					"task_code": "(批量接受)", "status": "error",
 					"message": "接受任务失败（不阻塞后续）: " + err.Error(),
@@ -1723,6 +1737,11 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		}
 		item["status"] = "done"
 		item["message"] = msg
+		// 只要动作跑过，就要登记「这次上报覆盖了哪些码」（BUG-22）：此前只在
+		// 回读成功时登记，回读失败后紧接着的 Buddy_App_QQ 会把同一组事件再报一遍。
+		for _, c := range act.Covers {
+			covered[strings.ToLower(c)] = true
+		}
 		if rerr != nil {
 			// 回读失败（bug A4）：动作已执行，但拿不到执行后的进度。
 			// 不能写成 progress_after="" 让前端以为"进度没动"；after 为 nil 时
