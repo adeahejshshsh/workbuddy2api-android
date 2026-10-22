@@ -778,7 +778,21 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 	if len(codes) == 0 {
 		return 0
 	}
-	if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
+	// 按 20 条分片（报告 #10）：上游对 task_codes 数组长度无公开上限，整批下发时
+	// 任务多会被整批拒收（只记一条 error，后续动作照跑）。面板单任务入口与
+	// runAutoAll 早就分片了，这里漏了。
+	accErr := error(nil)
+	for i := 0; i < len(codes); i += 20 {
+		end := i + 20
+		if end > len(codes) {
+			end = len(codes)
+		}
+		if e := p.cfg.Upstream.AcceptTasks(a, codes[i:end]); e != nil {
+			accErr = e
+			break
+		}
+	}
+	if err := accErr; err != nil {
 		log.Printf("panel: 队列 accept uid=%s: %v（不阻塞）", a.UID, err)
 		return 0
 	}

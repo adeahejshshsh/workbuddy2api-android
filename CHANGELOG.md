@@ -498,8 +498,17 @@
 * **`patch_source.sh` 第三个 heredoc 缺 `import sys`** —— 锚点未命中时抛 `NameError`，
   预期的错误提示打不出来，用户只看到 traceback。
 
-**未修（2 条）**：`accept_all` / `claim` 不取 `tryLockAccount` 账号锁、批量 accept 未按
-20 条分片 —— 都涉及批量路径的并发与分片重构，单独一版做。
+**这两条也修完了（见下）**：
+* **`accept_all` / `claim` 不取账号锁** —— 与 `auto`/队列并发时会读到别处留下的中止标记
+  （`clearAborted` 只有持锁入口做），`sleepAB` 直接返回 false → 整批 504「客户端已断开」。
+  两个入口都补 `tryLockAccount` + `defer unlock`，`accept_all` 另补 `clearAborted` 与
+  `watchAbort`（断连即中止，与单任务入口同构）。
+* **批量 accept 未按 20 条分片** —— 队列 accept（`taskcenter`）与 `runAutoAll` 的 mp accept
+  都是整批下发，任务多时会被上游整批拒收。两处都改成分片，与单任务入口/CN 侧同口径。
+
+**新增测试**（3 条）：`accept_all` / `claim` 在锁被占用时回 409；45 个任务分 3 批、每批 ≤20
+（写这条时发现 6 批是**正确行为** —— `accept_all` 会再跑一轮 mp 接受，是测试的假上游
+没区分口径，不是重复提交）。
 
 ### 二十三、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 

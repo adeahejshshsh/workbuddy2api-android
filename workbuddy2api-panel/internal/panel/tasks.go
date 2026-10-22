@@ -107,6 +107,17 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	if a == nil || p.rejectNoGrowth(w, a) {
 		return
 	}
+	// per-account 互斥（报告 #9）：与单任务/全量入口同一把锁 —— 不取锁时，
+	// 本入口与 auto/队列并发会读到别处留下的中止标记（clearAborted 只有持锁入口做），
+	// sleepAB 直接返回 false → 整批回 504「客户端已断开」。
+	if !p.tryLockAccount(uid) {
+		writeErr(w, http.StatusConflict, "该账号有任务动作正在执行中，请等本轮结束后再试")
+		return
+	}
+	defer p.unlockAccount(uid)
+	clearAborted(uid)
+	stopWatch := watchAbort(r.Context().Done(), uid)
+	defer stopWatch()
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
@@ -194,6 +205,13 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	if a == nil || p.rejectNoGrowth(w, a) {
 		return
 	}
+	// 同上（报告 #9）：手动领奖与批量动作并发时会撞在同一个上游动作上。
+	if !p.tryLockAccount(uid) {
+		writeErr(w, http.StatusConflict, "该账号有任务动作正在执行中，请等本轮结束后再试")
+		return
+	}
+	defer p.unlockAccount(uid)
+
 	var body struct {
 		TaskCode string `json:"task_code"`
 	}

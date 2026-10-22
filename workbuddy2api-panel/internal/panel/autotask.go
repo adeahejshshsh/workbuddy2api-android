@@ -1688,7 +1688,19 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			}
 		}
 		if len(mpCodes) > 0 {
-			if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes); err != nil {
+			// 同样按 20 条分片（报告 #10）：与上面的 CN 侧一致，整批下发会被上游拒。
+			var mpAccErr error
+			for i := 0; i < len(mpCodes); i += 20 {
+				end := i + 20
+				if end > len(mpCodes) {
+					end = len(mpCodes)
+				}
+				if e := p.cfg.Upstream.AcceptTasksMP(a, mpCodes[i:end]); e != nil {
+					mpAccErr = e
+					break
+				}
+			}
+			if err := mpAccErr; err != nil {
 				out = append(out, map[string]any{
 					"task_code": "(批量接受-mp)", "status": "error",
 					"message": "接受小程序任务失败（不阻塞后续）: " + err.Error(),
