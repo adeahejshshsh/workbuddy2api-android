@@ -358,6 +358,10 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 				p.cfg.Pool.NoteCheckinDone(acct.UID)
 			}
 			checkinMsg = err.Error()
+		} else {
+			// 成功也要记（报告 #11）：此前只有「今天已签到」那条错误分支标记，
+			// 真签到成功的号在面板上仍显示「未签到」，用户会再点一次。
+			p.cfg.Pool.NoteCheckinDone(acct.UID)
 		}
 	}
 	if rm, tt, exp, at, rem, uerr := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow()); uerr == nil {

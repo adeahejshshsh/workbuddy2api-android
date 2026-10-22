@@ -154,7 +154,10 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		}
 		next := now.Add(d)
 		if next.Before(e.until) {
-			next = e.until // 已有更长的冷却：保留更晚的截止
+			// 已有更长的冷却：**什么都不改**（报告 #4）。此前只保留更晚的 until，却照样
+			// 覆盖 coolKind —— 一次较短的硬冷却事件能把更长的软冷却标成 hard，
+			// reviveCoolingLocked 随后按 coolKind 解冻，一次余额刷新就把它提前清掉。
+			return
 		}
 		e.until = next
 		e.coolKind = kind

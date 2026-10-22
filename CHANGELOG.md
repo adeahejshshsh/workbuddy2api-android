@@ -463,7 +463,45 @@
   - 新增 `patches/gwconfig_selftest.java`：13 条断言离线自检（端口形态、超范围、
     嵌套同名键不误取、数组内同名不取、值里含转义引号），已实跑 `ALL PASS`。
 
-### 二十二、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 二十二、BUG-REVIEW（18 条）—— 修 15 条 + 1 条误报 + 2 条未修
+
+* **`sanitize` 左右值相同？—— 误报（第五次）**。用程序把两个字符串取出来比字节：
+  左 16 字符（`DeepSeekRuntime`，第 8 位是空格 0x20）、右 15 字符（`DeepSeekRuntime`），
+  首个差异 @8。**不是**空操作。`TestSanitizeRewritesAreNotNoop` 已永久钉住这类判定。
+* **global 探测失败清空缓存** —— CN 侧失败保留旧缓存，global 侧却 `names=nil; infos=nil`，
+  一次抖动就让 global 模型从 `/v1/models` 整体消失到负缓存结束。改为保留上次成功结果。
+* **空 `Accounts` 被当成余额归零** —— 上游偶尔回 200 + Accounts 缺失，`notifyCredits`
+  照样按 remain=0 记一次真实观测 → 积分台账多一条「余额归零」假流水。改为「无条目 =
+  无观测，不通知」。
+* **`Cooldown()` 覆盖 `coolKind`** —— 保留更长旧 `until` 时仍无条件改写 kind，一次较短的
+  硬冷却能把更长的软冷却标成 hard，`reviveCoolingLocked` 随后一次余额刷新就提前解冻。
+  改为「已有更长冷却 → 什么都不改」。
+* **`schedule.account_spread_seconds` 无热生效也无重启提示** —— 加进 `restartRequiredFields`。
+* **签到 / 保活没走 `accountDelay()`** —— `account_spread_seconds` 对这两类任务不生效
+  （旅行/活跃/夜猫子/连登却生效）。统一走 `s.accountDelay(...)`。
+* **`credit_history` 的 `limit` 无上限** —— 直接做 `make` 容量，一个 query 参数就能打爆进程。
+  封顶 2000。
+* **登录/导入签到**成功**分支不记 `NoteCheckinDone`** —— 只有「今天已签到」错误分支记，
+  真签成功的号在面板上仍显示「未签到」。两处都补。
+* **扫描期补领 / 补领清扫不刷积分** —— 奖励到账但面板积分要等下一轮余额刷新。补
+  `refreshCreditsAsync`。
+* **跳过名单用原始 code 记账** —— 单任务入口用 `effectiveTaskCode`，按域换码的任务
+  （`WorkBuddy_Valorant`）会写出两条不同的跳过记录。统一用生效码。
+* **`expDaysLeft` 按浏览器本地时区解析 CST 日期串** —— 非 CST 时区下「N 天后到期」差一天。
+  改按 `+08:00` 解析。
+* **`a.uid.slice(0, 8)` 无空值兜底**（3 处）—— packages 行缺 uid 时整个「积分构成」渲染抛错。
+* **`user_agent` 占位符与实际默认值不符** —— 写着 `CLI/2.63.2 CodeBuddy/2.63.2`，
+  实际默认是 `WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0`。
+* **APK 壳还有三处 7863** —— 通知正文、「复制密钥」的 Base URL、状态条（把 `mode`
+  当端口拼在 `:端口` 位置）、探测提示。全部改用 `GwConfig.port()`；状态条改成
+  「端口 · 模式」分开显示。
+* **`patch_source.sh` 第三个 heredoc 缺 `import sys`** —— 锚点未命中时抛 `NameError`，
+  预期的错误提示打不出来，用户只看到 traceback。
+
+**未修（2 条）**：`accept_all` / `claim` 不取 `tryLockAccount` 账号锁、批量 accept 未按
+20 条分片 —— 都涉及批量路径的并发与分片重构，单独一版做。
+
+### 二十三、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

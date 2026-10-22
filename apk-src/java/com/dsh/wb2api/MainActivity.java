@@ -357,13 +357,16 @@ public class MainActivity extends Activity {
         // 只在这里补一句，避免次要提示盖掉「启动被系统拒」这类关键原因。
         String oerr = GatewayService.overlayError();
         if (oerr != null && !oerr.isEmpty()) sb.append(" · ").append(oerr);
+        // 端口与运行模式分开显示（报告 #18）：此前把 mode（"直接 exec" / "linker 代跑"）
+        // 直接拼在 `:端口` 的位置上，看起来像个端口号，而端口本身写死 7863。
+        sb.append(" · :").append(GwConfig.port(this));
         String mode = GatewayService.modeText();
-        sb.append(" · ").append(mode.isEmpty() ? ":7863" : mode);
+        if (!mode.isEmpty()) sb.append(" · ").append(mode);
         info.setText(sb.toString());
 
         // 第三行：通了给最后一行日志，不通给"为什么"（这才是能拿去做事的信息）
         if (!probed) {
-            logLine.setText("正在探测 127.0.0.1:7863 …");
+            logLine.setText("正在探测 127.0.0.1:" + GwConfig.port(this) + " …");
             logLine.setTextColor(INK3);
         } else if (portServing) {
             String l = GatewayService.lastLogLine();
@@ -542,7 +545,7 @@ public class MainActivity extends Activity {
 
     void copyApi() {
         String key = apiKey.isEmpty() ? readApiKey() : apiKey;
-        String txt = "Base URL: http://127.0.0.1:7863/v1\nAPI Key: " + key +
+        String txt = "Base URL: http://127.0.0.1:" + GwConfig.port(this) + "/v1\nAPI Key: " + key +
                 "\n(局域网: 把 127.0.0.1 换成手机 IP)";
         try {
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);

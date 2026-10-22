@@ -144,9 +144,14 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 		// 探测失败：负缓存 + 返回 nil（effort 桶不写，prepareBody 走 globalEffortMap 静态兜底）。
 		c.globalModels.Lock()
 		c.globalModels.lastFail = time.Now()
-		c.globalModels.names = nil
-		c.globalModels.infos = nil
+		// **保留**上一次成功拿到的目录（报告 #2）：CN 侧失败时就是保留旧缓存的，
+		// global 侧却清空 —— 一次探测抖动就让 global 模型从 /v1/models 整体消失，
+		// 直到 5 分钟负缓存结束。负缓存已经负责「别急着再打上游」，不需要再抹掉数据。
+		prevNames, prevInfos := c.globalModels.names, c.globalModels.infos
 		c.globalModels.Unlock()
+		if len(prevNames) > 0 {
+			return prevNames, prevInfos
+		}
 		return nil, nil
 	}
 	// global 域 effort 能力：探测下发的 supportedEfforts/defaultEffort 权威写入 global 桶

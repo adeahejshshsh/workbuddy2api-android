@@ -87,7 +87,9 @@ fi
 #   若只做上一步的硬编码路径替换，App 内 DNS 全挂 → 上游全失败 → 全 503 + 连败降权
 #   （v1.24.0 真实踩过：两版 .so 对照，旧版含 WB2API_RESOLV_CONF 1 处，新版 0 处）。
 python3 - <<'PYEOF'
-import os
+# sys 必须一起导入（报告 #19）：下面锚点未命中时会 sys.exit(1)，只 import os 会在
+# set -eu 下抛 NameError —— 预期的错误提示打不出来，用户只看到一段 traceback。
+import os, sys
 G = os.path.join(os.environ.get("PREFIX", "/data/data/com.dsharnessmobile.shell/files/usr"), "lib/go/src/net")
 # 必须跟随 $PREFIX：第 2 步用的是 $RESOLV（跟随 PREFIX），这里若硬编码默认路径，
 # 自定义 PREFIX 下一条都替换不中 —— 函数被追加但无人调用，WB2API_RESOLV_CONF

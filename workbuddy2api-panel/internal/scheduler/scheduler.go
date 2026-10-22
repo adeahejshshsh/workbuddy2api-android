@@ -599,8 +599,8 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context) {
 		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
 		// credit_floor 判定与面板额度展示的唯一数据源）。
 		// 账号间节流：第一个号不等，之后每个号之间等一次。
-		if !first && checkinAccountDelay > 0 {
-			if !sleepCtx(ctx, checkinAccountDelay) {
+		if !first && s.accountDelay(checkinAccountDelay) > 0 {
+			if !sleepCtx(ctx, s.accountDelay(checkinAccountDelay)) {
 				return // 停机/取消：不再把剩余账号的节流全睡完
 			}
 		}
@@ -759,8 +759,8 @@ func (s *Scheduler) RunKeepaliveNowCtx(ctx context.Context) {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
-		if !first && keepaliveAccountDelay > 0 {
-			if !sleepCtx(ctx, keepaliveAccountDelay) {
+		if !first && s.accountDelay(keepaliveAccountDelay) > 0 {
+			if !sleepCtx(ctx, s.accountDelay(keepaliveAccountDelay)) {
 				return // 停机/取消：立刻退出
 			}
 		}

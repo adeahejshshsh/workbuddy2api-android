@@ -1008,7 +1008,9 @@ public class GatewayService extends Service {
         // 三态（报告 #22）：此前非运行态一律拼「启动中」，停止后也显示「启动中」。
         String head = up ? "运行中 · "
                 : (stNow == ST_STOPPED ? "已停止 · " : "启动中 · ");
-        String s = head + "127.0.0.1:7863"
+        // 端口跟随配置（报告 #17）：探针与面板都走 GwConfig.port()，通知里写死 7863
+        // 会让「改了 listen」的用户看到错误端口，以为没生效。
+        String s = head + "127.0.0.1:" + GwConfig.port(this)
                 + (restarts > 0 ? " · 自愈 " + restarts + " 次" : "");
         b.setContentText(s);
         return b.build();

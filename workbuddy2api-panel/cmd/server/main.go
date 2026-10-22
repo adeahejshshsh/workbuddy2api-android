@@ -685,6 +685,9 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		"session_sticky.enabled", "session_sticky.ttl", "session_sticky.gc_interval",
 		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
 		"server.read_timeout",
+		// account_spread_seconds 在 Scheduler 构造时读入 cfg（报告 #5）：保存路径没有
+		// 对应 setter，不列进来就会提示「已保存并立即生效」，实际要重启才生效。
+		"schedule.account_spread_seconds",
 	}
 	var out []string
 	for _, k := range keys {

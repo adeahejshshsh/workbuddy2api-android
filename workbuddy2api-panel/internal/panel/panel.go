@@ -1190,6 +1190,11 @@ func (p *Panel) creditHistory(w http.ResponseWriter, r *http.Request) {
 	limit := 200
 	if v := strings.TrimSpace(q.Get("limit")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			// 必须封顶（报告 #7）：这个值直接做 make 的容量，`?limit=100000000`
+			// 会一次性申请巨量内存 —— 一个 query 参数就能把进程打爆。
+			if n > 2000 {
+				n = 2000
+			}
 			limit = n
 		}
 	}

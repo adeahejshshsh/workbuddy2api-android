@@ -226,6 +226,9 @@ scanLoop:
 					// 奖励已经到手，只差点击 —— 不需要再跑一遍动作链。
 					if t.Claimable && !t.Claimed {
 						if credit, _, _, cerr := p.cfg.Upstream.ClaimReward(a, t.TaskCode); cerr == nil {
+							// 奖励已到账，面板积分要跟着动（报告 #12）：此前不刷，
+							// 得等下一轮余额刷新才变，用户以为没领到。
+							p.refreshCreditsAsync(a)
 							log.Printf("panel: 扫描期补领 uid=%s code=%s +%dc", uid, t.TaskCode, credit)
 						} else {
 							log.Printf("panel: 扫描期补领失败 uid=%s code=%s: %v", uid, t.TaskCode, cerr)
@@ -690,7 +693,11 @@ dispatchQueue:
 					if err != nil {
 						why = errBrief(err)
 					}
-					added, n := p.skipNote(one.a.UID, code, why)
+					// 用生效任务码记账（报告 #13）：runGrowthQueued 内部按
+					// effectiveTaskCode 读回/领奖（按域换码的任务如 WorkBuddy_Valorant），
+					// 而单任务入口也按生效码记 —— 这里用原始 code 会写出两条不同的
+					// 跳过记录，同一任务被记两次「做不了」。
+					added, n := p.skipNote(one.a.UID, p.effectiveTaskCode(one.a, code), why)
 					note := fmt.Sprintf("（连续无效 %d/%d）", n, skipFailLimit)
 					if added {
 						note = fmt.Sprintf("（连续 %d 次无效 → 已跳过：不再出现在待办里，7 天后自动重试，"+
@@ -1072,6 +1079,10 @@ func (p *Panel) ClaimSweepOnce(ctx context.Context) (accounts, claimed, failed i
 					claimed++
 				} else {
 					failed++
+				}
+				if cerr == nil {
+					// 同上（报告 #12）：清扫领到奖也要刷积分。
+					p.refreshCreditsAsync(a)
 				}
 				mu.Unlock()
 				if cerr == nil {

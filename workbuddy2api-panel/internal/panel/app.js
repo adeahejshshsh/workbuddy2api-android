@@ -2756,7 +2756,7 @@ function renderPackages(d, detailLimit) {
   $('pkSummary').innerHTML = list.map(a => {
     if (a.error) {
       return '<div class="pk-card"><div class="who"><span class="nm">' +
-        esc((a.nickname || a.uid.slice(0, 8))) + '</span>' +
+        esc((a.nickname || String(a.uid || '').slice(0, 8))) + '</span>' +
         '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
         '<div class="err">查询失败：' + esc(a.error) + '</div></div>';
     }
@@ -2784,7 +2784,7 @@ function renderPackages(d, detailLimit) {
           ' 1 0" title="' + esc(title) + '"></i>';
       }).join('') + '</div>' : '';
     return '<div class="pk-card">' +
-      '<div class="who"><span class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+      '<div class="who"><span class="nm">' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</span>' +
       '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
       '<div class="big">' + fmtTok(a.remain) + '</div>' +
       '<div class="sub">共 ' + fmtTok(a.size) + ' · ' + (a.packages || []).length +
@@ -2835,7 +2835,7 @@ function renderPackages(d, detailLimit) {
         groups.used.map(p => rowOf(p, 'used')).join('')
       : '';
     return '<div class="box"><header><h3>' +
-      esc(a.nickname || a.uid.slice(0, 8)) + ' · ' + esc(a.realm || '') +
+      esc(a.nickname || String(a.uid || '').slice(0, 8)) + ' · ' + esc(a.realm || '') +
       '</h3><span class="grow"></span><span class="note">余额 ' + fmtTok(a.remain) +
       ' / 总额 ' + fmtTok(a.size) + ' · 可用 ' + (groups.visible.length + groups.rest.length) + ' 个包' +
       (groups.used.length ? ' / 已用完 ' + groups.used.length + ' 个' : '') +
@@ -2968,7 +2968,12 @@ function expBatches(packs) {
 }
 
 function expDaysLeft(dateStr, today) {
-  return Math.round((new Date(dateStr + 'T00:00:00') - today) / 86400000);
+  // 必须按 **CST** 解析（报告 #15）：expBatches 产出的是 CST 日期串，这里若按浏览器
+  // 本地时区解析，非 CST 时区的用户会看到「N 天后到期」差一天，与首页快照的
+  // 本地日历日算法对不上。
+  const ms = Date.parse(dateStr + 'T00:00:00+08:00');
+  if (!Number.isFinite(ms)) return NaN;
+  return Math.round((ms - today) / 86400000);
 }
 
 function renderExpiry(d) {

@@ -69,6 +69,9 @@ func (p *Panel) postImportActivate(a *auth.Auth, realm string) {
 				p.cfg.Pool.NoteCheckinDone(a.UID)
 			}
 			log.Printf("panel: import checkin uid=%s: %v", a.UID, err)
+		} else {
+			// 同上（报告 #11）：成功分支也要标记，否则导入的号一直显示「签到」。
+			p.cfg.Pool.NoteCheckinDone(a.UID)
 		}
 	}
 	if rm, tt, exp, at, rem, uerr := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow()); uerr == nil {

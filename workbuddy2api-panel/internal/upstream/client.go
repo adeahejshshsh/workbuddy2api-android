@@ -2456,6 +2456,11 @@ func (c *Client) UserResourceDetailedWithExpiryCtx(ctx context.Context, a *auth.
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return 0, 0, 0, time.Time{}, 0, fmt.Errorf("resource parse: %w", err)
 	}
+	// 空 Accounts 与「真实余额为 0」不可区分（报告 #3）：上游偶尔回 200 + Accounts 缺失，
+	// 此前照样按 remain=0 往下走 —— notifyCredits 会把它当成一次真实观测，
+	// 积分台账里就多出一条「余额归零」的假流水，池里也会把号标成没积分。
+	// 这里明确区分：没有 Accounts 条目 = **没有观测**，返回 0 但**不通知**。
+	hasAccounts := len(resp.Response.Data.Accounts) > 0
 	for _, acct := range resp.Response.Data.Accounts {
 		r, _, size := packageRemainUsed(respAccount{
 			CapacityRemain:      acct.CapacityRemain,
@@ -2504,7 +2509,9 @@ func (c *Client) UserResourceDetailedWithExpiryCtx(ctx context.Context, a *auth.
 			expiring += r
 		}
 	}
-	c.notifyCredits(a, remain, nil)
+	if hasAccounts {
+		c.notifyCredits(a, remain, nil)
+	}
 	return remain, total, expiring, earliestAt, earliestRemaining, nil
 }
 
