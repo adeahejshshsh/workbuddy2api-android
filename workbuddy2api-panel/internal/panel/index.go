@@ -9,11 +9,14 @@
 package panel
 
 import (
+	"bytes"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 )
 
 //go:embed index.html
@@ -86,7 +89,43 @@ func writeStaticAsset(w http.ResponseWriter, r *http.Request, contentType, etag 
 // index 输出面板页面（静态无秘密；数据接口 /panel/api/* 才走鉴权）。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	writeStaticAsset(w, r, "text/html; charset=utf-8", indexHTMLETag, indexHTML)
+	body, etag := p.versionedIndex()
+	writeStaticAsset(w, r, "text/html; charset=utf-8", etag, body)
+}
+
+// 版本化页面的缓存（cfg.Version 进程内不变，算一次就够）。
+var versionedHTMLCache struct {
+	once sync.Once
+	body []byte
+	etag string
+}
+
+// versionedIndex 返回带资源版本串的 index.html。
+//
+// 为什么光靠 ETag + no-cache 不够（misakano/qcgzxw `1ab95fad`）：面板常挂在
+// Cloudflare 这类 CDN 后，`.js` 被边缘缓存数小时；升级二进制不会让 CDN 回源
+// —— 用户拿到「新页面 + 旧 app.js」，新按钮没有事件绑定，表现就是「点了没反应」。
+// URL 带上版本串后，发版即换 URL，CDN 与浏览器缓存自动失效，不依赖 CDN 是否
+// 老实遵守 no-cache。
+//
+// 版本串用 cfg.Version（1.35.1-202610221657）：每次构建都变，同一版本的重建
+// 也不会撞。`go run` 下是 "dev"，此时退化为不带版本（本地开发不缓存）。
+func (p *Panel) versionedIndex() ([]byte, string) {
+	v := strings.TrimSpace(p.cfg.Version)
+	if v == "" || v == "dev" {
+		return indexHTML, indexHTMLETag
+	}
+	versionedHTMLCache.once.Do(func() {
+		// 只替换内嵌的那处引用：indexHTML 是包级常量，改副本，不动原值。
+		body := bytes.ReplaceAll(indexHTML,
+			[]byte(`src="app.js"`),
+			[]byte(`src="app.js?v=`+url.QueryEscape(v)+`"`))
+		versionedHTMLCache.body = body
+		// ETag 必须按**实际输出的字节**算：沿用 indexHTML 的 ETag 会让
+		// If-None-Match 与响应体错配（浏览器拿 304 却对应另一份内容）。
+		versionedHTMLCache.etag = contentETag(body)
+	})
+	return versionedHTMLCache.body, versionedHTMLCache.etag
 }
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
