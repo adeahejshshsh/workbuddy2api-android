@@ -627,7 +627,13 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context) {
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
 	}
-	s.RunStreakBonusNowCtx(ctx)
+	// 连登管家与主循环共用 ctx：账号间节流被取消（停机/客户端断连）时整轮都不会执行。
+	// 此前静默跳过，日志里看不出「连登这轮为什么没跑」（报告 #13）。
+	if ctx.Err() != nil {
+		log.Printf("scheduler: 签到主循环已取消，连登管家本轮跳过: %v", ctx.Err())
+	} else {
+		s.RunStreakBonusNowCtx(ctx)
+	}
 }
 
 // RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。
@@ -848,7 +854,10 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 	}
 	s.balanceInterval.Store(int64(interval))
 	go func() {
-		var logged time.Duration
+		// 用哨兵初值而不是 0（报告 #12）：启动时就暂停（interval=0）时
+		// `cur != logged` 恒假，「暂停中显示 0s」那条日志永远打不出来，
+		// 与注释描述相反。用 -1 保证第一次一定打。
+		logged := time.Duration(-1)
 		for {
 			cur := time.Duration(s.balanceInterval.Load())
 			if cur != logged {

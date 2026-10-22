@@ -1155,6 +1155,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 整个会话钉在它身上，后续每轮都失败。
 				kind := upstream.FrameKind(errFrame)
 				h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, nil)
+				// 粘性必须解绑（报告 #3）：这一跳以 error 帧收尾，若策略是零动作
+				// （ErrNone/ErrClient/内容拦截），账号侧既不罚也不记，粘性仍钉在刚
+				// 失败的号上，下一轮继续撞。惩罚与否由 applyErrorPolicy 判。
+				fail(acct.UID)
 				st.status = http.StatusServiceUnavailable
 				st.outcome = reqlog.OutcomeStreamError
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
@@ -1282,12 +1286,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				writeOpenAIError(w, http.StatusBadGateway, "stream_error", err.Error())
 				st.status = http.StatusBadGateway
 				st.outcome = reqlog.OutcomeStreamError
+				// 账号处置必须与流式同源（报告 #1）：流式对同一形态走 NoteFailures，
+				// 这里此前只写响应就 return —— 连败降权不累计、粘性也不解绑。
+				h.cfg.Pool.NoteFailures(acct.UID)
+				fail(acct.UID)
+				log.Printf("WARN: [server] chat acct=%s model=%s: upstream read error: %v",
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, err)
 				return
 			}
 			// 其余解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
 			st.outcome = reqlog.OutcomeHTTPError
+			// 同上（报告 #2）：解析失败也是上游侧故障，账号口径与流式一致。
+			h.cfg.Pool.NoteFailures(acct.UID)
+			fail(acct.UID)
 			return
 		}
 		// 标记修复（非流式）：把正文里的原生工具调用标记还原成 message.tool_calls。

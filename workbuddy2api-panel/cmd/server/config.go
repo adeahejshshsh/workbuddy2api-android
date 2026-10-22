@@ -679,8 +679,11 @@ func (c *Config) normalize() error {
 	if c.Pool.DegradeThreshold <= 0 {
 		c.Pool.DegradeThreshold = 5
 	}
-	// global 在途分档：0/负数视为未设置回落默认 2（WAF 403 修复 P1-1）。
-	if c.Pool.MaxInFlightGlobal <= 0 {
+	// global 在途分档（报告 #9）：`0` 是**有效值** = 不分档、回落 max_in_flight
+	// （pool.SetMaxInFlightGlobal 的既定语义）。此前 `<= 0` 一律改成 2，
+	// 配置里根本表达不出「不分档」，max_in_flight=8 时 global 号被静默压到 2 路。
+	// 只有负数才是非法值，回落默认 2（WAF 403 修复 P1-1）。
+	if c.Pool.MaxInFlightGlobal < 0 {
 		c.Pool.MaxInFlightGlobal = 2
 	}
 	if c.Pool.IdleWeightPerHour <= 0 {

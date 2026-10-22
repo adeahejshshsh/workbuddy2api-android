@@ -310,6 +310,16 @@ function rateLimitMeta(row, now) {
         (deadline ? '\n负缓存到期：' + fmtLocalDateTime(deadline) + '（到期后才会重新探测）' : ''),
     };
   }
+  // 审计行（无重置时间的 6004）**不参与选号**：文案必须中性，否则会被读成
+  // 「这个模型被挡住了」，而路由其实仍会选它（报告 #10）。
+  if (row && row.audit_only) {
+    return {
+      model,
+      kind,
+      detail: '仅记录（不参与选号）',
+      title: model + '\n上游 6004 未给重置时间：只记录，不挡选号',
+    };
+  }
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
   let detail;
   if (until && resetAt && until < resetAt) {
@@ -474,7 +484,10 @@ function renderAccounts(list) {
     } else tag = '<span class="tag ok">可用</span>'; // 两个分支都返回空串的三元已删（bug-14）
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
-    const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
+    // 缺 uid 时兜底（报告 #15）：任一元素没有 uid（快照占位、字段裁剪、旧缓存）会抛
+    // TypeError，map 中断 → 整张账号表只剩骨架。
+    const uidText = String(s.uid == null ? '' : s.uid);
+    const short = uidText.length > 16 ? uidText.slice(0, 16) + '…' : (uidText || '—');
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
     // enterpriseUnlimitedTotal）。此时剩余额度不参与展示，直接标「不限」。
     const unlimited = s.credits_total === -1;

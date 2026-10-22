@@ -733,6 +733,10 @@ func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedMod
 				Kind:   kind,
 				Until:  mc.Until,
 				Reason: mc.Reason,
+				// AuditOnly 必须透出（报告 #10）：这类条目**不参与选号**
+				// （healthyForModel / modelCooled 都忽略它），面板若按「限流中到某时刻」
+				// 展示，与路由口径相反。带上标记让前端显示「仅记录，不参与选号」。
+				AuditOnly: mc.AuditOnly,
 			}
 			// 上游原始重置墙钟：截断后 until==resetAt 时省略（omitempty），台账只显示真实恢复时刻。
 			if !mc.ResetAt.IsZero() && !mc.ResetAt.Equal(mc.Until) {

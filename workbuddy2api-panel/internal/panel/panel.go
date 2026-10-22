@@ -1061,6 +1061,9 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 		Error    string                   `json:"error,omitempty"`
 	}
 	out := make([]row, len(accts))
+	// 结果按下标写回，靠 UID 非空区分「未派发」：空 uid 的行会被静默丢弃，
+	// 页面少一行且无提示（报告 #14）。这里统计一下，最后打一条 WARN。
+	droppedRows := 0
 
 	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
@@ -1117,7 +1120,14 @@ dispatch:
 	for _, it := range out {
 		if it.UID != "" {
 			res = append(res, it)
+		} else {
+			droppedRows++
 		}
+	}
+	// 丢的是「未派发」还是「派发了但 uid 为空」分不清，所以只说数量（报告 #14）。
+	// 数量恒等于未派发数时说明是断连提前退出，属正常；多于它才可疑。
+	if droppedRows > 0 && ctx.Err() == nil {
+		log.Printf("WARN: [panel] packages: %d 行因 uid 为空被丢弃（已派发但无 uid，页面会少行）", droppedRows)
 	}
 	// 余额降序：多的在前，便于和少的对比。
 	sort.SliceStable(res, func(i, j int) bool { return res[i].Remain > res[j].Remain })

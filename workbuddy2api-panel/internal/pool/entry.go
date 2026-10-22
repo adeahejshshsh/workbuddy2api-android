@@ -146,6 +146,9 @@ type RateLimitedModel struct {
 	ResetAt time.Time `json:"reset_at,omitempty"`
 	// Reason 触发原因（运维可读文案）。
 	Reason string `json:"reason,omitempty"`
+	// AuditOnly 为 true 表示这条只是**记账**，不参与选号（无重置时间的 6004）。
+	// 前端据此显示「仅记录，不参与选号」，避免把「路由仍会选它」误读成「被挡住」。
+	AuditOnly bool `json:"audit_only,omitempty"`
 }
 
 // modelCooldown 单个 (账号, 模型) 的模型级独立冷却记录。

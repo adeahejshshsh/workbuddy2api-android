@@ -682,13 +682,8 @@ func Classify(status int, body string) ErrKind {
 	if hasBusinessCode(body, "14003") || strings.Contains(lower, "model busy") {
 		return ErrModelBusy
 	}
-	// 11‑-128 通道校验失败（上游 PR #233）：msg 同为 "request illegal"，但语义是
-	// 「上游认为请求不是官方客户端发出的」——账号本身健康（官方客户端用同一账号正常）。
-	// 必须 code + 文案双条件：11‑-128 还承载内容审核变体（"blocked by security policy"，
-	// 归 ErrContentBlocked），按 code 一刀切会误判。
-	if isChannelRefused(body) {
-		return ErrChannelRefused
-	}
+	// （此处原有一处重复的 isChannelRefused 判定，已被上方提前 return 覆盖，
+	//   恒不可达 —— 报告 #5 删除）
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
 	if status >= 400 {
@@ -1092,7 +1087,12 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 				clsStatus = s
 			}
 		}
-		kind := Classify(clsStatus, fmt.Sprintf(`{"code":%d,"msg":%s}`, env.Code, mustJSONString(env.Msg)))
+		// 直接把**原始 body** 交给 Classify（报告 #8）：此前用
+		// `{"code":%d,"msg":%s}` 重建，原 body 的 error/data 子对象、extError、
+		// displayMsg、requestId 全部丢失 —— 依赖结构或 displayMsg 的判定
+		// （IsModelBlocked / IsAccountRestricted）在这条路径上只能靠 msg 短语猜。
+		// code 与 msg 本来就在 raw 里，重建没有任何收益。
+		kind := Classify(clsStatus, string(raw))
 		if kind == ErrNone {
 			kind = ErrClient
 		}
@@ -2609,6 +2609,12 @@ func businessCodeStatus(code int) int {
 		return http.StatusBadRequest
 	case 14018: // 积分耗尽
 		return http.StatusPaymentRequired
+	case 12153:
+		// 会话失效：refresh 端点会回 **HTTP 200 + 信封 code=12153**（报告 #4）。
+		// 映射成 401 后，Classify 的 sessionDead marker（"12153"）才会命中 ——
+		// 此前 businessCodeStatus 返回 0、状态停在 200，被 `status != 401 && != 403`
+		// 门槛跳过，最终落 ErrClient 走熔断三振，NoteSessionDead 永不触发。
+		return http.StatusUnauthorized
 	}
 	return 0
 }

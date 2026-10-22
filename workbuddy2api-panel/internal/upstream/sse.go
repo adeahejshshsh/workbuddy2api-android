@@ -922,7 +922,11 @@ readLoop:
 	// 上游读错误（流中途断）：补一帧 error 再补 [DONE]。客户端因此能区分
 	// 「说完了」与「说到一半上游断了」，不会把半截答案当完整答案。
 	if readErr != nil {
-		_ = writeRaw(`{"error":{"message":"upstream stream broke before completion","type":"upstream_error","code":"upstream_read_error"}}`)
+		// 走 writeSSE 而不是 writeRaw（报告 #7）：writeRaw 内部会调
+		// frameGatewayHint(hintFn, payload)，而这是**网关本地补写的故障帧**，
+		// 不该带上游语义提示。此刻不出问题只因 FrameKind 对该 payload 恰好返回
+		// ErrClient（无 hint），属"靠巧合正确"——与下面空流分支同一个坑，那里已改。
+		_ = writeSSE(`{"error":{"message":"upstream stream broke before completion","type":"upstream_error","code":"upstream_read_error"}}`)
 	}
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
 	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。

@@ -206,8 +206,11 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	for _, c := range ws {
 		cands = append(cands, c.e)
 	}
-	// candsAll 保留截断前的全候选（权重降序），供 LRU 兜底在全量范围选最旧者，
-	// 避免 top5 字典序截断把等权重靠后账号饿死（惊群根因之一）。
+	// candsAll 是「**成本层过滤后**的全候选」（不是整个池）：它是 cands 的同一底层数组
+	// 的别名，长度与 cands 相同 —— 被 costTier 挡掉的候选不在其中（报告 #11）。
+	// 供 LRU 兜底在这批候选里选最旧者，避免 top5 字典序截断把等权重靠后账号饿死。
+	// 注意：两者共享数组，**后续不要对 cands 做 append**（会同时改写 candsAll）；
+	// 需要追加时先 copy。
 	candsAll := cands
 	if len(cands) > 5 {
 		cands = cands[:5]
