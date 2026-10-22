@@ -947,9 +947,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="grid2">
               <div>
                 <div class="switch"><span class="lb">连登管家</span>
-                  <input type="checkbox" name="streak_enabled"></div>
-                <label class="fld"><span class="lb">连登时点（小时，逗号分隔）</span>
-                  <input name="streak_hours" placeholder="21"></label>
+                  <span class="hint">随签到自动执行（无独立排程）</span></div>
+                <div class="hint" style="margin-top:6px">签到任务末尾自动补签保连登、兑换已解锁档位、抽完抽奖次数。</div>
               </div>
               <div></div>
             </div>
@@ -1077,7 +1076,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <div class="switch"><span class="lb">请求记录归档</span>
                 <input type="checkbox" name="request_archive_enabled"></div>
               <label class="fld"><span class="lb">归档保留天数</span>
-                <input name="request_archive_days" placeholder="7" inputmode="numeric"></label>
+                <input name="request_retention_days" placeholder="7" inputmode="numeric"></label>
             </div>
             <div class="hint" style="margin-top:8px">容量上限（<code>logging.request_archive_max_mb</code>）、
               <code>server.read_timeout</code> 与 <code>upstream.dns_servers</code> 仍需手工编辑配置文件

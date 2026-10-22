@@ -1151,11 +1151,17 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 
 	err := c.refreshTokenOnce(a)
 
+	// 顺序很重要（报告 #10）：必须**先写结果、关信号，再删表**。此前先 delete 再
+	// close，两者之间到达的调用会新建一次刷新 —— 此时旧 refreshToken 已被上游 rotate，
+	// 第二发必然带废 token 撞 12153，整链作废（正是单飞要防的事）。
+	//
+	// 注意：这里**只能锁一次**（sync.Mutex 不可重入）。曾因补丁残留多写了一个
+	// Lock()，第二次永远拿不到 → 所有 refresh 卡死，表现为「某个测试跑四五分钟」。
+	f.err = err
+	close(f.done)
 	c.refreshMu.Lock()
 	delete(c.refreshInFlight, key)
 	c.refreshMu.Unlock()
-	f.err = err
-	close(f.done)
 	return err
 }
 

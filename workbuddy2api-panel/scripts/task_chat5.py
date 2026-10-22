@@ -10,7 +10,19 @@
   python3 task_chat5.py <uid前缀> --yes          # 补齐到 5 次
   python3 task_chat5.py <uid前缀> --yes --count 2  # 只补 2 次
 """
+import re
 import sys, os, argparse
+
+def _uid_prefix(path):
+    """从 workbuddy-<uid>.json 取 uid 前 8 位。
+
+    此前用 os.path.basename(p)[10:18] 硬切（报告 #24）：文件名不是
+    workbuddy-<uid>.json 形态（如 workbuddy.json）时得到空串，load_auth 直接
+    SystemExit 中断整批。这里按前缀匹配取，取不到返回空串由调用方跳过。
+    """
+    m = re.search(r"workbuddy-([0-9A-Za-z]+)", os.path.basename(path))
+    return m.group(1)[:8] if m else ""
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import task_common as tc
 
@@ -30,7 +42,7 @@ def main():
     prefixes = []
     if a.account.upper() == "ALL":
         import glob
-        prefixes = [os.path.basename(p)[10:18]
+        prefixes = [_uid_prefix(p)
                     for p in sorted(glob.glob(tc.AUTHS + "/workbuddy-*.json"))]
     else:
         prefixes = [a.account]

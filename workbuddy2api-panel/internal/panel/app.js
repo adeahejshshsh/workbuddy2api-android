@@ -1140,9 +1140,13 @@ const CFG_MAP = {
   // 补齐缺失键（报告 #20）：这些字段此前在配置页既回显不了也改不了。
   blackcat_hours: ['schedule', 'blackcat_hours'], blackcat_enabled: ['schedule', 'blackcat_enabled'],
   growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
-  streak_hours: ['schedule', 'streak_hours'], streak_enabled: ['schedule', 'streak_enabled'],
+  // 连登管家没有独立排程（它在签到末尾自动跑，见 scheduler.runStreakBonus），
+  // 所以这里**不能**加 streak_enabled/streak_hours（报告 #18）——
+  // 加了只会得到「永远回显为关、改了也不生效」的死字段。
   request_archive_enabled: ['logging', 'request_archive_enabled'],
-  request_archive_days: ['logging', 'request_archive_days'],
+  // 键名必须与 Go 的 `logging.request_retention_days` 一致（报告 #17）：
+  // 此前写成 request_archive_days，读不到现值，保存时又以未知键落盘，永不生效。
+  request_retention_days: ['logging', 'request_retention_days'],
   max_in_flight: ['pool', 'max_in_flight'], max_in_flight_global: ['pool', 'max_in_flight_global'],
   breaker_threshold: ['pool', 'breaker_threshold'],
   degrade_threshold: ['pool', 'degrade_threshold'], degrade_cooldown: ['pool', 'degrade_cooldown'],
@@ -2426,6 +2430,9 @@ function pkExpiryMs(p) {
   const text = String((p && p.end_time) || '').trim();
   if (!text) return null;
   let iso = text.includes('T') ? text : text.replace(' ', 'T');
+  // 纯日期形态（"2026-10-24"）先补时间再补时区（报告 #19）：直接拼 "+08:00" 会得到
+  // "2026-10-24+08:00"，Date.parse 为 NaN → 该包被判「无到期时间」，不进到期分布/排序。
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) iso += 'T00:00:00';
   if (!/(?:Z|[+-]\d\d:\d\d)$/.test(iso)) iso += '+08:00';
   const parsed = Date.parse(iso);
   return Number.isFinite(parsed) ? parsed : null;

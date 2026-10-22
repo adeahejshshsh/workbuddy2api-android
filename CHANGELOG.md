@@ -91,7 +91,18 @@
 按账号错开能显著降低相关性风控。`activity` / `travel` / `blackcat` / `streak` 四条
 遍历链路统一走 `s.accountDelay()`（未配置时回落既有 800ms）。
 
-### 八、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 八、测试时长：死锁修复 + 节流变量归零
+
+* **refresh 单飞的自死锁**（我 v1.35.1 引入）—— 补丁残留多写了一个 `refreshMu.Lock()`，
+  `sync.Mutex` 不可重入，第二次永远拿不到 → 所有 refresh 卡死，`scheduler` 包从 2s
+  变成 **311s 且失败**（表现为「一个测试跑四五分钟」）。已删掉重复的 Lock。
+* 测试初始化补齐：`activityAccountDelay` / `travelAccountDelay` / `checkinAccountDelay`
+  一并置 0（此前只置了 keepalive，另三条链路仍真睡 800ms×账号数）。
+* 新增 `upstream.SetBillingRetryDelayForTest`：跨包测试缩短计费重试退避，
+  「上游全 500」的用例不再固定睡 12s。
+* 新增 `patches/test.sh`：迭代只跑改动包（单包 ≈1s），发版前 `all` 跑全量（≈18s）。
+
+### 九、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

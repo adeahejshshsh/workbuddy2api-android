@@ -235,3 +235,14 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID
 	_, err = c.billingJSON(a, http.MethodPost, reportPath, json.RawMessage(raw))
 	return err
 }
+
+// SetBillingRetryDelayForTest 临时改签到/余额重试的间隔基数，返回恢复函数。
+//
+// 仅供**其它包的测试**使用：维护类计费调用的重试基数是包内私有变量，
+// 上游包自己的测试能直接改，跨包（如 scheduler）改不到 —— 于是一个「上游全 500」
+// 的用例会把 1×base + 2×base 真睡满，单测从毫秒级变成十几秒。
+func SetBillingRetryDelayForTest(d time.Duration) (restore func()) {
+	old := billingRetryDelay
+	billingRetryDelay = d
+	return func() { billingRetryDelay = old }
+}

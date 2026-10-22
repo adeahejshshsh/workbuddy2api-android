@@ -111,6 +111,7 @@ WB2A_LOGIN_TOKEN="$TOKEN" \
 WB2A_LOGIN_USER_ID="$USER_ID" \
 WB2A_LOGIN_ENT_ID="$ENT_ID" \
 WB2A_LOGIN_DOMAIN="$DOMAIN" \
+WB2A_LOGIN_BASE="$([[ "$REALM" == "global" ]] && echo https://www.workbuddy.ai || echo https://www.codebuddy.cn)" \
 python3 - <<'PYEOF'
 import json, os, urllib.request, urllib.error
 
@@ -120,7 +121,9 @@ ent_id = os.environ["WB2A_LOGIN_ENT_ID"]
 domain = os.environ["WB2A_LOGIN_DOMAIN"]
 
 req = urllib.request.Request(
-    "https://www.codebuddy.cn/v2/billing/meter/daily-checkin",
+    # 按 realm 选 base（报告 #23）：写死 CN 域时 --realm=global 登录的号这一步必然 404。
+    (os.environ.get("WB2A_LOGIN_BASE") or "https://www.codebuddy.cn").rstrip("/")
+    + "/v2/billing/meter/daily-checkin",
     method="POST", data=b"{}",
     headers={
         "Authorization": "Bearer " + token,

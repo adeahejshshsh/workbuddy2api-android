@@ -386,6 +386,11 @@ func writeAuthSnapshot(s authFileSnapshot) error {
 	doc := map[string]any{}
 	if prevRaw, rerr := os.ReadFile(s.path); rerr == nil {
 		_ = json.Unmarshal(prevRaw, &doc)
+		// 文件内容是 JSON `null` 时 Unmarshal 会把 doc 置成 nil map（不是留空 map），
+		// 后面 doc[key] = dst 直接 panic（报告 #1）。这里补回空 map。
+		if doc == nil {
+			doc = map[string]any{}
+		}
 	}
 	// 已知键覆盖、子对象里的**未知键保留**（bug #11）：此前 `doc["auth"] = map{...}`
 	// 是整组替换，用户在 auth/account 里手写的扩展键（自定义域字段、附加 token）

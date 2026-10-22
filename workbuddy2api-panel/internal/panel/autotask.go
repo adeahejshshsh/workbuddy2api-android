@@ -445,7 +445,9 @@ func (p *Panel) taskByCodeMP(a *auth.Auth, code string) (*upstream.Task, error) 
 		return nil, err
 	}
 	for i := range tasks {
-		if tasks[i].TaskCode == code {
+		// 与 taskByCode 同口径（报告 #13）：精确比较时上游改一次大小写，
+		// mp 专属任务在单任务/队列路径会全部变成「无此任务」。
+		if strings.EqualFold(tasks[i].TaskCode, code) {
 			return &tasks[i], nil
 		}
 	}

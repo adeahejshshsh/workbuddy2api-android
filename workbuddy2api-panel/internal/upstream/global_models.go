@@ -155,7 +155,11 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 	if len(efforts) > 0 || len(defaults) > 0 {
 		c.storeEfforts("global", efforts, defaults)
 	}
-	c.storeModelRates("global", infos)
+	// 企业端点只回窄表时 infos 为 nil：此时 storeModelRates 会把已学到的
+	// global 倍率清空，积分保底的目录兜底随之失效到下次 v3 成功（报告 #12）。
+	if len(infos) > 0 {
+		c.storeModelRates("global", infos)
+	}
 
 	// 成功：探测结果去重。names/infos 均落缓存；倍率等选号敏感字段只透出展示，
 	// 不注入 costTier。

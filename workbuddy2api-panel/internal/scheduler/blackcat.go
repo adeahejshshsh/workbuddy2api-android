@@ -4,8 +4,8 @@ package scheduler
 
 import (
 	"context"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"log"
-	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -16,7 +16,10 @@ import (
 // 之所以留一个可替换点：窗口守卫**先于**账号循环，若不钉住时钟，「企业号门控是否生效」
 // 这条断言的判别力就完全取决于运行环境的墙钟——本机白天跑等于该用例什么都没测，
 // 只有 CI 恰好落在 UTC 夜里才真正执行。属典型的「随环境静默失效」的测试。
-var nowForNightWindow = time.Now
+// 按北京时间取时钟（报告 #7）：排程时点已按 CST 算，若窗口判定仍用宿主时区，
+// 非 CST 宿主上每天到点都会在窗口判定处被跳过。面板手动入口也用 cst.Now()，
+// 两条路径必须同源。
+var nowForNightWindow = cst.Now
 
 // RunBlackcatNow 对所有可用账号执行夜猫子对话补足（窗口外跳过）。
 // 由 blackcat_hours 排程（默认 [23]）触发；执行前二次校验 InNightWindow。
@@ -65,7 +68,7 @@ func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context) {
 			continue
 		}
 		log.Printf("blackcat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.NicknameValue()), ok)
-		if !sleepCtx(ctx, s.accountDelay()) {
+		if !sleepCtx(ctx, s.accountDelay(activityAccountDelay)) {
 			return
 		}
 	}

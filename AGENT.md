@@ -171,6 +171,13 @@ shell 的管道）关掉了读端，网关立刻 141 退出，日志上看不出
   `data/state.json`、`data/server.log`）—— 这个 uid 读不到，只能 `adb`/`run-as` 取。
 * 面板与 API 都在 `:7863`；默认监听 `127.0.0.1`，对外必须显式改 `listen` + 配 `api_key`。
 * 端口上如果已经有一个不是本服务拉起的实例，服务会判成「运行中（外部）」并**不抢端口**。
+* **测试节奏**（2026-10-22 起）：
+  - 迭代中只跑**改动涉及的包**：`bash patches/test.sh`（自动从 git diff 推包名）；
+    也可显式 `bash patches/test.sh server pool`。
+  - **发版前**跑一次全量：`bash patches/test.sh all`（≈18s，含编译）。
+  - 单包 ≈1s，全量 ≈18s —— 别在迭代里无脑全量。
+  - 新增等待/节流类变量时，**必须**在包内测试初始化里把它置 0（`zz_testinit_test.go`）；
+    跨包的私有常量用导出的 `...ForTest` 钩子（如 `upstream.SetBillingRetryDelayForTest`）。
 * **版本号规矩**（2026-10-22 起）：
   - **纯修 bug 不递增 `VERSION`** —— 直接改代码 + 在 `CHANGELOG` 当前段落追加条目即可。
   - **有实际变更**（新功能 / 策略调整 / 指纹变更）才递增，且**只升最小位**

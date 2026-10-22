@@ -651,7 +651,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 判断不成立——国际版 /v2/report 可用，跳过即国际版账号永远点不亮连登（上游
 		// a190252 同口径修复）。checkin/travel 的 global 门控不受影响，仍跳过。
 		if !first {
-			if !sleepCtx(ctx, s.accountDelay()) {
+			if !sleepCtx(ctx, s.accountDelay(activityAccountDelay)) {
 				return // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}
 		}
@@ -703,12 +703,15 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 var keepaliveAccountDelay = 800 * time.Millisecond
 
 // accountDelay 账号遍历型任务的账号间等待：配置了 schedule.account_spread_seconds
-// 就用它，否则回落既有的 800ms 默认（misakano7545 `3dfe46c3` issue #45）。
-func (s *Scheduler) accountDelay() time.Duration {
+// 就用它，否则回落**该任务自己的**延迟变量（misakano7545 `3dfe46c3` issue #45）。
+//
+// fallback 必须按任务传入，不能统一成一个常量：测试靠把 activityAccountDelay /
+// travelAccountDelay 置 0 来免等待，统一后测试会**真的睡**（整包跑成分钟级）。
+func (s *Scheduler) accountDelay(fallback time.Duration) time.Duration {
 	if s.cfg.AccountSpreadSeconds > 0 {
 		return time.Duration(s.cfg.AccountSpreadSeconds) * time.Second
 	}
-	return keepaliveAccountDelay
+	return fallback
 }
 
 // RunKeepaliveNow 无 ctx 版本（保留给旧调用方）。

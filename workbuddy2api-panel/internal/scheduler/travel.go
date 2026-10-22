@@ -76,7 +76,7 @@ func (s *Scheduler) RunTravelNowCtx(ctx context.Context) {
 		}
 		if !first {
 			// 可中断等待（issue ISSUE-17）：关机/停机信号到来时不要卡在节流里。
-			if !sleepCtx(ctx, s.accountDelay()) {
+			if !sleepCtx(ctx, s.accountDelay(travelAccountDelay)) {
 				return
 			}
 		}

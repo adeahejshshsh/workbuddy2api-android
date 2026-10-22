@@ -116,7 +116,12 @@ func (p *Pool) ModelDeniedForAllAccounts(model string) bool {
 	if p.tier == nil || len(p.byUID) == 0 {
 		return false
 	}
-	for uid := range p.byUID {
+	for uid, e := range p.byUID {
+		// 分母只算「可能被选中」的号（报告 #6）：disabled / paused / needAuth 永远选不到，
+		// 把它们算进来会让本该整池隐藏的模型继续出现在 /v1/models（客户端挑中必失败）。
+		if e == nil || e.disabled || e.paused || e.needAuth {
+			continue
+		}
 		if !p.tier.deniedFor(uid, model) {
 			return false
 		}

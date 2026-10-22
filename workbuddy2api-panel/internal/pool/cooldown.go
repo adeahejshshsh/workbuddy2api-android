@@ -64,7 +64,9 @@ func (p *Pool) NoteCheckinDone(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		day := time.Now().Format("2006-01-02")
+		// 日键按**北京时间**（报告 #4 / misakano7545 025cc107）：用宿主本地日期时，
+		// 非 CST 宿主上 CST 08:00 一过，当天已签的号会在面板上回退成「未签」。
+		day := cst.DayKey(time.Now())
 		if e.lastCheckinDay != day {
 			e.lastCheckinDay = day
 			p.dirty.Store(true)
@@ -297,7 +299,19 @@ func (p *Pool) CooldownModelBusy(uid, model, reason string) {
 	if e.modelCooldowns == nil {
 		e.modelCooldowns = make(map[string]modelCooldown)
 	}
-	e.modelCooldowns[model] = modelCooldown{Until: until, Reason: reason, Hits: prev.Hits + 1}
+	mc := modelCooldown{Until: until, Reason: reason, Hits: prev.Hits + 1}
+	// 既有条目可能来自更具体的来源（6004 有上游权威重置时刻 / 11102 是确定性负缓存）：
+	// 用 14003 的短窗口整体覆盖会把它们降级成「模型繁忙」，原因与 ResetAt 一起丢
+	// （报告 #5）。这里只延长 Until，其余字段按「更具体者优先」保留。
+	if !prev.ResetAt.IsZero() {
+		mc.ResetAt = prev.ResetAt
+	}
+	switch {
+	case strings.Contains(prev.Reason, "6004"), strings.Contains(prev.Reason, "11102"),
+		strings.Contains(prev.Reason, "11158"):
+		mc.Reason = prev.Reason
+	}
+	e.modelCooldowns[model] = mc
 	p.dirty.Store(true)
 }
 

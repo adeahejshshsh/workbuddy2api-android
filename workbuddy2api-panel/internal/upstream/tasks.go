@@ -147,8 +147,13 @@ func parseClaimReward(data json.RawMessage) (credit, energy int64, already bool,
 		Credit         int64 `json:"credit"`
 		Energy         int64 `json:"energy"`
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, false, err
+	// 200 + 空 body 时 doJSON 返回 (nil, nil)：直接 Unmarshal(nil) 会报
+	// "unexpected end of JSON input"，把**成功**当成失败（报告 #9）——
+	// 自动领奖随之中断。空响应按「成功、无字段」处理。
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return 0, 0, false, err
+		}
 	}
 	return resp.Credit, resp.Energy, resp.AlreadyClaimed, nil
 }
@@ -176,8 +181,11 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 			Progress     json.RawMessage `json:"progress"`
 		} `json:"tasks"`
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, err
+	// 200 + 空 body（doJSON 返回 nil）：按「本次没有任务」处理，不报解析错误（报告 #9）。
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, err
+		}
 	}
 	out := make([]Task, 0, len(resp.Tasks))
 	for _, t := range resp.Tasks {
@@ -287,8 +295,11 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 		Credit         int64 `json:"credit"`
 		Energy         int64 `json:"energy"`
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, false, err
+	// 空 body = 成功但无字段（报告 #9），不要 Unmarshal(nil) 判失败。
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return 0, 0, false, err
+		}
 	}
 	// 幂等：重复领取不算错误，但无新增奖励。用上游明示的 already_claimed 判断，
 	// 不再靠"金额为 0"推断（bug #6：道具类奖励本来就是 0 分 0 能）。
