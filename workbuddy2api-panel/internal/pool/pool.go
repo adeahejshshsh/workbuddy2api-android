@@ -26,6 +26,9 @@ type Pool struct {
 	breakerCooldownMax time.Duration
 	// softRateMax 软冷却指数退避的封顶（SetSoftRateMax 注入；默认 defaultSoftRateMax）。
 	softRateMax time.Duration
+	// softResetMax 上游权威重置墙钟的合理性上限（SetSoftResetMax 注入；
+	// 默认 defaultSoftResetMax）。只挡荒谬的解析结果，不参与指数退避。
+	softResetMax time.Duration
 	// costExploreInterval costTier 条件探索窗口（issue #136 方案 a′，SetCostExploreInterval
 	// 注入；默认 defaultCostExploreInterval 30m）。tier 0 垄断 + tier 1 存在且距上次
 	// 探索 ≥ 窗口时，本次 pick 生效层切 tier 1-only（探索=搭车改道，零新增上游请求）。
@@ -161,6 +164,17 @@ func (p *Pool) SetSoftRateMax(d time.Duration) {
 	defer p.mu.Unlock()
 	if d > 0 {
 		p.softRateMax = d
+	}
+}
+
+// SetSoftResetMax 注入上游权威重置墙钟的冷却上限（cooldown.soft_reset_max）。
+// 与 SetSoftRateMax 分工：前者管「上游明确说了何时恢复」，后者管「不知道、按退避」。
+// 非正值忽略（保持默认），与 SetSoftRateMax 同口径。
+func (p *Pool) SetSoftResetMax(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d > 0 {
+		p.softResetMax = d
 	}
 }
 

@@ -76,10 +76,18 @@ var sanitizeRewrites = [][2]string{
 	{feedbackSentence, strings.Replace(feedbackSentence, "give", "provide", 1)},
 	// DSH 的身份句（@deepseek-ai/dsh-system-prompt 注入的 harness:identity 段）被上游
 	// 当成「非官方渠道调用」**整单拦截**：400 `11‑-128 Illegal API invocation from an
-	// unapproved channel`。实测换一个词即绕过（语义不变），插零宽空格对这条无效。
+	// unapproved channel`。
+	//
+	// 改写值 = `DeepSeek` + U+200B（零宽空格）+ `Harness`，两层都动：
+	//   - 品牌词中间不是 0x20 而是零宽空格 → 逐字匹配原串不再命中；
+	//   - 后半段换成 Harness（不是原词 Runtime）→ 即使上游把零宽字符归一化掉，
+	//     归一后的串是 `DeepSeekHarness`，与原句仍不同形。
+	// 渲染出来仍是「DeepSeek Harness」，语义不变、肉眼可核对。
+	// （源码里写 \u200B 转义而非裸零宽字符：裸字符在 diff / 终端里不可见，
+	//   审查时看不出改了什么，也没法 grep。）
 	// 按短语全局替换而非只认开头 —— 同一品牌词在长提示词正文里还会出现多次。
 	// 依据：misakano7545/workbuddy2api-panel `4f60a4c6`（DSH 身份句改按品牌词表驱动）。
-	{"DeepSeek Harness", "DeepSeekRuntime"},
+	{"DeepSeek Harness", "DeepSeek\u200BHarness"},
 	// 数字错误码（11-128 / 11-128）不在这张表里：子串替换会篡改 base64/ID 里的
 	// 同形片段，改由 sanitizeCodeRe 的边界正则单独处理（见其注释）。
 }

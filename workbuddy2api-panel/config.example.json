@@ -17,7 +17,8 @@
   },
   "cooldown": {
     "soft_rate": "600s",
-    "soft_rate_max": "2h"
+    "soft_rate_max": "2h",
+    "soft_reset_max": "24h"
   },
   "schedule": {
     "checkin_hours": [9, 21],

@@ -551,6 +551,11 @@ const (
 // 避免测试/裸用池时退避无上限。
 const defaultSoftRateMax = 2 * time.Hour
 
+// defaultSoftResetMax 上游权威重置墙钟的默认上限：softResetMax 未注入（<=0）时按此值算。
+// 24h 覆盖「按天重置」的常见形态；更远的解析结果按荒谬处理（脏文案 / 时钟错乱），
+// 不能让一条脏文案把账号或模型锁死几天。
+const defaultSoftResetMax = 24 * time.Hour
+
 // defaultDegrade* 连败降权默认参数（issue #114）：连败 5 次临时出池 10 分钟。
 const (
 	defaultDegradeThreshold   = 5

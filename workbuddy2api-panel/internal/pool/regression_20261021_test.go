@@ -30,9 +30,16 @@ func TestCappedSoftUntilExpiredResetFallsBackToBase(t *testing.T) {
 		t.Fatalf("base<=0 时冷却 %v，期望回落到 1 分钟", got.Sub(now))
 	}
 
-	// 超过 softRateMax 的 resetAt 必须被截断
-	p.softRateMax = time.Minute
+	// 荒谬的远期 resetAt 必须被 softResetMax 截断（注意不是 softRateMax：
+	// 后者只管「无重置时间」的指数退避封顶，不参与权威墙钟的截断）。
+	p.softResetMax = time.Minute
 	if got := p.cappedSoftUntilLocked(now, now.Add(time.Hour), base); got.Sub(now) > time.Minute+time.Second {
-		t.Fatalf("冷却 %v 没被 softRateMax 截断", got.Sub(now))
+		t.Fatalf("冷却 %v 没被 softResetMax 截断", got.Sub(now))
+	}
+	// 而 1 小时内的权威墙钟原样采用（正是「上游说 16:26 恢复」的那类场景）
+	p.softResetMax = 24 * time.Hour
+	p.softRateMax = 2 * time.Hour
+	if got := p.cappedSoftUntilLocked(now, now.Add(time.Hour), base); got.Sub(now) < 59*time.Minute {
+		t.Fatalf("1 小时后的权威墙钟被截断成 %v，应原样采用", got.Sub(now))
 	}
 }

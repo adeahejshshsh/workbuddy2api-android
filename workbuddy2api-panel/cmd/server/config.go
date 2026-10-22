@@ -70,6 +70,14 @@ type Config struct {
 		// SoftRateMax 软冷却指数退避的封顶，默认 "2h"。
 		// 空值回落默认，非法值报错（处理风格同 soft_rate）。
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
+		// SoftResetMax 上游**权威重置墙钟**（429 文案「将在 … 重置」/ Retry-After 头）
+		// 的冷却上限，默认 "24h"。与 soft_rate_max 分工不同，别混用：
+		//   - soft_rate_max：不知道上游何时恢复时的**指数退避**封顶（默认 2h）；
+		//   - soft_reset_max：上游明确给了恢复时刻时的**合理性上限**，只用来挡明显
+		//     荒谬的解析结果（脏缓存文案 / 时钟错乱），不参与退避。
+		// 历史坑：这两个语义曾共用一个 soft_rate_max —— 上游文案说「16:26 重置」
+		// （10 小时后），我们 2 小时就把号放回池子，冷却一过照旧 6004，客户端一直 429。
+		SoftResetMax string `json:"soft_reset_max"` // "24h"
 	} `json:"cooldown"`
 
 	Schedule struct {
@@ -259,6 +267,7 @@ type Config struct {
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
+	SoftResetMaxDur        time.Duration `json:"-"`
 	BreakerCooldownDur     time.Duration `json:"-"`
 	BreakerCooldownMaxD    time.Duration `json:"-"`
 	DegradeCooldownDur     time.Duration `json:"-"`
@@ -288,6 +297,7 @@ func Default() *Config {
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
+	c.Cooldown.SoftResetMax = "24h"
 	c.Server.ReadTimeout = "300s"
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
@@ -546,6 +556,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_SOFT_RATE_MAX"); v != "" {
 		c.Cooldown.SoftRateMax = v
 	}
+	if v := os.Getenv("WB2A_SOFT_RESET_MAX"); v != "" {
+		c.Cooldown.SoftResetMax = v
+	}
 	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.TimeoutSeconds = n
@@ -693,6 +706,14 @@ func (c *Config) normalize() error {
 	}
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
+	}
+	// 上游权威重置墙钟的合理性上限（默认 24h）：空值回落、非法值 fail fast，
+	// 口径与 soft_rate_max 一致。应当明显大于 soft_rate_max，否则退化成旧行为。
+	if c.Cooldown.SoftResetMax == "" {
+		c.Cooldown.SoftResetMax = "24h"
+	}
+	if c.SoftResetMaxDur, err = time.ParseDuration(c.Cooldown.SoftResetMax); err != nil {
+		return fmt.Errorf("cooldown.soft_reset_max: %w", err)
 	}
 	// 空值回落必须在 ParseDuration **之前**（issue B4）：`ParseDuration("")` 直接
 	// 返回 invalid duration，配置里写 `"degrade_cooldown": ""` 会让进程启动失败，

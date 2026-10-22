@@ -6,6 +6,8 @@
 workbuddy2api-panel/data/
 workbuddy2api-panel/auths/
 workbuddy2api-panel/config.json
+# 编译产物（cmd/signin 的 10MB 二进制，2026-10-23 误提交过一次）
+workbuddy2api-panel/signin
 workbuddy2api-panel/backups/
 
 # 密钥与签名

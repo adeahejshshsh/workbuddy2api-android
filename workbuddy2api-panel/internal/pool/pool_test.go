@@ -893,12 +893,15 @@ func TestCooldownSoftForModelParsedUntil(t *testing.T) {
 	}
 }
 
-func TestCooldownSoftForModelCappedBySoftRateMax(t *testing.T) {
-	// 解析时间超出 soft_rate_max → 截断到 soft_rate_max（不无限期拉黑）。
+func TestCooldownSoftForModelCappedBySoftResetMax(t *testing.T) {
+	// 解析时间超出 soft_reset_max → 截断到 soft_reset_max（不无限期拉黑）。
+	// 注意截断它的是 soft_reset_max，不是 soft_rate_max：后者只封顶「无重置时间」的
+	// 指数退避，拿它截断权威墙钟正是「上游说 10 小时后恢复、我们 2 小时就放号」的根因。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetSoftRateMax(10 * time.Minute)
-	reset := time.Now().Add(2 * time.Hour) // 远超过封顶 10m
+	p.SetSoftResetMax(10 * time.Minute)
+	reset := time.Now().Add(2 * time.Hour) // 远超过上限 10m
 	before := time.Now()
 	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "429 rate limit")
 	st, _ := p.Status("u1")
@@ -906,7 +909,7 @@ func TestCooldownSoftForModelCappedBySoftRateMax(t *testing.T) {
 		t.Fatalf("want model ledger row: %+v", st.RateLimitedModels)
 	}
 	if st.RateLimitedModels[0].Until.Sub(before) > 10*time.Minute+time.Second {
-		t.Errorf("model until=%v want capped at soft_rate_max=10m", st.RateLimitedModels[0].Until)
+		t.Errorf("model until=%v want capped at soft_reset_max=10m", st.RateLimitedModels[0].Until)
 	}
 }
 

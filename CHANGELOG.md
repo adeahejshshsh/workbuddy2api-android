@@ -516,6 +516,29 @@
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，
 多条折叠成一条汇总，模型名放 title。
 
+### 二十四、429 权威重置墙钟被退避封顶截断（2026-10-23 线上实测）
+
+**现象**：上游 429 文案写「您的使用量已超出频率限制，将在 2026-10-23 16:26:37 UTC+8 重置」
+（约 10 小时后），网关却只冷却 2 小时；冷却一过立刻再撞 6004，客户端表现为
+「一直 429、永远好不了」。
+
+**根因**：`cappedSoftUntilLocked` 把**两种上限当成一个**用 —— `soft_rate_max`（默认 2h）
+既是「没有重置时间」时的指数退避封顶，又被拿来截断上游给的**权威重置时刻**
+（`min(resetAt, now+soft_rate_max)`）。上游说 10 小时，代码只认 2 小时。
+
+**修法**：拆成两个旋钮，语义分开：
+
+* `soft_rate_max`（默认 2h，行为不变）：只管「不知道上游何时恢复」的指数退避封顶；
+* `soft_reset_max`（**新增**，默认 24h）：上游明确给了恢复时刻时的**合理性上限**，
+  只用来挡荒谬的解析结果（脏缓存文案 / 时钟错乱），正常墙钟原样采用。
+
+`cappedSoftUntilLocked` 现在是：未来时刻 → `min(resetAt, now+soft_reset_max)`；
+过期/零值 → 原来的有界退避 `min(now+base, now+soft_rate_max)`。6004 的模型级冷却与
+非 6004 的账号级冷却共用这个函数，两条路径一起修好。
+
+配置 `cooldown.soft_reset_max`（`config.example.json` 已加），env `WB2A_SOFT_RESET_MAX`，
+热改生效（`reload` 里同步 `SetSoftResetMax`）。
+
 ### 未合并
 
 | kk-cao 提交 | 内容 | 判断 |
@@ -533,8 +556,17 @@
 带限流文案的 11140 不算账号限制）、新增 `TestNormalizeBusinessCode`；
 `TestDesktopUAForGlobalAccount` 改为断言「平台段恒为 WorkBuddy + 版本段按 realm」；
 其余指纹断言改用常量构造，避免下次改版本号再红一片。
-**768 通过 / 0 失败**（server 97 / upstream 229 / panel 54 / pool 188 / scheduler 65 /
-auth 29 / session 21 / reqlog 10 / usage 16 / redisstore 7 / cmd-server 52）。
+新增 `TestCooldownSoftForModelHonorsResetBeyondSoftRateMax`（10h 权威墙钟不被 2h 截断）、
+`TestCooldownSoftForModelCapsAbsurdReset`（30h 截断到 `soft_reset_max`=24h）、
+`TestCooldownSoftRateHonorsResetBeyondSoftRateMax`（账号级同理）、
+`TestSoftResetMaxParsedFromFile` / `TestSoftResetMaxDefaultsTo24h` / `TestBadSoftResetMax`；
+`TestCappedSoftUntilExpiredResetFallsBackToBase` 的截断断言改注入 `softResetMax`
+（原来拿 `softRateMax` 断言，正是本节要修的那个混淆）。
+顺带修 `TestCheckinDoneExpiredYesterday`：日期改用 `cst.DayKey` —— Go 运行时读不到
+`/etc/localtime` 时是 UTC，与北京日界差一天，每天 00:00–08:00（CST）必红。
+
+**808 通过 / 0 失败**（server 104 / upstream 235 / panel 60 / pool 192 / scheduler 65 /
+auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 59）。
 
 
 ## v1.35.0

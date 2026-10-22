@@ -92,12 +92,14 @@ func TestCooldownSoftForModelDoesNotClobberUntil(t *testing.T) {
 }
 
 // TestCooldownSoftForModelCapsUntilKeepsResetAt 6004 写 modelCooldowns：
-// until 截断到 soft_rate_max，reset_at 保留上游原始墙钟（issue #36 台账语义迁移）。
+// until 截断到 soft_reset_max（权威墙钟的合理性上限），reset_at 保留上游原始墙钟
+// （issue #36 台账语义迁移）。
 func TestCooldownSoftForModelCapsUntilKeepsResetAt(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetSoftRateMax(10 * time.Minute)
-	reset := time.Now().Add(2 * time.Hour) // 远超封顶 → until 截断到 10m，reset_at 保留 2h
+	p.SetSoftResetMax(10 * time.Minute)
+	reset := time.Now().Add(2 * time.Hour) // 远超上限 → until 截断到 10m，reset_at 保留 2h
 	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "6004 model rate limit")
 	p.mu.RLock()
 	mc, ok := p.byUID["u1"].modelCooldowns["glm-5.3"]
@@ -604,5 +606,61 @@ func TestModelCooldownsPersistCompatOldState(t *testing.T) {
 	}
 	if until.IsZero() {
 		t.Error("旧文件 until 应照常加载（账号级冷却兼容）")
+	}
+}
+
+// TestCooldownSoftForModelHonorsResetBeyondSoftRateMax 2026-10-23 线上实测：
+// 上游 429 文案写「将在 … 16:26:37 UTC+8 重置」（约 10 小时后），而当时的实现
+// 用 soft_rate_max=2h 截断权威墙钟 —— 号 2 小时回池，冷却一过立刻再撞 6004，
+// 客户端表现成「一直 429」。权威墙钟必须原样采用。
+func TestCooldownSoftForModelHonorsResetBeyondSoftRateMax(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetSoftRateMax(2 * time.Hour) // 退避封顶保持默认语义
+	reset := time.Now().Add(10 * time.Hour)
+	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "6004 model rate limit")
+	p.mu.RLock()
+	mc, ok := p.byUID["u1"].modelCooldowns["glm-5.3"]
+	p.mu.RUnlock()
+	if !ok {
+		t.Fatal("modelCooldowns 缺少 glm-5.3")
+	}
+	if d := mc.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Fatalf("Until=%v 应等于上游重置墙钟 %v（不该被 soft_rate_max 截断）", mc.Until, reset)
+	}
+}
+
+// TestCooldownSoftForModelCapsAbsurdReset 荒谬的远期时刻（30h > soft_reset_max=24h）
+// 按上限截断：一条脏文案不该把模型锁死几天。
+func TestCooldownSoftForModelCapsAbsurdReset(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	now := time.Now()
+	p.CooldownSoftForModel("u1", 600*time.Second, now.Add(30*time.Hour), "glm-5.3", "6004 model rate limit")
+	p.mu.RLock()
+	mc := p.byUID["u1"].modelCooldowns["glm-5.3"]
+	p.mu.RUnlock()
+	rem := mc.Until.Sub(now)
+	if rem > defaultSoftResetMax+time.Second {
+		t.Fatalf("Until 剩余 %v，应被 soft_reset_max=%v 截断", rem, defaultSoftResetMax)
+	}
+	if rem < defaultSoftResetMax-time.Minute {
+		t.Fatalf("Until 剩余 %v，应约等于 soft_reset_max=%v", rem, defaultSoftResetMax)
+	}
+}
+
+// TestCooldownSoftRateHonorsResetBeyondSoftRateMax 账号级软冷却同样按权威墙钟走，
+// 不被退避封顶截断（非 6004 的普通 429 走这条路径）。
+func TestCooldownSoftRateHonorsResetBeyondSoftRateMax(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetSoftRateMax(2 * time.Hour)
+	reset := time.Now().Add(8 * time.Hour)
+	p.CooldownSoftRate("u1", 600*time.Second, reset, "429 rate limit")
+	p.mu.RLock()
+	until := p.byUID["u1"].until
+	p.mu.RUnlock()
+	if d := until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Fatalf("账号级 until=%v 应等于上游重置墙钟 %v", until, reset)
 	}
 }

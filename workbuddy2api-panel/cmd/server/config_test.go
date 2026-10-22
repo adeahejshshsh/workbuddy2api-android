@@ -278,6 +278,42 @@ func TestBadSoftRateMax(t *testing.T) {
 	}
 }
 
+func TestSoftResetMaxParsedFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"cooldown":{"soft_reset_max":"6h"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SoftResetMaxDur.Hours() != 6 {
+		t.Errorf("soft_reset_max=%v want 6h", c.SoftResetMaxDur)
+	}
+}
+
+func TestSoftResetMaxDefaultsTo24h(t *testing.T) {
+	// 键缺席 → 默认 24h（上游权威重置墙钟的合理性上限）。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"cooldown":{"soft_rate":"90s"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SoftResetMaxDur.Hours() != 24 {
+		t.Errorf("soft_reset_max=%v want 24h default", c.SoftResetMaxDur)
+	}
+}
+
+func TestBadSoftResetMax(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"cooldown":{"soft_reset_max":"oops"}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("want error for bad soft_reset_max")
+	}
+}
+
 func TestBadBreakerCooldown(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")

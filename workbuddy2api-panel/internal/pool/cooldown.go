@@ -555,8 +555,18 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 	}
 }
 
-// cappedSoftUntilLocked 把上游重置墙钟截断到 softRateMax（now+softRateMax 与 resetAt
-// 取较早者）。resetAt 已过期（时钟偏移/文案过期）时时长钳到时间零点附近，立即恢复。
+// cappedSoftUntilLocked 把上游给的恢复时刻换算成冷却截止，**两个上限分工**：
+//
+//   - resetAt 在未来 → 截止 = min(resetAt, now+softResetMax)。
+//     softResetMax 默认 24h，只挡「明显荒谬的解析结果」（脏缓存文案、时钟错乱），
+//     正常的上游重置墙钟（几小时 ~ 一天）原样采用。
+//   - resetAt 已过期 / 零值 → 截止 = min(now+base, now+softRateMax)，走有界退避。
+//
+// 为什么要拆（2026-10-23 实测）：上游 429 文案写着「将在 2026-10-23 16:26:37 UTC+8
+// 重置」（≈10 小时后），而当时两个语义共用 soft_rate_max=2h —— 号 2 小时就回池，
+// 冷却一过立刻再撞 6004，客户端表现为「一直 429、永远好不了」。指数退避的 2h 封顶是
+// 对的（防止无重置时间时越堆越厚），但不能拿来截断上游的权威时刻。
+//
 // 调用方必须已持有 p.mu。
 // base 是调用方给的退避基数：resetAt 已经过期时用它兜底，绝不再返回「1ms」。
 //
@@ -566,20 +576,21 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 // rotateBackoff 只等 0.5~1s，同一个号立刻又被选中，限流保护形同虚设；而且这条
 // 分支不推进 softStreak，连退避都不会触发。
 func (p *Pool) cappedSoftUntilLocked(now, resetAt time.Time, base time.Duration) time.Time {
-	cap := now.Add(p.softRateMaxOr())
-	if resetAt.After(cap) {
-		return cap
+	resetCap := now.Add(p.softResetMaxOr())
+	backoffCap := now.Add(p.softRateMaxOr())
+	if resetAt.After(resetCap) {
+		return resetCap // 荒谬的远期时刻：按上限处理，不锁死几天
 	}
 	if resetAt.After(now) {
-		return resetAt
+		return resetAt // 上游权威时刻：原样采用（这是本函数的主路径）
 	}
 	if base <= 0 {
 		base = time.Minute
 	}
-	if next := now.Add(base); next.Before(cap) {
+	if next := now.Add(base); next.Before(backoffCap) {
 		return next
 	}
-	return cap
+	return backoffCap
 }
 
 // softRateMaxOr 返回生效的 softRateMax（未注入时按默认 2h），供封顶计算。
@@ -589,6 +600,16 @@ func (p *Pool) softRateMaxOr() time.Duration {
 		return p.softRateMax
 	}
 	return defaultSoftRateMax
+}
+
+// softResetMaxOr 返回生效的 softResetMax（未注入时按默认 24h），供「上游权威重置
+// 墙钟」的合理性上限使用。与 softRateMaxOr 分开：一个管权威时刻，一个管退避封顶。
+// 调用方必须已持有 p.mu。
+func (p *Pool) softResetMaxOr() time.Duration {
+	if p.softResetMax > 0 {
+		return p.softResetMax
+	}
+	return defaultSoftResetMax
 }
 
 // softDurationLocked 按连续软冷却次数把基数 d 指数放大：d << (streak-1)，封顶 softRateMax。

@@ -63,6 +63,7 @@ tar -C "$WS" \
     --exclude=./workbuddy2api-panel/data \
     --exclude=./workbuddy2api-panel/auths \
     --exclude=./workbuddy2api-panel/config.json \
+    --exclude=./workbuddy2api-panel/signin \
     --exclude=./apk-src/wb2api.keystore \
     --exclude=./WorkBuddy2API.apk \
     --exclude=./WorkBuddy2API.apk.idsig \
@@ -170,8 +171,16 @@ set -e
 if [ $frc -eq 0 ] && git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1; then
   if ! git merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
     git reset --soft FETCH_HEAD
-    git -c user.name "$OWNER" -c user.email "$OWNER@users.noreply.github.com" \
-        commit -qm "WorkBuddy2API Android 移植版 v$VER" || true
+    # 参数必须写成 -c name=value（**一个** argv）。曾写成 `-c user.name "$OWNER"`：
+    # bash 把它分成 4 个参数，git 于是把 owner 当子命令 →
+    # "git: 'adeahejshshsh' is not a git command"；而这里原来挂着 `|| true`，
+    # 失败被静默吞掉 —— 后果是 reset 已把本轮提交挪走、新提交没建出来，
+    # push 推的还是旧 HEAD（"Everything up-to-date"），脚本却打印「已推送」。
+    if ! git -c user.name="$OWNER" -c user.email="$OWNER@users.noreply.github.com" \
+         commit -qm "${TITLE:-WorkBuddy2API Android 移植版 v$VER}"; then
+      echo "❌ 接到远端历史后重新提交失败，已中止（暂存目录 $STAGE 保留便于排查）"
+      exit 1
+    fi
     echo "  已把本轮提交接到远端 $BRANCH 之后（保留远端历史 → 快进）"
   fi
 fi
