@@ -281,6 +281,26 @@ func (s *Scheduler) TryBeginTask(key string) bool {
 	return m.(*sync.Mutex).TryLock()
 }
 
+// TaskRunning 报告某任务族当前是否在跑（**不**占锁）。
+//
+// 实现是「试着 TryLock 再立刻释放」：拿得到 = 没人在跑；拿不到 = 有人在跑。
+// 只用于状态展示（面板「余额刷新中」），不做任何调度决策，所以这点竞态无害。
+func (s *Scheduler) TaskRunning(key string) bool {
+	if key == "" || s == nil {
+		return false
+	}
+	v, ok := s.taskLocks.Load(key)
+	if !ok {
+		return false
+	}
+	mu := v.(*sync.Mutex)
+	if mu.TryLock() {
+		mu.Unlock()
+		return false
+	}
+	return true
+}
+
 // EndTask 释放 TryBeginTask 占用的任务族锁。
 func (s *Scheduler) EndTask(key string) {
 	if key == "" {

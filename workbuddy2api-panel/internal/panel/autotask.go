@@ -538,6 +538,11 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		if !already {
 			p.refreshCreditsAsync(a)
 		}
+		if already {
+			// 幂等重复领取（报告 #15）：上游明示 already_claimed，本次**没有**新增奖励。
+			// 此前照样回「已领取奖励（+Nc +Ne）」，前端据此提示有新增积分。
+			return "该奖励此前已领取（本次无新增）", nil
+		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
 	// 判据上报：按差额补 mini chat 事件。每条前 sleep mpChatEventGap+抖动——
@@ -570,6 +575,11 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 			continue
 		}
 		t = t2
+		// accept 之后 target 可能被上游改写（报告 #14）：target 是在 accept **之前**
+		// 取的，不回读就会按旧值判达标，提前领奖撞 400 task not completed。
+		if t.Target > 0 {
+			target = t.Target
+		}
 		if t.Claimable || t.Claimed || t.Current >= target {
 			break
 		}
@@ -650,6 +660,11 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 		if !already {
 			p.refreshCreditsAsync(a)
 		}
+		if already {
+			// 幂等重复领取（报告 #15）：上游明示 already_claimed，本次**没有**新增奖励。
+			// 此前照样回「已领取奖励（+Nc +Ne）」，前端据此提示有新增积分。
+			return "该奖励此前已领取（本次无新增）", nil
+		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
 	if t.AcceptStatus == "not_accepted" || t.AcceptStatus == "" {
@@ -679,6 +694,11 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 			continue
 		}
 		t = t2
+		// accept 之后 target 可能被上游改写（报告 #14）：target 是在 accept **之前**
+		// 取的，不回读就会按旧值判达标，提前领奖撞 400 task not completed。
+		if t.Target > 0 {
+			target = t.Target
+		}
 		if t.Claimable || t.Claimed || t.Current >= target {
 			break
 		}
@@ -779,6 +799,11 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 		if !already {
 			p.refreshCreditsAsync(a)
 		}
+		if already {
+			// 幂等重复领取（报告 #15）：上游明示 already_claimed，本次**没有**新增奖励。
+			// 此前照样回「已领取奖励（+Nc +Ne）」，前端据此提示有新增积分。
+			return "该奖励此前已领取（本次无新增）", nil
+		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
 	// 判据载体前置（accept 之前）：市场真实专家 id。
@@ -810,6 +835,11 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 			continue
 		}
 		t = t2
+		// accept 之后 target 可能被上游改写（报告 #14）：target 是在 accept **之前**
+		// 取的，不回读就会按旧值判达标，提前领奖撞 400 task not completed。
+		if t.Target > 0 {
+			target = t.Target
+		}
 		if t.Claimable || t.Claimed || t.Current >= target {
 			break
 		}
@@ -1393,6 +1423,11 @@ func runValorantExpert(p *Panel, a *auth.Auth) (string, error) {
 		}
 		if credit == 0 && energy == 0 {
 			return "已领取（该奖励为道具/次数，不含积分与能量）", nil
+		}
+		if already {
+			// 幂等重复领取（报告 #15）：上游明示 already_claimed，本次**没有**新增奖励。
+			// 此前照样回「已领取奖励（+Nc +Ne）」，前端据此提示有新增积分。
+			return "该奖励此前已领取（本次无新增）", nil
 		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}

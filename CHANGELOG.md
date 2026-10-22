@@ -102,7 +102,46 @@
   「上游全 500」的用例不再固定睡 12s。
 * 新增 `patches/test.sh`：迭代只跑改动包（单包 ≈1s），发版前 `all` 跑全量（≈18s）。
 
-### 九、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 九、审查报告 27 条的第二批（行为类 7 条）
+
+* **auth 空 map panic** —— auth 文件内容是 JSON `null` 时 `Unmarshal` 把 doc 置成 nil map，
+  随后 `doc[key] = dst` 直接 panic。补回空 map。
+* **`CooldownModelBusy` 覆盖更具体条目**（我 v1.35.1 引入）—— 用 14003 短窗口整体覆盖同模型
+  条目，把 6004 的 `ResetAt`/`Reason` 一起丢掉。改为只延长 `Until`，`ResetAt` 保留、
+  更具体的原因（6004/11102/11158）不被降级。
+* **等级闸门分母算了不可选号** —— `disabled`/`paused`/`needAuth` 永远选不到，却能让本该
+  整池隐藏的模型继续出现在 `/v1/models`。分母改为只算可能被选中的号。
+* **企业端点窄表清空 global 倍率** —— `infos == nil` 时仍 `storeModelRates`，
+  积分保底的目录兜底失效到下次 v3 成功。改为仅在非空时回写。
+* **`taskByCodeMP` 大小写敏感** —— 与 `taskByCode` 的 `EqualFold` 分叉。
+* **mp 任务 accept 后不回读 target** —— target 在 accept 之前取，accept 后被上游改写时
+  会按旧值提前领奖撞 400 `task not completed`。三处回读点统一在回读后刷新 target。
+* **`already_claimed` 冒充到账** —— 幂等重复领取仍回「已领取奖励（+Nc +Ne）」，
+  前端据此提示有新增积分。四处领奖点改为「该奖励此前已领取（本次无新增）」。
+* **队列把「无此任务」记成「做不了」** —— 新增 `errTaskAbsent` 哨兵与
+  `verdictNotApplicable`：该账号本来就没有这个任务时不喂跳过名单（此前 3 次后 7 天不再尝试）。
+* **签到日键按北京时间** —— 用宿主本地日期时，非 CST 宿主上 CST 08:00 一过，
+  当天已签的号会回退成「未签」。
+* **夜猫子窗口时钟与排程同源** —— 调度器改用 `cst.Now`，此前宿主非 CST 时每天到点被跳过。
+* **`doJSON` 空 body 被当失败** —— 任务列表/领奖三处 `json.Unmarshal(nil)` 报错，
+  成功却记成失败、自动领奖中断。空响应按「成功、无字段」处理。
+* **refresh 单飞顺序** —— 先写结果、关信号，再删表；此前先删再关，窗口内到达的调用会
+  用已被 rotate 的 refreshToken 再发一次（撞 12153）。
+* **归档天数键名对齐** —— 前端 `request_archive_days` → `logging.request_retention_days`
+  （此前读不到现值、保存成未知键，永不生效）。
+* **连登管家的死字段** —— `schedule.streak_enabled/streak_hours` 在 Go 侧不存在
+  （它在签到末尾自动跑），表单改为只读说明。
+* **纯日期 `end_time` 解析为 NaN** —— 先补时间再补时区；到期分布不再漏掉这类包。
+* **到期批次日期按 CST** —— 此前 `slice(0,10)` 取 RFC3339 自身时区日期，UTC 宿主上早一天。
+* **余额刷新轮询** —— 固定 3×1.5s 只覆盖前 4.5 秒，长任务停在半程且无提示。
+  改为按后端新增的 `balance_refreshing` 状态轮询（最多 ~30s），超时如实告知仍在后台跑。
+* **企业号「积分构成」恒空** —— `CreditPackages` 补企业分支，用
+  `get-enterprise-user-usage` 合成一条「企业版周期额度」。
+* **`login.sh` 签到写死 CN 域** —— `--realm=global` 的号这一步必然 404。改为按 realm 选 base。
+* **`scripts/task_*.py` 的 uid 硬切** —— 文件名非 `workbuddy-<uid>.json` 时得到空串并
+  `SystemExit` 中断整批。改为按前缀正则提取。
+
+### 十、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

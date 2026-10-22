@@ -2117,6 +2117,26 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 		"PackageEndTimeRangeBegin": now.Format(packageEndLayout),
 		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format(packageEndLayout),
 	}
+	// 企业版分流（报告 #25）：企业额度不在「个人资源包」体系内，
+	// get-user-resource* 对 enterpriseId 非空的号恒返回空 Accounts（实测 code 0 + Accounts null），
+	// 面板「积分构成」对企业号永远为空。改用 get-enterprise-user-usage 合成一条周期额度。
+	if a != nil && a.IsEnterprise() {
+		remain, total, _, earliestAt, _, eerr := c.enterpriseResource(a, 30*24*time.Hour)
+		if eerr != nil {
+			return nil, 0, 0, eerr
+		}
+		pkg := CreditPackage{
+			Name:   "企业版周期额度",
+			Remain: remain,
+			Used:   total - remain,
+			Size:   total,
+		}
+		if !earliestAt.IsZero() {
+			pkg.EndTime = earliestAt.Format(time.RFC3339)
+			pkg.ExpiresAt = earliestAt.UnixMilli()
+		}
+		return []CreditPackage{pkg}, remain, total, nil
+	}
 	data, err := c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
 	if err != nil {
 		return nil, 0, 0, err

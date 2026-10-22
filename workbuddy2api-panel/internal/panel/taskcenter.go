@@ -678,6 +678,9 @@ dispatchQueue:
 					p.queueMarkAt(seq, i, "error", msg+"；"+err.Error())
 					log.Printf("panel: 任务回读失败 uid=%s code=%s（本轮不计入跳过名单）: %v",
 						one.a.UID, code, err)
+				case verdictNotApplicable:
+					// 该账号没有这个任务：只标记，不计数（报告 #7）。
+					p.queueMarkAt(seq, i, "skipped", msg)
 				case verdictNoProgress:
 					// 执行了但没进展 → 记一笔；连续 skipFailLimit 次就把该 (账号,任务码)
 					// 砍出待办，别再天天"做了也没用"（7 天后自动放回，或一键清空）。
@@ -781,13 +784,19 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 // 1/3 次机会，三次抖动后好账号 + 可做任务被砍出待办 7 天，而它什么都没做错。
 var errTaskReadback = errors.New("上游回读失败")
 
-// queueVerdict 队列一项执行结果的三种归宿。
+// errTaskAbsent 「该账号没有这个任务」：既不是失败也不是没进展，**不该计入跳过名单**。
+// 此前它返回 (msg, false, nil)，被 queueVerdictOf 归成 verdictNoProgress ——
+// 3 次后把「本来就不存在的任务」记成「做不了」，7 天内不再尝试（报告 #7）。
+var errTaskAbsent = errors.New("该账号无此任务")
+
+// queueVerdict 队列一项执行结果的归宿。
 type queueVerdict int
 
 const (
 	verdictProgress       queueVerdict = iota // 有进展（或已领奖）→ 清零跳过计数
 	verdictNoProgress                         // 执行了但没进展 → 计入跳过名单
 	verdictReadbackFailed                     // 回读失败 → 两样都不做（不知道 ≠ 没做）
+	verdictNotApplicable                      // 该账号没有这个任务 → 不计入跳过名单
 )
 
 // queueVerdictOf 把 (err, progressed) 判成三种归宿。
@@ -801,6 +810,9 @@ func queueVerdictOf(err error, progressed bool) queueVerdict {
 		return verdictProgress
 	case errors.Is(err, errTaskReadback):
 		return verdictReadbackFailed
+	case errors.Is(err, errTaskAbsent):
+		// 任务本来就不在 → 既不算进展也不算无效，别喂跳过名单。
+		return verdictNotApplicable
 	default:
 		// 动作失败与「执行了但没进展」同归：都是确凿的"这次没换来东西"。
 		return verdictNoProgress
@@ -823,7 +835,7 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, bool, error)
 		return "", false, err
 	}
 	if before == nil {
-		return "该账号无此任务", false, nil
+		return "该账号无此任务", false, errTaskAbsent
 	}
 	isMP := isMPTaskCode(code)
 	if before.Claimed {

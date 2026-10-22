@@ -288,19 +288,22 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
 	}
+	// 余额刷新是异步长任务：前端要知道「还在跑」才能正确轮询（报告 #21）。
+	balanceRefreshing := p.cfg.Scheduler != nil && p.cfg.Scheduler.TaskRunning(scheduler.TaskBalance)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":         p.cfg.Version,
-		"uptime_sec":      int(time.Since(p.started).Seconds()),
-		"auth_required":   p.apiKey() != "",
-		"redis_mode":      p.cfg.RedisMode,
-		"sticky_sessions": sticky,
-		"total":           total,
-		"healthy":         healthy,
-		"cooling":         cooling,
-		"disabled":        disabled,
-		"paused":          paused,
-		"in_flight_full":  inFlightFull,
-		"accounts":        p.cfg.Pool.List(),
+		"balance_refreshing": balanceRefreshing,
+		"version":            p.cfg.Version,
+		"uptime_sec":         int(time.Since(p.started).Seconds()),
+		"auth_required":      p.apiKey() != "",
+		"redis_mode":         p.cfg.RedisMode,
+		"sticky_sessions":    sticky,
+		"total":              total,
+		"healthy":            healthy,
+		"cooling":            cooling,
+		"disabled":           disabled,
+		"paused":             paused,
+		"in_flight_full":     inFlightFull,
+		"accounts":           p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),

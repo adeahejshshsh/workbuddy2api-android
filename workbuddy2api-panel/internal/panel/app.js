@@ -1405,11 +1405,17 @@ $('btnRefresh').onclick = async () => {
     // 后端已改成异步（起 goroutine 立刻返回，bug #9）：这里轮询几次把结果拉回来，
     // 不再假装"已刷新完成"（46 个号在上游慢时最坏要几分钟）。
     await api('balance_all', { method: 'POST' });
-    toast('已触发余额刷新（后台进行中）', 'ok');
-    for (let i = 0; i < 3; i++) {
+    toast('已触发余额刷新（后台进行中，完成前显示的是旧值）', 'ok');
+    // 余额刷新是**异步长任务**（46 个号在慢上游下最坏几分钟）：固定轮询 3 次 ×1.5s
+    // 只覆盖前 4.5 秒，慢的时候面板停在半程数据且没有任何提示（报告 #21）。
+    // 改为按「仍在刷新」状态轮询，最多 ~30s，超时如实告知还在后台跑。
+    let done = false;
+    for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 1500));
-      await loadOverview(true);
+      const ov = await loadOverview(true);
+      if (ov && ov.balance_refreshing === false) { done = true; break; }
     }
+    if (!done) toast('余额刷新仍在后台进行，稍后自动更新', 'ok');
   } catch (e) { toast('刷新失败：' + e.message, 'err'); await loadOverview(true); }
   finally { b.disabled = false; b.textContent = '刷新'; }
   if (view === 'logs') loadLogs();
@@ -2834,8 +2840,12 @@ function expBatches(packs) {
   const byDay = new Map();
   for (const p of packs || []) {
     const r = Number(p.remain || 0);
-    const t = (p.end_time || '').slice(0, 10);
-    if (r <= 0 || !t) continue;
+    // 日期必须按**北京时间**取（报告 #20）：后端 DeductionEndTime 是 RFC3339，
+    // 直接 slice(0,10) 拿到的是它自身时区的日期串 —— 宿主在 UTC 时比 CST 到期日早一天，
+    // 首页到期提醒的日期整体错位。用 pkExpiryMs 解析后按 +8 归一。
+    const ms = pkExpiryMs(p);
+    if (r <= 0 || !(ms > 0)) continue;
+    const t = new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 10);
     byDay.set(t, (byDay.get(t) || 0) + r);
   }
   return [...byDay.entries()]

@@ -861,6 +861,13 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('function expBatches');
 const end = src.indexOf('async function loadExpiry');
 if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
+// expBatches 现在依赖 pkExpiryMs（把 end_time 归一到 CST 日期）。**不能**把切片起点
+// 往前挪到 pkExpiryMs —— 中间夹着带顶层副作用的代码（$().addEventListener），
+// 在 vm 里会 TypeError。这里单独精确切出该函数（到下一个顶层 function 为止）拼上。
+const pkStart = src.indexOf('function pkExpiryMs');
+const pkEnd = src.indexOf('\nfunction ', pkStart + 20);
+if (pkStart < 0 || pkEnd < 0 || pkEnd < pkStart) throw new Error('pkExpiryMs not found');
+const pkSrc = src.slice(pkStart, pkEnd);
 const sink = { innerHTML: '', textContent: '', hidden: true };
 const ctx = {
   esc: s => String(s == null ? '' : s),
@@ -870,7 +877,7 @@ const ctx = {
   lastPackages: null, lastPackagesAt: 0,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderExpiry = renderExpiry;', ctx);
+vm.runInContext(pkSrc + '\n' + src.slice(start, end) + '\nthis.renderExpiry = renderExpiry;', ctx);
 const iso = n => {
   const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
   const p = x => String(x).padStart(2, '0');
