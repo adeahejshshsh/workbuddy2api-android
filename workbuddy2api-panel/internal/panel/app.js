@@ -1238,6 +1238,19 @@ async function loadConfig() {
     $('cfgNote').textContent = '';
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
+/* 必须是 JSON 数字的配置字段。
+   根因（回归）：input 漏写 type="number" 时 collectConfig 会发字符串，
+   config.json 落成 "7"，而 Go 侧是 int —— 下次启动直接
+   "cannot unmarshal string into Go struct field ... of type int"，网关起不来。
+   这份集合是**第二道保险**：控件类型写错也仍然发数字。 */
+const NUMERIC_CFG = new Set([
+  'request_retention_days', 'request_archive_max_mb', 'package_detail_limit',
+  'max_in_flight', 'max_in_flight_global', 'breaker_threshold', 'degrade_threshold',
+  'credit_floor', 'balance_refresh_minutes', 'account_spread_seconds',
+  'timeout_seconds', 'header_timeout_seconds', 'idle_timeout_seconds',
+  'idle_weight_per_hour', 'idle_weight_max',
+]);
+
 function collectConfig() {
   const f = $('cfgForm'), out = {};
   for (const [name, path] of Object.entries(CFG_MAP)) {
@@ -1246,6 +1259,16 @@ function collectConfig() {
     let v;
     if (el.type === 'checkbox') v = el.checked;
     else if (el.type === 'number') { v = el.value.trim() === '' ? undefined : Number(el.value); }
+    else if (NUMERIC_CFG.has(name)) {
+      // 控件类型写错也兜住：空 → 不下发；非数字 → 当场报错（别把字符串塞进 config.json）
+      const raw = el.value.trim();
+      if (raw === '') v = undefined;
+      else {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) throw new Error('「' + name + '」必须是数字：' + raw);
+        v = n;
+      }
+    }
     else {
       const raw = el.value.trim();
       // 覆盖型字段空串照发（见 CLEARABLE_CFG）；其余空 = 不下发。

@@ -300,7 +300,28 @@
   （按 uid / limit 过滤）+ 用量页新增「积分变动流水」表。新账号首次只建基线不成流水，
   重启后基线不丢。
 
-### 十七、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 十七、修复：`request_retention_days` 存成字符串导致网关起不来
+
+* **哪里有问题**：我上批把表单字段 `request_archive_days` 改名成
+  `request_retention_days` 对齐 Go 配置 —— 但那个 `<input>` 只写了
+  `inputmode="numeric"`，**没有 `type="number"`**。`collectConfig()` 是按控件类型
+  决定发数字还是发字符串的，于是面板保存时把 `"7"` 写进了 config.json。
+* **会导致什么**：改名前该键是「未知键」（Go 侧忽略），改名后成了真实字段，而
+  `logging.request_retention_days` 是 `int` —— 下次启动直接
+  `parse config: json: cannot unmarshal string into Go struct field
+  Config.logging.request_retention_days of type int`，**整个网关起不来**。
+  用户在面板里点一次保存就把自己锁在门外。
+* **做了什么**：
+  1. 输入框改成 `type="number" min="1"`（根因）；
+  2. `app.js` 加 `NUMERIC_CFG` 白名单做第二道保险：控件类型写错也仍然发数字，
+     非数字当场报错，绝不把字符串塞进 config.json；
+  3. `config.ApplyJSON` 加**容错解码**：解析失败时把「已知数值字段」上像数字的
+     字符串改回 JSON 数字再试一次，并打 WARN 说明改了什么 —— 这样**已经在盘上的
+     坏文件也能启动**（面板再保存一次即写回数字）。只动白名单里的字段，`api_key`
+     这类合法字符串字段不会被误改。
+* **测试**：3 条（字符串数字可解析、非数字仍报错、不误改其它字符串）。
+
+### 十八、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

@@ -1102,7 +1102,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <div class="switch"><span class="lb">请求记录归档</span>
                 <input type="checkbox" name="request_archive_enabled"></div>
               <label class="fld"><span class="lb">归档保留天数</span>
-                <input name="request_retention_days" placeholder="7" inputmode="numeric"></label>
+                <input name="request_retention_days" type="number" min="1" placeholder="7"></label>
             </div>
             <div class="hint" style="margin-top:8px">容量上限（<code>logging.request_archive_max_mb</code>）、
               <code>server.read_timeout</code> 与 <code>upstream.dns_servers</code> 仍需手工编辑配置文件

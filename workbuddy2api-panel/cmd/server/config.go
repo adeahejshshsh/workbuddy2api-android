@@ -2,10 +2,12 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -381,9 +383,89 @@ func Load(path string) (*Config, error) {
 // 顺序错了就会出现「env 里的密钥还没生效、校验已经用文件里的空值把你拦下」（bug P0-1）。
 func ApplyJSON(raw []byte, c *Config) error {
 	if err := json.Unmarshal(raw, c); err != nil {
+		// 容错重试（回归修复）：面板表单曾把 logging.request_retention_days 以
+		// **字符串**提交（input 没写 type=number），config.json 里落成 "7"，
+		// 下次启动就是这个错：
+		//   parse config: json: cannot unmarshal string into Go struct field
+		//   Config.logging.request_retention_days of type int
+		// 网关直接起不来。前端已修，这里兜住**已经在盘上的坏文件**：
+		// 只纠正明确知道的数值字段（不做全局类型猜测 —— 那会把 "123" 这类
+		// 合法字符串字段也改掉），纠正后重试一次。
+		if fixed, names, ok := coerceNumericStrings(raw); ok {
+			if err2 := json.Unmarshal(fixed, c); err2 == nil {
+				log.Printf("WARN: config 里 %s 被存成了字符串，已按数字解析"+
+					"（在面板里重新保存一次即可写回数字）", strings.Join(names, ", "))
+				return nil
+			}
+		}
 		return fmt.Errorf("parse config: %w", err)
 	}
 	return nil
+}
+
+// numericStringFields 面板表单可能以字符串提交的数值字段（section, key）。
+//
+// 为什么要列出来：前端 input 的类型决定 collectConfig 是发数字还是发字符串，
+// 漏写 type="number" 就会把 "7" 写进 config.json，而 Go 侧字段是 int —— 解析
+// 直接失败，表现出来的却是「网关起不来」。这张表只用于**容错解码**，
+// 不是校验白名单。
+var numericStringFields = [][2]string{
+	{"logging", "request_retention_days"},
+	{"logging", "request_archive_max_mb"},
+	{"panel", "package_detail_limit"},
+	{"pool", "max_in_flight"},
+	{"pool", "max_in_flight_global"},
+	{"pool", "breaker_threshold"},
+	{"pool", "degrade_threshold"},
+	{"pool", "credit_floor"},
+	{"schedule", "balance_refresh_minutes"},
+	{"schedule", "account_spread_seconds"},
+	{"upstream", "timeout_seconds"},
+	{"upstream", "header_timeout_seconds"},
+	{"upstream", "idle_timeout_seconds"},
+	{"upstream", "idle_weight_per_hour"},
+	{"upstream", "idle_weight_max"},
+}
+
+// coerceNumericStrings 把这些字段上「看起来是数字的字符串」改回 JSON 数字。
+// 返回纠正后的字节、被纠正的字段名、是否发生了纠正。
+//
+// 用 UseNumber 读，未改动的数字原样保留（避免 float64 往返改变精度/写法）。
+func coerceNumericStrings(raw []byte) ([]byte, []string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var root map[string]any
+	if err := dec.Decode(&root); err != nil {
+		return nil, nil, false
+	}
+	var fixed []string
+	for _, pair := range numericStringFields {
+		sec, _ := root[pair[0]].(map[string]any)
+		if sec == nil {
+			continue
+		}
+		str, ok := sec[pair[1]].(string)
+		if !ok {
+			continue
+		}
+		t := strings.TrimSpace(str)
+		if t == "" {
+			continue
+		}
+		if _, err := strconv.ParseFloat(t, 64); err != nil {
+			continue // 不是数字就不动，交给正常报错
+		}
+		sec[pair[1]] = json.Number(t)
+		fixed = append(fixed, pair[0]+"."+pair[1])
+	}
+	if len(fixed) == 0 {
+		return nil, nil, false
+	}
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, nil, false
+	}
+	return out, fixed, true
 }
 
 // ParseConfigInto 把 JSON 覆盖到 c 上并 normalize（不做 env、不读文件）。
