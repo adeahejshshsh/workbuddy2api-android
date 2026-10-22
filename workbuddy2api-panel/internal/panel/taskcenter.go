@@ -161,8 +161,10 @@ func errBrief(err error) string {
 		return ""
 	}
 	s := strings.Join(strings.Fields(err.Error()), " ")
-	if len(s) > 140 {
-		s = s[:140] + "…"
+	// 按 **rune** 截断（报告 #9）：s[:140] 是字节切片，中文正好跨界时切出非法 UTF-8，
+	// 经 json.Marshal 变成替换字符。与 logfmt.Truncate 同口径。
+	if r := []rune(s); len(r) > 140 {
+		s = string(r[:140]) + "…"
 	}
 	return s
 }
@@ -246,13 +248,13 @@ scanLoop:
 			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
 				seen := map[string]bool{}
 				for _, t := range it.Growth {
-					seen[t.TaskCode] = true
+					seen[strings.ToLower(t.TaskCode)] = true
 				}
 				for _, t := range mpTasks {
-					if seen[t.TaskCode] {
+					if seen[strings.ToLower(t.TaskCode)] {
 						continue
 					}
-					seen[t.TaskCode] = true
+					seen[strings.ToLower(t.TaskCode)] = true
 					if p.growthPending(a, t) {
 						it.Growth = append(it.Growth, t)
 						continue
@@ -480,7 +482,7 @@ dispatch:
 					// 用户看到「跳过 6 个」而实际只有 3 个。与 loadTaskMap 同口径。
 					seen := make(map[string]bool, len(tasks))
 					for _, t := range tasks {
-						seen[t.TaskCode] = true
+						seen[strings.ToLower(t.TaskCode)] = true
 						if p.growthPending(a, t) {
 							one.grow = append(one.grow, t)
 							continue
@@ -503,10 +505,10 @@ dispatch:
 					// mp 待办而队列报"无可执行待办"。
 					if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
 						for _, t := range mpTasks {
-							if seen[t.TaskCode] {
+							if seen[strings.ToLower(t.TaskCode)] {
 								continue
 							}
-							seen[t.TaskCode] = true
+							seen[strings.ToLower(t.TaskCode)] = true
 							if p.growthPending(a, t) {
 								one.grow = append(one.grow, t)
 								continue
@@ -1056,7 +1058,7 @@ func (p *Panel) ClaimSweepOnce(ctx context.Context) (accounts, claimed, failed i
 				if seen[t.TaskCode] || t.Claimed || !t.Claimable {
 					continue
 				}
-				seen[t.TaskCode] = true
+				seen[strings.ToLower(t.TaskCode)] = true
 				var cerr error
 				if isMPTaskCode(t.TaskCode) {
 					_, _, _, cerr = p.cfg.Upstream.ClaimRewardMP(a, t.TaskCode)

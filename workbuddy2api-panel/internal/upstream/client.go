@@ -2128,8 +2128,12 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 		pkg := CreditPackage{
 			Name:   "企业版周期额度",
 			Remain: remain,
-			Used:   total - remain,
 			Size:   total,
+		}
+		// 不限量时两个字段都是哨兵（total=-1、remain=1<<40），相减会得到 -1e12 量级的
+		// 「已用」并原样透出（报告 #19）。此时不报已用，让面板走 isUnlimited 分支。
+		if total >= 0 {
+			pkg.Used = total - remain
 		}
 		if !earliestAt.IsZero() {
 			pkg.EndTime = earliestAt.Format(time.RFC3339)

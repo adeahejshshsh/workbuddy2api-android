@@ -436,7 +436,13 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 			if a := p.PickExistingAuth(uids); a != nil { // 依次回退（bug P1-2）
 				// FetchGlobalModelInfos 无错误返回（内部负缓存自行节流），
 				// 仅按结果条数判断是否拿到目录。
-				if infos := up.FetchGlobalModelInfos(a); len(infos) == 0 {
+				infos := up.FetchGlobalModelInfos(a)
+				if len(infos) == 0 && up.GlobalProbeInFlight() {
+					// 探测在飞时 fetchGlobalModelsOnce 直接返回 nil（不打上游、不等待），
+					// 此前一律记 WARN 把「正在探测」误报成「上游没模型」（报告 #16）。
+					// 面板侧早已用 GlobalProbeInFlight 区分，这里补齐。
+					log.Printf("[upstream] warm model rates: global 探测在飞，跳过本轮预热")
+				} else if len(infos) == 0 {
 					log.Printf("WARN: [upstream] warm model rates (global): empty model list")
 				} else {
 					log.Printf("[upstream] warm model rates: global ok (%d models)", len(infos))

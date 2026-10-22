@@ -9,8 +9,8 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"log"
-	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -144,7 +144,9 @@ func (s *Scheduler) makeupYesterday(a *auth.Auth) {
 	if err != nil || full.MakeupCards.Balance <= 0 {
 		return
 	}
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	// 「昨天」按北京时间算（报告 #8）：heatmap 的日期单元是 CST 自然日，
+	// 用宿主本地日界会在跨日窗口里查错单元（漏签误判、补签卡补到错误日期）。
+	yesterday := cst.Now().AddDate(0, 0, -1).Format("2006-01-02")
 	if err := s.cfg.Upstream.UseMakeupCard(a, yesterday); err != nil {
 		log.Printf("streak-bonus %s: 补签 %s 失败: %v", logfmt.Label(a.UID, a.NicknameValue()), yesterday, err)
 		return

@@ -345,8 +345,12 @@ func ensureConsoleSystem(body []byte) []byte {
 	if len(body) == 0 {
 		return body
 	}
+	// UseNumber（报告 #11）：主管线已用它保住数字原文，这里若用默认 Unmarshal 再解
+	// 一次，超过 2^53 的整数（seed、微秒时间戳）会变成浮点近似 —— 整段 body 失真。
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&obj); err != nil {
 		return body
 	}
 	msgs, ok := obj["messages"].([]any)
@@ -360,7 +364,8 @@ func ensureConsoleSystem(body []byte) []byte {
 		}
 	}
 	obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
-	out, err := json.Marshal(obj)
+	// 不转义 HTML（报告 #11）：Marshal 默认把 < > & 转成 \u003c 等，与客户端原文不一致。
+	out, err := marshalNoEscape(obj)
 	if err != nil {
 		return body
 	}
@@ -532,4 +537,15 @@ func dropReasoningContentParts(obj map[string]any) {
 		out = append(out, rawMsg)
 	}
 	obj["messages"] = out
+}
+
+// marshalNoEscape 序列化但不做 HTML 转义（保持与客户端原文一致）。
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }

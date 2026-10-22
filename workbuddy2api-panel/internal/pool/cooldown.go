@@ -224,7 +224,10 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			}
 			e.coolKind = CoolSoft
 			e.reason = reason
-			clearRoutingModelCooldownsLocked(e)
+			// **不要**清模型台账（报告 #7）：此前这里调 clearRoutingModelCooldownsLocked，
+			// 把该账号上其它模型尚未到期的 6004 冷却一并删掉 —— 账号级冷却到期后这些
+			// 模型立刻又被选中、再撞 429，/status 的 model_locks 也提前消失。
+			// 账号级冷却本身已经挡住选号，无需在此清表。
 		}
 		p.dirty.Store(true)
 	}

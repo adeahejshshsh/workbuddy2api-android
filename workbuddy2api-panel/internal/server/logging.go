@@ -236,7 +236,10 @@ func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
 	miss = int64(s.cacheMiss)
 	if !s.hasCacheMiss {
 		if !s.hasPromptTokens || s.promptTokens < s.cacheHit {
-			return hit, 0, true
+			// miss 与 prompt 都推不出来 → **不参与命中率统计**（报告 #14）。
+			// 此前返回 (hit, 0, true)，分母只有 hit，命中率恒 100%，
+			// noteCacheTokens 还会在没有任何 miss 观测时把模型记成 everHit。
+			return 0, 0, false
 		}
 		miss = int64(s.promptTokens - s.cacheHit)
 	} else if s.cacheHit == 0 && s.hasPromptTokens && s.promptTokens > s.cacheMiss {

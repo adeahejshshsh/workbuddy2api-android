@@ -116,17 +116,21 @@ func (p *Pool) ModelDeniedForAllAccounts(model string) bool {
 	if p.tier == nil || len(p.byUID) == 0 {
 		return false
 	}
+	matched := 0
 	for uid, e := range p.byUID {
 		// 分母只算「可能被选中」的号（报告 #6）：disabled / paused / needAuth 永远选不到，
 		// 把它们算进来会让本该整池隐藏的模型继续出现在 /v1/models（客户端挑中必失败）。
 		if e == nil || e.disabled || e.paused || e.needAuth {
 			continue
 		}
+		matched++
 		if !p.tier.deniedFor(uid, model) {
 			return false
 		}
 	}
-	return true
+	// 整池都不可选时**不能**下结论（报告 #6）：没有可服务的号 ≠ 每个号都用不了该模型。
+	// 此处若不守卫，全池暂停/禁用时 modelList 会把缓存里的模型整段过滤掉。
+	return matched > 0
 }
 
 // deniedFor 供包内只读判定（不加锁：调用方持锁）。
@@ -158,7 +162,12 @@ func (p *Pool) ModelDeniedForAllAccountsInRealm(model, realm string) bool {
 	}
 	matched := 0
 	for uid, e := range p.byUID {
-		if realm != "" && e.a.Realm() != realm {
+		// 与不分域版本同口径（报告 #4）：disabled / paused / needAuth 永远选不到，
+		// 把它们算进分母会让「本域实际无号可服务」的模型继续出现在 /v1/models。
+		if e == nil || e.disabled || e.paused || e.needAuth {
+			continue
+		}
+		if realm != "" && e.a != nil && e.a.Realm() != realm {
 			continue
 		}
 		matched++

@@ -141,7 +141,49 @@
 * **`scripts/task_*.py` 的 uid 硬切** —— 文件名非 `workbuddy-<uid>.json` 时得到空串并
   `SystemExit` 中断整批。改为按前缀正则提取。
 
-### 十、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 十、应用层审查报告（19 条）—— 修 18 条
+
+**P1**
+
+* **面板刷新永远等满 30s 且必定误报**（我上批引入）—— `loadOverview` 是 async 但**没有
+  `return`**，`const ov = await loadOverview(true)` 恒为 undefined → 循环固定跑满 20×1.5s，
+  且不管后台是否早完成都弹「仍在后台」。补 `return overviewData`。
+* **「今日已签到」两套日界** —— 写侧 `cst.DayKey`、读侧 `now.Format`。非 CST 宿主每天有
+  一段窗口两边不一致（刚签到的号显示「未签到」）。读侧统一到 `cst.DayKey`。
+* **global 的 `X-IDE-Version` 被 CN 版本覆盖**（我上批引入）—— `injectAttribution` 用不带
+  realm 的 `clientVersion()` 覆盖了 `ChatHeaders` 刚按 realm 写好的值；`billingUA` 同样。
+  两者都改为 `clientVersionFor(a)`。
+* **等级闸门分域版把不可选号算进分母** —— `ModelDeniedForAllAccountsInRealm` 没跳过
+  `disabled/paused/needAuth`，一个等级未知的禁用号就能让该域无号可服务的模型继续出现。
+* **进度回滚到 0 解析不生效** —— `progress.current` 只在 `>0` 时覆盖，上游反作弊把进度
+  回滚到 0 时仍保留旧值 → 任务卡在不可领。改用指针区分「键不存在」与「值为 0」。
+
+**P2**
+
+* **整池不可选时 `ModelDeniedForAllAccounts` 返回 true**（我上批引入）—— 加了 `continue`
+  却没加 `matched > 0` 守卫，全池暂停时 `modelList` 会把缓存模型整段过滤。
+* **6004 无重置时间时清掉其它模型的冷却** —— else 分支调 `clearRoutingModelCooldownsLocked`，
+  把该账号上其它模型未到期的 6004 条目一并删除。去掉该清理（账号级冷却已挡住选号）。
+* **补签/漏签日期按宿主时区** —— 两处 `AddDate(0,0,-1)` 改用 `cst.Now()`。
+* **错误摘要按字节截断** —— `s[:140]` 把中文切成半个字符（非法 UTF-8）。改按 rune。
+* **任务码去重大小写口径不一致** —— `seen[t.TaskCode]` 改小写键，与 `EqualFold` 同口径。
+* **global 请求体二次解码** —— `ensureConsoleSystem` 用默认 Unmarshal 再解一次，
+  超过 2^53 的整数变浮点近似。改 `UseNumber` + `SetEscapeHTML(false)`。
+
+**P3**
+
+* **缓存命中率对「只回 hit」恒 100%** —— miss 与 prompt 都推不出来时应 `ok=false`，
+  不参与统计（此前分母只有 hit）。
+* **启动预热把「探测在飞」当「上游无模型」** —— 补 `GlobalProbeInFlight()` 分支。
+* **备注保存失败的 toast 无样式** —— `'bad'` 改成 `'err'`（CSS 只定义了 ok/err）。
+* **登录轮询未清旧 timer** —— 起新 interval 前 `stopPoll()`。
+* **企业「不限量」显示巨大负数已用** —— 哨兵相减（`total=-1`、`remain=1<<40`）得 -1e12，
+  不限量时不报 Used。
+
+**未修（3 条，均为耗时/统计类）**：`loginPoll` 完成路径串 4 次上游调用、
+`packages` 断连后仍把剩余账号查完、重试请求的 tok/s 分母与 TTFB 不同源。
+
+### 十一、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

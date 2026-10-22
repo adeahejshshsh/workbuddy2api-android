@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"io"
 	"net/http"
 	"time"
@@ -125,7 +126,8 @@ func (c *Client) ClaimCompensation(a *auth.Auth) (int64, error) {
 
 // HeatmapYesterdayMissed 检查昨日是否漏签（heatmap cell score==0）。
 func (c *Client) HeatmapYesterdayMissed(a *auth.Auth) (bool, error) {
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	// 同上（报告 #8）：与 heatmap 的 CST 日期单元同源。
+	yesterday := cst.Now().AddDate(0, 0, -1).Format("2006-01-02")
 	data, err := c.growthJSON(a, http.MethodGet, "/activity/growth/heatmap", nil)
 	if err != nil {
 		return false, err

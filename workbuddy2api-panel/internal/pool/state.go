@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"log"
 	"sort"
 	"strings"
@@ -609,12 +610,15 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// disabled|paused 四维或门，而 /status 的汇总 cooling 计数用的是 !healthy ——
 		// 此前这里只取前两维，于是"仅因连败降权出池"的号在汇总里算 cooling、
 		// 在行内却 cooling=false / cool_kind 空，监控按行判断会漏掉它。
-		Cooling:          now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
-		Disabled:         e.disabled,
-		Paused:           e.paused,
-		SuccessCount:     e.successCount,
-		ErrTotal:         e.errTotal,
-		CheckinDone:      e.lastCheckinDay == now.Format("2006-01-02"),
+		Cooling:      now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
+		Disabled:     e.disabled,
+		Paused:       e.paused,
+		SuccessCount: e.successCount,
+		ErrTotal:     e.errTotal,
+		// 读侧必须与写侧同源（报告 #2）：写侧是 cst.DayKey，读侧用宿主本地日期时，
+		// 非 CST 宿主每天有一段窗口两个日期键不一致 —— 刚签到的号显示「未签到」，
+		// 前一天的「已签」又多留 8 小时。
+		CheckinDone:      e.lastCheckinDay == cst.DayKey(now),
 		TokenUsage:       e.tokenUsage,
 		LastSuccessTime:  e.lastSuccess,
 		LastErrTime:      e.lastErr,

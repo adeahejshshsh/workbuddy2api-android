@@ -614,6 +614,10 @@ async function loadOverview(quiet) {
     // 已有逐包明细缓存时不再覆盖——明细信息量更大，别把它降级成快照。
     if ($('expBox') && !lastPackages) renderExpirySnapshot(d);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
+  // 必须返回响应体（报告 #1）：调用方 `const ov = await loadOverview(true)` 拿返回值
+  // 判断 balance_refreshing —— 此前没有 return，恒为 undefined，于是每点一次刷新都
+  // 白等满 20×1.5s 并必定误报「仍在后台」。
+  return overviewData;
 }
 
 $('accBody').addEventListener('click', async ev => {
@@ -1325,6 +1329,9 @@ function startAddLogin() {
     $('addLoad').hidden = true; $('addReady').hidden = false;
     $('btnStartLogin').hidden = true;
     $('btnCopyUrl').hidden = false; $('btnOpenUrl').hidden = false;
+    // 赋值前先清旧 timer（报告 #18）：任何绕过按钮的重复调用都会叠出两个 3s 轮询，
+    // 对同一 state 双倍请求（后端 consumed 只挡重复执行，挡不住请求量）。
+    stopPoll();
     loginTimer = setInterval(pollLogin, 3000);
   }).catch(e => {
     $('addLoad').hidden = true;
@@ -3036,6 +3043,6 @@ document.addEventListener('click', async (ev) => {
     toast('备注已保存');
     loadOverview(true);
   } catch (e) {
-    toast('备注保存失败：' + (e && e.message ? e.message : e), 'bad');
+    toast('备注保存失败：' + (e && e.message ? e.message : e), 'err');
   }
 });

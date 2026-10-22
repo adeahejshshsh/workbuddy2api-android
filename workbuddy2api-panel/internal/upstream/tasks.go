@@ -192,19 +192,22 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 		cur, tgt := t.Current, t.Target
 		// progress 可能是 {current,target} 对象（实测口径），覆盖平铺字段。
 		if len(t.Progress) > 0 && string(t.Progress) != "null" {
+			// 用指针区分「键不存在」与「值为 0」（报告 #5）：上游反作弊会把进度从 N
+			// 回滚到 0，此前只在 >0 时覆盖 → 解析仍保留旧值 N，taskDone/队列据此
+			// 认为已推进，任务卡在不可领状态。
 			var pr struct {
-				Current int64 `json:"current"`
-				Target  int64 `json:"target"`
+				Current *int64 `json:"current"`
+				Target  *int64 `json:"target"`
 			}
 			if json.Unmarshal(t.Progress, &pr) == nil {
 				// 逐字段覆盖（BUG-8）：上游下发 progress:{current:3,target:0}（target
 				// 只在平铺字段里）时，整对覆盖会把 tgt 写成 0 → Claimable 判据
 				// `tgt > 0 && cur >= tgt` 恒 false → 永远不可领、队列反复重跑并累计跳过。
-				if pr.Current > 0 {
-					cur = pr.Current
+				if pr.Current != nil {
+					cur = *pr.Current // 含回滚到 0
 				}
-				if pr.Target > 0 {
-					tgt = pr.Target
+				if pr.Target != nil && *pr.Target > 0 {
+					tgt = *pr.Target
 				}
 			}
 		}
