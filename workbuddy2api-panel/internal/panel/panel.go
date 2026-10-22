@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"log"
 	"net/http"
 	"os"
@@ -42,6 +43,10 @@ type Config struct {
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
 	RedisMode string               // "upstash" / "noop"，仅观测透出
 	Version   string               // 面板版本号（展示用）
+
+	// CreditHistory 积分历史账本（只读展示；写入由 upstream 的余额观察者完成）。
+	// nil 时接口返回空列表，不影响其它功能。（qcgzxw `826aaded`）
+	CreditHistory *credithist.Ledger
 
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
@@ -166,6 +171,7 @@ func (p *Panel) Logs() *Ring { return p.logs }
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
+	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
@@ -1170,4 +1176,38 @@ func (p *Panel) accountRemark(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "remark": strings.TrimSpace(body.Remark)})
+}
+
+// creditHistory 输出积分变动流水（新的在前）。
+//
+// 只读：写入由 upstream 的余额观察者（credithist.Ledger.Observe）在每次**真实查到**
+// 余额后完成 —— 签到 / 活跃上报 / 旅行 / 保活 / 面板手动刷新全覆盖，因为这些渠道
+// 上游都不落金额日志，比对余额是唯一可靠口径（qcgzxw `826aaded`）。
+//
+// 参数：limit（默认 200）、uid（可选，按账号过滤）。
+func (p *Panel) creditHistory(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 200
+	if v := strings.TrimSpace(q.Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	uid := strings.TrimSpace(q.Get("uid"))
+	if p.cfg.CreditHistory == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"entries": []any{}, "total": 0})
+		return
+	}
+	entries := p.cfg.CreditHistory.Read(0) // 全量，再按 uid 过滤后截断
+	out := make([]credithist.Entry, 0, limit)
+	for _, e := range entries {
+		if uid != "" && e.UID != uid {
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": out, "total": len(entries)})
 }

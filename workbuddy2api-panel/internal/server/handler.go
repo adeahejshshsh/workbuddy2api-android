@@ -62,6 +62,11 @@ type Config struct {
 	PromptMode string
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
+	// PromptIdentityOverrideEnabled 仅在 passthrough/append 的非降级期，替换客户端
+	// 开头 system/developer 里以 "You are " 开头的身份首句。
+	PromptIdentityOverrideEnabled bool
+	// PromptIdentityOverrideText 替换后的首句（空值使用 prompt.DefaultHarnessIdentity）。
+	PromptIdentityOverrideText string
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
@@ -824,6 +829,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
 	degradedApplied := false
+	// 身份首句替换必须先于模式分支（吸收 qcgzxw `a7f10ad1`）：只动客户端原始身份句，
+	// 降级期整体换成 Degraded 时不保留。custom 模式没有客户端身份句，开关不生效。
+	if h.cfg.PromptIdentityOverrideEnabled &&
+		(h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") &&
+		!h.degrade.Active(degradeKey) {
+		body = prompt.OverrideHarnessIdentity(body, h.cfg.PromptIdentityOverrideText)
+	}
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
 	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active(degradeKey) {

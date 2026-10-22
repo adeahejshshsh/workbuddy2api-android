@@ -196,6 +196,13 @@ type Config struct {
 		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
 		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
 		File string `json:"file"`
+		// IdentityOverrideEnabled 仅在 passthrough/append 模式替换客户端 harness 的
+		// 身份首句（吸收 qcgzxw `a7f10ad1` / 上游 PR #2）：只改开头连续
+		// system/developer 里以 "You are " 开头的**第一句**，其余内容逐字保留。
+		// 缺省关闭，不改变既有行为。需重启。
+		IdentityOverrideEnabled bool `json:"identity_override_enabled"`
+		// IdentityOverrideText 替换后的首句；空值回落到 prompt.DefaultHarnessIdentity。
+		IdentityOverrideText string `json:"identity_override_text"`
 	} `json:"prompt"`
 
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
@@ -312,6 +319,9 @@ func Default() *Config {
 	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
+	// 身份首句替换缺省关闭（老配置无该键 → false），但文本预置默认值，
+	// 面板勾选后无需再填。
+	c.Prompt.IdentityOverrideText = prompt.DefaultHarnessIdentity
 	c.Pool.MaxInFlight = 3
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
 	// P1-1）；0/负数 normalize 回落默认（与 max_in_flight 的 0=不限语义不同，分档键

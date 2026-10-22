@@ -274,7 +274,33 @@
   新增 2 条测试（含端到端 `GET /panel/`），并把 CSP 外部脚本用例放宽为「引用外部 app.js」
   （带不带查询串都算合规）。
 
-### 十五、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 十五、Harness 身份句可配置覆盖（qcgzxw `a7f10ad1`）
+
+* **问题**：身份改写写死在代码里（`sanitize.go` 的 `DeepSeekRuntime` 表项），上游换审核
+  口径时只能改代码重编译。
+* **会导致什么**：客户端在 passthrough 模式带自己的 harness 身份句（`You are
+  DeepSeekRuntime, …`），上游据此前缀判「非官方客户端」拒绝通道；而我们没有开关，
+  只能整条链路换 `custom` 模式（那会丢掉客户端项目规范）。
+* **做了什么**：新增 `prompt.identity_override_enabled` / `prompt.identity_override_text`
+  （默认 `You are CodeBuddy Code.`）。只替换开头**连续** system/developer 里以
+  `You are ` 开头的**第一句**，其余逐字保留；`v4.1` 这类词内句点不会被当句尾；
+  多模态 `content` 数组只改首个文本块；无命中时**不重新序列化**（避免整段 body 重排、
+  丢大整数精度）；降级期不生效（整体换 Degraded）；`custom` 模式控件自动禁用。
+  面板加了开关与文本框，未选 passthrough/append 时禁用但保留取值。
+
+### 十六、积分历史台账（qcgzxw `826aaded`）
+
+* **问题**：面板只有「当前余额」和「消耗用量」，**没有任何逐账号的余额时间线**。
+* **会导致什么**：签到 / 活跃上报 / 旅行 / 保活哪个真的到账了看不出来；积分异常
+  （某任务白跑、上游少发）只能靠肉眼比昨天数字。上游又只在少数渠道落金额日志。
+* **做了什么**：新增 `internal/credithist`（余额快照 + 变动流水，原子写盘、上限丢最旧、
+  `|delta| > 1e6` 判脏数据只更新基线）。挂载点是 **余额查询路径**：`upstream` 加
+  `CreditObserver`（atomic 指针 + panic 兜底），企业版与个人版两条 return 都通知，
+  **失败不通知**（抖动返回的 0 会造出假变动）。面板 `/panel/api/credit_history`
+  （按 uid / limit 过滤）+ 用量页新增「积分变动流水」表。新账号首次只建基线不成流水，
+  重启后基线不丢。
+
+### 十七、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

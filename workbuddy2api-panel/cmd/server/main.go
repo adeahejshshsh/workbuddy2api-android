@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"io"
 	"io/fs"
 	"log"
@@ -306,6 +307,14 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
+	// 积分历史：把每次**真实查到**的余额与上一次比对，变动即留痕（新账号首次只建
+	// 基线）。挂载在余额查询路径上（upstream 的余额观察者），签到 / 活跃上报 /
+	// 旅行 / 保活 / 面板手动刷新全覆盖 —— 上游只在少数渠道落金额日志，比对余额是
+	// 唯一可靠口径。与 state/usage/request-logs 同目录，随 state_file 搬移。
+	creditHist := credithist.New(stateSibling(cfg.StateFile, "credit-history.json"), 2000)
+	up.SetCreditObserver(creditHist.Observe)
+	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -320,7 +329,9 @@ func main() {
 		Live:        live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
-		ProbeFile: stateSibling(cfg.StateFile, "output_probes.json"),
+		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
+		CreditHistory: creditHist,
+		ProbeFile:     stateSibling(cfg.StateFile, "output_probes.json"),
 		// 任务跳过名单（v1.22.0）：attempt 开关 + 反复无效的 (账号,任务码)。
 		// 与 state 同目录，容器/自托管部署跟着 state 卷一起走。
 		SkipFile:   stateSibling(cfg.StateFile, "task_skip.json"),
@@ -342,21 +353,23 @@ func main() {
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
-		SoftCooldown: cfg.SoftRateDur,
-		MaxBodyMB:    cfg.ServerMaxBodyMB,
-		ModelsHidden: cfg.Models.Hidden, // 模型黑名单（上游 PR #225）
-		Panel:        pn,
-		Live:         live,
-		Usage:        rec,
-		RequestLog:   requestLog,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
+		Pool:                          p,
+		Upstream:                      up,
+		APIKey:                        cfg.APIKey,
+		Session:                       sessRouter,
+		StickyCount:                   sessCount,
+		RedisMode:                     redisMode,
+		SoftCooldown:                  cfg.SoftRateDur,
+		MaxBodyMB:                     cfg.ServerMaxBodyMB,
+		ModelsHidden:                  cfg.Models.Hidden, // 模型黑名单（上游 PR #225）
+		Panel:                         pn,
+		Live:                          live,
+		Usage:                         rec,
+		RequestLog:                    requestLog,
+		PromptMode:                    cfg.Prompt.Mode,
+		PromptText:                    cfg.PromptText,
+		PromptIdentityOverrideEnabled: cfg.Prompt.IdentityOverrideEnabled,
+		PromptIdentityOverrideText:    cfg.Prompt.IdentityOverrideText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,

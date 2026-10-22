@@ -1178,6 +1178,8 @@ const CFG_MAP = {
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
+  prompt_identity_override_enabled: ['prompt', 'identity_override_enabled'],
+  prompt_identity_override_text: ['prompt', 'identity_override_text'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
@@ -1193,7 +1195,22 @@ const CFG_MAP = {
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file']);
+const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'prompt_identity_override_text']);
+
+/* 身份首句替换只在 passthrough / append 下有意义（custom 模式没有客户端身份句）。
+   这里按当前 prompt_mode 禁用/启用那两个控件；**保留**它们的值，切回 passthrough
+   后无需重填。 */
+function updateIdentityOverrideInputs() {
+  const f = $('cfgForm');
+  if (!f) return;
+  const modeEl = f.elements.prompt_mode;
+  const enEl = f.elements.prompt_identity_override_enabled;
+  const txEl = f.elements.prompt_identity_override_text;
+  if (!modeEl || !enEl || !txEl) return;
+  const allowed = modeEl.value === 'passthrough' || modeEl.value === 'append';
+  enEl.disabled = !allowed;
+  txEl.disabled = !allowed || !enEl.checked;
+}
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
@@ -1217,6 +1234,7 @@ async function loadConfig() {
       else el.value = v == null ? '' : v;
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
+    updateIdentityOverrideInputs();
     $('cfgNote').textContent = '';
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
@@ -1276,6 +1294,11 @@ function markDurationFields() {
 }
 $('cfgForm').addEventListener('input', ev => {
   if (DURATION_FIELDS.includes(ev.target.name)) markDurationFields();
+});
+$('cfgForm').addEventListener('change', ev => {
+  if (ev.target.name === 'prompt_mode' || ev.target.name === 'prompt_identity_override_enabled') {
+    updateIdentityOverrideInputs();
+  }
 });
 $('btnEye').onclick = () => {
   const el = $('cfgKey');
@@ -2356,12 +2379,51 @@ async function warmUsageModelRates() {
   usageRateWarmAt = Date.now();
 }
 
+/* 后端 Entry.time 是 RFC3339 字符串（Go 的 time.Time）；解析失败就原样显示，
+   不让一个坏时间戳把整行变成 Invalid Date。 */
+function fmtEntryTime(v) {
+  const ms = Date.parse(String(v || ''));
+  return Number.isFinite(ms) ? fmtLocalDateTime(ms) : String(v || '—');
+}
+
+/* 积分变动流水：把「真实查到的余额」逐次比对后的差异列出来。
+   展示用正负号区分获取与消耗；首次建基线不成行（后端已保证）。 */
+async function loadCreditHistory() {
+  const body = $('chBody');
+  if (!body) return;
+  try {
+    const d = await api('credit_history?limit=200');
+    const rows = d.entries || [];
+    $('chNote').textContent = rows.length ? ('最近 ' + rows.length + ' 条 / 共 ' + (d.total || 0) + ' 条') : '暂无变动';
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="5" class="us-empty">还没有积分变动记录（首次查询只建基线）</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(e => {
+      const delta = Number(e.delta || 0);
+      const cls = delta > 0 ? 'ok' : (delta < 0 ? 'err' : '');
+      const sign = delta > 0 ? '+' : '';
+      return '<tr>' +
+        '<td>' + esc(fmtEntryTime(e.time)) + '</td>' +
+        '<td class="mono">' + esc(String(e.uid || '').slice(0, 12)) + '</td>' +
+        '<td class="num ' + cls + '">' + sign + delta + '</td>' +
+        '<td class="num">' + Number(e.before || 0) + '</td>' +
+        '<td class="num">' + Number(e.after || 0) + '</td>' +
+        '</tr>';
+    }).join('');
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="5" class="us-empty">读取失败：' + esc(e.message) + '</td></tr>';
+    $('chNote').textContent = '—';
+  }
+}
+
 async function loadUsage() {
   const q = trangeQuery('usRange', true);
   try {
     await warmUsageModelRates();
     const d = await api('usage?' + q.toString());
     renderUsage(d);
+    loadCreditHistory(); // 旁路，不阻塞用量渲染
   } catch (e) {
     // 失败时三块都要清干净：只改图表会留下上一次窗口的数字，看起来像"刷新成功"。
     usageData = null;
@@ -2375,6 +2437,7 @@ async function loadUsage() {
     $('usDimHead').innerHTML = '';
     $('usCreditHead').innerHTML = '';
     $('usDimTabs').innerHTML = usTabsHtml(US_DIM_TABS, usDim, null);
+    if ($('chBody')) $('chBody').innerHTML = '<tr><td colspan="5" class="us-empty">读取失败</td></tr>';
     $('usCreditTabs').innerHTML = usTabsHtml([['account', '按账号'], ['model', '按模型']], usCreditDim, null);
     $('usDimBody').innerHTML = '<tr><td colspan="10" class="empty">读取用量失败</td></tr>';
     $('usCreditBody').innerHTML = '<tr><td colspan="7" class="empty">读取用量失败</td></tr>';

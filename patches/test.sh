@@ -15,7 +15,7 @@ export GOROOT="$PREFIX/lib/go"
 export PATH="$GOROOT/bin:$PATH"
 export GOFLAGS="-toolexec=/system/bin/linker64 -buildvcs=false"
 
-ALL_PKGS="server upstream panel pool scheduler auth session reqlog usage redisstore"
+ALL_PKGS="server upstream panel pool scheduler auth session reqlog usage redisstore credithist"
 
 pick() {
   if [ "${1:-}" = "all" ]; then echo "$ALL_PKGS"; return; fi

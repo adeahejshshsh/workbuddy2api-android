@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 //go:embed defaultprompt.md
@@ -161,4 +162,113 @@ func Append(body []byte, systemPrompt string) []byte {
 		return body
 	}
 	return out
+}
+
+// DefaultHarnessIdentity 身份首句替换的默认值（吸收 qcgzxw `a7f10ad1` / 上游 PR #2）。
+// 开关缺省关闭，不改变既有行为。
+const DefaultHarnessIdentity = "You are CodeBuddy Code."
+
+// OverrideHarnessIdentity 仅在开头**连续**的 system/developer 消息中，寻找以
+// "You are " 开头的第一句身份声明并替换；其余提示词内容、消息顺序与其他字段保留。
+//
+// 用途：passthrough/append 模式下客户端会带上自己的 harness 身份句（例如
+// "You are DeepSeekRuntime, ..."），上游据此识别「非官方客户端」并拒绝通道。改成
+// 官方文案后语义不变、识别消失。无命中时原样返回（**不重新序列化**，避免把整段
+// body 重排、丢大整数精度）。
+func OverrideHarnessIdentity(body []byte, replacement string) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if strings.TrimSpace(replacement) == "" {
+		replacement = DefaultHarnessIdentity
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return body
+	}
+	for _, raw := range msgs {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			break
+		}
+		role, _ := msg["role"].(string)
+		if role != "system" && role != "developer" {
+			break // 不触碰对话中段及 user/assistant/tool 的内容
+		}
+
+		switch content := msg["content"].(type) {
+		case string:
+			updated, changed := replaceHarnessIdentitySentence(content, replacement)
+			if !changed {
+				continue
+			}
+			msg["content"] = updated
+		case []any:
+			// OpenAI 多模态形式：只检查首个文本块，其余块不动。
+			changed := false
+			for _, rawPart := range content {
+				part, ok := rawPart.(map[string]any)
+				if !ok || part["type"] != "text" {
+					break
+				}
+				text, ok := part["text"].(string)
+				if !ok {
+					break
+				}
+				updated, didChange := replaceHarnessIdentitySentence(text, replacement)
+				if didChange {
+					part["text"] = updated
+					changed = true
+				}
+				break
+			}
+			if !changed {
+				continue
+			}
+		default:
+			continue
+		}
+
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return body
+		}
+		return out // 只替换找到的第一处声明
+	}
+	return body
+}
+
+// replaceHarnessIdentitySentence 识别英文 harness 常见的 "You are ..." 首句。
+// 以句末标点（后接空白/结尾）或换行作为边界；**不把 v4.1 这类词内句点当句尾**
+// （否则 "You are DeepSeek v4.1 ..." 会被切成 "You are DeepSeek v4."）。
+// 保留前导空白与句尾之后的全部文本及原有换行。非身份首句不动。
+func replaceHarnessIdentitySentence(text, replacement string) (string, bool) {
+	start := len(text) - len(strings.TrimLeft(text, " \t\r\n\ufeff"))
+	const prefix = "You are "
+	if len(text)-start < len(prefix) || !strings.EqualFold(text[start:start+len(prefix)], prefix) {
+		return text, false
+	}
+	end := len(text)
+scan:
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '\r', '\n':
+			end = i
+			break scan
+		case '.', '!', '?':
+			if i+1 == len(text) || strings.ContainsRune(" \t\r\n", rune(text[i+1])) {
+				end = i + 1
+				break scan
+			}
+		}
+	}
+	if text[start:end] == replacement {
+		return text, false
+	}
+	return text[:start] + replacement + text[end:], true
 }

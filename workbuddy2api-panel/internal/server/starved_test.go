@@ -94,7 +94,7 @@ func TestOutputBudgetAliases(t *testing.T) {
 		if got := outputBudget(obj); got != 123 {
 			t.Errorf("%s: got %d want 123", k, got)
 		}
-		if !bodySetsOutputLimit([]byte(`{"model":"x","`+k+`":123}`)) {
+		if !bodySetsOutputLimit([]byte(`{"model":"x","` + k + `":123}`)) {
 			t.Errorf("%s: bodySetsOutputLimit=false", k)
 		}
 	}

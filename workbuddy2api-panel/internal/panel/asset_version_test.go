@@ -4,6 +4,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 )
 
 // 面板挂在 CDN 后时，固定 URL 的 app.js 会被边缘缓存数小时：升级二进制后
@@ -60,4 +62,33 @@ func firstLineWith(s, sub string) string {
 		}
 	}
 	return "(未找到)"
+}
+
+// 积分流水接口：无账本时返回空列表（不能 500），有账本时按 uid/limit 过滤。
+func TestCreditHistoryAPI(t *testing.T) {
+	p := New(Config{Version: "test"}) // 不设 APIKey = 不鉴权（本用例只测聚合逻辑）
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/api/credit_history", nil))
+	if rec.Code != 200 {
+		t.Fatalf("无账本时 code=%d body=%s", rec.Code, rec.Body)
+	}
+
+	l := credithist.New("", 100)
+	l.Observe("u1", 100)
+	l.Observe("u1", 150)
+	l.Observe("u2", 10)
+	l.Observe("u2", 20)
+	p2 := New(Config{Version: "test", CreditHistory: l})
+	rec2 := httptest.NewRecorder()
+	p2.ServeHTTP(rec2, httptest.NewRequest("GET", "/panel/api/credit_history?uid=u1&limit=5", nil))
+	if rec2.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec2.Code, rec2.Body)
+	}
+	body := rec2.Body.String()
+	if !strings.Contains(body, `"uid":"u1"`) {
+		t.Fatalf("缺 u1 记录: %s", body)
+	}
+	if strings.Contains(body, `"uid":"u2"`) {
+		t.Fatalf("uid 过滤没生效: %s", body)
+	}
 }

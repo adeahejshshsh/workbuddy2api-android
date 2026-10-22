@@ -870,6 +870,22 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <tbody id="usCreditBody"></tbody>
           </table>
         </div>
+
+        <div class="hr"></div>
+        <header class="box-hd">
+          <span class="lb">积分变动流水</span>
+          <span class="grow"></span>
+          <span class="note" id="chNote">—</span>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc zebra">
+            <thead>
+              <tr><th>时间</th><th>账号</th><th class="num">变动</th><th class="num">变动前</th><th class="num">变动后</th></tr>
+            </thead>
+            <tbody id="chBody"><tr><td colspan="5" class="us-empty">读取中…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="hint">只记「真实查到的余额」与上一次的差异：签到 / 活跃上报 / 旅行 / 保活 / 手动刷新都覆盖；新账号首次只建基线不成流水。</div>
       </div>
     </section>
 
@@ -1055,6 +1071,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">提示词文件路径</span>
                 <input name="prompt_file" placeholder="留空 = 内置默认提示词">
                 <span class="hint">需重启</span></label>
+            </div>
+            <div class="grid2">
+              <div>
+                <label class="switch"><span class="lb">替换 Harness 身份首句</span>
+                  <input type="checkbox" name="prompt_identity_override_enabled"></label>
+                <div class="hint">仅 passthrough / append 生效；只替换以 You are 开头的身份首句，其余内容逐字保留；需重启</div>
+              </div>
+              <label class="fld"><span class="lb">替换后的身份提示词</span>
+                <input name="prompt_identity_override_text" placeholder="You are CodeBuddy Code.">
+                <span class="hint">默认 You are CodeBuddy Code.；留空恢复默认；需重启</span></label>
             </div>
             <div class="hr"></div>
             <div class="switch"><span class="lb">出站请求指纹脱敏</span>
