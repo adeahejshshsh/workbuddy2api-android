@@ -1078,7 +1078,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				body = prompt.Rewrite(body, prompt.Degraded)
 				degradedApplied = true
 				delete(tried, acct.UID) // 单账号池也能拿到重试机会
-				releaseHeld()
+				// 与同形的另一处降级分支一致（报告 #5）：此前只 releaseHeld()，
+				// 粘性仍钉在被拦的这个号上 → 降级重试又命中同一个号。
+				fail(acct.UID)
 				log.Printf("content-blocked (likely fingerprint false positive) -> degraded prompt retry")
 				// 降级重试**不占轮转名额**（bug #5）：这条分支从不给 lastErr 赋值，
 				// 若它吃掉一次 i，MaxRotate==1 时循环直接结束 → 末端落默认
@@ -1355,16 +1357,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			// 上游中途断流：与流式路径同一个错误码（bug #1 附带项）。
 			if upstream.IsUpstreamReadError(err) {
-				writeOpenAIError(w, http.StatusBadGateway, "stream_error", err.Error())
-				st.status = http.StatusBadGateway
-				st.outcome = reqlog.OutcomeStreamError
-				// 账号处置必须与流式同源（报告 #1）：流式对同一形态走 NoteFailures，
-				// 这里此前只写响应就 return —— 连败降权不累计、粘性也不解绑。
+				// 账号处置与流式同源（报告 #1）：流式对同一形态走 NoteFailures + 解粘性。
 				h.cfg.Pool.NoteFailures(acct.UID)
 				fail(acct.UID)
 				log.Printf("WARN: [server] chat acct=%s model=%s: upstream read error: %v",
 					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, err)
-				return
+				// **换号重试**（报告 #2）：这里还在轮转循环内，同一个请求换个号本可成功。
+				// 此前写完 502 就 return，把 MaxRotate 整体作废 —— 流式受限于已写出的
+				// 帧只能 502，非流式没有这个限制（超时分支的不轮转是另一套显式设计）。
+				lastErr = err
+				if !rotateBackoff(i, r.Context()) {
+					break
+				}
+				continue
 			}
 			// 其余解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
@@ -1405,13 +1410,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 写客户端失败要看错误（bug #13）：客户端在响应体写一半时断开（Agent 点
 			// 停止很常见），此前忽略错误、无条件记 200 success，流水行与 reqlog 都记成功、
 			// usage 也按成功计。流式路径早有 errClientWrite 判定，非流式漏了。
+			// 客户端写失败**不再 return**（报告 #3）：上游这一跳已经把完整响应聚合出来了，
+			// 账号是健康的 —— 跳过 NoteSuccess / BlockModelClear / 粘性 Bind / toks 会让
+			// 同一事实在流式与非流式上给出相反结论（流式对「客户端断连但上游成功」
+			// 明确记成功并绑粘性）。只改请求结局，账号口径照常走下面的入账。
 			if _, werr := w.Write(raw); werr != nil {
 				st.status = http.StatusOK // 头已发出，状态码改不了
 				st.outcome = reqlog.OutcomeInterrupted
-				return
+			} else {
+				st.status = http.StatusOK
+				st.outcome = reqlog.OutcomeSuccess
 			}
-			st.status = http.StatusOK
-			st.outcome = reqlog.OutcomeSuccess
 		} else {
 			log.Printf("ERR: [server] non-stream 响应序列化失败: %v", merr)
 			writeOpenAIError(w, http.StatusInternalServerError, "encode_failed", merr.Error())

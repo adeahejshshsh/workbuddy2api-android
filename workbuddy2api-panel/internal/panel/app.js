@@ -1938,11 +1938,6 @@ function fmtModelRate(rate) {
   return s ? 'x' + s : '—';
 }
 
-function usStat(v, k, cls) {
-  return '<div class="stat ' + (cls || '') + '"><div class="v">' + esc(v) +
-         '</div><div class="k">' + esc(k) + '</div></div>';
-}
-
 /* usKpi 用量页的指标卡。比账号池的 .stat 多两样：语义色轨（cls）与副标题（sub，
    放"占比 / 均速率"这类解释性数字）；bar 是卡片内的构成条 HTML，只有需要时才传。 */
 function usKpi(v, k, cls, sub, bar) {
@@ -2401,8 +2396,6 @@ function renderUsageChart(series) {
   out += '</svg>';
   host.innerHTML = out;
 }
-
-function fmtTokTip(v) { return fmtTok(v); }
 
 let usageRateWarmAt = 0;
 async function warmUsageModelRates() {

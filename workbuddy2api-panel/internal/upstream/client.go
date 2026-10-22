@@ -1134,7 +1134,12 @@ const refreshTokenExpiresInMax = RefreshTokenExpiresInMax
 //     已变），本次结果直接采用（新 token 已生效），不再重复写回。
 //
 // RefreshToken 同账号单飞（上游 PR #217）：并发调用共享首个结果。
-func (c *Client) RefreshToken(a *auth.Auth) error {
+func (c *Client) RefreshToken(a *auth.Auth) (err error) {
+	if a == nil {
+		// nil 防御（报告 P0-1）：此前 key := a.UID 直接解引用，nil 会 panic 在
+		// defer 之外 —— 表项永久残留。
+		return fmt.Errorf("refresh: nil auth")
+	}
 	key := a.UID
 	if key == "" {
 		// 无 UID 的临时 auth：按对象指针去重，仍保证同一对象串行
@@ -1153,20 +1158,28 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	c.refreshInFlight[key] = f
 	c.refreshMu.Unlock()
 
-	err := c.refreshTokenOnce(a)
+	// 异常出口必须有保证（报告 P0-1）：refreshTokenOnce 内部会解 token、JSON、
+	// 上游响应，任一 panic 都会跳过下面的收尾 → `done` 永不关闭、表项永不清除，
+	// 该 UID 之后的每一次 RefreshToken 都停在 `<-f.done` 上**永久阻塞**（等待端
+	// 也没有超时可脱身，handler 的在途租约一并钉死）。defer + recover 兜住。
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("refresh panic: %v", r)
+			log.Printf("WARN: [upstream] refresh panic 已恢复（uid=%s）: %v", key, r)
+		}
+		// 顺序很重要（报告 #10）：先写结果、关信号，再删表。此前先 delete 再 close，
+		// 两者之间到达的调用会新建一次刷新 —— 旧 refreshToken 已被上游 rotate，
+		// 第二发必然带废 token 撞 12153，整链作废（正是单飞要防的事）。
+		f.err = err
+		close(f.done)
+		// 只能锁一次（sync.Mutex 不可重入）：曾因补丁残留多写一个 Lock()，
+		// 第二次永远拿不到 → 所有 refresh 卡死。
+		c.refreshMu.Lock()
+		delete(c.refreshInFlight, key)
+		c.refreshMu.Unlock()
+	}()
 
-	// 顺序很重要（报告 #10）：必须**先写结果、关信号，再删表**。此前先 delete 再
-	// close，两者之间到达的调用会新建一次刷新 —— 此时旧 refreshToken 已被上游 rotate，
-	// 第二发必然带废 token 撞 12153，整链作废（正是单飞要防的事）。
-	//
-	// 注意：这里**只能锁一次**（sync.Mutex 不可重入）。曾因补丁残留多写了一个
-	// Lock()，第二次永远拿不到 → 所有 refresh 卡死，表现为「某个测试跑四五分钟」。
-	f.err = err
-	close(f.done)
-	c.refreshMu.Lock()
-	delete(c.refreshInFlight, key)
-	c.refreshMu.Unlock()
-	return err
+	return c.refreshTokenOnce(a)
 }
 
 // refreshTokenOnce 实际执行一次刷新（原 RefreshToken 的实现体）。

@@ -536,14 +536,12 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		}
 		// 内层就完成了领奖，外层判 claimable 的 refreshCreditsAsync 走不到（bug B13），
 		// 面板积分要等 5 分钟才动 —— 这里补一次。
-		if !already {
-			p.refreshCreditsAsync(a)
-		}
 		if already {
-			// 幂等重复领取（报告 #15）：上游明示 already_claimed，本次**没有**新增奖励。
-			// 此前照样回「已领取奖励（+Nc +Ne）」，前端据此提示有新增积分。
+			// 幂等重复领取：上游明示 already_claimed，本次没有新增奖励 —— 不能回
+			// 「已领取奖励（+Nc +Ne）」，否则前端会提示有新增积分。
 			return "该奖励此前已领取（本次无新增）", nil
 		}
+		p.refreshCreditsAsync(a)
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
 	// 判据上报：按差额补 mini chat 事件。每条前 sleep mpChatEventGap+抖动——
@@ -1424,11 +1422,7 @@ func runValorantExpert(p *Panel, a *auth.Auth) (string, error) {
 		if credit == 0 && energy == 0 {
 			return "已领取（该奖励为道具/次数，不含积分与能量）", nil
 		}
-		if already {
-			// 幂等重复领取（报告 #15）：上游明示 already_claimed，本次**没有**新增奖励。
-			// 此前照样回「已领取奖励（+Nc +Ne）」，前端据此提示有新增积分。
-			return "该奖励此前已领取（本次无新增）", nil
-		}
+		// already 已在上面提前 return（报告 #7），此处只剩「确实新领到」一条路。
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
 	// 先 accept（PC 口径任务：未报名时上报事件不计数）。

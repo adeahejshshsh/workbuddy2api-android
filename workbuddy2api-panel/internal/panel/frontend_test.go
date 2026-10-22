@@ -172,7 +172,7 @@ func TestAppJSCreditDimensionFormatting(t *testing.T) {
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 	const start = src.indexOf('function trimFixed');
-const end = src.indexOf('function usStat');
+const end = src.indexOf('function usKpi');
 if (start < 0 || end < 0) throw new Error('credit helpers not found');
 const ctx = { Number, String, RegExp };
 vm.createContext(ctx);
@@ -260,7 +260,7 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const escStart = src.indexOf('function esc(');
 const escEnd = src.indexOf('function ago(');
 const fmtStart = src.indexOf('function fmtTok(');
-const fmtEnd = src.indexOf('function usStat(');
+const fmtEnd = src.indexOf('function usKpi(');
 const reqStart = src.indexOf('function requestLogText');
 const reqEnd = src.indexOf('function fmtBytes');
 if ([escStart, escEnd, fmtStart, fmtEnd, reqStart, reqEnd].some(v => v < 0)) throw new Error('request log helpers not found');
@@ -492,11 +492,11 @@ func TestAppJSUsageChartBarClass(t *testing.T) {
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('function parsePointTime');
-const end = src.indexOf('function fmtTokTip');
+const end = src.indexOf('let usageRateWarmAt'); // fmtTokTip 已按报告 #11 删除，用其后继作边界
 const escStart = src.indexOf('function esc(');
 const escEnd = src.indexOf('function ago(');
 const fmtStart = src.indexOf('function fmtTok(');
-const fmtEnd = src.indexOf('function usStat(');
+const fmtEnd = src.indexOf('function usKpi(');
 if ([start, end, escStart, escEnd, fmtStart, fmtEnd].some(v => v < 0)) throw new Error('usage chart helpers not found');
 const host = { innerHTML: '', textContent: '' };
 const ctx = {

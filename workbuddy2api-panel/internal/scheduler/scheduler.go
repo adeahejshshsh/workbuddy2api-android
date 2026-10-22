@@ -216,6 +216,10 @@ func nextFire(now time.Time, hours []int) time.Time {
 	var earliest time.Time
 	for _, h := range hours {
 		t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
+		// 整点相等按「已过」处理并滚到次日 —— 这是**既有设计**，不是 bug（报告 #6 误报）：
+		// TestNextFire 显式断言 `exact match should roll to next day`。改成重跑当刻
+		// 会让「刚跑完立刻重算下一次」变成同一时点二次触发（签到/汇报都是幂等的，
+		// 但白打一轮上游）。进程恰在 xx:00:00.000 启动的概率可忽略。
 		if !t.After(now) {
 			// 跨日必须**重建日期**（BUG-04）：Add(24h) 加的是绝对时长，碰上夏令时
 			// 切换日会偏一小时（春季次日 09:00 变 10:00、秋季变 08:00），

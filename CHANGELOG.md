@@ -361,7 +361,44 @@
 `run.sh`/`watchdog.sh` 探针，需要一起改并重新验证 APK 内嵌面板；报告里其余
 「残留」项属同一处。
 
-### 十九、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 十九、BUG-REVIEW-20261022（11 条）—— 修 9 条 + 1 条误报
+
+**P0**
+
+* **refresh 单飞无异常出口** —— `refreshTokenOnce` 之后才收尾，全程没有 `defer`/`recover`。
+  任一 panic（含 `a` 为 nil 的防御缺口）都会让 `done` 永不关闭、表项永不清除 → 该 UID
+  之后的每次刷新都停在 `<-f.done` 上**永久阻塞**，等待端也没有超时可脱身，handler 的
+  在途租约一并钉死。改：`a == nil` 早返 + `defer` 里 `recover` 转成错误、关信号、删表。
+
+**P1**
+
+* **非流式断流不换号** —— 写完 502 就 `return`，位置仍在轮转循环内，`MaxRotate` 整体作废。
+  改为 `NoteFailures` + `fail` + backoff 后 `continue`（流式受限于已写出的帧只能 502）。
+* **非流式写失败跳过成功入账** —— 客户端断连时 `return`，跳过 `NoteSuccess`/`BlockModelClear`/
+  粘性 `Bind`/`toks`；流式对同一事实明确记成功。改为只改请求结局，账号口径照常入账。
+* **券码/开学季界面未接线** —— 未修（见下）。
+
+**P2**
+
+* 内容拦截降级重试不调 `fail()` → 粘性仍钉在被拦的号上，降级重试又命中同一个号。
+* `autotask` 不可达的重复 `if already` 分支（前面已 return）→ 删除。
+* `awaitExit` 用墙钟计截止窗口 → 时间回拨窗口无限拉长、前跳提前结束（旧进程还占 7863）。
+  改 `SystemClock.elapsedRealtime()`。
+* `onDestroy` 不复位展示态 → 服务被销毁后静态 `status` 仍是 `RUNNING`，界面一直显示
+  「启动中」直到 5 分钟后的 alarm。补 `setState(ST_STOPPED, ...)`。
+* `proc != me` 兼表「被接管」与「被 `killProc` 置空」→ 用户点停止时日志写成「已被新实例
+  接管」。两处改为 `proc != null && proc != me`。
+
+**P3**
+
+* `usStat` / `fmtTokTip` 全文无调用点 → 删除（同时把 4 处测试切片锚点改到 `usKpi` /
+  `usageRateWarmAt`）。
+
+**误报（1 条）**：`nextFire` 用 `!t.After(now)` 判过期，报告称「整点相等会丢当天任务」。
+`TestNextFire` 显式断言 `exact match should roll to next day` —— 那是**既有设计**：
+改成重跑当刻会让「刚跑完立刻重算下一次」在同一时点二次触发，白打一轮上游。回退不改。
+
+### 二十、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

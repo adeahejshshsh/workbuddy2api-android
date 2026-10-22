@@ -336,6 +336,10 @@ public class GatewayService extends Service {
         watching = false;      // 系统杀我时 alarm 还挂着 → 5 分钟内自己回来
         killProc();
         releaseWake();
+        // 必须复位展示态（报告 #9）：静态 status 停在 ST_RUNNING 时，MainActivity.tick()
+        // 会一直显示「启动中」，直到 5 分钟后的 alarm 把服务拉回来 —— 用户以为卡死了。
+        setState(ST_STOPPED, "已停止",
+                userStop ? "用户点了停止，不再自愈" : "服务被系统销毁，等待 alarm/Job 拉起");
         if (!userStop) {       // 不是用户点的停止 → alarm + job 两条路把服务拉回来
             appLog(this, "服务被销毁（非用户操作）→ 已重挂 alarm + JobScheduler 兜底");
             armAlarm(this);
@@ -453,8 +457,11 @@ public class GatewayService extends Service {
     /** 等旧进程真正退出，最多 maxMs；仍活着就强杀再等一小会儿（bug 2 的共用实现）。 */
     void awaitExit(Process old, long maxMs) {
         if (old == null) return;
-        long deadline = System.currentTimeMillis() + maxMs;
-        while (System.currentTimeMillis() < deadline && isAlive(old)) {
+        // 单调时钟（报告 #8）：用 currentTimeMillis 时系统时间被回拨会把窗口无限拉长、
+        // 前跳会让窗口提前结束（旧进程还占着 7863 就往下走）。同文件其它定时逻辑
+        // 都按 elapsedRealtime 计算。
+        long deadline = android.os.SystemClock.elapsedRealtime() + maxMs;
+        while (android.os.SystemClock.elapsedRealtime() < deadline && isAlive(old)) {
             try { Thread.sleep(150); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
         }
@@ -579,7 +586,9 @@ public class GatewayService extends Service {
                     // 再退避 2s 拉新的，而 Go 侧优雅停机最长 5s —— 旧进程的 waitFor
                     // 可能在新进程 setState(RUNNING) **之后**才返回，把状态和 lastExit
                     // 一起覆盖成「已停止 / rc=143」，而 7863 其实正在服务。
-                    if (proc != me) {
+                    // proc == null 是 killProc() 置空的（用户停止/重启），**不是**被新实例
+                    // 接管 —— 混在一起会把「旧进程正常退出」记成「已被新实例接管」（报告 #10）。
+                    if (proc != null && proc != me) {
                         appLog(this, "旧网关进程退出（已被新实例接管）：" + why);
                         return;
                     }
@@ -589,7 +598,7 @@ public class GatewayService extends Service {
                     setState(ST_STOPPED, "已退出 " + why,
                              "网关进程退出：" + why + "，看门狗按退避重拉");
                 } catch (Exception e) {
-                    if (proc != me) return;       // 同上：被接管了就别写全局状态
+                    if (proc != null && proc != me) return; // 同上：真被接管了就别写全局状态
                     setState(ST_STOPPED, "等待异常 " + e, "等待网关进程出错：" + e);
                 }
                 if (proc == me) proc = null;      // 只清自己那个句柄，别把看门狗刚拉起的顶掉
