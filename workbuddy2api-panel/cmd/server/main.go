@@ -40,6 +40,21 @@ import (
 // 十三个小版本，面板上显示的版本号会让人误判"要不要升级"。
 var appVersion = "dev"
 
+// buildStamp 构建时间戳（YYYYMMDDHHMM），由 -ldflags "-X main.buildStamp=..." 注入。
+// 留空时版本串就是纯 x.y.z（`go run` / 测试不受影响）。
+var buildStamp = ""
+
+// VersionString 对外展示的版本：主版本 + 构建时间，例如 1.35.1-202610221657。
+//
+// VERSION 文件**仍是 x.y.z 的单一版本源**（格式不变，语义版本不该被构建时间污染）；
+// 构建时间只追加在展示串与产物名上，便于区分「同一个版本号下的不同构建」。
+func VersionString() string {
+	if buildStamp == "" {
+		return appVersion
+	}
+	return appVersion + "-" + buildStamp
+}
+
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
 func usagePathFor(stateFile string) string { return stateSibling(stateFile, "usage.json") }
@@ -301,7 +316,7 @@ func main() {
 		APIKey:      cfg.APIKey,
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
-		Version:     appVersion,
+		Version:     VersionString(),
 		Live:        live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。

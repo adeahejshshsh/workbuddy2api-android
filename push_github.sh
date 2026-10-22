@@ -1,13 +1,27 @@
 #!/data/data/com.dsharnessmobile.shell/files/usr/bin/bash
 # 把本工作区推到 GitHub（可选：建 Release 并上传 APK）。
 #
-#   bash push_github.sh            # 只推代码
-#   bash push_github.sh release    # 推代码 + 建/更新 Release(v<版本>) + 上传 APK
+#   bash push_github.sh "(fix) 修好X"           # 只推代码，提交标题用给的那句
+#   bash push_github.sh "(feat) 加Y" release    # 推代码 + 建/更新 Release + 上传 APK
+#
+# 提交标题约定（本项目自 v1.35.1 起）：**必须**带类型前缀，一眼能看出改了什么性质：
+#   (fix) 修 bug  (feat) 新功能  (doc) 文档  (chore) 杂务/脚本  (perf) 性能
+#   (refactor) 重构  (test) 测试  (security) 安全/指纹对齐
+# 不给标题时按 (chore) 兜底并带时间戳 —— 但请尽量显式给，日志才可读。
 #
 # token 从 /sdcard/public_repo 读（40 位 ghp_…），只在命令行里用，
 # **不会**写进任何文件、也不会进仓库（推之前还会全量扫一遍高危串）。
 # 暂存目录 $PREFIX/tmp/ghrepo 会保留（复用它的 .git 才能累加历史，不用每次强推）。
 set -eu
+# 参数解析：release 可出现在任意位置，其余视作提交标题。
+DO_RELEASE=0
+MSG=""
+for arg in "$@"; do
+  case "$arg" in
+    release) DO_RELEASE=1 ;;
+    *) [ -n "$MSG" ] && MSG="$MSG $arg" || MSG="$arg" ;;
+  esac
+done
 export GIT_TERMINAL_PROMPT=0      # 绝不交互式问账号密码（问不到会挂住）
 
 OWNER="${OWNER:-adeahejshshsh}"
@@ -100,13 +114,21 @@ print("   OK 没扫到 token/私钥/真实 api_key")
 PY
 
 echo "== 2/5 提交"
+echo "  标题: ${MSG:-（未给标题，按 (chore) 兜底）}"
 cd "$STAGE"
 [ -d .git ] || git init -q -b "$BRANCH"
 git config user.name "$OWNER"
 git config user.email "$OWNER@users.noreply.github.com"
 git add -A
+echo "  推送日志（$(git diff --cached --name-only | wc -l) 个文件）："
+git diff --cached --stat --format='' | tail -n 8 | sed 's/^/    /'
 if git diff --cached --quiet; then echo "  （内容无变化，跳过提交）"; else
-  git commit -qm "WorkBuddy2API Android 移植版 v$VER"
+  # 标题带类型前缀（(fix)/(feat)/(doc)/…），正文写清这次推了什么。
+  TITLE="${MSG:-"(chore) 同步 v$VER 构建（$(date +%Y-%m-%d\ %H:%M)）"}"
+  git commit -qm "$TITLE" -m "版本: v$VER
+构建: ${BUILD_STAMP:-$(date +%Y%m%d%H%M)}
+变更文件:
+$(git diff --cached --stat --format='' | tail -n 5)"
   echo "  已提交 $(git rev-parse --short HEAD)"
 fi
 
@@ -186,7 +208,7 @@ if [ $push_ok -ne 1 ]; then
 fi
 echo "  已推送 → https://github.com/$OWNER/$NAME"
 
-[ "${1:-}" = "release" ] || { echo "（要发 Release 就加参数 release）"; exit 0; }
+[ "$DO_RELEASE" = "1" ] || { echo "（要发 Release 就加参数 release）"; exit 0; }
 
 echo "== 5/5 Release v$VER + 上传 APK"
 OWNER="$OWNER" NAME="$NAME" VER="$VER" APK="$APK" TOKEN="$TOKEN" WS="$WS" python3 - <<'PY'

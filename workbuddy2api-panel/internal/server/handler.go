@@ -738,6 +738,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// fail 在轮转失败分支统一：释放租约 + 若失败号正是粘性号则解绑（下次请求重新分配）。
+	// 空截断救援每请求只用一次（见 starved.go）：轮转换号后不再重复救援，
+	// 免得一个畸形请求把整池都打一遍。
+	starvedTried := false
 	fail := func(uid string) {
 		releaseHeld()
 		if stickyUID != "" && uid == stickyUID {
@@ -1238,6 +1241,33 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		resp, err := upstream.Aggregate(rc)
 		rc.Close()
+		// 空截断救援（starved.go）：额度被思考吃光、正文零字节、finish_reason=length。
+		// 非流式这一侧没有续写通道，救援在这里做 —— 同预算关思考重发一次、重新聚合。
+		// 只在客户端**显式给了**输出限额时做（没给限额的空回复另有成因，不替它决定）。
+		if err == nil && !starvedTried && aggregateStarved(resp) && bodySetsOutputLimit(body) {
+			if rb, ok := starvedRetryBody(body); ok {
+				starvedTried = true
+				rc2, st2, _, e2 := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, rb, clientIP, chatMeta)
+				if e2 == nil && st2 < 400 && rc2 != nil {
+					if resp2, e3 := upstream.Aggregate(rc2); e3 == nil {
+						rc2.Close()
+						resp = resp2
+						log.Printf("INFO: [starved] non-stream acct=%s model=%s: 预算被思考吃光（正文 0B）→ 同额度关思考重发成功",
+							logfmt.Label(acct.UID, acct.NicknameValue()), bareModel)
+					} else {
+						rc2.Close()
+						log.Printf("WARN: [starved] non-stream acct=%s model=%s: 重发聚合失败: %v",
+							logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, e3)
+					}
+				} else {
+					if rc2 != nil {
+						rc2.Close()
+					}
+					log.Printf("WARN: [starved] non-stream acct=%s model=%s: 关思考重发失败（status=%d err=%v）→ 保留原截断响应",
+						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, st2, e2)
+				}
+			}
+		}
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			// 上游「200 + error 帧」（6004 限流 / 内容审核 / 11158 等级拒绝）：既不是

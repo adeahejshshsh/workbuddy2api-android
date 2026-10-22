@@ -237,7 +237,31 @@
   SDK 自己加的，**缺失本身就是破绽**。按实测值补齐（js / 6.25.0 / Windows / x64 / node /
   v22.21.1 / 0），并补 `X-Agent-Type: main` + `X-Agent-Intent: craft`。
 
-### 十三、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 十三、思考吃光预算的空回复救援（misakano7545 `b0320cf1`）+ 版本构建时间
+
+* **空截断救援**（`internal/server/starved.go`）—— 上游把 reasoning 与正文字节算在
+  **同一个** `max_tokens` 预算里，思考没有独立上限：给一个偏小的额度时思考会独吞整份，
+  结束于 `finish_reason=length`、正文零字节、无 `tool_calls`，客户端看到「空回复」。
+  实测 `max_tokens=60/100/150/200/300` 全部被吃满，`400` 起才时好时坏；`thinking:{type:disabled}`
+  + 同预算则正文正常。救援动作是**同预算、关思考重发一次**：不放大客户端额度（超发是语义
+  违约，本身也是个可判别形态），只把预算从思考手里拿回来。
+  - 只在「客户端**显式给了**输出限额」且 `finish_reason=length` + 正文空 + 无 tool_calls 时触发；
+  - 额度 < 16 不救（官方客户端用 `max_tokens=1` 做探活）；
+  - 非 DeepSeek 模型、已关思考、body 不可解析 → 一律不猜；
+  - **每请求一次**（`starvedTried`），失败按原路降级，行为与接线前完全一致。
+  - 上游 `ThinkingSwitchSupported(model)` 区分能力，兼容 `cn:` / `global:` 前缀。
+  - 注：流式侧的救援需要「续写通道」架构（本仓未合入 `continue.go`），本次只接非流式。
+
+* **版本号追加构建时间** —— 展示串与产物名改成 `1.35.1-202610221701`，
+  **`VERSION` 文件仍是纯 `x.y.z`**（语义版本不该被构建时间污染，格式不变）。
+  `build_apk.sh` 注入 `-X main.buildStamp=YYYYMMDDHHMM`，产出
+  `WorkBuddy2API-v1.35.1-<stamp>.apk`（同时保留稳定名供增量签名）。
+
+* **推送标题带类型前缀 + 推送日志** —— `push_github.sh` 接受标题参数，约定
+  `(fix)` / `(feat)` / `(doc)` / `(chore)` / `(perf)` / `(refactor)` / `(test)` / `(security)`；
+  提交正文自动写入版本、构建时间与变更文件；推送前打印变更文件清单与行数统计。
+
+### 十四、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

@@ -27,6 +27,9 @@ WS="/storage/emulated/0/新建文件夹/workbuddy2api"
 # 单一版本源（issue ISSUE-05）：仓库根 VERSION 文件。
 VERNAME=$(tr -d ' \r\n' < "$WS/VERSION" 2>/dev/null || true)
 [ -n "$VERNAME" ] || { echo "❌ 缺 $WS/VERSION（版本单一源）"; exit 1; }
+# 构建时间戳：版本展示串/产物名追加 -YYYYMMDDHHMM（VERSION 文件本身仍是纯 x.y.z）。
+# 目的是区分「同一版本号下的不同构建」—— 每次重建的产物不再同名同 md5 混淆。
+STAMP=$(date +%Y%m%d%H%M)
 # versionCode 由 versionName 派生（major*10000 + minor*100 + patch），不再手工同步。
 VERCODE=$(( $(echo "$VERNAME" | cut -d. -f1) * 10000 + $(echo "$VERNAME" | cut -d. -f2) * 100 + $(echo "$VERNAME" | cut -d. -f3) ))
 # 清单里的 versionName 必须与 VERSION 一致（改一处即可发版；不一致直接失败）
@@ -96,7 +99,7 @@ trap 'restore_asm' EXIT INT TERM HUP
   echo "❌ 缺 $GOROOT/src/runtime/asm_arm64.s.orig-dsh（先跑 patch_source.sh）"; exit 1; }
 cp "$ASM" "$ASM_BAK"
 cp "$GOROOT/src/runtime/asm_arm64.s.orig-dsh" "$ASM"
-( cd "$REPO" && go build -buildvcs=false -trimpath -ldflags="-s -w -X main.appVersion=$VERNAME" \
+( cd "$REPO" && go build -buildvcs=false -trimpath -ldflags="-s -w -X main.appVersion=$VERNAME -X main.buildStamp=$STAMP" \
     -o "$B/jni/lib/arm64-v8a/libwb2api.so" ./cmd/server )
 restore_asm
 trap - EXIT INT TERM HUP
@@ -253,5 +256,10 @@ java -jar "$SIGNER" sign --ks "$KS" --ks-pass "file:$KSPF" \
 java -jar "$SIGNER" verify "$OUTDIR/WorkBuddy2API.apk"
 
 echo
-echo "完成: $OUTDIR/WorkBuddy2API.apk"
-ls -la "$OUTDIR/WorkBuddy2API.apk"
+# 稳定名（工具链/增量签名用）+ 带构建时间的可分发名。
+STAMPED="$OUTDIR/WorkBuddy2API-v$VERNAME-$STAMP.apk"
+cp -f "$OUTDIR/WorkBuddy2API.apk" "$STAMPED"
+echo "完成: $STAMPED"
+echo "      (稳定名: $OUTDIR/WorkBuddy2API.apk)"
+ls -la "$STAMPED"
+echo "版本展示串: $VERNAME-$STAMP（VERSION 文件仍是 $VERNAME）"
