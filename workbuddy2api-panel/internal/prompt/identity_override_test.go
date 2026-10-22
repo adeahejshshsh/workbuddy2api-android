@@ -100,3 +100,21 @@ func TestOverrideHarnessIdentityNoop(t *testing.T) {
 		t.Fatalf("空值应回落默认: %q", got)
 	}
 }
+
+// 改写不得动数字原文（报告 #2）：>2^53 的整数经 float64 往返会被改写成近似值，
+// 对「透传型」网关来说这就是静默改写客户端请求。函数自述承诺「其余内容逐字保留」，
+// 这里把它钉死。
+func TestOverrideHarnessIdentityPreservesBigInts(t *testing.T) {
+	body := []byte(`{"seed":9007199254740993,"metadata":{"ts_us":1792623687458123},
+		"messages":[{"role":"system","content":"You are Old Harness. tail"}]}`)
+	out := OverrideHarnessIdentity(body, "You are CodeBuddy Code.")
+	if !strings.Contains(string(out), "9007199254740993") {
+		t.Fatalf("大整数被改写: %s", out)
+	}
+	if !strings.Contains(string(out), "1792623687458123") {
+		t.Fatalf("微秒时间戳被改写: %s", out)
+	}
+	if !strings.Contains(string(out), "You are CodeBuddy Code.") {
+		t.Fatalf("身份句没替换: %s", out)
+	}
+}

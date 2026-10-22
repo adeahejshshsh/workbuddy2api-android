@@ -321,7 +321,47 @@
      这类合法字符串字段不会被误改。
 * **测试**：3 条（字符串数字可解析、非数字仍报错、不误改其它字符串）。
 
-### 十八、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 十八、审查报告（19 条）—— 修 17 条
+
+**我引入的（5 条）**
+
+* **数值容错表挂错段位** —— `idle_weight_per_hour` / `idle_weight_max` 在 **pool** 段，
+  我写成了 `upstream` 段 → 表里那两条永远命中不到真实字段，`"0.7"` 依旧解析失败、
+  网关起不来。改成 `pool`。
+* **`OverrideHarnessIdentity` 静默丢精度** —— 函数自述「不重新序列化，避免丢大整数」，
+  实现却是普通 `Unmarshal` + `Marshal`。`seed`、微秒时间戳等 >2^53 的整数被改成近似值，
+  且开关打开时**每个请求**都跑。改 `UseNumber` + 不转义 HTML。
+* **`starvedRetryBody` 同样丢精度** —— 救援重发等于给上游换了个请求。同上改法，并补
+  `outputBudget` 的 `json.Number` 分支（漏了它，「客户端给了限额」会被判成没给，
+  救援直接不触发）。
+* **`CooldownModelBusy` 不继承 `AuditOnly`** —— 原本「只记账、不参与选号」的 6004 条目，
+  被一次 14003 覆盖后变成真正拦路由的模型冷却。
+* **`ClaimSweepOnce` 去重口径不一致** —— 查询用原大小写、写入用小写，同一任务码的两种
+  写法各自通过 → 同一奖励被重复发起领奖。
+
+**其它（12 条）**
+
+* `modelHidden` 用「含冒号」判前缀（`resolveModel` 对裸名恒返回 cn）→ `qwen:7b` 这种
+  裸名被当成 cn 专属，global 侧照样可选；且前缀大小写敏感。改显式解析 + 忽略大小写。
+* 503 提示里的 `realm_healthy` 没排除账号级冷却 / needAuth → 提示说「有健康号」却依然
+  503。`Status` 新增 `need_auth` 字段。
+* `upstreamBaseForRealm` 写死官方域名 → 配了 `cn.chat_base` / `global.chat_base` 的部署，
+  报错文案里给的是错地址。改成读配置。
+* `/v1/models` 在 global 探测在飞时整段消失（面板侧早有特判）→ 用上一次成功目录兜住。
+* `persist` 回退 `.bak` 时解进同一个结构 → 恢复出「两份文件的混合体」。改为各解独立结构。
+* `login` 的 `state` 未转义 → 含 `&`/`#` 时请求目标被截断。
+* `app.js` 数字分支缺 `Number.isFinite` → `NaN` 经 `JSON.stringify` 变 `null`，
+  Go 侧 int 取零值，配置被静默改成 0 还提示「已保存」。
+* 「企业版不限量」两套判据（行内只认 `credits_total === -1`）→ 同一账号表里显示 1e12、
+  汇总里被排除。统一判据。
+* `rebuild.sh` 缺 `mkdir -p $PREFIX/tmp`（重定向先失败，`go build` 根本不执行，只打印
+  FAIL）与缺 `-X main.buildStamp`（同版本重建不换 app.js URL）。
+
+**未修（2 条）**：端口写死 7863 横跨 APK 壳（`GatewayService`/`MainActivity`）与
+`run.sh`/`watchdog.sh` 探针，需要一起改并重新验证 APK 内嵌面板；报告里其余
+「残留」项属同一处。
+
+### 十九、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

@@ -44,11 +44,18 @@ echo "== 编译 cmd/* =="
 # 版本从仓库根 VERSION 注入（issue ISSUE-05 单一版本源）
 VER=$(tr -d ' \r\n' < "$SELF_DIR/VERSION" 2>/dev/null || echo dev)
 [ "$VER" = "dev" ] && echo "  ⚠ 未找到 $SELF_DIR/VERSION，版本按 dev 注入"
-LDF="-s -w -X main.appVersion=$VER"
+# 构建时间戳：与 patches/build_apk.sh 同口径。缺了它 rebuild.sh 产物在同一版本号下
+# 重建不会换版本串，面板 versionedIndex() 就不会换 app.js 的 URL —— 升级后客户端
+# 仍拿旧前端（报告 #2）。
+STAMP=$(date +%Y%m%d%H%M)
+LDF="-s -w -X main.appVersion=$VER -X main.buildStamp=$STAMP"
 echo "  版本: $VER"
 # rc 累计失败（bug-09）：此前某个 cmd 编不过只打印 FAIL 就继续，脚本末尾照样 exit 0 ——
 # 接在 CI/发版流水线里就是"构建失败但流水线绿"。
 rc=0
+# 日志目录必须先存在（报告 #2）：$PREFIX/tmp 不存在时 `2>"$PREFIX/tmp/e_$c.log"`
+# 的重定向先失败，go build 根本不会执行，循环只打印 FAIL —— 真实原因是写不了日志。
+mkdir -p "$PREFIX/tmp" || { echo "  ❌ 无法创建 $PREFIX/tmp"; exit 1; }
 for c in server signin login credit trial; do
   [ -d "./cmd/$c" ] || continue
   printf "  %-8s " "$c"

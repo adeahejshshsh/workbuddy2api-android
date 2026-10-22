@@ -133,17 +133,25 @@ func (p *Pool) load() {
 		}
 		return
 	}
+	// 每次尝试都解到**独立**结构（报告 #10）：主文件「前半段合法、后半段损坏」时
+	// json.Unmarshal 已经填进去一部分字段，若继续往同一个 sf 里解 .bak，备份里没有的
+	// 字段不会被清空 —— 恢复出来是两份文件的混合体（例如 credits 来自损坏文件、
+	// 冷却来自备份）。
 	var sf stateFile
-	if json.Unmarshal(raw, &sf) != nil {
+	parseOK := json.Unmarshal(raw, &sf) == nil
+	if !parseOK {
 		// 主文件坏了 → 回退 .bak（同上）；两处都坏才按空池处理。
 		if bak, berr := os.ReadFile(p.stateFp + ".bak"); berr == nil && len(bak) > 0 {
-			if json.Unmarshal(bak, &sf) == nil {
+			var bf stateFile
+			if json.Unmarshal(bak, &bf) == nil {
 				log.Printf("WARN: [pool] state.json 解析失败，已回退 state.json.bak（%d 字节）", len(bak))
+				sf = bf
 				raw = bak
+				parseOK = true
 			}
 		}
 	}
-	if json.Unmarshal(raw, &sf) != nil {
+	if !parseOK {
 		// 损坏必须留档再启动（issue ISSUE-03）：此前静默 return，5 秒后 flusher 会把
 		// 空状态写回 state.json —— 冷却时长、熔断计数、成本账本、credits、"已签到"
 		// 全部不可恢复。另存一份 .corrupt-<unix> 至少还能人工捞。

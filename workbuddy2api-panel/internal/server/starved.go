@@ -18,6 +18,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 
@@ -34,8 +35,12 @@ const minStarvedBudget = 16
 // 返回 false 的情形都是「不猜」：没有 thinking 开关的模型、已经关着思考的、
 // 额度小到不值得重发的、body 不可解析。
 func starvedRetryBody(body []byte) ([]byte, bool) {
+	// UseNumber 保住数字原文（报告 #2）：救援重发不该顺手改写整份 body 的数字 ——
+	// 默认解码把整数落成 float64，超过 2^53 的 seed/微秒时间戳会变成近似值。
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var obj map[string]any
-	if json.Unmarshal(body, &obj) != nil {
+	if dec.Decode(&obj) != nil {
 		return nil, false
 	}
 	if bt := outputBudget(obj); bt > 0 && bt < minStarvedBudget {
@@ -60,11 +65,14 @@ func starvedRetryBody(body []byte) ([]byte, bool) {
 	// 而思考管线的 disabled 分支本来就要求两者不共存（见 upstream/thinking.go）。
 	delete(obj, "reasoning_effort")
 	delete(obj, "reasoningEffort")
-	out, err := json.Marshal(obj)
-	if err != nil {
+	// 不转义 HTML：默认 Marshal 会把 < > & 变成 \u003c 等，等于改写客户端原文。
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(obj); err != nil {
 		return nil, false
 	}
-	return out, true
+	return bytes.TrimRight(buf.Bytes(), "\n"), true
 }
 
 // aggregateStarved 聚合体是否属于「预算被思考吃光、什么也没产出」。
@@ -99,6 +107,16 @@ func aggregateStarved(resp map[string]any) bool {
 func outputBudget(obj map[string]any) int {
 	for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
 		switch v := obj[k].(type) {
+		case json.Number:
+			// UseNumber 之后数值是 json.Number（不是 float64）—— 漏这一支会让
+			// 「客户端给了限额」被判成没给，救援直接不触发。
+			if n, err := v.Int64(); err == nil {
+				return int(n)
+			}
+			if f, err := v.Float64(); err == nil {
+				return int(f)
+			}
+			return 0
 		case float64:
 			return int(v)
 		case int:
@@ -113,8 +131,10 @@ func outputBudget(obj map[string]any) int {
 // bodySetsOutputLimit 客户端是否显式给了输出限额（救援只在这种请求上做：
 // 没给限额时空回复另有「额度未知」的成因，不该我们替它决定）。
 func bodySetsOutputLimit(body []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var obj map[string]any
-	if json.Unmarshal(body, &obj) != nil {
+	if dec.Decode(&obj) != nil {
 		return false
 	}
 	return outputBudget(obj) > 0

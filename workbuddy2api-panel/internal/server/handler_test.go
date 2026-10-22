@@ -818,7 +818,9 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 		t.Fatalf("transport error 应为 502，实际 code=%d body=%s", rec.Code, rec.Body)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"upstream_unreachable", "copilot.tencent.com", "could not reach upstream"} {
+	// base 取**配置值**（报告 #7）：本用例的上游是 fake.example，文案里就该是它；
+	// 此前写死 copilot.tencent.com，配了自定义上游的部署会看到错域名。
+	for _, want := range []string{"upstream_unreachable", "fake.example", "could not reach upstream"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("502 文案缺少 %q: %s", want, body)
 		}

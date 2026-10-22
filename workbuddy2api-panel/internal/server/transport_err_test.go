@@ -4,19 +4,35 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
-// TestUpstreamBaseForRealm 文案用的 base 必须与路由常量一致（cn/global 各一条）。
+// 文案用的 base 必须与**实际配置**一致（报告 #7）：写死官方地址时，配了
+// cn.chat_base / global.chat_base 自建上游的部署，报错文案里给的是错域名。
 func TestUpstreamBaseForRealm(t *testing.T) {
-	if got := upstreamBaseForRealm("cn"); got != "https://copilot.tencent.com" {
+	// 未配置上游 → 回落官方默认（cn/global 各一条；空 realm 按 cn）。
+	h := &Handler{}
+	if got := h.upstreamBaseForRealm("cn"); got != "https://copilot.tencent.com" {
 		t.Fatalf("cn base = %q", got)
 	}
-	if got := upstreamBaseForRealm("global"); got != "https://www.workbuddy.ai" {
+	if got := h.upstreamBaseForRealm("global"); got != "https://www.workbuddy.ai" {
 		t.Fatalf("global base = %q", got)
 	}
-	// 未知/空 realm 按 cn 处理（与 resolveModel 的裸名=cn 口径一致）。
-	if got := upstreamBaseForRealm(""); got != "https://copilot.tencent.com" {
+	if got := h.upstreamBaseForRealm(""); got != "https://copilot.tencent.com" {
 		t.Fatalf("空 realm base = %q", got)
+	}
+
+	// 配了自定义 base → 必须用它。
+	h2 := &Handler{cfg: Config{Upstream: &upstream.Client{
+		ChatBaseCN:     "https://cn.example",
+		ChatBaseGlobal: "https://global.example",
+	}}}
+	if got := h2.upstreamBaseForRealm("cn"); got != "https://cn.example" {
+		t.Fatalf("自定义 cn base = %q", got)
+	}
+	if got := h2.upstreamBaseForRealm("global"); got != "https://global.example" {
+		t.Fatalf("自定义 global base = %q", got)
 	}
 }
 

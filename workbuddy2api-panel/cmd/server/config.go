@@ -423,8 +423,10 @@ var numericStringFields = [][2]string{
 	{"upstream", "timeout_seconds"},
 	{"upstream", "header_timeout_seconds"},
 	{"upstream", "idle_timeout_seconds"},
-	{"upstream", "idle_weight_per_hour"},
-	{"upstream", "idle_weight_max"},
+	// 这两个在 **pool** 段（config.go 的 Pool.IdleWeightPerHour/Max），
+	// 早先挂到 upstream 段的话永远命中不到真实字段 —— 报告 #1。
+	{"pool", "idle_weight_per_hour"},
+	{"pool", "idle_weight_max"},
 }
 
 // coerceNumericStrings 把这些字段上「看起来是数字的字符串」改回 JSON 数字。

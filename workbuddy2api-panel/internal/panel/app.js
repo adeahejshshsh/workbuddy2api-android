@@ -490,7 +490,10 @@ function renderAccounts(list) {
     const short = uidText.length > 16 ? uidText.slice(0, 16) + '…' : (uidText || '—');
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
     // enterpriseUnlimitedTotal）。此时剩余额度不参与展示，直接标「不限」。
-    const unlimited = s.credits_total === -1;
+    // 与顶部汇总卡同一判据（报告 #14）：行内只认 credits_total === -1 时，
+    // 缺该字段但 credits 是 1<<40 哨兵的账号会在表里显示成 1e12 的巨额余额，
+    // 而汇总卡把它排除了 —— 两处互相打架。
+    const unlimited = Number(s.credits_total) === -1 || Number(s.credits) >= 1e12;
     const cred = unlimited ? '不限'
       : (s.credits == null ? '—' : (s.credits_total > 0 ? s.credits + '<span class="of">/' + s.credits_total + '</span>' : String(s.credits)));
     const pct = unlimited ? 100
@@ -1258,7 +1261,17 @@ function collectConfig() {
     if (!el) continue;
     let v;
     if (el.type === 'checkbox') v = el.checked;
-    else if (el.type === 'number') { v = el.value.trim() === '' ? undefined : Number(el.value); }
+    else if (el.type === 'number') {
+      // 必须校验有限性（报告 #13）：NaN/Infinity 经 JSON.stringify 变成 null，
+      // Go 侧 int 收到 null 取零值 —— 配置被静默改成 0，界面还提示「已保存」。
+      const raw = el.value.trim();
+      if (raw === '') v = undefined;
+      else {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) throw new Error('「' + name + '」不是有效数字：' + raw);
+        v = n;
+      }
+    }
     else if (NUMERIC_CFG.has(name)) {
       // 控件类型写错也兜住：空 → 不下发；非数字 → 当场报错（别把字符串塞进 config.json）
       const raw = el.value.trim();

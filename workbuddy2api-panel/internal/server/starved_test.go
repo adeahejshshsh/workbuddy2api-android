@@ -156,3 +156,20 @@ func TestChatStarvedRetryWires(t *testing.T) {
 		t.Fatalf("客户端没拿到救援后的正文: %s", rec.Body.String())
 	}
 }
+
+// 救援体重写不得动数字原文（报告 #2）：整份 body 会被重发上游，
+// 大整数被改成浮点近似就是给上游换了个请求。
+func TestStarvedRetryBodyPreservesBigInts(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4.1-flash","max_tokens":60,"seed":9007199254740993,
+		"messages":[{"role":"user","content":"hi"}]}`)
+	out, ok := starvedRetryBody(body)
+	if !ok {
+		t.Fatal("应当产出救援体")
+	}
+	if !strings.Contains(string(out), "9007199254740993") {
+		t.Fatalf("大整数被改写: %s", out)
+	}
+	if !strings.Contains(string(out), `"max_tokens":60`) {
+		t.Fatalf("额度被改写: %s", out)
+	}
+}

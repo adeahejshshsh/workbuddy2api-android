@@ -612,6 +612,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 在行内却 cooling=false / cool_kind 空，监控按行判断会漏掉它。
 		Cooling:      now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
 		Disabled:     e.disabled,
+		NeedAuth:     e.needAuth,
 		Paused:       e.paused,
 		SuccessCount: e.successCount,
 		ErrTotal:     e.errTotal,

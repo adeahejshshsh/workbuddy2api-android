@@ -16,6 +16,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -204,7 +205,9 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	_, epToken, epAcct, origin := loginEndpoints(sess.realm)
 
 	// auth/token 是权威登录状态端点：pending 时业务 code 非 0（"login ing"）。
-	tokRaw, _, err := doJSON(http.MethodGet, epToken+state, "", nil, origin)
+	// state 来自上游回调的 query 参数，必须转义（报告 #12）：含 & / # / 空格时
+	// 直接拼接会让请求目标被截断或串到别的参数上。
+	tokRaw, _, err := doJSON(http.MethodGet, epToken+url.QueryEscape(state), "", nil, origin)
 	if err != nil {
 		// pending / 未完成：面板前端继续轮询。
 		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": err.Error()})
@@ -227,7 +230,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		EnterpriseID string `json:"enterpriseId"`
 		Nickname     string `json:"nickname"`
 	}
-	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+state, tok.AccessToken, nil, origin); err == nil {
+	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+url.QueryEscape(state), tok.AccessToken, nil, origin); err == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 	if acct.UID == "" {

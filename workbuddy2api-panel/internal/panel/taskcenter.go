@@ -1055,7 +1055,9 @@ func (p *Panel) ClaimSweepOnce(ctx context.Context) (accounts, claimed, failed i
 			}
 			seen := map[string]bool{}
 			for _, t := range tasks {
-				if seen[t.TaskCode] || t.Claimed || !t.Claimable {
+				// 查询与写入必须同一口径（报告 #11）：写入用小写键，查询用原大小写
+				// 时同一任务码的两种写法会各自通过 → 同一奖励被重复发起领奖。
+				if seen[strings.ToLower(t.TaskCode)] || t.Claimed || !t.Claimable {
 					continue
 				}
 				seen[strings.ToLower(t.TaskCode)] = true

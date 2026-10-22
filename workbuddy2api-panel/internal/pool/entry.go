@@ -88,8 +88,11 @@ type Status struct {
 	// Enterprise 企业版账号（auth.EnterpriseID 非空，计算值不落盘）。
 	// 企业版无个人成长体系（签到/成长任务/连登/旅行/夜猫子 上游均拒），
 	// 面板据此隐藏对应按钮；选号、保活、额度展示不受影响。
-	Enterprise     bool   `json:"enterprise,omitempty"`
-	Disabled       bool   `json:"disabled"`
+	Enterprise bool `json:"enterprise,omitempty"`
+	Disabled   bool `json:"disabled"`
+	// NeedAuth 快照恢复出的占位条目（只有 UID、没有凭证）。这类号永远选不到，
+	// 但此前不透出，导致 503 提示把它算成「本域健康号」（报告 #6）。
+	NeedAuth       bool   `json:"need_auth,omitempty"`
 	DisabledReason string `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
 	// Paused 暂停选号：退出选号候选（与 disabled 一样不参与选号），但**照常参与**
 	// 签到 / 活跃上报 / 保活 / 余额刷新四类保号任务。与 disabled 正交——disabled 是

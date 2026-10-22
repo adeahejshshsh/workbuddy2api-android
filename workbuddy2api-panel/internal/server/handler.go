@@ -400,7 +400,11 @@ func (h *Handler) modelHidden(realm, bare string) bool {
 		if e == "" {
 			continue
 		}
-		if r, b := resolveModel(e); strings.Contains(e, ":") && (r == "cn" || r == "global") {
+		// 前缀必须**显式**识别（报告 #5）：resolveModel 对裸名恒返回 ("cn", 原名)，
+		// 用 strings.Contains(e, ":") 当「带前缀」判据时，黑名单里本身含冒号的裸模型名
+		// （如 `qwen:7b`）会被当成 cn 专属 → global 侧同名模型照样列出可选。
+		// 前缀匹配也要忽略大小写（注释承诺不敏感，写 `CN:xxx` 应生效）。
+		if r, b, ok := splitRealmPrefixFold(e); ok {
 			// 带合法前缀：只藏该域
 			if r == realm && strings.EqualFold(b, bare) {
 				return true
@@ -524,8 +528,34 @@ func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
 	if acct == nil {
 		return nil, nil
 	}
-	return h.cfg.Upstream.FetchGlobalModels(acct), acct
+	ids := h.cfg.Upstream.FetchGlobalModels(acct)
+	if len(ids) > 0 {
+		globalModelsLastMu.Lock()
+		globalModelsLast = ids
+		globalModelsLastMu.Unlock()
+		return ids, acct
+	}
+	// 探测在飞时 FetchGlobalModels 直接返回 nil（不打上游、不等待），此前
+	// /v1/models 本次响应里 global 模型会**整段消失**，客户端偶发拿不到
+	// global:*（报告 #8）。面板侧早已用 GlobalProbeInFlight 特判，这里对齐：
+	// 用上一次成功拿到的目录顶上，宁可给旧列表也不要给空列表。
+	if h.cfg.Upstream != nil && h.cfg.Upstream.GlobalProbeInFlight() {
+		globalModelsLastMu.RLock()
+		last := globalModelsLast
+		globalModelsLastMu.RUnlock()
+		if len(last) > 0 {
+			return last, acct
+		}
+	}
+	return ids, acct
 }
+
+// globalModelsLast 上一次成功探测到的 global 目录（探测在飞时兜底用，见
+// fetchGlobalModels 的报告 #8 说明）。进程级缓存，跨请求共享。
+var (
+	globalModelsLastMu sync.RWMutex
+	globalModelsLast   []string
+)
 
 // fetchDynamicModels 从第一个可用 CN 账号拉模型列表（含 contextWindow/maxTokens），
 // 缓存 10min。
@@ -1453,7 +1483,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 该号是否属于本次请求的域：跨域号即使健康也不会被选中（选号有 realm 谓词），
 			// 必须显式标出来，否则"有个号显示 ok 却依然 503"读不懂（用户实测）。
 			inRealm := realm == "" || as.Realm == realm
-			if inRealm && !as.Disabled && !as.Paused && !deg && !cooled {
+			// 「本域健康号」必须与选号口径一致（报告 #6）：只排除 disabled/paused/
+			// degraded/model_cooled 时，正在账号级冷却的号、needAuth 占位号、在途占满
+			// 的号都会被算成健康 → 提示里说「有 3 个健康号」却依然 503，自相矛盾。
+			if inRealm && !as.Disabled && !as.Paused && !deg && !cooled &&
+				!as.Cooling && !as.NeedAuth {
 				realmHealthy++
 			}
 			if len(parts) < 4 {
@@ -1585,12 +1619,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if code == "no_healthy_account" && lastErr != nil && ue == nil {
 		code = "upstream_unreachable"
 		status = http.StatusBadGateway
-		msg = "gateway could not reach upstream " + upstreamBaseForRealm(realm) + ": " + transportBrief(lastErr)
+		msg = "gateway could not reach upstream " + h.upstreamBaseForRealm(realm) + ": " + transportBrief(lastErr)
 		hint = fmt.Sprintf(
 			"upstream transport error (no HTTP response at all); realm=%s base=%s. "+
 				"If you switched a proxy/VPN exit: cn upstreams are mainland-only — use a mainland exit for cn models, "+
 				"or call a global: model with a global account (base %s). [%s]",
-			realm, upstreamBaseForRealm(realm), upstreamBaseForRealm("global"), hint)
+			realm, h.upstreamBaseForRealm(realm), h.upstreamBaseForRealm("global"), hint)
 	}
 
 	// 模型级阻塞覆盖上面的通用文案（放在最后 = 优先级最高）。
@@ -2010,7 +2044,18 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // upstreamBaseForRealm 返回该域的上游 chat base —— 只用于错误文案与提示，不参与路由
 // （真实 base 由 upstream.Client 按账号 realm 决定，见 client.go ChatBaseCN / defaultGlobalBase）。
-func upstreamBaseForRealm(realm string) string {
+func (h *Handler) upstreamBaseForRealm(realm string) string {
+	// 必须读配置（报告 #7）：写死官方地址时，配了 cn.chat_base / global.chat_base
+	// 自建上游的部署，`upstream_unreachable` 与 503 hint 里给出的地址是错的 ——
+	// 用户照着排查会去 ping 一个根本没在用的域名。
+	if u := h.cfg.Upstream; u != nil {
+		if realm == "global" && u.ChatBaseGlobal != "" {
+			return u.ChatBaseGlobal
+		}
+		if realm != "global" && u.ChatBaseCN != "" {
+			return u.ChatBaseCN
+		}
+	}
 	if realm == "global" {
 		return "https://www.workbuddy.ai"
 	}

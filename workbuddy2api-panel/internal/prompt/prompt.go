@@ -183,8 +183,13 @@ func OverrideHarnessIdentity(body []byte, replacement string) []byte {
 		replacement = DefaultHarnessIdentity
 	}
 
+	// UseNumber 保住数字原文（报告 #2）：默认解码把整数落成 float64，超过 2^53
+	// 的 seed/微秒时间戳会被静默改写成近似值 —— 本函数在 passthrough/append +
+	// 开关打开时**每个请求**都跑，属高频静默改写。与 Rewrite/Append 同口径。
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	if err := dec.Decode(&obj); err != nil {
 		return body
 	}
 	msgs, ok := obj["messages"].([]any)
@@ -234,7 +239,7 @@ func OverrideHarnessIdentity(body []byte, replacement string) []byte {
 			continue
 		}
 
-		out, err := json.Marshal(obj)
+		out, err := jsonMarshalNoEscape(obj)
 		if err != nil {
 			return body
 		}
@@ -271,4 +276,18 @@ scan:
 		return text, false
 	}
 	return text[:start] + replacement + text[end:], true
+}
+
+// jsonMarshalNoEscape 序列化但不做 HTML 转义。
+//
+// 默认 Marshal 会把 < > & 转成 \u003c 等：对「透传型」网关来说那是改写了客户端
+// 原文（与 UseNumber 同一个理由）。
+func jsonMarshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }

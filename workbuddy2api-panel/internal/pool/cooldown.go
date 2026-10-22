@@ -309,6 +309,10 @@ func (p *Pool) CooldownModelBusy(uid, model, reason string) {
 	if !prev.ResetAt.IsZero() {
 		mc.ResetAt = prev.ResetAt
 	}
+	// AuditOnly 也必须继承（报告 #9）：原本「只记账、不参与选号」的 6004 条目，
+	// 被一次 14003 覆盖后若不继承该标志，会变成真正拦路由的模型冷却 ——
+	// 账面上「升级了」，行为上却把号从该模型上挡掉了。
+	mc.AuditOnly = prev.AuditOnly
 	switch {
 	case strings.Contains(prev.Reason, "6004"), strings.Contains(prev.Reason, "11102"),
 		strings.Contains(prev.Reason, "11158"):
