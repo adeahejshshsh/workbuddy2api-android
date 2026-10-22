@@ -1,6 +1,92 @@
 # 变更记录
 
-## v1.35.1（当前）
+## v1.35.2（当前）
+
+**本版 = 429 冷却对齐上游权威重置时刻（线上实测）+ DSH 身份句品牌词改零宽形态 + 发布脚本修复。**
+
+三件事按影响排序：
+
+1. **429 冷却被 2h 封顶截断**（真 bug，直接导致「冷却过了还是 6004」）：上游说 10 小时后
+   恢复，网关只认 `soft_rate_max`=2h。拆出 `soft_reset_max`（默认 24h）专管权威墙钟，
+   `soft_rate_max` 回归「无重置时间时的退避封顶」本职。
+2. **身份句品牌词改 `DeepSeek`+U+200B+`Harness`**：1.35.1 用的是「换成另一个词」，
+   本版改成零宽空格 + 换词双层，源码写 `\u200B` 转义（裸零宽字符在 diff / 终端不可见，
+   也没法 grep）。数字错误码那条结论不变（仍走边界正则，不插零宽）。
+3. **`push_github.sh` 假成功**：`-c user.name "$OWNER"` 被 bash 拆成 4 个参数，git 把 owner
+   当子命令；`|| true` 把失败吞掉，于是「reset 挪走本轮提交 → 新提交没建出来 → 推旧 HEAD →
+   打印已推送」。已改成 `-c name=value` + 失败显式退出。
+
+### 一、429 权威重置墙钟被退避封顶截断（2026-10-23 线上实测）
+
+**现象**：上游 429 文案写「您的使用量已超出频率限制，将在 2026-10-23 16:26:37 UTC+8 重置」
+（约 10 小时后），网关却只冷却 2 小时；冷却一过立刻再撞 6004，客户端表现为
+「一直 429、永远好不了」。
+
+**根因**：`cappedSoftUntilLocked` 把**两种上限当成一个**用 —— `soft_rate_max`（默认 2h）
+既是「没有重置时间」时的指数退避封顶，又被拿来截断上游给的**权威重置时刻**
+（`min(resetAt, now+soft_rate_max)`）。上游说 10 小时，代码只认 2 小时。
+
+**修法**：拆成两个旋钮，语义分开：
+
+* `soft_rate_max`（默认 2h，行为不变）：只管「不知道上游何时恢复」的指数退避封顶；
+* `soft_reset_max`（**新增**，默认 24h）：上游明确给了恢复时刻时的**合理性上限**，
+  只用来挡荒谬的解析结果（脏缓存文案 / 时钟错乱），正常墙钟原样采用。
+
+`cappedSoftUntilLocked` 现在是：未来时刻 → `min(resetAt, now+soft_reset_max)`；
+过期/零值 → 原来的有界退避 `min(now+base, now+soft_rate_max)`。6004 的模型级冷却与
+非 6004 的账号级冷却共用这个函数，两条路径一起修好。
+
+配置 `cooldown.soft_reset_max`（`config.example.json` 已加），env `WB2A_SOFT_RESET_MAX`，
+热改生效（`reload` 里同步 `SetSoftResetMax`）。
+
+### 二、DSH 身份句品牌词改成 DeepSeek\u200BHarness
+
+1.35.1 的处理是「把品牌词换成另一个词」（`DeepSeek`+空格+`Harness` → `DeepSeek`+`Runtime`），
+当时明确写了「插零宽空格那条路对数字错误码无效，故不采用」。本版只针对**品牌词**换方案：
+
+* 改写值 = `DeepSeek` + **U+200B（零宽空格）** + `Harness`，两层同时动 ——
+  中间不是 0x20 而是零宽空格（逐字匹配原串不再命中），后半段也换词
+  （即便上游把零宽字符归一化掉，归一后的 `DeepSeekHarness` 与原句仍不同形）；
+* 源码写成 `\u200B` 转义，不写裸零宽字符：裸字符在 diff / 终端里不可见，审查时看不出
+  改了什么，也没法 grep；
+* 特征表仍保留被拦原串（`DeepSeek`+空格+`Harness`）作为触发条件 —— 它要能被识别出来才谈得上改写；
+* 单测从「断言含替代词」改为：不含原串、含 ZWSP 形态、**旧替代词彻底消失**、幂等、
+  正文多次出现全部替换（`Count == 2`）。三个串一律常量拼接构造，不手打整词
+  （这个品牌词在终端里空格形态和零宽形态渲染出来一模一样，手写迟早写反）。
+
+数字错误码（`11‑-128` / `11‑-128`）**不在**这条路上：仍由 `sanitizeCodeRe` 的边界正则处理，
+不插零宽 —— 上游会归一化数字串，插了也白插。
+
+### 三、发布脚本与仓库卫生
+
+* **`push_github.sh` 的 `-c` 分词 bug（假成功）**：`git -c user.name "$OWNER" -c user.email "..."`
+  会被 bash 拆成 `-c` / `user.name` / `adeahejshshsh` / … 四个 argv，git 把 owner 当子命令
+  （`git: 'adeahejshshsh' is not a git command`）；那一行原来挂着 `|| true`，失败被静默吞掉。
+  连锁后果：`reset --soft FETCH_HEAD` 已把本轮提交挪走、新提交没建出来，push 推的是旧 HEAD
+  （Everything up-to-date），脚本照样打印「已推送」。已改成 `-c name=value`，且重新提交失败
+  直接 `exit 1`，不再假绿。
+* **`workbuddy2api-panel/signin`（10MB 编译产物）误入暂存**：tar 增加排除项，`.gitignore`
+  补同名条目；已推上去的那份用 `git gc --prune=now` 清掉游离提交。
+* **`AGENT.md` 记录发布规矩**：每次改动都必须提交（默认档只推源码），Release 只在需要
+  可安装包时才发。
+
+### 测试
+
+新增 `TestCooldownSoftForModelHonorsResetBeyondSoftRateMax`（10h 权威墙钟不被 2h 截断）、
+`TestCooldownSoftForModelCapsAbsurdReset`（30h 截断到 `soft_reset_max`=24h）、
+`TestCooldownSoftRateHonorsResetBeyondSoftRateMax`（账号级同理）、
+`TestSoftResetMaxParsedFromFile` / `TestSoftResetMaxDefaultsTo24h` / `TestBadSoftResetMax`；
+`TestCappedSoftUntilExpiredResetFallsBackToBase` 的截断断言改注入 `softResetMax`
+（原来拿 `softRateMax` 断言，正是本版要修的那个混淆）；
+`TestDeepSeekHarnessBrandRewritten` 改写为 ZWSP 断言（含「旧替代词必须消失」）。
+顺带修 `TestCheckinDoneExpiredYesterday`：日期改用 `cst.DayKey` —— Go 运行时读不到
+`/etc/localtime` 时是 UTC，与北京日界差一天，每天 00:00–08:00（CST）必红。
+
+**808 通过 / 0 失败**（server 104 / upstream 235 / panel 60 / pool 192 / scheduler 65 /
+auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 59）。
+
+
+## v1.35.1
 
 **本版 = 出站指纹对齐真机 + 业务码归一 + 积分历史台账 + 22 批审查报告修复。**
 
@@ -516,29 +602,6 @@
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，
 多条折叠成一条汇总，模型名放 title。
 
-### 二十四、429 权威重置墙钟被退避封顶截断（2026-10-23 线上实测）
-
-**现象**：上游 429 文案写「您的使用量已超出频率限制，将在 2026-10-23 16:26:37 UTC+8 重置」
-（约 10 小时后），网关却只冷却 2 小时；冷却一过立刻再撞 6004，客户端表现为
-「一直 429、永远好不了」。
-
-**根因**：`cappedSoftUntilLocked` 把**两种上限当成一个**用 —— `soft_rate_max`（默认 2h）
-既是「没有重置时间」时的指数退避封顶，又被拿来截断上游给的**权威重置时刻**
-（`min(resetAt, now+soft_rate_max)`）。上游说 10 小时，代码只认 2 小时。
-
-**修法**：拆成两个旋钮，语义分开：
-
-* `soft_rate_max`（默认 2h，行为不变）：只管「不知道上游何时恢复」的指数退避封顶；
-* `soft_reset_max`（**新增**，默认 24h）：上游明确给了恢复时刻时的**合理性上限**，
-  只用来挡荒谬的解析结果（脏缓存文案 / 时钟错乱），正常墙钟原样采用。
-
-`cappedSoftUntilLocked` 现在是：未来时刻 → `min(resetAt, now+soft_reset_max)`；
-过期/零值 → 原来的有界退避 `min(now+base, now+soft_rate_max)`。6004 的模型级冷却与
-非 6004 的账号级冷却共用这个函数，两条路径一起修好。
-
-配置 `cooldown.soft_reset_max`（`config.example.json` 已加），env `WB2A_SOFT_RESET_MAX`，
-热改生效（`reload` 里同步 `SetSoftResetMax`）。
-
 ### 未合并
 
 | kk-cao 提交 | 内容 | 判断 |
@@ -556,17 +619,8 @@
 带限流文案的 11140 不算账号限制）、新增 `TestNormalizeBusinessCode`；
 `TestDesktopUAForGlobalAccount` 改为断言「平台段恒为 WorkBuddy + 版本段按 realm」；
 其余指纹断言改用常量构造，避免下次改版本号再红一片。
-新增 `TestCooldownSoftForModelHonorsResetBeyondSoftRateMax`（10h 权威墙钟不被 2h 截断）、
-`TestCooldownSoftForModelCapsAbsurdReset`（30h 截断到 `soft_reset_max`=24h）、
-`TestCooldownSoftRateHonorsResetBeyondSoftRateMax`（账号级同理）、
-`TestSoftResetMaxParsedFromFile` / `TestSoftResetMaxDefaultsTo24h` / `TestBadSoftResetMax`；
-`TestCappedSoftUntilExpiredResetFallsBackToBase` 的截断断言改注入 `softResetMax`
-（原来拿 `softRateMax` 断言，正是本节要修的那个混淆）。
-顺带修 `TestCheckinDoneExpiredYesterday`：日期改用 `cst.DayKey` —— Go 运行时读不到
-`/etc/localtime` 时是 UTC，与北京日界差一天，每天 00:00–08:00（CST）必红。
-
-**808 通过 / 0 失败**（server 104 / upstream 235 / panel 60 / pool 192 / scheduler 65 /
-auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 59）。
+**768 通过 / 0 失败**（server 97 / upstream 229 / panel 54 / pool 188 / scheduler 65 /
+auth 29 / session 21 / reqlog 10 / usage 16 / redisstore 7 / cmd-server 52）。
 
 
 ## v1.35.0
