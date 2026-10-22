@@ -1181,6 +1181,8 @@ const CFG_MAP = {
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
+  request_archive_max_mb: ['logging', 'request_archive_max_mb'],
+  account_spread_seconds: ['schedule', 'account_spread_seconds'],
   prompt_identity_override_enabled: ['prompt', 'identity_override_enabled'],
   prompt_identity_override_text: ['prompt', 'identity_override_text'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],

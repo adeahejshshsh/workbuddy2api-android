@@ -398,7 +398,40 @@
 `TestNextFire` 显式断言 `exact match should roll to next day` —— 那是**既有设计**：
 改成重跑当刻会让「刚跑完立刻重算下一次」在同一时点二次触发，白打一轮上游。回退不改。
 
-### 二十、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 二十、BUG-REVIEW（13 条）—— 修 11 条 + 1 条误报 + 1 条未修
+
+* **`sanitize` 改写表左右值相同？—— 误报（第四次）**。逐码点核验：左值是
+  `"DeepSeekRuntime"`（含 0x20 空格），右值是 `"DeepSeekRuntime"`，**不是**恒等操作。
+  终端里两者长得一样，肉眼看必被骗 —— 这类判定只能靠码点/字节比对。
+  顺带加了 `TestSanitizeRewritesAreNotNoop`：逐条断言 `rw[0] != rw[1]`，把这类
+  误报/真事故一起钉死。
+* **等权重洗牌被 uid 兜底抵消** —— 比较器是全序（cost→权重→uid），`SliceStable` 的
+  结果与输入顺序无关，排序前那次洗牌对 top5 毫无影响，「等权重按 uid 字典序饿死」
+  依然存在。改为**排序后**对每个 (cost1k, w) 并列段洗牌，截断才是随机取样。
+* **6004 无重置时间误用账号级冷却** —— 该分支落到 `CooldownSoftRate`，把整个账号冷却，
+  客户端换到该账号**其它没被限流的模型**依然 429，与「带重置文案 / 带 Retry-After」
+  两条只锁模型的分支直接矛盾。改为 `CooldownSoftForModel`（无 resetAt 时 Until 由
+  有界退避算出）；`CooldownSoftForModel` 只要给了模型名就走模型级。
+* **`max_tokens` 只看键存在** —— `{"max_tokens": null, "max_completion_tokens": 1000}`
+  时别名被删、额度丢失。改判「值有效」（新增 `hasPositiveInt`）。
+* **`tool_choice` 被静默放宽** —— 缺 name 的 function 约束降级成 `auto`、未知 type
+  整个删掉，等于把「只许调这个」放开成「随便调」。改为**保留原样**交给上游判错。
+* **全 reasoning 的消息被整条删** —— 破坏 user/assistant 交替，上游可能 400 且日志无痕。
+  改为保留该轮、`content` 置空串。
+* **realm 前缀大小写口径不一致** —— `resolveModel` 敏感、`modelHidden` 不敏感 →
+  `CN:glm-5.2` 既绕过黑名单又被整串发给上游（11102）。两处统一走
+  `splitRealmPrefixFold`；`bareModelName` 同步。
+* **看门狗在 `curl` 缺失时杀健康网关** —— 探测恒 `000` → 60s 后 `stop`+`start` 无限循环。
+  改为启动时探测 `curl` 可用性，缺失则降级为「仅按进程存活判断」。
+* **端口写死 7863** —— `run.sh` 改为从 `config.json` 的 `listen` 推导（复用既有
+  `cfg_val`）；`watchdog.sh` 同样推导，探针不再打错端口。
+* **`credithist` 固定临时文件名** —— 双进程并发写互相覆盖。改为唯一 tmp 名。
+* **`NUMERIC_CFG` 两条死配置** —— `request_archive_max_mb` / `account_spread_seconds`
+  既不在 `CFG_MAP` 也没有控件（而页面提示还写着前者）。补齐 `CFG_MAP` 与两个输入框。
+* **未修**：APK 壳里的 `GatewayService`（健康探针）与 `MainActivity`（面板 URL）仍写死
+  7863 —— 改端口后 App 内面板打不开、看门狗误判。需要 Java 侧读配置，单独一版做。
+
+### 二十一、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

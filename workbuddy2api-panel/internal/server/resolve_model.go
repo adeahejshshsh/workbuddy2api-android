@@ -11,15 +11,16 @@ import "strings"
 //
 // 导出为 ResolveModel（cmd/server/main.go 粘性闭包需要），包内简写 resolveModel。
 func resolveModel(model string) (realm, bare string) {
-	idx := strings.IndexByte(model, ':')
-	if idx < 0 {
-		return "cn", model
+	// 前缀识别必须与黑名单/展示同口径（报告 #7）：此前这里大小写**敏感**，而
+	// modelHidden 用的大小写**不敏感** → 客户端发 `CN:glm-5.2` 时：
+	//   1. 黑名单拦不住（它认得 cn 前缀，按裸名 `glm-5.2` 比对，却拿到 `CN:glm-5.2`）；
+	//   2. 这里又不认前缀，把整串 `CN:glm-5.2` 当模型名发给上游 → 11102/400，
+	//      客户端看到「模型不存在」而不是「前缀写错了」。
+	// 统一走 splitRealmPrefixFold，两处语义一致。
+	if r, b, ok := splitRealmPrefixFold(model); ok {
+		return r, b
 	}
-	prefix := model[:idx]
-	if prefix != "cn" && prefix != "global" {
-		return "cn", model
-	}
-	return prefix, model[idx+1:]
+	return "cn", model
 }
 
 // ResolveModel 是 resolveModel 的导出面（跨包调用）。

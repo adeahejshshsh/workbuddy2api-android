@@ -30,18 +30,44 @@ echo $$ > "$DATA/watchdog.pid"
 say() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 say "看门狗启动 pid=$$ 间隔=${INTERVAL}s"
 
+# curl 不可用（没装 / 被 SELinux 拦）时**不能**把「探不到」当成「网关挂了」（报告 #10）：
+# 那会让看门狗每 10s 累加一次失败，60s 后把完全健康的网关 stop + start，无限循环。
+# 探测能力缺失是**环境问题**，降级为「只按进程存活判断」。
+# 端口与 run.sh 同源（报告 #8/#11）：写死 7863 时，面板里改了 listen，
+# 这里的探针打的是一个没人监听的端口 → 判「僵死」并周期性杀健康网关。
+WD_DIR="$(cd "$(dirname "$0")" && pwd)"
+PORT=$(python3 - "$WD_DIR/workbuddy2api-panel/config.json" <<'PY' 2>/dev/null
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("listen", "").rsplit(":", 1)[-1])
+except Exception:
+    print("")
+PY
+)
+PORT=$(printf '%s' "$PORT" | tr -dc '0-9')
+[ -n "$PORT" ] || PORT=7863
+
+HAVE_CURL=1
+command -v curl >/dev/null 2>&1 || HAVE_CURL=0
+[ "$HAVE_CURL" = 0 ] && say "WARN: 未找到 curl —— 健康探测降级为仅进程存活判断（不会因探测失败重启网关）"
+
 fail=0
 noted=0     # 外部实例只提示一次，别刷屏
 while :; do
   # 锚定 argv[0]：松散写全会匹配到"命令行里提到这个路径"的无关进程（测出来的坑）
   p=$(pgrep -f '^[^ ]*/workbuddy2api/server( |$)' | head -1)
-  code=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:7863/healthz 2>/dev/null)
-  code=${code:-000}      # curl 失败自带 000，别再叠加一个
+  if [ "$HAVE_CURL" = 1 ]; then
+    code=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/healthz 2>/dev/null)
+    code=${code:-000}    # curl 失败自带 000，别再叠加一个
+  else
+    # 无探测能力：有进程就当活着（503/000 无法区分，宁可不动）
+    [ -n "$p" ] && code=200 || code=000
+  fi
 
   if [ "$code" = "200" ] || [ "$code" = "503" ]; then      # 503=服务在但没绑账号，也算活着
     if [ -z "$p" ]; then
       # 端口有主但不是本脚本起的那个 → 复用，绝不抢
-      [ "$noted" = 0 ] && { say "7863 上是外部实例（http=$code），复用不干预"; noted=1; }
+      [ "$noted" = 0 ] && { say "$PORT 上是外部实例（http=$code），复用不干预"; noted=1; }
       # 清零前先留痕（BUG-20）：否则「本实例失败 → 外部实例接管 → 本实例恢复」
       # 这条真实路径在 watchdog.log 里没有任何恢复记录，只剩早先的失败行。
       [ "$fail" -gt 0 ] && say "外部实例接管（http=$code），本实例失败计数 $fail 清零"

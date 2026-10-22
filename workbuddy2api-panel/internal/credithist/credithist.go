@@ -14,6 +14,7 @@ package credithist
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -185,7 +186,11 @@ func (l *Ledger) write(raw []byte) {
 			return
 		}
 	}
-	tmp := l.path + ".tmp"
+	// 唯一临时名（报告 #12）：固定 `<path>.tmp` 时，同目录两个实例（双进程 /
+	// 双容器挂同一卷）并发 Observe 会共用同一个 tmp —— A 写、B 覆盖、A rename，
+	// 落盘内容变成 B 的；rename 失败还只打日志、账本静默停在旧值。
+	// 与 auth.ReplaceAtomic / pool 的落盘同一手法。
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", l.path, os.Getpid(), time.Now().UnixNano())
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		log.Printf("[credithist] 写临时文件失败: %v", err)
 		return

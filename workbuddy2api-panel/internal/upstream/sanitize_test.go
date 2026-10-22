@@ -424,3 +424,22 @@ func newTestUpstream(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(h)
 }
+
+// 改写表里任何一条左右值相同 = 恒等操作，脱敏空转。
+//
+// 这类 bug 被报告反复提过三次（前几次是误报：那四条由 strings.Replace 派生，
+// 字节级确实不同）。这里用**逐条自检**把它钉死：手写的新行若左右一致，直接红。
+func TestSanitizeRewritesAreNotNoop(t *testing.T) {
+	if len(sanitizeRewrites) == 0 {
+		t.Fatal("改写表为空")
+	}
+	for i, rw := range sanitizeRewrites {
+		if rw[0] == "" || rw[1] == "" {
+			t.Errorf("第 %d 条有空值: %q → %q", i, rw[0], rw[1])
+			continue
+		}
+		if rw[0] == rw[1] {
+			t.Errorf("第 %d 条是空操作（左右值相同）: %q", i, rw[0])
+		}
+	}
+}

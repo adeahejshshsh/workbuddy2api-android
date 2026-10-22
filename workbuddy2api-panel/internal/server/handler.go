@@ -693,8 +693,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			"model is hidden by gateway config (models.hidden); pick another model")
 		return
 	}
-	bareModelName := peek.Model != "" &&
-		!strings.HasPrefix(peek.Model, "cn:") && !strings.HasPrefix(peek.Model, "global:")
+	// 同上（报告 #7）：大小写敏感的前缀判定会让 `CN:x` 被当成裸名。
+	_, _, hasRealmPrefix := splitRealmPrefixFold(peek.Model)
+	bareModelName := peek.Model != "" && !hasRealmPrefix
 	modelRate := ""
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
@@ -1934,13 +1935,19 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), until, "429 rate limit (retry-after)")
 			return
 		}
-		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶
-		// soft_rate_max；已在冷却中的兜底探测不翻倍）。基数取 h.softCooldown()
-		// （热改优先），管理面板改 soft_rate 后立即生效。
-		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
-		if modelRateLimited {
-			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
+		// 无重置时间：**仍然只锁模型**（报告 #3）。
+		//
+		// 6004 是模型级限流（「这个模型这分钟被限」），不是账号级。此前这条落到
+		// CooldownSoftRate —— 把整个账号冷却掉，客户端换到该账号**其它没被限流的模型**
+		// 依然拿 429，与上面两条分支（带重置文案 / 带 Retry-After 都只锁模型）直接矛盾。
+		// 没有 resetAt 时用有界退避算 Until（soft_rate 基数起、封顶 soft_rate_max）。
+		if modelRateLimited && model != "" {
+			h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), time.Time{}, model,
+				"6004 model rate limit (reset unknown)")
+			return
 		}
+		// 非模型级（通用 429）：账号级有界退避，基数取 h.softCooldown()（热改优先）。
+		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
 	case upstream.ErrModelBusy:
 		// 14003「模型繁忙」是**模型级、间歇**信号（同一分钟既有 14003 也有成功）：
 		// 号是好的，只给这个 (号,模型) 停 10s（翻倍封顶 1m），不冷却账号。

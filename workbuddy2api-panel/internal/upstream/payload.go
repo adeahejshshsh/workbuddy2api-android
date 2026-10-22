@@ -152,8 +152,12 @@ func translateMaxCompletionTokens(obj map[string]any) {
 			}
 		}
 	}
-	// 翻译完成（或显式 max_tokens 已存在）才删别名；翻译失败保留原样透传。
-	if _, explicit := obj["max_tokens"]; explicit {
+	// 翻译完成（或**有效的** max_tokens 已存在）才删别名；翻译失败保留原样透传。
+	//
+	// 判据必须是「值有效」而不是「键存在」（报告 #4）：客户端发
+	// {"max_tokens": null, "max_completion_tokens": 1000} 时，只看键存在会把别名删掉、
+	// max_tokens 仍是 null → 上游按默认上限截断或直接 11101，而客户端明明给了额度。
+	if hasPositiveInt(obj["max_tokens"]) {
 		delete(obj, "max_completion_tokens")
 	}
 }
@@ -413,13 +417,17 @@ func normalizeToolChoice(obj map[string]any) {
 			if name = strings.TrimSpace(name); name != "" {
 				obj["tool_choice"] = name
 			} else {
-				obj["tool_choice"] = "auto"
+				// 缺 name 的 function 约束：**不能**降级成 auto（报告 #5）——
+				// 那等于把「只许调这个工具」放开成「随便调」，客户端看不出任何异常，
+				// 表现就是模型乱调工具。保留原样交给上游判错。
+				// （保留原值即不动 obj["tool_choice"]）
 			}
 		default:
-			delete(obj, "tool_choice")
+			// 未知 type（如 allowed_tools）：同样不删（报告 #5）。删掉 = 静默放宽，
+			// 保留则上游要么认识、要么明确报错，两种都比「悄悄放开」好。
 		}
 	default:
-		delete(obj, "tool_choice")
+		// 非字符串/非对象形态：同样保留，交给上游判。
 	}
 }
 
@@ -525,6 +533,12 @@ func dropReasoningContentParts(obj map[string]any) {
 		}
 		if len(kept) == 0 {
 			if _, hasToolCalls := msg["tool_calls"]; !hasToolCalls {
+				// 整条删掉会破坏 user/assistant 交替（报告 #6）：Codex 经
+				// responses→chat 转换后会产出「content 全是 reasoning 片段」的 assistant
+				// 轮，删掉它历史就少一轮，上游可能直接 400，而日志里毫无痕迹。
+				// 改为保留该轮、把 content 置空串（最小改动，交替关系不变）。
+				msg["content"] = ""
+				out = append(out, msg)
 				continue
 			}
 			// 带 tool_calls 但内容全是思考片段：**删掉 content 键**而不是写 []（报告 #7）。
@@ -548,4 +562,27 @@ func marshalNoEscape(v any) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+// hasPositiveInt 判断 JSON 解出来的值是不是「有效的正数」。
+//
+// 用于「显式给了额度」这类判据：只看键存在会把 null / 0 / "" 也当成给了
+// （报告 #4：max_tokens:null 时别名被删、额度丢失）。
+func hasPositiveInt(v any) bool {
+	switch n := v.(type) {
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i > 0
+		}
+		if f, err := n.Float64(); err == nil {
+			return f > 0
+		}
+	case float64:
+		return n > 0
+	case int:
+		return n > 0
+	case int64:
+		return n > 0
+	}
+	return false
 }

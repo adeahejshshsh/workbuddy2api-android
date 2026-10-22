@@ -13,7 +13,9 @@ BIN_DIR="$PREFIX/lib/workbuddy2api"
 BIN="$BIN_DIR/server"
 LOG="$APP_DIR/data/server.log"
 PIDF="$APP_DIR/data/server.pid"
-PORT=7863
+# PORT 在 cfg_val 定义之后按 config.json 的 listen 推导（报告 #11）：写死 7863 时，
+# 面板里把 listen 改掉后 status/panel 给出的地址全是错的。
+PORT_FALLBACK=7863
 
 # 取配置值：键名走 sys.argv（review S-23），不再拼进 python 源码 ——
 # 键名里带引号会让整段变成 SyntaxError，而且拼接本身就容易被当成注入面。
@@ -27,6 +29,11 @@ PY
 }
 
 api_key() { cfg_val api_key; }
+
+# 从 listen（如 ":7863" / "127.0.0.1:8080"）取端口；取不到回落 7863。
+# 与 APK 壳的探针、面板 URL 同源，改 listen 后这里自动跟上。
+PORT=$(cfg_val listen | sed 's/^.*://' | tr -dc '0-9')
+[ -n "$PORT" ] || PORT="$PORT_FALLBACK"
 
 # key_fp 只打密钥指纹（sha256 前 8 位）：完整 api_key 会进 server.log，
 # 再经 log 镜像进面板日志环 —— 等于把凭据写进日志文件（review S-23）。

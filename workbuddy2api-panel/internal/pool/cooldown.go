@@ -201,7 +201,10 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			// 每 5 秒全量重写一次 state.json —— 纯无谓磁盘写。
 			return
 		}
-		if !resetAt.IsZero() && model != "" {
+		// 只要给了模型名就走**模型级**（报告 #3）：resetAt 为空只是「不知道上游何时
+		// 恢复」，不等于「整个账号都不可用」。此时 Until 由有界退避算出
+		// （cappedSoftUntilLocked 对零值 resetAt 会回落到 now+base，再受 soft_rate_max 封顶）。
+		if model != "" {
 			// 有上游重置时间：冷却截止 = min(resetAt, now+softRateMax)，不做指数放大。
 			if e.modelCooldowns == nil {
 				e.modelCooldowns = map[string]modelCooldown{}

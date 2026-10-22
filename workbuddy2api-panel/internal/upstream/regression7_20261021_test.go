@@ -22,8 +22,14 @@ func TestDropReasoningContentParts(t *testing.T) {
 	}
 	dropReasoningContentParts(obj)
 	msgs := obj["messages"].([]any)
-	if len(msgs) != 2 {
-		t.Fatalf("只剩思考片段的消息应整条丢弃：得到 %d 条", len(msgs))
+	// 只剩思考片段的消息**保留**（报告 #6）：整条删掉会破坏 user/assistant 交替，
+	// 上游可能直接 400，而日志里毫无痕迹。改为 content 置空串。
+	if len(msgs) != 3 {
+		t.Fatalf("消息条数应保持 3（不整条删）：得到 %d 条", len(msgs))
+	}
+	last := msgs[2].(map[string]any)
+	if c, _ := last["content"].(string); c != "" {
+		t.Fatalf("只剩思考片段的消息 content 应置空串: %v", last["content"])
 	}
 	parts := msgs[1].(map[string]any)["content"].([]any)
 	if len(parts) != 1 {

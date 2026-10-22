@@ -735,12 +735,14 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad should be soft cooling: %+v", st)
+	// 6004 是**模型级**限流：没有重置时间时也只锁该模型，账号本身不进冷却
+	// （报告 #3）。此前这条落到 CooldownSoftRate，客户端换到该账号其它没被限流的
+	// 模型依然 429 —— 与带重置文案 / 带 Retry-After 两条分支直接矛盾。
+	if st.Cooling {
+		t.Fatalf("6004 无重置时间不该冷却整个账号: %+v", st)
 	}
-	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
-	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
-		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
+		t.Fatalf("该模型应进模型级台账: %+v", st.RateLimitedModels)
 	}
 	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" || st.RateLimitedModels[0].Kind != "rate_limit" {
 		t.Fatalf("rate-limited models=%+v, want audit row for glm-5.3", st.RateLimitedModels)

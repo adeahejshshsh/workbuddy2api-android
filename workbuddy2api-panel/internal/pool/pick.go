@@ -200,8 +200,27 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if ws[i].w != ws[j].w {
 			return ws[i].w > ws[j].w
 		}
-		return ws[i].e.a.UID < ws[j].e.a.UID // 稳定兜底（洗牌后此项几乎不触发）
+		return ws[i].e.a.UID < ws[j].e.a.UID // 稳定兜底
 	})
+	// 并列段内再洗一次（报告 #2）：上面的 uid 兜底构成**全序**，SliceStable 的结果
+	// 与输入顺序无关 —— 排序前那次洗牌对最终 top5 毫无影响，注释声称修掉的
+	// 「等权重按 uid 字典序饿死」依然存在。这里在**排序之后**对每个 (cost1k, w)
+	// 并列段洗牌，截断才是随机取样；不同权重的相对次序仍由 cost/权重决定。
+	if len(ws) > 1 {
+		r := rand.New(rand.NewPCG(uint64(now.UnixNano()), uint64(len(ws))))
+		for start := 0; start < len(ws); {
+			end := start + 1
+			for end < len(ws) && ws[end].cost1k == ws[start].cost1k && ws[end].w == ws[start].w {
+				end++
+			}
+			if end-start > 1 {
+				r.Shuffle(end-start, func(i, j int) {
+					ws[start+i], ws[start+j] = ws[start+j], ws[start+i]
+				})
+			}
+			start = end
+		}
+	}
 	cands = cands[:0]
 	for _, c := range ws {
 		cands = append(cands, c.e)
