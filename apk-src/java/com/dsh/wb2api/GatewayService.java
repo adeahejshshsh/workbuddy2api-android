@@ -249,7 +249,11 @@ public class GatewayService extends Service {
 
     @Override public IBinder onBind(Intent i) { return null; }
 
+    /** 探针是 static 的，需要一个 Context 去读 config.json 里的 listen（见 GwConfig）。 */
+    static volatile Context appCtx;
+
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        appCtx = this;
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {   // 用户主动停：别再自愈
             userStop = true;
             try { getSharedPreferences(PREF, MODE_PRIVATE).edit().putBoolean("service_up", false).apply(); } catch (Throwable ignored) {}
@@ -318,8 +322,9 @@ public class GatewayService extends Service {
             if (portUp()) {               // 本机已有实例在跑（比如 DSH 里那个），复用不抢
                 external = true;
                 mode = "复用";
-                setState(ST_EXTERNAL, "端口 7863 已被占用，复用现有实例",
-                         "7863 上已有别的实例在服务，本服务不接管（不抢端口、不杀进程）");
+                int extPort = GwConfig.port(this);
+                setState(ST_EXTERNAL, "端口 " + extPort + " 已被占用，复用现有实例",
+                         extPort + " 上已有别的实例在服务，本服务不接管（不抢端口、不杀进程）");
                 refreshNotification();
             } else {
                 external = false;
@@ -394,7 +399,7 @@ public class GatewayService extends Service {
                         external = true;
                         mode = "复用";
                         setState(ST_EXTERNAL, "外部实例在跑（复用）",
-                                 "本服务没持有子进程，7863 由外部实例服务");
+                                 "本服务没持有子进程，" + GwConfig.port(this) + " 由外部实例服务");
                         continue;
                     }
                     external = false;
@@ -939,7 +944,9 @@ public class GatewayService extends Service {
     static boolean portUp() {
         Socket s = new Socket();
         try {
-            s.connect(new InetSocketAddress("127.0.0.1", 7863), 150);
+            // 端口来自 config.json 的 listen（报告 #8）：写死 7863 时，面板里改了端口，
+            // 探针打的是一个没人监听的端口 → 看门狗判「僵死」并反复杀健康网关。
+            s.connect(new InetSocketAddress("127.0.0.1", GwConfig.port(appCtx)), 150);
             return true;
         } catch (Throwable t) {
             return false;
@@ -952,7 +959,8 @@ public class GatewayService extends Service {
     static boolean httpUp() {
         HttpURLConnection c = null;
         try {
-            c = (HttpURLConnection) new URL("http://127.0.0.1:7863/healthz").openConnection();
+            int port = GwConfig.port(appCtx);
+            c = (HttpURLConnection) new URL("http://127.0.0.1:" + port + "/healthz").openConnection();
             c.setConnectTimeout(2000);
             c.setReadTimeout(2000);
             return c.getResponseCode() > 0;

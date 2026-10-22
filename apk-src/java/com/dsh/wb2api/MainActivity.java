@@ -47,7 +47,15 @@ import java.util.regex.Pattern;
  * 面板的 api_key 存在 localStorage['wb2api.key']，首次加载后自动注入，免手输。
  */
 public class MainActivity extends Activity {
-    static final String PANEL_URL = "http://127.0.0.1:7863/panel/";
+    /**
+     * 面板地址：端口取自 config.json 的 listen（报告 #9）。
+     *
+     * 写死 7863 时，用户在面板里把 listen 改掉，WebView 就永远打不开（panelLoaded
+     * 恒 false，重试耗尽后停在空白页），而网关其实是好的。
+     */
+    static String panelUrl(android.content.Context c) {
+        return "http://127.0.0.1:" + GwConfig.port(c) + "/panel/";
+    }
     static final String LS_KEY = "wb2api.key";
 
     // ── 设计令牌（= 面板 :root / [data-theme="dark"]）
@@ -176,12 +184,12 @@ public class MainActivity extends Activity {
                 progress.setVisibility(View.GONE);
                 // 错误页同样用原 URL 回调本方法（bug B2）：WebView 的顺序是
                 // onReceivedError(failingUrl) → onPageFinished(failingUrl)，所以
-                // 只判 url.startsWith(PANEL_URL) 会把「加载失败」记成「加载成功」，
+                // 只判 url 是否以面板地址开头会把「加载失败」记成「加载成功」，
                 // tick 的 !panelLoaded 条件从此不成立 → 网关恢复后也不会自动重载，
                 // 只能手点「重载面板」。用一次性错误标记与之取与。
                 boolean hadError = pageHadError;
                 pageHadError = false;   // 每次加载结束复位
-                if (url == null || !url.startsWith(PANEL_URL) || hadError) {
+                if (url == null || !url.startsWith(panelUrl(MainActivity.this)) || hadError) {
                     panelLoaded = false;      // 让 tick 的下一拍再试
                     return;
                 }
@@ -225,7 +233,7 @@ public class MainActivity extends Activity {
             // 否则 WebView 会被导航出面板，而 panelLoaded 仍为 true → tick 不再拉回来，
             // 用户只能靠返回键硬退。
             @Override public boolean shouldOverrideUrlLoading(WebView v, String url) {
-                if (url == null || url.startsWith(PANEL_URL)) return false;  // 面板内部：照常
+                if (url == null || url.startsWith(panelUrl(MainActivity.this))) return false;  // 面板内部：照常
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
                 } catch (Throwable ignored) {}
@@ -384,7 +392,7 @@ public class MainActivity extends Activity {
             panelLoadAt = SystemClock.elapsedRealtime();
             loadTries++;
             pageHadError = false;   // 新一次加载：清掉上一次的错误标记（bug B2）
-            web.loadUrl(PANEL_URL);
+            web.loadUrl(panelUrl(this));
         }
 
         probePort();

@@ -431,7 +431,28 @@
 * **未修**：APK 壳里的 `GatewayService`（健康探针）与 `MainActivity`（面板 URL）仍写死
   7863 —— 改端口后 App 内面板打不开、看门狗误判。需要 Java 侧读配置，单独一版做。
 
-### 二十一、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 二十一、APK 壳端口跟随配置（补完 7863 那条）
+
+* **哪里有问题**：`GatewayService` 的健康探针（`portUp` / `httpUp`）与 `MainActivity`
+  的面板 URL 全部写死 `127.0.0.1:7863`，而面板配置页允许改 `listen`。
+* **会导致什么**：改端口后 —— App 内面板**永远打不开**（`panelLoaded` 恒 false，重试
+  耗尽停在空白页）；`watchLoop` 每 10s 判 `!httpUp()`，超过 45s 宽限就 `selfHeal`
+  → **反复杀进程重启健康网关**，界面上一直显示「自愈中」。用户看到的是「改了端口就废了」。
+* **做了什么**：
+  - 新增 `apk-src/java/com/dsh/wb2api/GwConfig.java`：从 `<filesDir>/gateway/config.json`
+    的 `listen` 解析端口（支持 `:7863` / `127.0.0.1:8080` / `[::1]:9000`），解析失败或
+    超出 1..65535 回落默认。**刻意不引 JSON 库**，用最小扫描只取**顶层** `listen`
+    键（跳过字符串内部与嵌套同名键）。
+  - `GatewayService`：加 `static volatile Context appCtx`（探针是 static 的），
+    `portUp`/`httpUp` 改用 `GwConfig.port(...)`；「端口已被占用」「外部实例服务」
+    两条提示文案也改成动态端口。
+  - `MainActivity`：`PANEL_URL` 常量 → `panelUrl(Context)` 方法，4 处用法同步
+    （**注意**：两处在 `WebViewClient` 匿名内部类里，必须写 `MainActivity.this`，
+    写 `this` 会编译失败）。
+  - 新增 `patches/gwconfig_selftest.java`：13 条断言离线自检（端口形态、超范围、
+    嵌套同名键不误取、数组内同名不取、值里含转义引号），已实跑 `ALL PASS`。
+
+### 二十二、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，
