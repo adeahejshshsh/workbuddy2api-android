@@ -219,7 +219,25 @@
 **未修（1 条）**：SSE 首帧无 `id` 时先写哨兵、后续真 id 不回填（报告 #6）——
 需要先定策略（缓冲首帧 vs 干脆不发 id），不适合顺手改。
 
-### 十二、11102 负缓存 UI（kk-cao `b7bcfb9f`）
+### 十二、出站标识去自证 + 官方 ID 形态（misakano7545 issue #51 集群）
+
+**这两个是「自报非官方客户端」的直接证据，优先级高于任何功能。**
+
+* **清掉 `wb2api-*` 自证前缀**（`d030e0fd`）—— 我们在**23 处**往上游发的会话/链路 ID 里
+  带了自己的品牌前缀（`wb2api-mp-…`、`wb2api-chat5-…`、`wb2api-adopt-…`、`wb2api-night-…`、
+  `wb2api-conv-…`、school 的 `wb2api-` + token …），还有两处上报文案直接叫「wb2api 自动化」。
+  全部换成官方形态的 ID / 中性文案。**这是最廉价也最致命的指纹**：上游只要看 ID 前缀就知道
+  不是官方客户端发的。
+* **ID 形态对齐真机**（`edd0dbae`）—— 消息级 ID 改为「前 12 hex = 毫秒时间戳 + 20 hex 随机」
+  （官方样本 `01a160b2b722740da9b34be7d909a6ed` 前 48 bit 解出 1792623687458 ms，且同会话
+  单调）；会话级改为 **UUID v4 带横线**。此前是纯随机 32 hex，同账号请求按时间排序是乱的 ——
+  「批量特征」本身可被聚类。新增 `session.NewConversationID()`。
+* **补 OpenAI Node SDK 头族**（`8f7366f2`）—— 官方桌面端是 Electron + `openai` SDK，
+  `X-Stainless-Lang/Package-Version/OS/Arch/Runtime/Runtime-Version/Retry-Count` 这批头是
+  SDK 自己加的，**缺失本身就是破绽**。按实测值补齐（js / 6.25.0 / Windows / x64 / node /
+  v22.21.1 / 0），并补 `X-Agent-Type: main` + `X-Agent-Intent: craft`。
+
+### 十三、11102 负缓存 UI（kk-cao `b7bcfb9f`）
 
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，

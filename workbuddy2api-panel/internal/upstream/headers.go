@@ -255,6 +255,20 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	// 的头组不一致，是 11140 风控的诱因之一。
 	// 显式 client_name="SaaS" 保持旧行为（只 X-Product，不设 X-IDE-*）。
 	if c.attributionClientName() != "SaaS" {
+		// OpenAI Node SDK 指纹头族（misakano7545 `8f7366f2`，两版官方真机对齐）：
+		// 官方桌面端是 Electron + `openai` SDK，这批头是 SDK 自己加的，**缺失本身就是
+		// 破绽**（真机有、我们没有）。取值照抄实测：js / 6.25.0 / Windows / x64 /
+		// node / v22.21.1 / Retry-Count 0（首跳恒 0）。
+		req.Header.Set("X-Stainless-Lang", "js")
+		req.Header.Set("X-Stainless-Package-Version", "6.25.0")
+		req.Header.Set("X-Stainless-OS", "Windows")
+		req.Header.Set("X-Stainless-Arch", "x64")
+		req.Header.Set("X-Stainless-Runtime", "node")
+		req.Header.Set("X-Stainless-Runtime-Version", "v22.21.1")
+		req.Header.Set("X-Stainless-Retry-Count", "0")
+		// 官方 chat 头组里的 agent 归因（另两处在 desktop 专家路径已设）。
+		req.Header.Set("X-Agent-Type", "main")
+		req.Header.Set("X-Agent-Intent", "craft")
 		req.Header.Set("X-Product", "SaaS")
 		req.Header.Set("X-IDE-Name", "WorkBuddy")
 		req.Header.Set("X-IDE-Type", "WorkBuddy")

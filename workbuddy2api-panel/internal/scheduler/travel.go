@@ -4,8 +4,8 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"log"
 	"time"
 
@@ -152,7 +152,7 @@ func (s *Scheduler) travelAdopt(ctx context.Context, a *auth.Auth) {
 		return
 	}
 	// 前置：解锁 first_buddy 任务（幂等；失败不阻塞，让 buddy/first 按既有错误路径暴露）。
-	if err := s.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli()), ""); err != nil {
+	if err := s.cfg.Upstream.ReportChatActivity(a, session.NewConversationID(), ""); err != nil {
 		log.Printf("travel %s: adopt preflight report: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 	} else {
 		if !sleepCtx(ctx, adoptReportGap) { // 给上游事件处理留时间（对齐脚本实测的 1.05s 口径）

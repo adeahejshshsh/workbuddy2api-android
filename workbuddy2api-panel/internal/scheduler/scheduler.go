@@ -5,8 +5,8 @@ package scheduler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -685,7 +685,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 拼上账号标识（bug #12）：原来是纯毫秒时间戳，46 个号里同毫秒处理 2 个以上
 		// 就拿到**同一个** conversation id —— 上游按 conversation 聚合活跃事件，
 		// 重复 id 可能被去重/合并，表现为"报了 N 个号，连登只涨了一部分"。
-		cid := fmt.Sprintf("wb2api-%d-%s", time.Now().UnixMilli(), logfmt.UID8(st.UID))
+		cid := session.NewConversationID()
 		if err := s.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
 			log.Printf("activity %s: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 			continue

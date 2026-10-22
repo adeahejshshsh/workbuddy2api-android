@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strings"
+	"time"
 )
 
 // ResolveConversationID 从请求体提取会话头族的 conversationId（snake/camel 双形态，
@@ -48,12 +49,32 @@ func ResolveConversationID(body []byte) string {
 // X-Request-ID / X-Conversation-Message-ID。crypto/rand 失败（理论上不可能）时回落
 // math/rand/v2 双 uint64 拼 32 hex——恒 32 hex、恒合法，可安全用作 B3 TraceId。
 func NewMessageID() string {
-	b := make([]byte, 16)
+	b := make([]byte, 10)
+	ms := time.Now().UnixMilli()
 	if _, err := cryptorand.Read(b); err == nil {
-		return hex.EncodeToString(b)
+		// 前 12 hex = 毫秒时间戳（misakano7545 `edd0dbae`，官方真机样本
+		// `01a160b2b722740da9b34be7d909a6ed` 前 48 bit 解出 1792623687458 ms，
+		// 正是该次发送时刻且同会话内单调）。纯随机 32 hex 会让同账号请求按时间
+		// 排序变乱 —— 标识形态本身就是指纹。
+		return fmt.Sprintf("%012x%s", ms, hex.EncodeToString(b))
 	}
-	// 熵源故障的极端兜底：仍保证 32 hex（fallbackID 不 panic、不空串）。
-	return fmt.Sprintf("%016x%016x", uint64(rand.Uint64())|1, rand.Uint64())
+	// 熵源故障的极端兜底：仍保证 32 hex、仍带时间位（fallbackID 不 panic、不空串）。
+	return fmt.Sprintf("%012x%020x", ms, uint64(rand.Uint64())|1)
+}
+
+// NewConversationID 生成会话级标识：UUID v4 带横线（36 字符），对齐官方
+// X-Conversation-ID 的实测形态（样本 `9c0dca10-1110-4bd0-9bc0-9dc9f3440631`）。
+//
+// 使用边界：**只给网关自己发起的会话**用（自动化任务上报体、面板批量动作）。
+// 真实用户会话必须透传客户端声明的 conversationId —— 伪造会破坏后台按对话聚合。
+func NewConversationID() string {
+	var u [16]byte
+	if _, err := cryptorand.Read(u[:]); err != nil {
+		return NewMessageID() // 熵源故障：退让成 32 hex，仍是合法 ID
+	}
+	u[6] = (u[6] & 0x0f) | 0x40 // version 4
+	u[8] = (u[8] & 0x3f) | 0x80 // variant RFC 4122
+	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
 }
 
 // deriveSalt 进程启动随机盐：对所有稳定聚合 ID 的纯派生统一加盐，使派生值无法
