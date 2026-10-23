@@ -613,6 +613,9 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 | `e7c42b9c` | 账号级冷却字段落盘惰性清洗 | 只取 `persist.go` 的落盘判据；配套的 `persist_guard_test.go` 依赖未移植的「损坏 state.json 要打日志」行为，未收 |
 | `e278bf3a` | 刷新后落盘有界重试 | 取 `SaveAtomicRetry` + 三处调用点；`RefreshTokenIfNeeded` 封装在未移植的 `280fee08` 里，handler 处改回我们的 `RefreshToken`（`NeedsRefresh` 已在上一行判定） |
 | `c7ce5fb8` | 字符串 content 里的图也识别 | `hasImagePart` 改用 `json.RawMessage` 逐条解析；用例里的 `imagePartIfPresent` 属未移植提交，断言已移除 |
+| `00fea446` | 透出上游付费层级 tier | 模型结构体加 `Tier` 字段 + 面板「Pro Only / 订阅优先」标签；同提交里的 `SupportsImagesSet` / `GenerationKind` 属别的提交，未收 |
+| `2089c262` | 网关 401（APISIX invalid_token 页）归 session 死亡 | 新增 `IsGatewayUnauthorized`（401 且无业务信封）；分类链插在 `sessionDeadMarkers` 之后；handler 侧走**连续阈值**才禁（一次就禁会在上游抖动时把整池打光） |
+| `56057810` | body 侧补 conversationRequestId | 只取 `injectConversationFields` 调用 + `conv_fields.go`；同提交的 `prepareBody` 三返回值重构属别的提交，保持我们单返回值签名 |
 
 顺带修两处**与移植无关**的定时炸弹：
 

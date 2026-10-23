@@ -31,6 +31,16 @@ func (p *Pool) Disable(uid, reason string) {
 // 即使账号已 disabled，计数仍累计并返回 false 前 N-1 次——但 keepalive 会跳过
 // disabled 号，实际只有「已 disabled 后复活且计数未清」这类场景才会走到这里。
 func (p *Pool) NoteSessionDead(uid string) bool {
+	return p.NoteSessionDeadWith(uid, sessionDeadReason)
+}
+
+// NoteSessionDeadWith 同 NoteSessionDead，但由调用方指定持久化 reason。
+//
+// 用途：网关层 401（APISIX `invalid_token`，无业务信封）与业务码 12153 是两种
+// 不同的死法，面板的「禁用原因」要把它们分开，否则运维看到 12153 会去查 refresh
+// 链路，而实际是 token 被边缘判无效、只能重登。计数/阈值语义与 12153 完全共用
+// （同一个 sessionDeadFails 计数，成功即由 ClearSessionDead 清零）。
+func (p *Pool) NoteSessionDeadWith(uid, reason string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
@@ -42,7 +52,7 @@ func (p *Pool) NoteSessionDead(uid string) bool {
 		return false
 	}
 	e.sessionDeadFails = 0
-	p.disableLocked(e, sessionDeadReason)
+	p.disableLocked(e, reason)
 	return true
 }
 

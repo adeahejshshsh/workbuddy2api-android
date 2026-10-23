@@ -650,3 +650,26 @@ func TestFetchModelsOverlaysV3ConfigCapabilities(t *testing.T) {
 		t.Errorf("Efforts=%v want low,high,max", mi.Efforts)
 	}
 }
+
+// 网关 401（APISIX invalid_token 页，无业务信封）必须判 session 死亡：
+// 落 ErrClient 会让死号永久留在池里，每个请求再打一遍、日志刷一串 401。
+// 夹具是 2026-10-17 实测原文（CN 站 /v2/chat/completions，token 被上游作废）。
+func TestClassifyGatewayUnauthorized(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+		want   ErrKind
+	}{
+		{401, "<html><head><title>401 Authorization Required</title></head><body><center><h1>401 Authorization Required</h1></center><hr><center>openresty</center><p><em>Powered by APISIX.</em></p></body></html>", ErrSessionDead},
+		{401, ``, ErrSessionDead},
+		{401, `Unauthorized`, ErrSessionDead},
+		// 带业务信封的维持既有语义：12153 仍是 session 死亡，其他业务码不劫持。
+		{401, `{"code":12153,"msg":"12153:refresh token is invalid"}`, ErrSessionDead},
+		{401, `{"code":1,"msg":"unknown business error"}`, ErrClient},
+	}
+	for _, c := range cases {
+		if got := Classify(c.status, c.body); got != c.want {
+			t.Errorf("Classify(%d,%q)=%v want %v", c.status, c.body, got, c.want)
+		}
+	}
+}

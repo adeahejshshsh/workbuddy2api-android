@@ -52,6 +52,29 @@ func TestNoteSessionDeadDisablesAtThird(t *testing.T) {
 	}
 }
 
+// TestNoteSessionDeadWithReason 网关 401 与 12153 共用阈值计数，但持久化 reason
+// 各自可辨：面板上「401 invalid token (re-login required)」与「12153 session dead」
+// 指向两种不同处置（前者只能重登，后者先查 refresh 链路）。
+func TestNoteSessionDeadWithReason(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	const reason = "401 invalid token (re-login required)"
+	if p.NoteSessionDeadWith("u1", reason) {
+		t.Fatal("第 1 次不应禁用")
+	}
+	// 计数与 NoteSessionDead 共用：再来一次（第 2 次）仍不禁用。
+	if p.NoteSessionDead("u1") {
+		t.Fatal("第 2 次不应禁用")
+	}
+	if !p.NoteSessionDeadWith("u1", reason) {
+		t.Fatal("第 3 次应禁用")
+	}
+	st, _ := p.Status("u1")
+	if !st.Disabled || st.Reason != reason {
+		t.Fatalf("got disabled=%v reason=%q want reason=%q", st.Disabled, st.Reason, reason)
+	}
+}
+
 // TestClearSessionDeadResetsCount 中间成功（refresh 成功）清计数，后续从 1 重新计。
 func TestClearSessionDeadResetsCount(t *testing.T) {
 	p := New("")

@@ -515,6 +515,7 @@ func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string
 		"description":          mi.Description,
 		"tags":                 mi.Tags,
 		"vendor":               mi.Vendor,
+		"tier":                 mi.Tier,
 		"is_default":           mi.IsDefault,
 		"supports_tool_call":   mi.SupportsToolCall,
 		"only_reasoning":       mi.OnlyReasoning,

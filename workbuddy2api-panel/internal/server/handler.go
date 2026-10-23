@@ -117,6 +117,11 @@ func (h *Handler) softCooldown() time.Duration {
 // 故固定 60s 防雪崩即可，不随 soft_rate 配置、也不参与软退避指数。
 const notFoundCooldown = 60 * time.Second
 
+// gatewayUnauthorizedReason 网关 401（无效 token）达阈禁用时写入 state.json 的 reason。
+// 与 12153 分开写：面板的「禁用原因」是运维第一手线索——看到 12153 会去查 refresh
+// 链路，而网关 401 是 token 被边缘直接判无效，只能重新登录。
+const gatewayUnauthorizedReason = "401 invalid token (re-login required)"
+
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
 // 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
 // 返回 2xx 也不带本标识，宿主据此可识别"假成功"。
@@ -355,6 +360,11 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 	}
 	if len(mi.Tags) > 0 {
 		entry["tags"] = mi.Tags
+	}
+	// 付费层级（issue #235）：官方 badge 原文，如 global「Pro Only」/ CN「订阅优先」。
+	// 只标注不过滤——层级是账号级属性，列表是全池共享的。
+	if mi.Tier != "" {
+		entry["tier"] = mi.Tier
 	}
 	if mi.Vendor != "" {
 		entry["vendor"] = mi.Vendor
@@ -1969,6 +1979,17 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
+		// 网关 401（APISIX HTML 授权页，无业务信封）同属 session 已死，但成因不同：
+		// 边缘节点抖动也会回 401 HTML，一次就禁会在上游抖一下时把整池打光（踩过）。
+		// 故与 12153 一样走**连续阈值**才禁；阈值内死号仍会被重试，但最多 3 次出池，
+		// 不再「每请求刷一遍 401」。
+		if uerr != nil && upstream.IsGatewayUnauthorized(uerr.Status, body) {
+			if h.cfg.Pool.NoteSessionDead(uid) {
+				log.Printf("WARN: [server] acct=%s disabled after %d consecutive gateway 401 (token invalid)",
+					logfmt.Label(uid, ""), pool.SessionDeadThreshold())
+			}
+			return
+		}
 		// 三振判死，不再单次 Disable：12153 也会被网络抖动/上游闪断触发，
 		// 单次即永久禁用等于把健康号误杀（历史上有过 13 个号全是误判）。
 		if h.cfg.Pool.NoteSessionDead(uid) {

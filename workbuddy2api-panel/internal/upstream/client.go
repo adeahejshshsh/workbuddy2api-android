@@ -408,8 +408,25 @@ func hasBusinessEnvelope(body string) bool {
 
 // IsWafBlocked 报告 403 响应是否为 WAF 拦截形态：HTTP 403 且 body 无业务信封
 // （无 `"code":`/`"msg":` JSON 字段——HTML 拦截页、空体、纯文本均命中）。
-// 带业务信封的 403（11140 request illegal / 11128 等）仍走既有分类链。
+// 带业务信封的 403（11140 request illegal / 11-128 等）仍走既有分类链。
 // 403 含 accountFault 文案的维持现状（ErrAccountFault），由 Classify 的规则序保证。
+// IsGatewayUnauthorized 报告 401 响应是否为**网关层授权拒绝页**（无业务信封）。
+//
+// 形态（2026-10-17 实测 CN 站 copilot.tencent.com /v2/*，token 被上游判无效时）：
+//
+//	HTTP/1.1 401
+//	WWW-Authenticate: Bearer realm="copilot", error="invalid_token", ...
+//	Server: APISIX/3.9.1
+//	<body><html><head><title>401 Authorization Required</title>…openresty…</body>
+//
+// 与 403 WAF 页同族：都是边缘（APISIX）拦下来的 HTML 页，没有 `{"code":…}` 信封。
+// 业务层 401 一定带信封（如 code 12153 offline session），走既有 sessionDeadMarkers。
+// 判为 ErrSessionDead 的依据：同一 token 在 /v3/config 仍 200、在 /v2/* 全 401，
+// refresh 端点回 invalid_grant ⇒ session 已被上游作废，只能重登。
+func IsGatewayUnauthorized(status int, body string) bool {
+	return status == http.StatusUnauthorized && !hasBusinessEnvelope(body)
+}
+
 func IsWafBlocked(status int, body string) bool {
 	return status == http.StatusForbidden && !hasBusinessEnvelope(body)
 }
@@ -557,6 +574,13 @@ func ParseRateReset(body string) (time.Time, bool) {
 //  10. IsWafBlocked —— 403 且无业务信封（HTML 拦截页/空体/纯文本）：APISIX WAF
 //     拦截形态。判在通用 4xx 兜底**之前**：此前该形态落 ErrClient → 只换号不罚 →
 //     连环 403。带业务信封的 403 已被上方各层捕获，走不到本层。
+//     10.5 IsGatewayUnauthorized —— 401 且无业务信封（APISIX HTML 授权拒绝页）：
+//     token 被上游判无效，refresh 亦回 invalid_grant ⇒ session 已作废。同上，落
+//     ErrClient 会让死号永久留在池里反复被选中，故归 ErrSessionDead。
+//  11. 11133 model_param_invalid / 11135 invalid_image_data —— 模型供应商拒绝参数、
+//     图片数据无效：确定性请求级 400（同 body 换号结果不变），判在内容策略/参数
+//     错误/通用 4xx 之前，避免落 ErrClient 把健康号轮转一遍。
+//  12. 内容策略/参数错误/其他 4xx —— 通用兜底。
 //  11. 内容策略/参数错误/其他 4xx —— 通用兜底。
 func Classify(status int, body string) ErrKind {
 	// 11102「该后端无此模型」须最先判：它是「模型在后端不存在」的确定性答复，语义比
@@ -592,6 +616,12 @@ func Classify(status int, body string) ErrKind {
 		if m == "12153" && status != http.StatusUnauthorized && status != http.StatusForbidden {
 			continue
 		}
+		return ErrSessionDead
+	}
+	// 网关 401（APISIX/openresty HTML 页，无业务信封）：token 被上游判无效。
+	// 落 ErrClient（旧行为）的代价是「只换号不罚」——死号永远留在池里，每个请求
+	// 再打一遍、日志刷一串 401（2026-10-17 现场：18 个号里 16 个已死）。
+	if IsGatewayUnauthorized(status, body) {
 		return ErrSessionDead
 	}
 	// 通道校验失败必须先于 accountFault 判（上游 PR #233）：11‑-128 的 msg 与
@@ -663,6 +693,14 @@ func Classify(status int, body string) ErrKind {
 	// 带信封的 403 在上方各层已有权威分类，不受影响。
 	if IsWafBlocked(status, body) {
 		return ErrWafBlock
+	}
+	// 网关 401（APISIX/openresty HTML 页，无业务信封）：token 被上游判无效。
+	// 实测同 token 在 /v3/config 仍 200、在 /v2/* 全 401，refresh 回 invalid_grant
+	// ⇒ session 已被作废，只能重登。落 ErrClient（旧行为）的代价是「只换号不罚」：
+	// 死号永远留在池里，每个请求都再打一遍、日志里刷出一串 401（2026-10-17 现场：
+	// 18 个号里 16 个已死，一次请求打空一整排）。
+	if IsGatewayUnauthorized(status, body) {
+		return ErrSessionDead
 	}
 	// 图片格式/数据错误是确定性的请求级错误：同 body 换账号结果不变，直接
 	// fail-fast，避免把健康账号轮转一遍后仍把最终 503 返回给客户端。
@@ -1324,6 +1362,9 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		ctx = context.Background()
 	}
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	// body 侧会话字段（issue #51）：把本轮 ID 同时写进消息体，与出站头保持头体一致
+	// （官方桌面端头与体都带 conversationRequestId）。见 conv_fields.go。
+	prepared = injectConversationFields(prepared, meta.ConversationRequestID)
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
@@ -1399,19 +1440,24 @@ type ModelInfo struct {
 	DefaultEffort string   // reasoning.defaultEffort（新模型键）或 reasoning.effort（老模型键）；空=未返回
 
 	// 模型目录全字段（models-full-fields）：
-	Description        string   // descriptionZh 中文描述
-	Credits            string   // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
-	Tags               []string // tags 模型标签（含 badge:限时免费 等）
-	Vendor             string   // vendor 厂商标识
-	IsDefault          bool     // isDefault 是否默认模型
-	SupportsReasoning  bool     // supportsReasoning 是否支持推理
-	SupportsToolCall   bool     // supportsToolCall 是否支持工具调用
-	OnlyReasoning      bool     // onlyReasoning 是否纯推理模型
-	SupportsImages     bool     // 顶层 supportsImages（多模态能力，透出到 /v1/models）
-	MaxAllowedSize     int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
-	CanDisableThinking bool     // reasoning.canDisableThinking：思考可关（off 档可用）
-	ReasoningEffort    string   // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
-	ReasoningSummary   string   // reasoning.summary 推理摘要模式（如 "auto"）
+	Description string   // descriptionZh 中文描述
+	Credits     string   // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
+	Tags        []string // tags 模型标签（含 badge:限时免费 等）
+	// Tier /v3/config data.modelTiers 的官方标识文案（global「Pro Only」/ CN
+	// 「订阅优先」），空=不受限。只透文案不给布尔：海外是 Pro 专属（免费号调不通），
+	// 国内只是「优先调度」（能用，排队靠后），同一个 requiredUserType 两种语义，
+	// 一刀切成「不可用」会把国内这三个模型错标成禁选（issue #235）。
+	Tier               string
+	Vendor             string // vendor 厂商标识
+	IsDefault          bool   // isDefault 是否默认模型
+	SupportsReasoning  bool   // supportsReasoning 是否支持推理
+	SupportsToolCall   bool   // supportsToolCall 是否支持工具调用
+	OnlyReasoning      bool   // onlyReasoning 是否纯推理模型
+	SupportsImages     bool   // 顶层 supportsImages（多模态能力，透出到 /v1/models）
+	MaxAllowedSize     int64  // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
+	CanDisableThinking bool   // reasoning.canDisableThinking：思考可关（off 档可用）
+	ReasoningEffort    string // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
+	ReasoningSummary   string // reasoning.summary 推理摘要模式（如 "auto"）
 
 	// 优惠（modelPromotions，/v3/config data.modelPromotions）：Credits 是**牌价**
 	//（转正后基准倍率），Promo* 是当前生效的限时优惠——面板据此显示「生效价 +
@@ -1821,6 +1867,45 @@ func promoActive(p *v3ModelPromotion, now time.Time) bool {
 	return true
 }
 
+// v3ModelTier /v3/config data.modelTiers 单条付费层级（issue #235 实测两域各一条）：
+// 一层级带一组 modelIds + 官方标识文案。只取 label —— requiredUserType 两域同值
+// （"standard"）语义却不同，不能拿来判「能不能调」，判了就会误标。
+type v3ModelTier struct {
+	Enabled  bool     `json:"enabled"`
+	Priority int      `json:"priority"`
+	ModelIDs []string `json:"modelIds"`
+	Badge    *struct {
+		Label string `json:"label"`
+	} `json:"badge"`
+}
+
+// applyModelTiers 给受限模型挂官方标识文案（同模型多条命中取 priority 最高）。
+// 只标注不过滤：一次 /v1/models 是全池共享的，而层级是账号级属性，在列表接口上
+// 没有「当前账号」，硬过滤会按池里最差的号降级掉所有人的选择。
+func applyModelTiers(out map[string]ModelInfo, tiers []v3ModelTier) {
+	if len(tiers) == 0 || len(out) == 0 {
+		return
+	}
+	best := map[string]int{}
+	for _, t := range tiers {
+		if !t.Enabled || t.Badge == nil || strings.TrimSpace(t.Badge.Label) == "" {
+			continue
+		}
+		for _, id := range t.ModelIDs {
+			mi, ok := out[id]
+			if !ok {
+				continue // 目录外模型（如已下架）不挂
+			}
+			if p, seen := best[id]; seen && p >= t.Priority {
+				continue
+			}
+			best[id] = t.Priority
+			mi.Tier = t.Badge.Label
+			out[id] = mi
+		}
+	}
+}
+
 // applyModelPromotions 把当前生效的优惠挂到目录条目：同模型多条命中取 priority
 // 最高（实测 glm-5.2 白天 badge-only(50) 与夜间五折(100) 靠 priority+daily 双轨
 // 切换）。无 discount 对象的条目也挂标签/说明（错峰类），PromoFactor 留 nil。
@@ -2033,6 +2118,10 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 				} `json:"ModelTrialBanner"`
 			} `json:"productFeaturesConfig"`
 			ModelPromotions []v3ModelPromotion `json:"modelPromotions"`
+			// ModelTiers 付费层级表（issue #235）：海外「Pro Only」= 专业版专属
+			// （免费号选了就报错），国内「订阅优先」= 仅排队优先。清单与文案都在这，
+			// 模型目录本身不会按账号权限裁剪。
+			ModelTiers []v3ModelTier `json:"modelTiers"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -2081,6 +2170,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	// 倍率，如 hy4-preview-f 的 x0.29），而 WorkBuddy 客户端显示的是生效价（试用/
 	// 折扣窗口内 factor 打折）——面板据此展示「生效价 + 标签 + 牌价」。
 	applyModelPromotions(out, env.Data.ModelPromotions)
+	applyModelTiers(out, env.Data.ModelTiers)
 
 	if len(out) == 0 {
 		return nil, fmt.Errorf("v3/config returned empty models")
