@@ -16,6 +16,122 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
+// schedFor 只让 cfg 显式配了小时数的那几类参与：New 会给未配的补默认整点
+// （activity 10 点 / keepalive 22 点等），不静音就会把断言撑满与用例无关的类别。
+func schedFor(cfg Config) *Scheduler {
+	if len(cfg.CheckinHours) == 0 {
+		cfg.CheckinDisabled = true
+	}
+	if len(cfg.TravelHours) == 0 {
+		cfg.TravelDisabled = true
+	}
+	if len(cfg.ActivityHours) == 0 {
+		cfg.ActivityDisabled = true
+	}
+	if len(cfg.KeepaliveHours) == 0 {
+		cfg.KeepaliveDisabled = true
+	}
+	if len(cfg.BlackcatHours) == 0 {
+		cfg.BlackcatDisabled = true
+	}
+	if len(cfg.GrowthHours) == 0 {
+		cfg.GrowthDisabled = true
+	}
+	return New(cfg)
+}
+
+// 启动补跑（missedToday）：今天时点全过 → 补；今天还有更晚的时点 → 不补。
+func TestMissedToday(t *testing.T) {
+	cases := []struct {
+		name string
+		now  time.Time
+		cfg  Config
+		want []taskKind
+	}{
+		{"今天的时点已过 → 补", time.Date(2026, 10, 15, 10, 0, 0, 0, time.Local),
+			Config{CheckinHours: []int{9}}, []taskKind{taskCheckin}},
+		{"今天还有更晚的时点 → 不补（当天照常会跑，补跑是多余的）", time.Date(2026, 10, 15, 10, 0, 0, 0, time.Local),
+			Config{CheckinHours: []int{9, 21}}, nil},
+		{"时点还没到 → 不补", time.Date(2026, 10, 15, 10, 0, 0, 0, time.Local),
+			Config{CheckinHours: []int{11}}, nil},
+		{"禁用任务不进候选", time.Date(2026, 10, 15, 10, 0, 0, 0, time.Local),
+			Config{CheckinHours: []int{9}, CheckinDisabled: true, TravelHours: []int{8}}, []taskKind{taskTravel}},
+		{"多类一起补", time.Date(2026, 10, 15, 10, 0, 0, 0, time.Local),
+			Config{CheckinHours: []int{9}, TravelHours: []int{8}, KeepaliveHours: []int{7}, GrowthHours: []int{11}},
+			[]taskKind{taskCheckin, taskTravel, taskKeepalive}},
+		{"跨年：12/31 的时点已过 → 补", time.Date(2026, 12, 31, 10, 0, 0, 0, time.Local),
+			Config{CheckinHours: []int{1}}, []taskKind{taskCheckin}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := schedFor(c.cfg).missedToday(c.now)
+			if len(got) != len(c.want) {
+				t.Fatalf("missed=%v want %v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("missed=%v want %v", got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// nextWake 与 missedToday 必须共用同一套「有哪些任务族」口径：新增任务族漏改一处，
+// 排程或补跑会静默少一类（正是「同一件事两套纪律」那类缺口）。
+func TestEnabledSlotsSingleSourceOfTruth(t *testing.T) {
+	now := time.Date(2026, 10, 15, 10, 0, 0, 0, time.Local)
+	all := Config{
+		CheckinHours: []int{9}, TravelHours: []int{8}, ActivityHours: []int{7},
+		KeepaliveHours: []int{6}, BlackcatHours: []int{5}, GrowthHours: []int{4},
+	}
+	if got := New(all).enabledSlots(now); len(got) != 6 {
+		t.Fatalf("启用任务族应为 6 类，got %d: %v", len(got), got)
+	}
+	if got := New(all).missedToday(now); len(got) != 6 {
+		t.Fatalf("时点全过时 6 类都应补跑，got %v", got)
+	}
+}
+
+// Run 启动时必须真的把「今天已过时点」的任务补一轮（不只是算出来）。
+func TestRunCatchesUpMissedSlots(t *testing.T) {
+	f := &fakeUpstream{}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+
+	// 取「今天已经过去」的整点：now 的上一小时（00:xx 时取 0 点，其 00:00 也已过）。
+	past := time.Now().Hour() - 1
+	if past < 0 {
+		past = 0
+	}
+	s := New(Config{
+		Pool: p, Upstream: up, CheckinHours: []int{past},
+		TravelDisabled: true, ActivityDisabled: true, KeepaliveDisabled: true,
+		BlackcatDisabled: true, GrowthDisabled: true,
+	})
+	old := wakeupGraceDelay
+	wakeupGraceDelay = 0 // 测试不等启动宽限
+	defer func() { wakeupGraceDelay = old }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	// 补跑在 Run 进入主循环之前派发；命中即退出，不等固定时长。
+	deadline := time.Now().Add(10 * time.Second)
+	for f.checkinCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if n := f.checkinCalls.Load(); n == 0 {
+		t.Fatal("启动补跑未触发签到（今天的时点已过，应补一轮）")
+	}
+}
+
 func TestNextFire(t *testing.T) {
 	loc := time.Local
 	now := time.Date(2026, 7, 27, 10, 0, 0, 0, loc)
