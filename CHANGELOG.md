@@ -2,9 +2,22 @@
 
 ## v1.35.2（当前）
 
-**本版 = 429 冷却对齐上游权威重置时刻（线上实测）+ DSH 身份句品牌词改零宽形态 + 发布脚本修复。**
+**本版 = 23 条上游移植 + 两轮代码审查（47 条缺陷）+ 429 冷却修复 + 品牌词改零宽形态。**
 
-三件事按影响排序：
+六个部分按影响排序（一～三为本仓自有修复，四～六为移植与审查）：
+
+**四、上游 misakano7545 移植（23 条）**：model_fallback（6004 限流同账号改道等价模型）、
+余额趋势视图、`/v1/search` 与 `/v1/fetch`、models.aliases、静态 API Key 账号（精简版）、
+dump 诊断开关、启动补跑去重、账号级摊开按计划时刻、实时繁忙度、11148/11133 请求级错误、
+网关 401 归 session 死、缓存槽按对话分配、tier 透出、旅行端点、scheduler 时点枚举重构等。
+
+**五、代码审查 19 条**：重编码丢精度（`UseNumber` + 不转义 HTML）、热更丢表、
+空 for 循环、跳过名单键不一致、在途名额缺失、`Hits` 被清零等。
+
+**六、应用缺陷审查 28 条**：search/fetch nil panic、夜猫子漏 disabled 门控、
+摊开只排序不等待、降级用量记错模型、`cmd/credit` 企业号显示 0、别名流式回显等。
+
+前三条为本仓自有修复：
 
 1. **429 冷却被 2h 封顶截断**（真 bug，直接导致「冷却过了还是 6004」）：上游说 10 小时后
    恢复，网关只认 `soft_rate_max`=2h。拆出 `soft_reset_max`（默认 24h）专管权威墙钟，
@@ -69,6 +82,147 @@
   补同名条目；已推上去的那份用 `git gc --prune=now` 清掉游离提交。
 * **`AGENT.md` 记录发布规矩**：每次改动都必须提交（默认档只推源码），Release 只在需要
   可安装包时才发。
+
+### 四、上游 misakano7545 移植（第一批，2026-10-23）
+
+按「0.1 必须跟 / 0.2 建议跟」清单逐条 cherry-pick，冲突逐个手工适配（我们的树有 24 批
+独立修复，直接套补丁会互相踩）。本批已落地 4 条，均带测试：
+
+| 提交 | 内容 | 落地情况 |
+|---|---|---|
+| `02639df2` | `stop` 字符串形态归一为数组 | 全量移植（函数 + 用例）。上游把 stop 定义成 `[]string`，客户端发字符串即 400 `11101`，网关判 ErrBadParams 但**仍轮换** → 全池试完报 503 |
+| `e7c42b9c` | 账号级冷却字段落盘惰性清洗 | 只取 `persist.go` 的落盘判据；配套的 `persist_guard_test.go` 依赖未移植的「损坏 state.json 要打日志」行为，未收 |
+| `e278bf3a` | 刷新后落盘有界重试 | 取 `SaveAtomicRetry` + 三处调用点；`RefreshTokenIfNeeded` 封装在未移植的 `280fee08` 里，handler 处改回我们的 `RefreshToken`（`NeedsRefresh` 已在上一行判定） |
+| `c7ce5fb8` | 字符串 content 里的图也识别 | `hasImagePart` 改用 `json.RawMessage` 逐条解析；用例里的 `imagePartIfPresent` 属未移植提交，断言已移除 |
+| `00fea446` | 透出上游付费层级 tier | 模型结构体加 `Tier` 字段 + 面板「Pro Only / 订阅优先」标签；同提交里的 `SupportsImagesSet` / `GenerationKind` 属别的提交，未收 |
+| `2089c262` | 网关 401（APISIX invalid_token 页）归 session 死亡 | 新增 `IsGatewayUnauthorized`（401 且无业务信封）；分类链插在 `sessionDeadMarkers` 之后；handler 侧走**连续阈值**才禁（一次就禁会在上游抖动时把整池打光） |
+| `56057810` | body 侧补 conversationRequestId | 只取 `injectConversationFields` 调用 + `conv_fields.go`；同提交的 `prepareBody` 三返回值重构属别的提交，保持我们单返回值签名 |
+| `0eb9e37d` | **model_fallback：6004 限流时同账号改道等价模型** | 本轮最大一条。取 `curModel` / `fallbackTried` / `fallbackTo` / `applyFallback` 全套 + 两处调用点（选不到号时先降级、6004 时同账号换模型重试）。**剔掉**同块里的 busy-wait（issue #46，我们没这套 helper）与 hard-credit 细化；6 条用例全过，含「全池该模型冷却时降级而非报 503」与「A→B→A 不循环」 |
+| `2892e6a8` | 诊断开关 `WB2A_DUMP_UPSTREAM` | 落上游原始报文（`upstream.dump_dir`，默认空 = 不落盘，正文含用户提示词）。与 `DNSServers` 字段并存 |
+| `575611b5` | `upstream.dump_max_bytes` | dump 请求体上限可配（issue #44），干净合入 |
+| `e4ef71a7` | `models.aliases` 模型名映射 | 手工实现（未整条 cherry-pick）：`config.Models.Aliases` + `livecfg.NormalizeModelAliases`（键归一化小写、裸名登记两域、非法条目丢弃）+ handler 在 **hidden 检查之前**解析别名并重写出站 body 的顶层 `model`。非流式响应把 `model` 覆写回客户端原发名（严格校验的客户端不报错）。**流式帧的回显未做**（要穿到 SSE 中继里，单独一趟） |
+| `44219be4` | `POST /v1/search` 官方联网检索透传 | 新文件 `server/search.go` + `upstream/search.go`；只补一条路由 + 一个 `requestLevelFailFastKind` helper（该 helper 原本在未移植的 images.go 里）。搜索用例里「X-Conversation-ID 必发」那条断言按本仓口径改成只验 RequestID/MessageID（我们不伪造会话 ID） |
+| `3d5900fd` | `POST /v1/fetch`（DSH 网页抓取） | 依赖 search 落地的 `WebFetch`/`searchAttempts`，本次一并补齐；路由挂在 `/v1/search` 之后 |
+| `2737aed3` | 模型与档位显示官方实时繁忙度 | 取 `internal/upstream/modelbusy.go` + 面板模型列表繁忙度列；**剔掉**同块的出图模型（`GenerationModels` 属未移植的 images 提交），并把该用例一并去掉。繁忙度查询用与目录同一批账号（`cnAcct`/`globalAcct`），不额外选号；查不到就不填字段、不编造 |
+| `0b6fe19a` | 账号级摊开改按计划时刻顺序执行 | 用 `spreadPlan`/`plan.order`/`plan.wait` 替换我们原来的「串行延迟」（`accountDelay`）；偏移按「任务｜uid｜日」哈希，当天确定性、重启不重排。新增 `schedule.account_spread_minutes` + `account_spread_min_gap_seconds` 两个配置项；五个任务函数加 `spread bool` 参数（排程 true / 面板手动 false，手动点击不该等半小时）；补 `cst.Day`、`spreadEnabled` |
+| `e1735298` | **余额趋势视图** | 新包 `internal/balance`（643 行 + 658 行测试，原样入库）+ 面板新视图。手工合并点：`scheduler.Config.Balance` 采样钩子挂在我们自己的 `RunBalanceRefreshNow` 循环里；`app.js` 只追加视图代码（752 行）并补 `TITLES`/`go()` 路由；`index.html` **不取对方整份**（会带进一套不同的配置表单版本），只加导航 + `<section id="view-balhist">` + 余额趋势专用样式 |
+| `44de7912` | scheduler 重构：`enabledSlots` 统一时点枚举 | 把「有哪些任务族 / 下次何时跑」收敛成一个口径，`nextWake` 与 `missedToday` 共用。我们这版没有 `nextFireKind`/`JitterMinutes`，改用现有 `nextFire`（无抖动，行为不变）；另补 `taskKind.String()` 供落盘去重记录用 |
+| `2999a8d2` | 启动补跑同一天只跑一轮 | `RunStampFile`（与 state.json 同目录的 `task-runs.json`）+ `runstamps.go`。没有它，每次重启都会把当天已过的时点重打一遍上游 |
+| `cce39c30` | 按号旅行端点 `POST /panel/api/accounts/{uid}/travel` | 只取端点 + `RunTravelNowFor`；`travelOne` 我们这版带 ctx，按号入口用 `context.Background()`（面板点击没有请求上下文可继承）。同提交带的 `task_realm_test.go` 依赖未移植的 `globalTaskWriteMessage`，未收 |
+| `f9b2f07a` | 只发 user_id 的客户端也按对话分配缓存槽 | `ChatMeta.CacheKeyID` 新增；`prepareBody` 多带一个 cacheKeyID 参数（sessKey 为空时用 `session.DeriveCacheKey(body)` 内容派生键）。修 issue #5「glm-5.3 大上下文命中率掉到 0.2%」 |
+| `79a70ef8` | 11148 工具配对断裂 → 400 fail-fast | 新增 `ErrToolMismatch` + 分类（**判在 5xx 兜底之前**，上游会套 5xx 外壳）+ handler fail-fast 分支 + hint「开新会话」。此前落 ErrClient 会全池轮转、每个健康号白记一笔连败，末端还把确定失败伪装成 503 |
+| `c587c090` | config.example 守卫 + model_fallback 文档 | `pool.model_fallback` 进示例配置；新增 `TestConfigExampleIsValid`（守卫示例 JSON 合法 + 新键可见）。同提交的 brand_scope 断言随未移植字段一并去掉 |
+
+顺带修两处**与移植无关**的定时炸弹：
+
+* `TestArchivePruneHonorsSize` 把文件名日期写死成 `2026-09-2x`，真实日期越过 30 天保留期后
+  会被「年龄」先清空，断言却还在怪大小裁剪 —— 10-23 之后每天必红。改为按今天生成文件名。
+* `TestCheckinDoneExpiredYesterday` 见前文（`cst.DayKey`）。
+
+**静态 API Key 账号（`5ce1a2f4`）—— 精简版已落地**：不碰成长任务链，只做
+「建号 / 选号 / 额度」+ 任务入口门控。改动清单：
+`auth.IsAPIKey()`（`ck_`/`pt_` 前缀，落盘形态里唯一稳定判据）+ `UsesEnterpriseBilling`
++ `SupportsPersonalGrowth`/`SupportsPersonalEndpoints`；`NeedsRefresh` 对静态 Key 恒 false
+（refresh 只认 OAuth 设备流，否则会被当坏号冷却换号）；`pool.Status.APIKey` 字段；
+额度查询分流到企业口径端点（个人 `get-user-resource` 对静态 Key 恒返回空 Accounts）；
+`POST /panel/api/accounts/add_apikey`（先拿企业端点探测有效再落盘，坏 Key 不入池）；
+调度器 5 处门控从 `IsEnterprise()` 换成 `SupportsPersonalGrowth()`；面板任务类入口统一
+`accountByUIDForGrowth` → 400「该账号没有个人账号身份」；app.js 行内打「API Key」标记
+并隐藏签到/任务按钮。
+
+**未做的部分**：面板「添加 API Key」的图形入口（需要 index.html 新标签页），
+目前用接口加号：
+
+```bash
+curl -X POST http://127.0.0.1:7863/panel/api/accounts/add_apikey \
+  -H 'Authorization: Bearer <面板 api_key>' -H 'Content-Type: application/json' \
+  -d '{"access_token":"ck_xxx","nickname":"我的 key"}'
+```
+
+**（原评估，保留备查）静态 API Key 账号整条 cherry-pick 评估**：22 个文件冲突，核心不是「加个字段」，
+而是它与**成长任务重构**（PR #104：`globalTaskWriteMessage`、`ClaimReward` 四返值、
+`taskProgressReached`）绑在一起；只并静态 Key 那一半，任务中心会编译不过，全并则等于把
+整个任务链一起移植。静态 Key 账号本身适合独立开工：`auth.IsAPIKey`（ck_/pt_ 前缀）+
+`SupportsPersonalGrowth`/`SupportsPersonalEndpoints` 门控 + 面板建号端点 + 企业计费口径。
+
+**未落地（依赖我们还没移植的机制，强行套会编译不过）**：
+
+| 提交 | 阻塞原因 |
+|---|---|
+| `0eb9e37d` `f1eca4ad` `c587c090` model_fallback | handler 冲突块里混着 admin audit / busy-wait(issue #46) / hard-credit 细化，整块取会引入不存在符号；需按我们的 chat 循环单独改写 |
+| `5ee3b8fe` reserve_credits 兜底 | 依赖 `reserveBlocked` / `modelFreeOf`（未移植） |
+| `065b088a` 品牌词作用域 | 与我们刚做的 ZWSP 改写叠加，需先定作用域语义 |
+| `56057810` conversationRequestId | 与 headers.go 现有 trace id 逻辑耦合 |
+| `79a70ef8` `280fee08` `2089c262` `2999a8d2` `3fb80272` `f9b2f07a` `54e9862b` `00fea446` `3d5900fd` `58262f31` `e1735298` `cce39c30` 等 | 逐个适配中，见 `.tmp/analysis/misakano-gap-20261023.md` |
+
+### 五、代码审查 19 条（CODE-REVIEW-BUGS）
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| 1 | `conv_fields.go` 用 `json.Unmarshal`+`Marshal` 重编码整份 body：>2^53 整数丢精度、`< > &` 被转义 | 改 `UseNumber` 解码 + `marshalNoEscape`（与 payload/cache_key 同口径） |
+| 2 | handler 的别名/降级改写同款问题 | 同上，并在 server 包加 `marshalNoEscape` |
+| 3 | `saveConfig` 的 `live.Store` 漏 `ModelFallback`/`ModelAliases`：**保存任意配置后降级表被清空** | 补两个字段 |
+| 4 | `restartRequiredFields` 漏 8 个启动期装配键 | 补 `pool.model_fallback` / `models.aliases` / `prompt.identity_override_*` / `upstream.dump_*` / `schedule.account_spread_*` |
+| 5 | 面板出图模型段是**空 for 循环**，`measured` 无人读 | 删空循环与死映射（出图模型本仓未移植），留注释说明 |
+| 6 | 跳过名单键不一致：`skipNote` 用生效码、`skipReset` 用原始码 → 失败计数永不清零 | 统一用 `effectiveTaskCode` |
+| 7 | `/v1/search`、`/v1/fetch` 不占在途名额 | 补 `Pool.Acquire`/`Release` |
+| 8 | `CooldownSoftForModel` 整体覆盖条目 → `Hits` 清零，11102 的 6h→12h→24h 被打回 6h | 继承 `Hits` 与 `AuditOnly` |
+| 9 | 全冷却兜底路径不查 `modelOffed` | 兜底补判据 |
+| 10 | `healthy()` 不看 `modelOffed` | **不改**，补注释说明为何：模型维度门控属 `healthyForModel`；把「关了某个模型」当账号不健康会让 `/healthz` 在只关一个模型时就报无可用账号 |
+| 11 | `doJSON` 的 ≥400 分支不解析 `Retry-After` | 补 `ParseRetryAfter`，与 `ChatStreamContext` 同口径 |
+| 12 | `balance.flush` 用固定 `.tmp` 名，并发互相覆盖 | 改 `auth.ReplaceAtomic`（唯一 tmp + fsync） |
+| 13 | `modelAlias` 每请求重建归一化表 | `sync.Once` 缓存 |
+| 14 | `mergeV3Routes` 无调用点 | **保留**：代码内注释明确「供日后恢复多路探测」，不是遗留垃圾 |
+| 15 | `mustJSONString` 无调用点 | 删除 |
+| 16 | `readFile` 无调用点 | **保留**：`regression_20261021_test.go` 在用（删了测试编译不过） |
+| 17 | `PickExcluding` / `PickExcludingForModel` 无生产调用点 | 保留（pool 测试覆盖在用） |
+| 18 | `RecordModelRateLimitAudit` 无调用点 | 保留（6004 无重置时间时的展示台账入口，删除会改变面板语义） |
+| 19 | `IsWafBlocked` 的文档挂在 `IsGatewayUnauthorized` 上方 | 文档归位 |
+
+### 六、应用缺陷审查 28 条（代码审查报告-应用缺陷）
+
+**P0（6 条，全部已修）**
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| 1 | `/v1/search`、`/v1/fetch` 全部抢不到在途名额时 `lastErr` 为 nil → 末尾解引用 panic | `Acquire` 失败时写 `lastErr` |
+| 2 | 夜猫子不过滤 `disabled`（其余任务族都有这道门） | 补 `st.Disabled` + `includeDisabledInTasks` |
+| 3 | 活跃上报/夜猫子只排序不 `plan.wait` → 摊开配置对它们无效 | 两处改用 `plan.wait` |
+| 4 | 11133 未归请求级 → 全池轮转 + 误罚号 + 末端 503 | 新增 `ErrModelParamInvalid` + 分类 + handler fail-fast 400 |
+| 5 | `ErrUpstreamBusy`/`ErrChannelRefused` 仍轮转，与「换号无用」矛盾 | 两种 kind 直接 `break` |
+| 6 | 模型开关按第一个冒号剥前缀，`qwen:7b` 被截成 `7b` | 只认 `cn:`/`global:` |
+
+**P1（15 条，全部已修）**
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| 7 | 余额趋势「刷新」与时间窗无事件绑定 | 补 `onclick`/`onchange` |
+| 8 | 柱状图 `<title>` 裸挂 `<svg>`，悬浮提示错乱 | 包进 `<g>` |
+| 9 | `request_metrics` 失败时丢弃已取回的 `request_logs` | 判据改「metrics 明确说关闭才算关闭」 |
+| 10 | `balance.flush` 失败不恢复 `dirty`，采样批次丢失 | 失败回置 `dirty` |
+| 11 | 启动补跑用宿主本地时间而非 CST | 改 `cst.Now()` |
+| 12 | `model_fallback` 被误报需重启；`models.aliases` 的 live 写入是死代码 | 两个表都改读 live，移出重启清单 |
+| 13 | 降级后用量/成本仍记在原模型名下 | `modelRate`/`delta.Model`/`NoteModelCost` 改用 `curModel` |
+| 14 | global 窄表形态下面板误报「上游未返回可用模型」 | 回落到 `FetchGlobalModels` 的裸名列表 |
+| 15 | 面板单号签到未跳过静态 API Key | 补 `IsAPIKey()` 门控 |
+| 16 | `cmd/signin` 对 global 账号必然 FAIL | 补 global 门控（SKIP） |
+| 17 | `cmd/credit` 企业/API Key 显示 0；不认扁平形 auth 文件 | 补企业口径端点 + `UnmarshalJSON` 兼容两种形态 |
+| 18 | 按号旅行缺企业上下文门控、无账号级互斥 | 补 `skipBehaviorTask` + `tryLockAccount` |
+| 19 | 任务中心扫描/券码/单号任务缺企业上下文门控 | 三处补 `IsEnterpriseSession()` |
+| 20 | 补跑标记只在启动补跑写，正常排程不写 → 重启重跑 | 每批跑完即 `markRan` |
+| 21 | 归档容量提示「0=不限」与实现（<=0 → 100MiB）矛盾 | 文案改为「留空 = 默认 100 MB」 |
+
+**P2（7 条，全部已修）**
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| 22 | 14003 轮转耗尽落 503 `no_healthy_account` | 末端补 `ErrModelBusy` 分支（503 + `model_busy`） |
+| 23 | `balance.Stop` 未 `Start` 时永久阻塞；`Start` 不幂等 | `started` 原子标记 + `CompareAndSwap` |
+| 24 | `versionedIndex` 包级单例，多 Panel 会串版本 | 缓存移到 Panel 实例 |
+| 25 | 别名回显只覆盖非流式 | 新增 `WithModelEcho` 选项，SSE 帧同步改写 |
+| 26 | `doJSON` 的 HTTP 错误分支不填 `HTTPStatus` | 补 |
+| 27 | 按号旅行 skip 文案称「暂停」会被跳过，实际不会 | 文案纠正 |
+| 28 | `ReviveJobService` 日志写死 7863 | 改 `GwConfig.port(ctx)` |
 
 ### 测试
 
@@ -601,147 +755,6 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，
 多条折叠成一条汇总，模型名放 title。
-
-### 四、上游 misakano7545 移植（第一批，2026-10-23）
-
-按「0.1 必须跟 / 0.2 建议跟」清单逐条 cherry-pick，冲突逐个手工适配（我们的树有 24 批
-独立修复，直接套补丁会互相踩）。本批已落地 4 条，均带测试：
-
-| 提交 | 内容 | 落地情况 |
-|---|---|---|
-| `02639df2` | `stop` 字符串形态归一为数组 | 全量移植（函数 + 用例）。上游把 stop 定义成 `[]string`，客户端发字符串即 400 `11101`，网关判 ErrBadParams 但**仍轮换** → 全池试完报 503 |
-| `e7c42b9c` | 账号级冷却字段落盘惰性清洗 | 只取 `persist.go` 的落盘判据；配套的 `persist_guard_test.go` 依赖未移植的「损坏 state.json 要打日志」行为，未收 |
-| `e278bf3a` | 刷新后落盘有界重试 | 取 `SaveAtomicRetry` + 三处调用点；`RefreshTokenIfNeeded` 封装在未移植的 `280fee08` 里，handler 处改回我们的 `RefreshToken`（`NeedsRefresh` 已在上一行判定） |
-| `c7ce5fb8` | 字符串 content 里的图也识别 | `hasImagePart` 改用 `json.RawMessage` 逐条解析；用例里的 `imagePartIfPresent` 属未移植提交，断言已移除 |
-| `00fea446` | 透出上游付费层级 tier | 模型结构体加 `Tier` 字段 + 面板「Pro Only / 订阅优先」标签；同提交里的 `SupportsImagesSet` / `GenerationKind` 属别的提交，未收 |
-| `2089c262` | 网关 401（APISIX invalid_token 页）归 session 死亡 | 新增 `IsGatewayUnauthorized`（401 且无业务信封）；分类链插在 `sessionDeadMarkers` 之后；handler 侧走**连续阈值**才禁（一次就禁会在上游抖动时把整池打光） |
-| `56057810` | body 侧补 conversationRequestId | 只取 `injectConversationFields` 调用 + `conv_fields.go`；同提交的 `prepareBody` 三返回值重构属别的提交，保持我们单返回值签名 |
-| `0eb9e37d` | **model_fallback：6004 限流时同账号改道等价模型** | 本轮最大一条。取 `curModel` / `fallbackTried` / `fallbackTo` / `applyFallback` 全套 + 两处调用点（选不到号时先降级、6004 时同账号换模型重试）。**剔掉**同块里的 busy-wait（issue #46，我们没这套 helper）与 hard-credit 细化；6 条用例全过，含「全池该模型冷却时降级而非报 503」与「A→B→A 不循环」 |
-| `2892e6a8` | 诊断开关 `WB2A_DUMP_UPSTREAM` | 落上游原始报文（`upstream.dump_dir`，默认空 = 不落盘，正文含用户提示词）。与 `DNSServers` 字段并存 |
-| `575611b5` | `upstream.dump_max_bytes` | dump 请求体上限可配（issue #44），干净合入 |
-| `e4ef71a7` | `models.aliases` 模型名映射 | 手工实现（未整条 cherry-pick）：`config.Models.Aliases` + `livecfg.NormalizeModelAliases`（键归一化小写、裸名登记两域、非法条目丢弃）+ handler 在 **hidden 检查之前**解析别名并重写出站 body 的顶层 `model`。非流式响应把 `model` 覆写回客户端原发名（严格校验的客户端不报错）。**流式帧的回显未做**（要穿到 SSE 中继里，单独一趟） |
-| `44219be4` | `POST /v1/search` 官方联网检索透传 | 新文件 `server/search.go` + `upstream/search.go`；只补一条路由 + 一个 `requestLevelFailFastKind` helper（该 helper 原本在未移植的 images.go 里）。搜索用例里「X-Conversation-ID 必发」那条断言按本仓口径改成只验 RequestID/MessageID（我们不伪造会话 ID） |
-| `3d5900fd` | `POST /v1/fetch`（DSH 网页抓取） | 依赖 search 落地的 `WebFetch`/`searchAttempts`，本次一并补齐；路由挂在 `/v1/search` 之后 |
-| `2737aed3` | 模型与档位显示官方实时繁忙度 | 取 `internal/upstream/modelbusy.go` + 面板模型列表繁忙度列；**剔掉**同块的出图模型（`GenerationModels` 属未移植的 images 提交），并把该用例一并去掉。繁忙度查询用与目录同一批账号（`cnAcct`/`globalAcct`），不额外选号；查不到就不填字段、不编造 |
-| `0b6fe19a` | 账号级摊开改按计划时刻顺序执行 | 用 `spreadPlan`/`plan.order`/`plan.wait` 替换我们原来的「串行延迟」（`accountDelay`）；偏移按「任务｜uid｜日」哈希，当天确定性、重启不重排。新增 `schedule.account_spread_minutes` + `account_spread_min_gap_seconds` 两个配置项；五个任务函数加 `spread bool` 参数（排程 true / 面板手动 false，手动点击不该等半小时）；补 `cst.Day`、`spreadEnabled` |
-| `e1735298` | **余额趋势视图** | 新包 `internal/balance`（643 行 + 658 行测试，原样入库）+ 面板新视图。手工合并点：`scheduler.Config.Balance` 采样钩子挂在我们自己的 `RunBalanceRefreshNow` 循环里；`app.js` 只追加视图代码（752 行）并补 `TITLES`/`go()` 路由；`index.html` **不取对方整份**（会带进一套不同的配置表单版本），只加导航 + `<section id="view-balhist">` + 余额趋势专用样式 |
-| `44de7912` | scheduler 重构：`enabledSlots` 统一时点枚举 | 把「有哪些任务族 / 下次何时跑」收敛成一个口径，`nextWake` 与 `missedToday` 共用。我们这版没有 `nextFireKind`/`JitterMinutes`，改用现有 `nextFire`（无抖动，行为不变）；另补 `taskKind.String()` 供落盘去重记录用 |
-| `2999a8d2` | 启动补跑同一天只跑一轮 | `RunStampFile`（与 state.json 同目录的 `task-runs.json`）+ `runstamps.go`。没有它，每次重启都会把当天已过的时点重打一遍上游 |
-| `cce39c30` | 按号旅行端点 `POST /panel/api/accounts/{uid}/travel` | 只取端点 + `RunTravelNowFor`；`travelOne` 我们这版带 ctx，按号入口用 `context.Background()`（面板点击没有请求上下文可继承）。同提交带的 `task_realm_test.go` 依赖未移植的 `globalTaskWriteMessage`，未收 |
-| `f9b2f07a` | 只发 user_id 的客户端也按对话分配缓存槽 | `ChatMeta.CacheKeyID` 新增；`prepareBody` 多带一个 cacheKeyID 参数（sessKey 为空时用 `session.DeriveCacheKey(body)` 内容派生键）。修 issue #5「glm-5.3 大上下文命中率掉到 0.2%」 |
-| `79a70ef8` | 11148 工具配对断裂 → 400 fail-fast | 新增 `ErrToolMismatch` + 分类（**判在 5xx 兜底之前**，上游会套 5xx 外壳）+ handler fail-fast 分支 + hint「开新会话」。此前落 ErrClient 会全池轮转、每个健康号白记一笔连败，末端还把确定失败伪装成 503 |
-| `c587c090` | config.example 守卫 + model_fallback 文档 | `pool.model_fallback` 进示例配置；新增 `TestConfigExampleIsValid`（守卫示例 JSON 合法 + 新键可见）。同提交的 brand_scope 断言随未移植字段一并去掉 |
-
-顺带修两处**与移植无关**的定时炸弹：
-
-* `TestArchivePruneHonorsSize` 把文件名日期写死成 `2026-09-2x`，真实日期越过 30 天保留期后
-  会被「年龄」先清空，断言却还在怪大小裁剪 —— 10-23 之后每天必红。改为按今天生成文件名。
-* `TestCheckinDoneExpiredYesterday` 见前文（`cst.DayKey`）。
-
-**静态 API Key 账号（`5ce1a2f4`）—— 精简版已落地**：不碰成长任务链，只做
-「建号 / 选号 / 额度」+ 任务入口门控。改动清单：
-`auth.IsAPIKey()`（`ck_`/`pt_` 前缀，落盘形态里唯一稳定判据）+ `UsesEnterpriseBilling`
-+ `SupportsPersonalGrowth`/`SupportsPersonalEndpoints`；`NeedsRefresh` 对静态 Key 恒 false
-（refresh 只认 OAuth 设备流，否则会被当坏号冷却换号）；`pool.Status.APIKey` 字段；
-额度查询分流到企业口径端点（个人 `get-user-resource` 对静态 Key 恒返回空 Accounts）；
-`POST /panel/api/accounts/add_apikey`（先拿企业端点探测有效再落盘，坏 Key 不入池）；
-调度器 5 处门控从 `IsEnterprise()` 换成 `SupportsPersonalGrowth()`；面板任务类入口统一
-`accountByUIDForGrowth` → 400「该账号没有个人账号身份」；app.js 行内打「API Key」标记
-并隐藏签到/任务按钮。
-
-**未做的部分**：面板「添加 API Key」的图形入口（需要 index.html 新标签页），
-目前用接口加号：
-
-```bash
-curl -X POST http://127.0.0.1:7863/panel/api/accounts/add_apikey \
-  -H 'Authorization: Bearer <面板 api_key>' -H 'Content-Type: application/json' \
-  -d '{"access_token":"ck_xxx","nickname":"我的 key"}'
-```
-
-**（原评估，保留备查）静态 API Key 账号整条 cherry-pick 评估**：22 个文件冲突，核心不是「加个字段」，
-而是它与**成长任务重构**（PR #104：`globalTaskWriteMessage`、`ClaimReward` 四返值、
-`taskProgressReached`）绑在一起；只并静态 Key 那一半，任务中心会编译不过，全并则等于把
-整个任务链一起移植。静态 Key 账号本身适合独立开工：`auth.IsAPIKey`（ck_/pt_ 前缀）+
-`SupportsPersonalGrowth`/`SupportsPersonalEndpoints` 门控 + 面板建号端点 + 企业计费口径。
-
-**未落地（依赖我们还没移植的机制，强行套会编译不过）**：
-
-| 提交 | 阻塞原因 |
-|---|---|
-| `0eb9e37d` `f1eca4ad` `c587c090` model_fallback | handler 冲突块里混着 admin audit / busy-wait(issue #46) / hard-credit 细化，整块取会引入不存在符号；需按我们的 chat 循环单独改写 |
-| `5ee3b8fe` reserve_credits 兜底 | 依赖 `reserveBlocked` / `modelFreeOf`（未移植） |
-| `065b088a` 品牌词作用域 | 与我们刚做的 ZWSP 改写叠加，需先定作用域语义 |
-| `56057810` conversationRequestId | 与 headers.go 现有 trace id 逻辑耦合 |
-| `79a70ef8` `280fee08` `2089c262` `2999a8d2` `3fb80272` `f9b2f07a` `54e9862b` `00fea446` `3d5900fd` `58262f31` `e1735298` `cce39c30` 等 | 逐个适配中，见 `.tmp/analysis/misakano-gap-20261023.md` |
-
-### 五、代码审查 19 条（CODE-REVIEW-BUGS）
-
-| # | 缺陷 | 处置 |
-|---|---|---|
-| 1 | `conv_fields.go` 用 `json.Unmarshal`+`Marshal` 重编码整份 body：>2^53 整数丢精度、`< > &` 被转义 | 改 `UseNumber` 解码 + `marshalNoEscape`（与 payload/cache_key 同口径） |
-| 2 | handler 的别名/降级改写同款问题 | 同上，并在 server 包加 `marshalNoEscape` |
-| 3 | `saveConfig` 的 `live.Store` 漏 `ModelFallback`/`ModelAliases`：**保存任意配置后降级表被清空** | 补两个字段 |
-| 4 | `restartRequiredFields` 漏 8 个启动期装配键 | 补 `pool.model_fallback` / `models.aliases` / `prompt.identity_override_*` / `upstream.dump_*` / `schedule.account_spread_*` |
-| 5 | 面板出图模型段是**空 for 循环**，`measured` 无人读 | 删空循环与死映射（出图模型本仓未移植），留注释说明 |
-| 6 | 跳过名单键不一致：`skipNote` 用生效码、`skipReset` 用原始码 → 失败计数永不清零 | 统一用 `effectiveTaskCode` |
-| 7 | `/v1/search`、`/v1/fetch` 不占在途名额 | 补 `Pool.Acquire`/`Release` |
-| 8 | `CooldownSoftForModel` 整体覆盖条目 → `Hits` 清零，11102 的 6h→12h→24h 被打回 6h | 继承 `Hits` 与 `AuditOnly` |
-| 9 | 全冷却兜底路径不查 `modelOffed` | 兜底补判据 |
-| 10 | `healthy()` 不看 `modelOffed` | **不改**，补注释说明为何：模型维度门控属 `healthyForModel`；把「关了某个模型」当账号不健康会让 `/healthz` 在只关一个模型时就报无可用账号 |
-| 11 | `doJSON` 的 ≥400 分支不解析 `Retry-After` | 补 `ParseRetryAfter`，与 `ChatStreamContext` 同口径 |
-| 12 | `balance.flush` 用固定 `.tmp` 名，并发互相覆盖 | 改 `auth.ReplaceAtomic`（唯一 tmp + fsync） |
-| 13 | `modelAlias` 每请求重建归一化表 | `sync.Once` 缓存 |
-| 14 | `mergeV3Routes` 无调用点 | **保留**：代码内注释明确「供日后恢复多路探测」，不是遗留垃圾 |
-| 15 | `mustJSONString` 无调用点 | 删除 |
-| 16 | `readFile` 无调用点 | **保留**：`regression_20261021_test.go` 在用（删了测试编译不过） |
-| 17 | `PickExcluding` / `PickExcludingForModel` 无生产调用点 | 保留（pool 测试覆盖在用） |
-| 18 | `RecordModelRateLimitAudit` 无调用点 | 保留（6004 无重置时间时的展示台账入口，删除会改变面板语义） |
-| 19 | `IsWafBlocked` 的文档挂在 `IsGatewayUnauthorized` 上方 | 文档归位 |
-
-### 六、应用缺陷审查 28 条（代码审查报告-应用缺陷）
-
-**P0（6 条，全部已修）**
-
-| # | 缺陷 | 处置 |
-|---|---|---|
-| 1 | `/v1/search`、`/v1/fetch` 全部抢不到在途名额时 `lastErr` 为 nil → 末尾解引用 panic | `Acquire` 失败时写 `lastErr` |
-| 2 | 夜猫子不过滤 `disabled`（其余任务族都有这道门） | 补 `st.Disabled` + `includeDisabledInTasks` |
-| 3 | 活跃上报/夜猫子只排序不 `plan.wait` → 摊开配置对它们无效 | 两处改用 `plan.wait` |
-| 4 | 11133 未归请求级 → 全池轮转 + 误罚号 + 末端 503 | 新增 `ErrModelParamInvalid` + 分类 + handler fail-fast 400 |
-| 5 | `ErrUpstreamBusy`/`ErrChannelRefused` 仍轮转，与「换号无用」矛盾 | 两种 kind 直接 `break` |
-| 6 | 模型开关按第一个冒号剥前缀，`qwen:7b` 被截成 `7b` | 只认 `cn:`/`global:` |
-
-**P1（15 条，全部已修）**
-
-| # | 缺陷 | 处置 |
-|---|---|---|
-| 7 | 余额趋势「刷新」与时间窗无事件绑定 | 补 `onclick`/`onchange` |
-| 8 | 柱状图 `<title>` 裸挂 `<svg>`，悬浮提示错乱 | 包进 `<g>` |
-| 9 | `request_metrics` 失败时丢弃已取回的 `request_logs` | 判据改「metrics 明确说关闭才算关闭」 |
-| 10 | `balance.flush` 失败不恢复 `dirty`，采样批次丢失 | 失败回置 `dirty` |
-| 11 | 启动补跑用宿主本地时间而非 CST | 改 `cst.Now()` |
-| 12 | `model_fallback` 被误报需重启；`models.aliases` 的 live 写入是死代码 | 两个表都改读 live，移出重启清单 |
-| 13 | 降级后用量/成本仍记在原模型名下 | `modelRate`/`delta.Model`/`NoteModelCost` 改用 `curModel` |
-| 14 | global 窄表形态下面板误报「上游未返回可用模型」 | 回落到 `FetchGlobalModels` 的裸名列表 |
-| 15 | 面板单号签到未跳过静态 API Key | 补 `IsAPIKey()` 门控 |
-| 16 | `cmd/signin` 对 global 账号必然 FAIL | 补 global 门控（SKIP） |
-| 17 | `cmd/credit` 企业/API Key 显示 0；不认扁平形 auth 文件 | 补企业口径端点 + `UnmarshalJSON` 兼容两种形态 |
-| 18 | 按号旅行缺企业上下文门控、无账号级互斥 | 补 `skipBehaviorTask` + `tryLockAccount` |
-| 19 | 任务中心扫描/券码/单号任务缺企业上下文门控 | 三处补 `IsEnterpriseSession()` |
-| 20 | 补跑标记只在启动补跑写，正常排程不写 → 重启重跑 | 每批跑完即 `markRan` |
-| 21 | 归档容量提示「0=不限」与实现（<=0 → 100MiB）矛盾 | 文案改为「留空 = 默认 100 MB」 |
-
-**P2（7 条，全部已修）**
-
-| # | 缺陷 | 处置 |
-|---|---|---|
-| 22 | 14003 轮转耗尽落 503 `no_healthy_account` | 末端补 `ErrModelBusy` 分支（503 + `model_busy`） |
-| 23 | `balance.Stop` 未 `Start` 时永久阻塞；`Start` 不幂等 | `started` 原子标记 + `CompareAndSwap` |
-| 24 | `versionedIndex` 包级单例，多 Panel 会串版本 | 缓存移到 Panel 实例 |
-| 25 | 别名回显只覆盖非流式 | 新增 `WithModelEcho` 选项，SSE 帧同步改写 |
-| 26 | `doJSON` 的 HTTP 错误分支不填 `HTTPStatus` | 补 |
-| 27 | 按号旅行 skip 文案称「暂停」会被跳过，实际不会 | 文案纠正 |
-| 28 | `ReviveJobService` 日志写死 7863 | 改 `GwConfig.port(ctx)` |
 
 ### 未合并
 

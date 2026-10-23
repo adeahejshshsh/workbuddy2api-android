@@ -221,25 +221,38 @@ echo "  已推送 → https://github.com/$OWNER/$NAME"
 
 echo "== 5/5 Release v$VER + 上传 APK"
 OWNER="$OWNER" NAME="$NAME" VER="$VER" APK="$APK" TOKEN="$TOKEN" WS="$WS" python3 - <<'PY'
-import json, os, pathlib, urllib.request, urllib.error
+import json, os, pathlib, time, urllib.request, urllib.error
 
 o, r, ver = os.environ["OWNER"], os.environ["NAME"], os.environ["VER"]
 tok, apk = os.environ["TOKEN"], pathlib.Path(os.environ["APK"])
 tag = "v" + ver
 api = f"https://api.github.com/repos/{o}/{r}"
 
-def call(url, method="GET", data=None, ctype="application/json", raw=False):
-    req = urllib.request.Request(url, method=method, data=data)
-    req.add_header("Authorization", "Bearer " + tok)
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "wb2api-publish")
-    if data is not None: req.add_header("Content-Type", ctype)
-    try:
-        with urllib.request.urlopen(req, timeout=120) as f:
-            b = f.read()
-            return f.status, b, f.headers
-    except urllib.error.HTTPError as e:
-        return e.code, e.read(), e.headers
+def call(url, method="GET", data=None, ctype="application/json", raw=False, tries=3):
+    # 网络抖动要重试（2026-10-23 实测）：4MB 的 APK 上传在移动网络下会被
+    # `[Errno 103] Software caused connection abort` 打断，一次失败就让整个
+    # Release 半成品（release 建好、asset 空）。HTTPError 是服务端答复，不重试；
+    # URLError/超时这类传输层错误才重试。
+    last = None
+    for i in range(tries):
+        req = urllib.request.Request(url, method=method, data=data)
+        req.add_header("Authorization", "Bearer " + tok)
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("User-Agent", "wb2api-publish")
+        if data is not None: req.add_header("Content-Type", ctype)
+        try:
+            with urllib.request.urlopen(req, timeout=300) as f:
+                b = f.read()
+                return f.status, b, f.headers
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), e.headers
+        except Exception as e:      # URLError / socket.timeout / ConnectionReset
+            last = e
+            if i + 1 < tries:
+                wait = 3 * (i + 1)
+                print(f"  ⚠ 上传/请求中断（{e}），{wait}s 后重试（{i+1}/{tries-1}）")
+                time.sleep(wait)
+    raise SystemExit(f"❌ 重试 {tries} 次仍失败: {last}")
 
 # Release 说明直接取 CHANGELOG.md 里对应版本那一节 —— 一处维护，别两处写
 sec, grab = [], False
