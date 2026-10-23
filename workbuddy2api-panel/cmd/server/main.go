@@ -381,7 +381,8 @@ func main() {
 		RedisMode:                     redisMode,
 		SoftCooldown:                  cfg.SoftRateDur,
 		MaxBodyMB:                     cfg.ServerMaxBodyMB,
-		ModelsHidden:                  cfg.Models.Hidden, // 模型黑名单（上游 PR #225）
+		ModelsHidden:                  cfg.Models.Hidden,  // 模型黑名单（上游 PR #225）
+		ModelsAliases:                 cfg.Models.Aliases, // 模型名映射（issue #30）
 		Panel:                         pn,
 		Live:                          live,
 		Usage:                         rec,

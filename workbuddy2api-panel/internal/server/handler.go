@@ -55,6 +55,10 @@ type Config struct {
 	// 只对 6004 模型级限流生效；降级不写持久状态，冷却到期自动回原模型。
 	ModelFallback func() map[string]string
 
+	// ModelsAliases 模型映射原始条目（models.aliases，"客户端名=真实名"，issue #30）。
+	// 运行时用 livecfg.NormalizeModelAliases 归一化后查（Live 为 nil 的裸用路径也走这里）。
+	ModelsAliases []string
+
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
 	Panel http.Handler
@@ -413,6 +417,17 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
 // modelHidden 报告该模型是否在黑名单里（上游 PR #225）：
 // 裸名=两域都藏；"cn:x"/"global:x"=只藏该域。大小写不敏感（与模型名口径一致）。
+// modelAlias 查 models.aliases 映射（issue #30）：键为「小写 realm + ":" + 小写裸名」。
+// 未命中返回 ("", false)。
+func (h *Handler) modelAlias(realm, bare string) (string, bool) {
+	if bare == "" || len(h.cfg.ModelsAliases) == 0 {
+		return "", false
+	}
+	m := livecfg.NormalizeModelAliases(h.cfg.ModelsAliases)
+	target, ok := m[strings.ToLower(realm)+":"+strings.ToLower(bare)]
+	return target, ok
+}
+
 func (h *Handler) modelHidden(realm, bare string) bool {
 	for _, raw := range h.cfg.ModelsHidden {
 		e := strings.TrimSpace(raw)
@@ -707,6 +722,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 裸名（没有任何 realm 前缀）—— 末端要用它把「裸名只路由 cn」讲清楚（bug 3）
 	// 黑名单点名拒绝（上游 PR #225）：/v1/models 已隐藏，但客户端可能硬编码模型名。
 	// 给 400 + model_unavailable（换模型才有用），不换号、不罚号。
+	// 别名映射（issue #30）：客户端名命中 → 出站 body / 选号 / 粘性全部改用真实名，
+	// realm 也按目标重解析（别名值可带前缀跨域指向）。放在 hidden 检查**之前**：
+	// 别名不能绕过黑名单，映射后的目标仍会被下面的 modelHidden 拦下。
+	// aliasEcho 非空 = 本请求走了映射，响应侧把 model 覆写回客户端原发名。
+	aliasEcho := ""
+	if target, ok := h.modelAlias(realm, bareModel); ok && target != "" {
+		var obj map[string]any
+		if json.Unmarshal(body, &obj) == nil {
+			if cur, isStr := obj["model"].(string); isStr && cur == peek.Model {
+				obj["model"] = target
+				if nb, merr := json.Marshal(obj); merr == nil {
+					body = nb
+					realm, bareModel = resolveModel(target)
+					aliasEcho = peek.Model
+					log.Printf("INFO: [server] model alias applied: %s -> %s", peek.Model, target)
+				}
+			}
+		}
+	}
 	if h.modelHidden(realm, bareModel) {
 		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
 			"model is hidden by gateway config (models.hidden); pick another model")
@@ -1531,6 +1565,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, 0)
 		if st.hasCache {
 			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
+		}
+		// 模型名回显（issue #30）：走了别名映射时，把响应里的 model 覆写回客户端
+		// 原发名 —— 严格校验「响应 model == 请求 model」的客户端不会当场报错。
+		if aliasEcho != "" {
+			resp["model"] = aliasEcho
 		}
 		// 先 marshal 再写（bug #18）：writeJSON 内部失败会回 500，但表格流水行/
 		// reqlog 此前仍记 200 + success —— 排查时看不到这次失败。

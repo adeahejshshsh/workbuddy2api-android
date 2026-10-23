@@ -9,6 +9,7 @@
 package livecfg
 
 import (
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -22,6 +23,9 @@ type Snapshot struct {
 	// ModelFallback 模型降级路由表（pool.model_fallback）：6004 模型级限流时改用
 	// 的等价模型（裸名 → 裸名）。nil = 不降级，且不写持久状态。
 	ModelFallback map[string]string
+	// ModelAliases 客户端名 → 真实模型名（键已归一化为小写 "realm:裸名"；
+	// 裸名配置同时登记 cn/global 两个域）。nil = 不映射。issue #30。
+	ModelAliases map[string]string
 }
 
 // Holder 原子持有当前快照。
@@ -49,3 +53,46 @@ func (h *Holder) Load() Snapshot {
 
 // Store 整体替换快照。
 func (h *Holder) Store(s Snapshot) { h.p.Store(&s) }
+
+// NormalizeModelAliases 把 "客户端名=真实名" 条目归一化成查找表。
+//
+//   - 按第一个 "=" 拆键值，两端 Trim，键转小写（模型名大小写不敏感）；
+//   - 键带合法 realm 前缀（cn:/global:）→ 只登记该域；裸名 → 两域都登记；
+//   - 无 "="、空键、空值、键==值 → 丢弃（自我映射还可能成环）。
+func NormalizeModelAliases(entries []string) map[string]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(entries))
+	for _, raw := range entries {
+		k, v, ok := strings.Cut(raw, "=")
+		if !ok {
+			continue
+		}
+		k = strings.ToLower(strings.TrimSpace(k))
+		v = strings.TrimSpace(v)
+		if k == "" || v == "" || k == strings.ToLower(v) {
+			continue
+		}
+		if realm, bare, has := splitAliasRealm(k); has {
+			out[realm+":"+bare] = v
+			continue
+		}
+		out["cn:"+k] = v
+		out["global:"+k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// splitAliasRealm 拆 "cn:x" / "global:x" 前缀；非合法前缀返回 has=false。
+func splitAliasRealm(k string) (realm, bare string, has bool) {
+	for _, r := range []string{"cn:", "global:"} {
+		if strings.HasPrefix(k, r) {
+			return r[:len(r)-1], k[len(r):], true
+		}
+	}
+	return "", k, false
+}

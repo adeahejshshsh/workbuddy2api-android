@@ -153,6 +153,10 @@ type Config struct {
 		// Hidden 不对外暴露的模型黑名单：裸名=两域都藏；"cn:x"/"global:x"=只藏该域。
 		// 生效点：/v1/models 列表过滤 + chat 点名拒绝（400 model_unavailable）。改动需重启。
 		Hidden []string `json:"hidden"`
+		// Aliases 模型名映射（issue #30）："客户端名=真实模型名"。
+		// 客户端只能填固定模型名的 agent 靠它落到真实模型。
+		// 键大小写不敏感；裸名键两域生效，cn:/global: 前缀键只在该域生效。
+		Aliases []string `json:"aliases"`
 	} `json:"models"`
 
 	// Cn 国内版上游 base 覆盖（上游 PR #220）：空 = 回落内置默认

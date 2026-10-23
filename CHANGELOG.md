@@ -619,6 +619,7 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 | `0eb9e37d` | **model_fallback：6004 限流时同账号改道等价模型** | 本轮最大一条。取 `curModel` / `fallbackTried` / `fallbackTo` / `applyFallback` 全套 + 两处调用点（选不到号时先降级、6004 时同账号换模型重试）。**剔掉**同块里的 busy-wait（issue #46，我们没这套 helper）与 hard-credit 细化；6 条用例全过，含「全池该模型冷却时降级而非报 503」与「A→B→A 不循环」 |
 | `2892e6a8` | 诊断开关 `WB2A_DUMP_UPSTREAM` | 落上游原始报文（`upstream.dump_dir`，默认空 = 不落盘，正文含用户提示词）。与 `DNSServers` 字段并存 |
 | `575611b5` | `upstream.dump_max_bytes` | dump 请求体上限可配（issue #44），干净合入 |
+| `e4ef71a7` | `models.aliases` 模型名映射 | 手工实现（未整条 cherry-pick）：`config.Models.Aliases` + `livecfg.NormalizeModelAliases`（键归一化小写、裸名登记两域、非法条目丢弃）+ handler 在 **hidden 检查之前**解析别名并重写出站 body 的顶层 `model`。非流式响应把 `model` 覆写回客户端原发名（严格校验的客户端不报错）。**流式帧的回显未做**（要穿到 SSE 中继里，单独一趟） |
 | `44219be4` | `POST /v1/search` 官方联网检索透传 | 新文件 `server/search.go` + `upstream/search.go`；只补一条路由 + 一个 `requestLevelFailFastKind` helper（该 helper 原本在未移植的 images.go 里）。搜索用例里「X-Conversation-ID 必发」那条断言按本仓口径改成只验 RequestID/MessageID（我们不伪造会话 ID） |
 | `3d5900fd` | `POST /v1/fetch`（DSH 网页抓取） | 依赖 search 落地的 `WebFetch`/`searchAttempts`，本次一并补齐；路由挂在 `/v1/search` 之后 |
 | `2737aed3` | 模型与档位显示官方实时繁忙度 | 取 `internal/upstream/modelbusy.go` + 面板模型列表繁忙度列；**剔掉**同块的出图模型（`GenerationModels` 属未移植的 images 提交），并把该用例一并去掉。繁忙度查询用与目录同一批账号（`cnAcct`/`globalAcct`），不额外选号；查不到就不填字段、不编造 |
