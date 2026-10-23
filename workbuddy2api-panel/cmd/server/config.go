@@ -256,6 +256,14 @@ type Config struct {
 		// tier 0（免费）/ tier 1（无观测）不受限；签到回血越过 floor 自动恢复。
 		// 默认 0 = 关闭；负值钳 0。
 		CreditFloor int64 `json:"credit_floor"`
+		// ModelFallback 模型降级路由表：key = 客户端请求的模型（裸名），
+		// value = 该模型被 6004 模型级限流时改用的等价模型。
+		// 例：{"deepseek-v4.1-flash": "deepseek-v4-flash"}。
+		//
+		// 语义：等价模型是同一底层能力、只是计价不同；便宜的那个被限流时改用
+		// 稍贵的继续服务（可用性优先），限流解除后自动回原模型（不写持久状态）。
+		// 只对 6004 生效；11102/11101/普通 429/5xx 都不降级。缺省 nil = 不降级。
+		ModelFallback map[string]string `json:"model_fallback"`
 	} `json:"pool"`
 
 	SessionSticky struct {

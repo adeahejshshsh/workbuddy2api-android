@@ -616,6 +616,8 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 | `00fea446` | 透出上游付费层级 tier | 模型结构体加 `Tier` 字段 + 面板「Pro Only / 订阅优先」标签；同提交里的 `SupportsImagesSet` / `GenerationKind` 属别的提交，未收 |
 | `2089c262` | 网关 401（APISIX invalid_token 页）归 session 死亡 | 新增 `IsGatewayUnauthorized`（401 且无业务信封）；分类链插在 `sessionDeadMarkers` 之后；handler 侧走**连续阈值**才禁（一次就禁会在上游抖动时把整池打光） |
 | `56057810` | body 侧补 conversationRequestId | 只取 `injectConversationFields` 调用 + `conv_fields.go`；同提交的 `prepareBody` 三返回值重构属别的提交，保持我们单返回值签名 |
+| `0eb9e37d` | **model_fallback：6004 限流时同账号改道等价模型** | 本轮最大一条。取 `curModel` / `fallbackTried` / `fallbackTo` / `applyFallback` 全套 + 两处调用点（选不到号时先降级、6004 时同账号换模型重试）。**剔掉**同块里的 busy-wait（issue #46，我们没这套 helper）与 hard-credit 细化；6 条用例全过，含「全池该模型冷却时降级而非报 503」与「A→B→A 不循环」 |
+| `c587c090` | config.example 守卫 + model_fallback 文档 | `pool.model_fallback` 进示例配置；新增 `TestConfigExampleIsValid`（守卫示例 JSON 合法 + 新键可见）。同提交的 brand_scope 断言随未移植字段一并去掉 |
 
 顺带修两处**与移植无关**的定时炸弹：
 

@@ -177,6 +177,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
+	// (账号 × 模型) 手动开关：运维显式禁用某账号的某模型（永久语义，仅手动解）。
+	// 与上游触发的临时冷却（6004/11102）正交，且手动优先。
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_toggle", p.withAuth(p.modelToggle))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
@@ -1216,4 +1219,49 @@ func (p *Panel) creditHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": out, "total": len(entries)})
+}
+
+// modelToggle 手动开关某 (账号, 模型) 组合。
+//
+// 语义：这是**人工意图**（永久），与 modelCooldowns（上游触发、临时、过期自动删）
+// 正交。手动关掉的组合自动机制不能恢复 —— 见 internal/pool/toggle.go 的说明。
+//
+// model 接受带前缀形式（cn:gpt-4）也接受裸名；入库前统一剥前缀，与出站口径一致
+// （上游只认裸名，且带前缀存会在模型改名/换域时对不上）。
+func (p *Panel) modelToggle(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if _, ok := p.cfg.Pool.Status(uid); !ok {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	var req struct {
+		Model string `json:"model"`
+		Off   bool   `json:"off"`
+		Note  string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		writeErr(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	// 剥 realm 前缀（与出站口径一致：上游只认裸名）
+	if i := strings.Index(model, ":"); i >= 0 {
+		model = model[i+1:]
+	}
+	if req.Off {
+		if !p.cfg.Pool.SetModelOff(uid, model, req.Note) {
+			writeErr(w, http.StatusBadRequest, "set model off failed")
+			return
+		}
+	} else {
+		p.cfg.Pool.SetModelOn(uid, model)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "uid": uid, "model": model, "off": req.Off,
+		"list": p.cfg.Pool.ModelOffOf(uid),
+	})
 }

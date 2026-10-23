@@ -19,6 +19,9 @@ type Snapshot struct {
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
+	// ModelFallback 模型降级路由表（pool.model_fallback）：6004 模型级限流时改用
+	// 的等价模型（裸名 → 裸名）。nil = 不降级，且不写持久状态。
+	ModelFallback map[string]string
 }
 
 // Holder 原子持有当前快照。

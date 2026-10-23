@@ -237,6 +237,14 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 				e.modelCooldowns[m] = modelCooldown{Until: mc.Until, ResetAt: mc.ResetAt, Reason: mc.Reason, AuditOnly: mc.AuditOnly}
 			}
 		}
+		// 手动关闭 (账号, 模型)：**无过期过滤**——它是永久语义，
+		// 与冷却（过期即弃）不同，不得被惰性清理顺手删掉。
+		if len(s.ModelOff) > 0 {
+			e.modelOff = map[string]modelOff{}
+			for m, o := range s.ModelOff {
+				e.modelOff[m] = modelOff{Since: o.Since, Note: o.Note}
+			}
+		}
 		// 成本账本：惰性过滤过期（modelCostTTL 外不恢复）+ 剔除结构破损条目
 		// （负 per1k / 零 LastSeen——上游异常或旧文件手改产生的脏数据）。
 		if len(s.ModelCosts) > 0 {
@@ -375,6 +383,13 @@ func (p *Pool) stateOverviewLocked() stateFile {
 					s.ModelCooldowns = map[string]stateModelCooldown{}
 				}
 				s.ModelCooldowns[m] = stateModelCooldown{Until: mc.Until, ResetAt: mc.ResetAt, Reason: mc.Reason, AuditOnly: mc.AuditOnly}
+			}
+		}
+		// 手动关闭：全量写出（无过期概念，永久保留）。
+		if len(e.modelOff) > 0 {
+			s.ModelOff = map[string]stateModelOff{}
+			for m, o := range e.modelOff {
+				s.ModelOff[m] = stateModelOff{Since: o.Since, Note: o.Note}
 			}
 		}
 		// 成本账本：惰性过滤过期观测（modelCostTTL 外不写——陈旧价格不复活）。

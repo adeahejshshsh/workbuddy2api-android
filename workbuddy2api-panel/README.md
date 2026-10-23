@@ -164,6 +164,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |
 | **粘性会话内容回退** | 客户端不发 `conversation_id` 时，用 `system + 首条 user` 哈希派生会话键（`d-` 前缀），通用 OpenAI 客户端也能享受粘性 |
 | **余额后台刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
+| **模型降级路由（6004）** | `pool.model_fallback`：`{"deepseek-v4.1-flash":"deepseek-v4-flash"}`。上游 `6004`「该模型使用量超限」是**模型级**限流（实测见过 8 小时窗口），此时账号健康、等价模型可用——配了表就**同账号改道等价模型**继续服务。仅 `6004` 触发（`11102`/`11101`/普通 429/5xx 不降级）；冷却仍记在原模型名下（记成等价模型会把好的也冷却，降级白做）；不写持久状态，到期自动回原模型；全池该模型冷却（选号返回空）时也先试降级再报 503。缺省空 = 不降级 |
 | **模型能力透出** | `/v1/models` 附带 `supported_efforts` / `default_effort` / 积分倍率 / 输入输出上限等上游真实字段 |
 | **安全加固** | 常量时间密钥比较（`internal/httpauth`）、CSP 与安全响应头、UID 白名单防路径穿越、前端属性转义修复 |
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
