@@ -238,6 +238,9 @@ type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	// CacheKeyID prompt_cache_key 的会话段来源（网关派生的粘性会话键 sessKey；
+	// sessKey 为空时由调用方用内容派生键填入）。只影响缓存槽，不影响出站头。
+	CacheKeyID string
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。

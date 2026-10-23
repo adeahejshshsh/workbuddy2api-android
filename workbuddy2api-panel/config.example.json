@@ -52,7 +52,9 @@
     "client_name": "",
     "device_token": "",
     "device_token_file": "",
-    "passthrough_ip": false
+    "passthrough_ip": false,
+    "dump_dir": "",
+    "dump_max_bytes": 0
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

@@ -191,6 +191,13 @@ type Config struct {
 		// DNSServers 出站域名解析用的 DNS 服务器（上游 PR #144）：空 = 系统默认。
 		// 例：["1.1.1.1", "223.5.5.5"]。改动需重启（Dialer 在启动时构造）。
 		DNSServers []string `json:"dns_servers"`
+		// DumpDir 非空时把 chat 请求的出站报文 + 上游原始响应落盘（诊断用，见
+		// internal/upstream/dump.go）。默认空 = 不落盘：正文含用户提示词。
+		DumpDir string `json:"dump_dir"`
+		// DumpMaxBytes 落盘文件里「出站请求体」片段的上限，默认 262144（256 KB）。
+		// 长会话把 tools 定义排在几百条 messages 之后，256 KB 常在中途截断，
+		// 排障时看不到工具声明（issue #44 的反馈）。0 = 用默认值。
+		DumpMaxBytes int `json:"dump_max_bytes"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -599,6 +606,9 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_DEVICE_TOKEN_FILE"); v != "" {
 		c.Upstream.DeviceTokenFile = v
+	}
+	if v := os.Getenv("WB2A_DUMP_UPSTREAM"); v != "" {
+		c.Upstream.DumpDir = v
 	}
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

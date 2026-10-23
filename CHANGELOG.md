@@ -617,6 +617,9 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 | `2089c262` | 网关 401（APISIX invalid_token 页）归 session 死亡 | 新增 `IsGatewayUnauthorized`（401 且无业务信封）；分类链插在 `sessionDeadMarkers` 之后；handler 侧走**连续阈值**才禁（一次就禁会在上游抖动时把整池打光） |
 | `56057810` | body 侧补 conversationRequestId | 只取 `injectConversationFields` 调用 + `conv_fields.go`；同提交的 `prepareBody` 三返回值重构属别的提交，保持我们单返回值签名 |
 | `0eb9e37d` | **model_fallback：6004 限流时同账号改道等价模型** | 本轮最大一条。取 `curModel` / `fallbackTried` / `fallbackTo` / `applyFallback` 全套 + 两处调用点（选不到号时先降级、6004 时同账号换模型重试）。**剔掉**同块里的 busy-wait（issue #46，我们没这套 helper）与 hard-credit 细化；6 条用例全过，含「全池该模型冷却时降级而非报 503」与「A→B→A 不循环」 |
+| `2892e6a8` | 诊断开关 `WB2A_DUMP_UPSTREAM` | 落上游原始报文（`upstream.dump_dir`，默认空 = 不落盘，正文含用户提示词）。与 `DNSServers` 字段并存 |
+| `575611b5` | `upstream.dump_max_bytes` | dump 请求体上限可配（issue #44），干净合入 |
+| `f9b2f07a` | 只发 user_id 的客户端也按对话分配缓存槽 | `ChatMeta.CacheKeyID` 新增；`prepareBody` 多带一个 cacheKeyID 参数（sessKey 为空时用 `session.DeriveCacheKey(body)` 内容派生键）。修 issue #5「glm-5.3 大上下文命中率掉到 0.2%」 |
 | `79a70ef8` | 11148 工具配对断裂 → 400 fail-fast | 新增 `ErrToolMismatch` + 分类（**判在 5xx 兜底之前**，上游会套 5xx 外壳）+ handler fail-fast 分支 + hint「开新会话」。此前落 ErrClient 会全池轮转、每个健康号白记一笔连败，末端还把确定失败伪装成 503 |
 | `c587c090` | config.example 守卫 + model_fallback 文档 | `pool.model_fallback` 进示例配置；新增 `TestConfigExampleIsValid`（守卫示例 JSON 合法 + 新键可见）。同提交的 brand_scope 断言随未移植字段一并去掉 |
 

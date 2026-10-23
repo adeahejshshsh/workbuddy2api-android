@@ -809,6 +809,13 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
 	IdleTimeout time.Duration
 
+	// DumpRequestMax 落盘文件里出站请求体片段的上限（字节）；0 = 默认 256 KB。
+	// 见 dump.go。
+	DumpRequestMax int
+	// DumpDir 非空时把每次 chat 请求的出站报文与上游原始响应落盘（诊断用，
+	// 见 dump.go）。启动后只读，空 = 不落盘。
+	DumpDir string
+
 	// effortsMu/efforts 缓存各模型 supportedEfforts（FetchModels 刷新），供请求体 effort 降级。
 	// 按 realm 分层桶（cn/global）：同模型名跨域探测的 effort 集合可能不同，
 	// 混桶会互相污染（C-2）。
@@ -984,7 +991,7 @@ func (c *Client) chatBase(a *auth.Auth) string {
 
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
-func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
+func (c *Client) prepareBody(body []byte, realm, uid, conversationID, cacheKeyID string) []byte {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
 		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
@@ -999,7 +1006,13 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
-	body = InjectPromptCacheKey(body, uid, conversationID)
+	// 缓存槽会话段：优先网关派生的 CacheKeyID（sessKey 或内容派生键），
+	// 让「只发 user_id」的客户端也能各占一个前缀缓存槽（issue #5）。
+	cacheKeySrc := cacheKeyID
+	if cacheKeySrc == "" {
+		cacheKeySrc = conversationID
+	}
+	body = InjectPromptCacheKey(body, uid, cacheKeySrc)
 	return body
 }
 
@@ -1366,7 +1379,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID, meta.CacheKeyID)
 	// body 侧会话字段（issue #51）：把本轮 ID 同时写进消息体，与出站头保持头体一致
 	// （官方桌面端头与体都带 conversationRequestId）。见 conv_fields.go。
 	prepared = injectConversationFields(prepared, meta.ConversationRequestID)
@@ -1425,7 +1438,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
-		return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
+		body := c.dumpUpstream(monitorBody(resp.Body, c.IdleTimeout, cancel), prepared, a)
+		return body, resp.StatusCode, nil, nil
 	}
 	// 不用 panic 做兜底（bug #11）：HTTP 路径有 net/http recover，但 RunNightChats /
 	// runModelChat 这些后台 goroutine 没有 —— chatPaths 一旦被改成可返回空切片

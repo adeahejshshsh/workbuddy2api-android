@@ -1881,3 +1881,61 @@ func degradeActiveAny(g *degradeGate) bool {
 	}
 	return false
 }
+
+// TestChatUserIDClientGetsPerConversationCacheSlot 只发 user_id 的客户端不参与粘性
+// （ExtractKey 返回空串），但缓存槽不能退化成「每账号一个常量槽」——否则同账号上交错
+// 的多段对话互相覆盖前缀缓存，大上下文周期性命中率掉到 0.2%（issue #5）。
+func TestChatUserIDClientGetsPerConversationCacheSlot(t *testing.T) {
+	bodies := []string{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	up.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		return &http.Response{StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:   io.NopCloser(strings.NewReader(sseOK))}, nil
+	})}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+
+	send := func(firstUser, lastUser string) {
+		body, _ := json.Marshal(map[string]any{
+			"model":    "glm-5.2",
+			"metadata": map[string]any{"user_id": "u-1"},
+			"messages": []any{
+				map[string]any{"role": "system", "content": "你是助手。"},
+				map[string]any{"role": "user", "content": firstUser},
+				map[string]any{"role": "assistant", "content": "ok"},
+				map[string]any{"role": "user", "content": lastUser},
+			},
+		})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(body))))
+		if rec.Code != 200 {
+			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+		}
+	}
+	keyOf := func(i int) string {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(bodies[i]), &obj); err != nil {
+			t.Fatalf("出站 body 不可解析: %v", err)
+		}
+		k, _ := obj["prompt_cache_key"].(string)
+		if k == "" {
+			t.Fatalf("user_id 客户端也必须带 prompt_cache_key（空 = 每账号一个常量槽）: %s", bodies[i])
+		}
+		return k
+	}
+
+	send("第一问", "第二问")   // 0
+	send("第一问", "第三问")   // 1 同会话下一轮
+	send("另一个话题", "第二问") // 2 另一段对话
+	if keyOf(0) != keyOf(1) {
+		t.Fatalf("同会话轮次变化后缓存键必须稳定：%q vs %q", keyOf(0), keyOf(1))
+	}
+	if keyOf(0) == keyOf(2) {
+		t.Fatalf("不同对话必须落在不同缓存槽（否则互相覆盖前缀缓存）：%q", keyOf(0))
+	}
+}
