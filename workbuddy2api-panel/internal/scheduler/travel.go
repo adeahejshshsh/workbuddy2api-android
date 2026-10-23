@@ -100,6 +100,11 @@ func (s *Scheduler) RunTravelNowFor(uid string) bool {
 	if a.IsGlobal() || !a.SupportsPersonalGrowth() {
 		return false
 	}
+	// 企业上下文门控（review #18）：全池版会调 skipBehaviorTask，按号版此前漏了 ——
+	// 企业切换会话的 token 下旅行 RPC 会被上游静默丢弃/403，白打一串请求。
+	if s.skipBehaviorTask(a) {
+		return false
+	}
 	// 按号端点没有请求上下文可继承（调用方是面板的一次点击），用独立 context：
 	// 上游调用自带超时，这里不再叠加 deadline。
 	s.travelOne(context.Background(), a)

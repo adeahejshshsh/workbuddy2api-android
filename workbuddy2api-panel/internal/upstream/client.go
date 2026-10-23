@@ -29,24 +29,25 @@ import (
 type ErrKind int
 
 const (
-	ErrNone           ErrKind = iota // 成功
-	ErrHardCredit                    // 余额不足（402 或 body 关键词）→ 长冷却
-	ErrSoftRate                      // 429 软限流 → 短冷却
-	ErrSessionDead                   // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
-	ErrServer                        // 5xx 上游故障
-	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
-	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
-	ErrAccountFault                  // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
-	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
-	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
-	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
-	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
-	ErrUpstreamBusy                  // 6021 queue.full 渠道级容量满载 → 不罚号、不轮转，末端 503 upstream_busy
-	ErrChannelRefused                // 11‑-128 request illegal 通道校验失败（上游认为非官方客户端）→ 不罚账号
-	ErrModelBusy                     // 14003「模型繁忙」（间歇）→ (账号,模型) 10s 起短冷却，封顶 1m
-	ErrClient                        // 其他 4xx / 业务错误
-	ErrToolMismatch                  // 11148「tool calls and tool results do not match」→ 请求内容级配对断裂：不罚号、不轮转，末端 400 透传原文
+	ErrNone              ErrKind = iota // 成功
+	ErrHardCredit                       // 余额不足（402 或 body 关键词）→ 长冷却
+	ErrSoftRate                         // 429 软限流 → 短冷却
+	ErrSessionDead                      // 401 + 12153 offline session 失效 → 禁用
+	ErrNotFound                         // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
+	ErrServer                           // 5xx 上游故障
+	ErrContentBlocked                   // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
+	ErrBadParams                        // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
+	ErrAccountFault                     // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
+	ErrModelBlocked                     // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
+	ErrWafBlock                         // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
+	ErrPromptTooLong                    // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
+	ErrImageInvalid                     // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrModelParamInvalid                // 11133「模型供应商拒绝参数」（缺/空 messages、模型不支持图片等）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
+	ErrUpstreamBusy                     // 6021 queue.full 渠道级容量满载 → 不罚号、不轮转，末端 503 upstream_busy
+	ErrChannelRefused                   // 11‑-128 request illegal 通道校验失败（上游认为非官方客户端）→ 不罚账号
+	ErrModelBusy                        // 14003「模型繁忙」（间歇）→ (账号,模型) 10s 起短冷却，封顶 1m
+	ErrClient                           // 其他 4xx / 业务错误
+	ErrToolMismatch                     // 11148「tool calls and tool results do not match」→ 请求内容级配对断裂：不罚号、不轮转，末端 400 透传原文
 )
 
 func (k ErrKind) String() string {
@@ -81,6 +82,8 @@ func (k ErrKind) String() string {
 		return "model_busy"
 	case ErrImageInvalid:
 		return "image_invalid"
+	case ErrModelParamInvalid:
+		return "model_param_invalid"
 	case ErrAccountFault:
 		return "account_fault"
 	case ErrClient:
@@ -709,6 +712,13 @@ func Classify(status int, body string) ErrKind {
 	}
 	// 图片格式/数据错误是确定性的请求级错误：同 body 换账号结果不变，直接
 	// fail-fast，避免把健康账号轮转一遍后仍把最终 503 返回给客户端。
+	// 11133「模型供应商拒绝参数」（review #4）：缺/空 messages、模型不支持图片等，
+	// 都是**请求内容**的确定性 400 —— 同 body 换任何账号结果一样。不在此分流会落
+	// ErrClient → 全池轮转 + 每个健康号记一笔连败，末端还把确定失败伪装成 503。
+	// 判在 11135 之前（11135 是它的图片子类，两者同为请求级，先判更宽的即可）。
+	if status == http.StatusBadRequest && codeMarker(lower, "11133") {
+		return ErrModelParamInvalid
+	}
 	// 11135 业务码走 codeMarker（JSON 空白容差），文案走 invalidImageMarkers。
 	if status == http.StatusBadRequest && codeMarker(lower, "11135") {
 		return ErrImageInvalid
@@ -1119,7 +1129,10 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		// 而 doJSON（refresh/checkin/balance/travel/report）此前不解析 —— 走这条路的
 		// 429 丢了上游明示的等待时长，冷却只能靠默认基数猜。
 		ra, _ := ParseRetryAfter(resp.Header)
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), RetryAfter: ra}
+		// HTTPStatus 也填（review #26）：业务码分支填了它，HTTP 错误分支此前留 0，
+		// 排障时「真实 HTTP 状态」两类错误口径不一致。
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, HTTPStatus: resp.StatusCode,
+			Msg: truncate(string(raw), 200), RetryAfter: ra}
 	}
 	// 200 + 空 body 是**成功**（报告 #6）：/v2/report、appearance/set、
 	// claim-gift、claim-compensation 这些 RPC 成功时可能回空体，

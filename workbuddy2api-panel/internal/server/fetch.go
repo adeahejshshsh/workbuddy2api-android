@@ -78,6 +78,8 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 		tried[a.UID] = true
 		// 占在途名额（review #7）：与 chat 路径同口径。
 		if !h.cfg.Pool.Acquire(a.UID) {
+			// 同 search（review #1）：抢不到名额也要留 lastErr，否则末尾解引用 panic。
+			lastErr = fmt.Errorf("账号 %s 在途已满", a.UID)
 			continue
 		}
 		data, ferr := h.cfg.Upstream.WebFetch(r.Context(), a, target)

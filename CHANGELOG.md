@@ -698,6 +698,51 @@ curl -X POST http://127.0.0.1:7863/panel/api/accounts/add_apikey \
 | 18 | `RecordModelRateLimitAudit` 无调用点 | 保留（6004 无重置时间时的展示台账入口，删除会改变面板语义） |
 | 19 | `IsWafBlocked` 的文档挂在 `IsGatewayUnauthorized` 上方 | 文档归位 |
 
+### 六、应用缺陷审查 28 条（代码审查报告-应用缺陷）
+
+**P0（6 条，全部已修）**
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| 1 | `/v1/search`、`/v1/fetch` 全部抢不到在途名额时 `lastErr` 为 nil → 末尾解引用 panic | `Acquire` 失败时写 `lastErr` |
+| 2 | 夜猫子不过滤 `disabled`（其余任务族都有这道门） | 补 `st.Disabled` + `includeDisabledInTasks` |
+| 3 | 活跃上报/夜猫子只排序不 `plan.wait` → 摊开配置对它们无效 | 两处改用 `plan.wait` |
+| 4 | 11133 未归请求级 → 全池轮转 + 误罚号 + 末端 503 | 新增 `ErrModelParamInvalid` + 分类 + handler fail-fast 400 |
+| 5 | `ErrUpstreamBusy`/`ErrChannelRefused` 仍轮转，与「换号无用」矛盾 | 两种 kind 直接 `break` |
+| 6 | 模型开关按第一个冒号剥前缀，`qwen:7b` 被截成 `7b` | 只认 `cn:`/`global:` |
+
+**P1（15 条，全部已修）**
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| 7 | 余额趋势「刷新」与时间窗无事件绑定 | 补 `onclick`/`onchange` |
+| 8 | 柱状图 `<title>` 裸挂 `<svg>`，悬浮提示错乱 | 包进 `<g>` |
+| 9 | `request_metrics` 失败时丢弃已取回的 `request_logs` | 判据改「metrics 明确说关闭才算关闭」 |
+| 10 | `balance.flush` 失败不恢复 `dirty`，采样批次丢失 | 失败回置 `dirty` |
+| 11 | 启动补跑用宿主本地时间而非 CST | 改 `cst.Now()` |
+| 12 | `model_fallback` 被误报需重启；`models.aliases` 的 live 写入是死代码 | 两个表都改读 live，移出重启清单 |
+| 13 | 降级后用量/成本仍记在原模型名下 | `modelRate`/`delta.Model`/`NoteModelCost` 改用 `curModel` |
+| 14 | global 窄表形态下面板误报「上游未返回可用模型」 | 回落到 `FetchGlobalModels` 的裸名列表 |
+| 15 | 面板单号签到未跳过静态 API Key | 补 `IsAPIKey()` 门控 |
+| 16 | `cmd/signin` 对 global 账号必然 FAIL | 补 global 门控（SKIP） |
+| 17 | `cmd/credit` 企业/API Key 显示 0；不认扁平形 auth 文件 | 补企业口径端点 + `UnmarshalJSON` 兼容两种形态 |
+| 18 | 按号旅行缺企业上下文门控、无账号级互斥 | 补 `skipBehaviorTask` + `tryLockAccount` |
+| 19 | 任务中心扫描/券码/单号任务缺企业上下文门控 | 三处补 `IsEnterpriseSession()` |
+| 20 | 补跑标记只在启动补跑写，正常排程不写 → 重启重跑 | 每批跑完即 `markRan` |
+| 21 | 归档容量提示「0=不限」与实现（<=0 → 100MiB）矛盾 | 文案改为「留空 = 默认 100 MB」 |
+
+**P2（7 条，全部已修）**
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| 22 | 14003 轮转耗尽落 503 `no_healthy_account` | 末端补 `ErrModelBusy` 分支（503 + `model_busy`） |
+| 23 | `balance.Stop` 未 `Start` 时永久阻塞；`Start` 不幂等 | `started` 原子标记 + `CompareAndSwap` |
+| 24 | `versionedIndex` 包级单例，多 Panel 会串版本 | 缓存移到 Panel 实例 |
+| 25 | 别名回显只覆盖非流式 | 新增 `WithModelEcho` 选项，SSE 帧同步改写 |
+| 26 | `doJSON` 的 HTTP 错误分支不填 `HTTPStatus` | 补 |
+| 27 | 按号旅行 skip 文案称「暂停」会被跳过，实际不会 | 文案纠正 |
+| 28 | `ReviveJobService` 日志写死 7863 | 改 `GwConfig.port(ctx)` |
+
 ### 未合并
 
 | kk-cao 提交 | 内容 | 判断 |

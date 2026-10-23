@@ -610,6 +610,10 @@ type StreamOption func(*streamOptions)
 type streamOptions struct {
 	onErrorFrame func(payload string)
 	markup       *MarkupRepair
+	// modelEcho 非空时把每帧里的 "model":"<real>" 改写成该值（别名回显，
+	// review #25）：客户端按请求名校验响应时，流式与非流式必须一致。
+	modelEcho string
+	modelReal string
 }
 
 // WithMarkupRepair 注册「模型原生工具调用标记」修复器（见 dsml.go）。
@@ -627,6 +631,12 @@ func WithMarkupRepair(r *MarkupRepair) StreamOption {
 // payload（原始 data 内容）回调一次。给调用方一个**账号处置**的挂载点——
 // 上游「200 + error 帧」是真实形态（6004 限流、内容拦截、审核），此前网关在读
 // 第一帧之前就把账号记成功，限流号被当成健康号；有观察者后可在流尾按帧分类处置。
+// WithModelEcho 把响应帧里的 model 回显成客户端原发名（models.aliases 用）。
+// real 是上游实际模型名，echo 是客户端请求名；任一为空 → 不改写。
+func WithModelEcho(real, echo string) StreamOption {
+	return func(o *streamOptions) { o.modelReal, o.modelEcho = real, echo }
+}
+
 func WithErrorFrameObserver(fn func(payload string)) StreamOption {
 	return func(o *streamOptions) { o.onErrorFrame = fn }
 }
@@ -673,6 +683,12 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 写失败一律包成 errClientWrite：上游帧本身是好的，写不出去只可能是客户端
 	// 断连。handler 据此区分「人走了」与「上游坏了」——两者对账号的处置相反。
 	writeSSE := func(payload string) error {
+		// 别名回显（review #25）：只替换精确的 "model":"<real>" 片段，
+		// 不做整帧重编码（帧体积小、字段多，重编码风险大于收益）。
+		if o.modelEcho != "" && o.modelReal != "" && o.modelEcho != o.modelReal {
+			payload = strings.ReplaceAll(payload,
+				`"model":"`+o.modelReal+`"`, `"model":"`+o.modelEcho+`"`)
+		}
 		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
 			return clientWriteErr(werr)
 		}

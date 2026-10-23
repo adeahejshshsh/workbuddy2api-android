@@ -263,3 +263,19 @@ echo "完成: $STAMPED"
 echo "      (稳定名: $OUTDIR/WorkBuddy2API.apk)"
 ls -la "$STAMPED"
 echo "版本展示串: $VERNAME-$STAMP（VERSION 文件仍是 $VERNAME）"
+
+# 只留最新一份（用户要求，2026-10-23）：每轮迭代都产一个带时间戳的 APK，攒到十几份
+# 既占空间又容易装错版本。保留「稳定名 + 最新时间戳名」，其余同前缀的一律删掉；
+# 只删 $OUTDIR 下本脚本自己产出的命名，不碰用户的其它文件。
+KEEP="$(basename "$STAMPED")"
+if [ "$OUTDIR" = "$WS" ]; then
+  for old in "$OUTDIR"/WorkBuddy2API-v*.apk; do
+    [ -f "$old" ] || continue
+    [ "$(basename "$old")" = "$KEEP" ] && continue
+    rm -f "$old" && echo "  清理旧构建: $(basename "$old")"
+  done
+  # 早期手工命名的 idsig 也一并清（签名产物，可随时重签）
+  for stale in "$OUTDIR"/WorkBuddy2API.*.signed.apk.idsig; do
+    [ -f "$stale" ] && rm -f "$stale" && echo "  清理旧 idsig: $(basename "$stale")"
+  done
+fi

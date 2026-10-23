@@ -435,15 +435,23 @@ func marshalNoEscape(v any) ([]byte, error) {
 // modelAlias 查 models.aliases 映射（issue #30）：键为「小写 realm + ":" + 小写裸名」。
 // 未命中返回 ("", false)。
 func (h *Handler) modelAlias(realm, bare string) (string, bool) {
-	if bare == "" || len(h.cfg.ModelsAliases) == 0 {
+	if bare == "" {
 		return "", false
 	}
-	// 归一化只做一次（review #13）：别名表是进程内常量，此前每个 chat 请求都重建
-	// 一次 map（含 strings.ToLower/TrimSpace 与 map 分配），纯浪费。
-	h.aliasOnce.Do(func() {
-		h.aliasTable = livecfg.NormalizeModelAliases(h.cfg.ModelsAliases)
-	})
-	target, ok := h.aliasTable[strings.ToLower(realm)+":"+strings.ToLower(bare)]
+	// 优先读 live 快照（review #12）：面板保存后立即生效，与 model_fallback 同口径。
+	m := h.loadLive().ModelAliases
+	if m == nil {
+		// Live 为 nil 的裸用/测试路径：回落到构造期静态字段，归一化只做一次
+		// （review #13：此前每个 chat 请求都重建 map）。
+		h.aliasOnce.Do(func() {
+			h.aliasTable = livecfg.NormalizeModelAliases(h.cfg.ModelsAliases)
+		})
+		m = h.aliasTable
+	}
+	if m == nil {
+		return "", false
+	}
+	target, ok := m[strings.ToLower(realm)+":"+strings.ToLower(bare)]
 	return target, ok
 }
 
@@ -825,7 +833,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	modelRate := ""
 	if h.cfg.Upstream != nil {
-		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
+		// 用 curModel（review #13）：降级后实际走的是等价模型，成本倍率要按它取，
+		// 否则降级流量按原模型的倍率记账，被降级到的模型反而没有成本观测。
+		modelRate = h.cfg.Upstream.ModelRate(realm, curModel)
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
@@ -935,7 +945,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		} else if delta.HasPromptTokens || delta.HasCompletionTokens {
 			st.totalTokens = st.promptTokens + st.completionTokens
 		}
-		delta.Model = bareModel
+		// 同上（review #13）：流水行记实际使用的模型。
+		delta.Model = curModel
 		if delta.Model == "" {
 			delta.Model = peek.Model
 		}
@@ -1293,6 +1304,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			// 11133「模型供应商拒绝参数」（review #4）：缺/空 messages、模型不支持图片等
+			// 都是**请求内容**的确定性 400，同 body 换任何账号结果一样。此前落
+			// ErrClient → 全池轮转（每个健康号记一笔连败）+ 末端 503「没号」，
+			// 客户端还会对必然失败的请求无限重试。与 11101/11115/图片无效同哲学。
+			if kind == upstream.ErrModelParamInvalid {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := briefBodyOr(string(respBody), "request parameters were rejected by the model provider")
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "model_param_invalid", msg,
+					h.hintOf(upstream.ErrModelParamInvalid, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// 图片格式/数据无效：立即透传上游原文回客户端，不罚号不轮转。
 			// 同一 body 换账号仍是同样的解析结果，轮转只会放大无效请求。
 			if kind == upstream.ErrImageInvalid {
@@ -1347,6 +1372,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
 				break
 			}
+			// 换号无用的两类（review #5）：6021 渠道容量满载与 11‑-128 通道校验，
+			// applyErrorPolicy 对它们都是零动作（不冷却/不罚号），策略注释也写明
+			// 「换号不改变结果」。此前只有 WAF 会 break，这两类仍会 rotateBackoff
+			// 换号 —— 一次请求被放大成最多 MaxRotate 次上游调用 + 退避等待。
+			if kind == upstream.ErrUpstreamBusy || kind == upstream.ErrChannelRefused {
+				break
+			}
 			if !rotateBackoff(i, r.Context()) {
 				break // ctx 取消：终止轮转（分类错误换号退避）
 			}
@@ -1373,7 +1405,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }),
-				upstream.WithMarkupRepair(repair))
+				upstream.WithMarkupRepair(repair),
+				// 别名回显（review #25）：流式帧里的 model 也改回客户端原发名，
+				// 与非流式路径（resp["model"]）保持一致。
+				upstream.WithModelEcho(bareModel, aliasEcho))
 			switch {
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
@@ -1467,7 +1502,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.credit = credit
 				st.hasCredit = true
 				if total, tok := stats.TotalTokens(); tok && total > 0 {
-					h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
+					h.cfg.Pool.NoteModelCost(acct.UID, curModel, credit, total)
 				}
 			}
 			rc.Close()
@@ -1634,7 +1669,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if hasCredit {
 			st.credit = credit
 			st.hasCredit = true
-			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
+			h.cfg.Pool.NoteModelCost(acct.UID, curModel, credit, total)
 		}
 		return
 	}
@@ -1765,6 +1800,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusServiceUnavailable
 			code = "upstream_busy"
 			msg = "upstream capacity is full (queue.full); retry after a short wait"
+		case upstream.ErrModelBusy:
+			// 14003 模型繁忙（review #22）：请求内每个号都撞上时 lastErr 是它，
+			// 此前末端没有这个分支 → 落默认的 503 no_healthy_account，客户端看到
+			// 「没号」而不是「模型忙，稍后重试」，也没有 Retry-After。
+			status = http.StatusServiceUnavailable
+			code = "model_busy"
+			msg = "model is busy at upstream (14003); retry after a short wait"
 		case upstream.ErrSoftRate:
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"

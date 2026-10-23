@@ -515,13 +515,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// 启动补跑：进程停机（部署 / 重启 / 崩溃）跨过今天的时点，迟到唤醒补跑救不了
 	// ——它只管进程活着时 timer 被睡眠冻结。这里补一轮：各任务按天幂等，
 	// 窗口类（夜猫子）自带守卫，重复一轮不会打出无意义请求。
-	if missed := s.missedToday(time.Now()); len(missed) > 0 {
+	// 用 cst.Now()（review #11）：主循环的时点一律按 CST 解释（nextFire 用入参的
+	// Location 构造时刻）。此处传 time.Now() 时，UTC 容器/海外 VPS 上
+	// checkin_hours=[9] 会被解释成本地 09:00（CST 17:00），日界也按本地日算 ——
+	// 启动补跑在错误的时刻触发/漏触发，补跑标记的「今天」与上游自然日错位。
+	if missed := s.missedToday(cst.Now()); len(missed) > 0 {
 		log.Printf("启动补跑：%v（今天的时点已过）", missed)
 		if !sleepCtx(ctx, wakeupGraceDelay) {
 			return // 开机瞬间网络/DNS 可能未就绪（同 issue #152 的宽限口径）
 		}
 		s.runBatch(ctx, missed)
-		s.markRan(missed, time.Now())
+		s.markRan(missed, cst.Now())
 	}
 	for {
 		// 用北京时间算时点（misakano7545 `025cc107`）：上游的「今天」是北京自然日，
@@ -558,7 +562,13 @@ func (s *Scheduler) Run(ctx context.Context) {
 			// （checkin 末尾串跑 streak 管家 + 800ms/号节流，46 号就是数分钟）。
 			// 改为后台跑，主循环立刻回到 waitSlot 继续等下一个时点；
 			// 同族任务重入由 runBatch 内部的任务族互斥语义承担（各族自身幂等）。
-			go s.runBatch(ctx, kinds)
+			// 正常排程也要写补跑标记（review #20）：此前 markRan 只在启动补跑
+			// 分支调用，当天 09:00 正常跑完后重启，missedToday 仍认为「时点已过且
+			// 未补跑」→ 再对全池打一轮。现在每批跑完即记账，一天重启多次不再翻倍。
+			go func(kinds []taskKind) {
+				s.runBatch(ctx, kinds)
+				s.markRan(kinds, cst.Now())
+			}(kinds)
 		}
 	}
 }
@@ -727,7 +737,6 @@ func (s *Scheduler) RunActivityNow() {
 
 // runActivity 活跃上报遍历，随 ctx 取消立即退出。
 func (s *Scheduler) runActivity(ctx context.Context, spread bool) {
-	first := true
 	includeDisabled := s.includeDisabledInTasks()
 	plan := s.spreadPlan(taskActivity, spread, cst.Now())
 	for _, st := range plan.order(s.cfg.Pool.List()) {
@@ -753,12 +762,10 @@ func (s *Scheduler) runActivity(ctx context.Context, spread bool) {
 		// 无需改动 upstream。此处曾按「D4 门控：global 无活跃体系」跳过 global，实测该
 		// 判断不成立——国际版 /v2/report 可用，跳过即国际版账号永远点不亮连登（上游
 		// a190252 同口径修复）。checkin/travel 的 global 门控不受影响，仍跳过。
-		if !first {
-			if !sleepCtx(ctx, s.accountDelay(activityAccountDelay)) {
-				return // 优雅停机：不等限速睡满，剩余账号下轮再报
-			}
+		// 账号级摊开（review #3）：等本号在窗口内的偏移时刻（未启用时立即返回）。
+		if !plan.wait(ctx, st.UID) {
+			return // 优雅停机：不等限速睡满，剩余账号下轮再报
 		}
-		first = false
 		// 拼上账号标识（bug #12）：原来是纯毫秒时间戳，46 个号里同毫秒处理 2 个以上
 		// 就拿到**同一个** conversation id —— 上游按 conversation 聚合活跃事件，
 		// 重复 id 可能被去重/合并，表现为"报了 N 个号，连登只涨了一部分"。

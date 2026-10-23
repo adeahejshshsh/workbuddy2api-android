@@ -69,6 +69,9 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		// 占在途名额（review #7）：与 chat 路径同口径，否则 max_in_flight /
 		// max_in_flight_global 对检索端点不生效，in_flight 观测也不含它。
 		if !h.cfg.Pool.Acquire(a.UID) {
+			// 必须留痕（review #1）：三个账号都抢不到在途名额时 lastErr 仍是 nil，
+			// 末尾 lastErr.Error() 直接空指针 panic，客户端拿到空响应。
+			lastErr = fmt.Errorf("账号 %s 在途已满", a.UID)
 			continue
 		}
 		data, err := h.cfg.Upstream.Search(r.Context(), a, query, req.MaxResults)

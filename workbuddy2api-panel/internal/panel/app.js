@@ -925,6 +925,11 @@ function resetModelFilter() {
 
 // 筛选控件：输入框防抖 120ms（长列表逐字符重排不必每键一次），下拉即时。
 let mdQTimer = null;
+// 余额趋势页的刷新与时间窗（review #7）：此前两者都没有事件绑定 —— 点「刷新」
+// 无反应，切窗口后图表不变，只有切到别的页再切回来才按新值加载。
+if ($('btnBalHist')) $('btnBalHist').onclick = () => loadBalance();
+if ($('bhWindow')) $('bhWindow').onchange = () => loadBalance();
+
 $('mdQ').oninput = () => {
   clearTimeout(mdQTimer);
   mdQTimer = setTimeout(() => { mdFilter.q = $('mdQ').value.trim(); renderModels(); }, 120);
@@ -972,7 +977,11 @@ async function loadLogs() {
     // 归档开启时以归档为准——「区间内没有记录」是一个真实结果，不能回落成内存里
     // 的最近 100 条（那会把筛选条件之外、时间范围之外的请求显示出来）。
     // 只有归档关闭时才回落到内存指标，保证没有归档的部署仍能看到最近请求。
-    const archiveOn = !!(metrics && metrics.archive && metrics.archive.enabled);
+    // metrics 拉取失败时不能据此判「归档关闭」（review #9）：那样会把已成功取回的
+    // request_logs 丢掉，表格显示「暂无请求记录」并把来源列标成「未记录」。
+    // 判据改为「metrics 明确说归档关闭」才算关闭；拿不到 metrics 就按归档在用处理。
+    const metricsKnown = !!(metrics && metrics.archive);
+    const archiveOn = metricsKnown ? !!metrics.archive.enabled : true;
     // 归档关闭时回落到内存最近 100 条，但**同样要过时间范围筛选**（BUG-10）：
     // 此前直接整份喂给表格，用户选「今天 / 自定义区间」仍会看到区间外的旧记录，
     // 与筛选器文案自相矛盾。
@@ -3507,8 +3516,10 @@ function renderDailyBars(series) {
             '<title>超出纵轴范围（已裁剪），实际 ' + (v > 0 ? '+' : '') + fmtNum(v) + '</title></path>';
         }
       }
-      out += '<title>' + esc(s.name || s.uid.slice(0, 8)) + '  ' + esc(day) + '\n' +
-        (v > 0 ? '+' : '') + fmtNum(v) + (incomplete ? '\n⚠️ 该日采样不完整（当天未结束或中途启用）' : '') + '</title>';
+      // title 必须包进 <g>（review #8）：直接挂在 <svg> 下时浏览器只认根节点的
+      // 第一个 <title>，所有柱子都会显示第一根的数据。renderUsageChart 已是这个写法。
+      out += '<g><title>' + esc(s.name || s.uid.slice(0, 8)) + '  ' + esc(day) + '\n' +
+        (v > 0 ? '+' : '') + fmtNum(v) + (incomplete ? '\n⚠️ 该日采样不完整（当天未结束或中途启用）' : '') + '</title></g>';
     });
     // x 轴日期标签（稀疏）
     // 与上方「积分水位」图同一口径（天数 / 3 + 1，夹在 2~10 之间），保证可纵向对照。

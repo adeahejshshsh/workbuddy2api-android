@@ -57,6 +57,12 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "国际版账号无成长任务体系（上游 growth 仅对个人 CN 用户开放）")
 		return
 	}
+	// 企业上下文（review #19）：token 是企业切换会话时，任务端点会被上游静默
+	// 丢弃/403 —— 明确拒绝比让用户看着进度不动更好。
+	if a.IsEnterpriseSession() {
+		writeErr(w, http.StatusNotImplemented, "企业上下文账号不参与成长任务（上游会静默丢弃）")
+		return
+	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())

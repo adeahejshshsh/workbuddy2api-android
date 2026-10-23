@@ -71,8 +71,10 @@ public class ReviveJobService extends JobService {
                         return;
                     }
                     boolean up = GatewayService.portUp();
+                    // 端口从配置读（review #28）：写死 7863 时，改过 listen 的部署
+                    // 日志会指向错误端口，排障被带偏。
                     GatewayService.appLog(ReviveJobService.this,
-                            "JobScheduler 触发：7863 " + (up ? "在服务，不打扰" : "不在服务 → 拉起服务"));
+                            "JobScheduler 触发：" + GwConfig.port(ReviveJobService.this) + " " + (up ? "在服务，不打扰" : "不在服务 → 拉起服务"));
                     if (!up) {                   // 7863 不在服务 → 把服务叫起来（它自己去拉起网关）
                         try {
                             Intent i = new Intent(ReviveJobService.this, GatewayService.class);

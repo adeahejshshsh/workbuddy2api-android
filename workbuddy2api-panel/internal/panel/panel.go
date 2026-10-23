@@ -89,6 +89,13 @@ type Panel struct {
 	started time.Time
 	logs    *Ring
 
+	// idxOnce/idxBody/idxETag 版本化 index.html 的实例级缓存（review #24）：
+	// 此前是包级单例，进程内构造第二个 Panel（测试/嵌入/多实例）会拿到第一个
+	// Panel 的版本串与 ETag，导致 app.js?v= 与响应体错配。
+	idxOnce sync.Once
+	idxBody []byte
+	idxETag string
+
 	// logins 进行中的 OAuth 设备授权会话（state → 会话信息）。
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
 	loginMu sync.Mutex
@@ -445,6 +452,19 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 					// "上游未返回可用模型" —— 连点两次"刷新模型"就会拿到一句假错误。
 					if p.cfg.Upstream.GlobalProbeInFlight() {
 						fetchErrs = append(fetchErrs, "global: 目录探测进行中，请稍后重试")
+					} else if names := p.cfg.Upstream.FetchGlobalModels(acct); len(names) > 0 {
+						// 窄表形态（review #14）：目录只回了字符串数组，FetchGlobalModelInfos
+						// 返回 nil 但名字是有的（/v1/models 也会列出裸条目）。此前一律报
+						// 「上游未返回可用模型」，同一份目录面板报错、API 却有模型。
+						efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
+						for _, n := range names {
+							if skip, _ := p.tierHidden(n, "global", showHidden); skip {
+								hiddenTier++
+								continue
+							}
+							out = append(out, panelModelEntry("global",
+								upstream.ModelInfo{ID: n, Name: n}, efforts[n], defaults[n], p.cfg.Upstream.HTTP))
+						}
 					} else {
 						fetchErrs = append(fetchErrs, "global: 上游未返回可用模型")
 					}
@@ -730,6 +750,12 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	} else if a.IsEnterprise() {
 		checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
 		checkinSkipped = true
+	} else if a.IsAPIKey() {
+		// 静态 API Key 账号没有个人身份（review #15）：DailyCheckin 必然被上游拒。
+		// 其他入口都用 SupportsPersonalEndpoints()，这里补上同一判据 —— 前端已隐藏
+		// 按钮，但外部脚本/旧缓存前端仍可能调这个端点。
+		checkinMsg = "静态 API Key 账号无个人身份（已跳过签到，仅刷新额度）"
+		checkinSkipped = true
 	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		// 幂等拒绝（今天已签到）是**正常结果**，不是错误（bug #13）：此前把
 		// err.Error() 原样回给前端，toast 会拼出「（code=10001 msg=今天已签到）」
@@ -883,11 +909,21 @@ func (p *Panel) accountTravel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
+	// 账号级互斥（review #18）：按号端点与全池旅行可能并发跑同一账号，
+	// 并发时同一号可能被派出两次或重复领奖。
+	if !p.tryLockAccount(uid) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "ran": false, "skipped": true,
+			"skip_reason": "该账号有任务在执行中，请稍后再试",
+		})
+		return
+	}
+	defer p.unlockAccount(uid)
 	ran := p.cfg.Scheduler.RunTravelNowFor(uid)
 	if !ran {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": true, "ran": false, "skipped": true,
-			"skip_reason": "禁用/暂停/无 refresh token/国际区/企业版账号不参与旅行",
+			"skip_reason": "禁用/无 refresh token/国际区/企业版账号不参与旅行（暂停选号的账号照常参与）",
 		})
 		return
 	}
@@ -1324,9 +1360,14 @@ func (p *Panel) modelToggle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "model is required")
 		return
 	}
-	// 剥 realm 前缀（与出站口径一致：上游只认裸名）
-	if i := strings.Index(model, ":"); i >= 0 {
-		model = model[i+1:]
+	// 剥 realm 前缀（review #6）：只认 cn: / global:，不能按第一个冒号盲切 ——
+	// qwen:7b 这类合法裸名会被截成 7b，与 resolveModel/splitRealmPrefixFold 口径
+	// 不一致，modelOff 记录与选号时传的模型名永远对不上（开关显示成功但不生效）。
+	if i := strings.Index(model, ":"); i > 0 {
+		switch strings.ToLower(model[:i]) {
+		case "cn", "global":
+			model = model[i+1:]
+		}
 	}
 	if req.Off {
 		if !p.cfg.Pool.SetModelOff(uid, model, req.Note) {

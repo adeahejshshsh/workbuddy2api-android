@@ -463,6 +463,15 @@ dispatch:
 				mu.Unlock()
 				return
 			}
+			// 企业上下文门控（review #19）：企业切换会话的 token 下 /v2/report 会
+			// 200 但静默丢弃，任务进度不动且没有原因。runAutoAll / ClaimSweepOnce
+			// 早有这道门，扫描/队列此前漏了。
+			if a.IsEnterpriseSession() {
+				mu.Lock()
+				dg.gated++
+				mu.Unlock()
+				return
+			}
 			// 企业版门控：同上（企业版无个人成长体系，任务端点上游一律 403）。
 			if a.IsEnterprise() {
 				mu.Lock()
@@ -1014,6 +1023,10 @@ dispatchVouchers:
 			switch {
 			case a.IsGlobal():
 				it.Err = "global realm（无开学季活动）"
+			case !a.SupportsPersonalEndpoints():
+				it.Err = "该账号无个人账号身份（企业版 / 静态 API Key）"
+			case a.IsEnterpriseSession():
+				it.Err = "企业上下文账号（上游会静默丢弃）"
 			default:
 				vs, err := p.cfg.Upstream.SchoolVouchers(a)
 				if err != nil {

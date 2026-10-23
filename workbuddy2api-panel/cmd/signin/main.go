@@ -84,6 +84,14 @@ func main() {
 			}
 		}
 
+		// global 账号没有 daily-checkin 端点（review #16）：调度器/面板/导入后置
+		// 动作都显式跳过 global，只有这个批量工具漏了 —— 每次批量签到都会把国际版
+		// 账号全算进 FAIL，输出与真实状态不符。
+		if a.IsGlobal() {
+			r.status = "SKIP"
+			r.detail = "国际版账号无签到体系"
+			continue
+		}
 		err = up.DailyCheckin(a)
 		switch {
 		case err == nil:

@@ -35,7 +35,18 @@ func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context, spread bool) {
 		return
 	}
 	plan := s.spreadPlan(taskBlackcat, spread, cst.Now())
+	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range plan.order(s.cfg.Pool.List()) {
+		// 禁用账号门控（review #2）：签到/旅行/活跃/保活/成长队列都有这道门，
+		// 只有夜猫子漏了 —— 被人工禁用或 12153 判死的号每天 23:00 仍会被发
+		// 真实模型对话，烧额度还继续打上游。
+		if st.Disabled && !includeDisabled {
+			continue
+		}
+		// 账号级摊开（review #3）：只排序不等待等于没摊开，实际执行时刻仍是固定节拍。
+		if !plan.wait(ctx, st.UID) {
+			return
+		}
 		// 暂停选号（paused）账号跳过：夜猫子是全任务体系里**唯一「整任务都是真实模型
 		// 对话」**的（RunNightChats 逐条 ChatStream 发 glm-5.2 短对话），与「让位防风控」
 		// 正面冲突。旅行 / 成长任务 / 连登管家都走上报与领奖 RPC，照常参与
@@ -70,8 +81,5 @@ func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context, spread bool) {
 			continue
 		}
 		log.Printf("blackcat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.NicknameValue()), ok)
-		if !sleepCtx(ctx, s.accountDelay(activityAccountDelay)) {
-			return
-		}
 	}
 }

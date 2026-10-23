@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -46,6 +47,56 @@ func billingBaseFor(af *authFile) string {
 		return billingBaseGlobal
 	}
 	return billingBaseCN
+}
+
+// UnmarshalJSON 同时吃两种落盘形态（review #17）：嵌套形
+// {"auth":{"accessToken":…},"account":{…}} 与扁平形 {"accessToken":…,"uid":…}。
+// auth.Parse 已明确支持扁平形，CLI 只认嵌套会让这些账号静默消失。
+func (af *authFile) UnmarshalJSON(b []byte) error {
+	type nested struct {
+		Auth struct {
+			AccessToken string `json:"accessToken"`
+			Domain      string `json:"domain"`
+			Realm       string `json:"realm"`
+		} `json:"auth"`
+		Account struct {
+			UID          string `json:"uid"`
+			EnterpriseID string `json:"enterpriseId"`
+			Nickname     string `json:"nickname"`
+		} `json:"account"`
+		AccessToken  string `json:"accessToken"`
+		UID          string `json:"uid"`
+		EnterpriseID string `json:"enterpriseId"`
+		Nickname     string `json:"nickname"`
+		Domain       string `json:"domain"`
+		Realm        string `json:"realm"`
+	}
+	var n nested
+	if err := json.Unmarshal(b, &n); err != nil {
+		return err
+	}
+	af.Auth.AccessToken, af.Auth.Domain, af.Auth.Realm = n.Auth.AccessToken, n.Auth.Domain, n.Auth.Realm
+	af.Account.UID, af.Account.EnterpriseID, af.Account.Nickname = n.Account.UID, n.Account.EnterpriseID, n.Account.Nickname
+	// 扁平形：顶层字段补位（嵌套形时这些字段为空，不会覆盖）
+	if af.Auth.AccessToken == "" {
+		af.Auth.AccessToken = n.AccessToken
+	}
+	if af.Auth.Domain == "" {
+		af.Auth.Domain = n.Domain
+	}
+	if af.Auth.Realm == "" {
+		af.Auth.Realm = n.Realm
+	}
+	if af.Account.UID == "" {
+		af.Account.UID = n.UID
+	}
+	if af.Account.EnterpriseID == "" {
+		af.Account.EnterpriseID = n.EnterpriseID
+	}
+	if af.Account.Nickname == "" {
+		af.Account.Nickname = n.Nickname
+	}
+	return nil
 }
 
 type authFile struct {
@@ -129,6 +180,53 @@ func packageRemainUsed(a resourcePackage) (remain, used, size int64) {
 		remain = size - used
 	}
 	return remain, used, size
+}
+
+// fetchEnterpriseResource 企业版 / 静态 API Key 的额度（review #17）：
+// 个人 get-user-resource 对二者恒返回空 Accounts，网关侧走
+// get-enterprise-user-usage，CLI 此前没有对应分支 → 一律显示 0。
+func fetchEnterpriseResource(af *authFile) (remain, used, size int64, packs int, err error) {
+	base := billingBaseFor(af)
+	client := &http.Client{Timeout: 20 * time.Second}
+	req, rerr := http.NewRequest(http.MethodPost, base+"/v2/billing/meter/get-enterprise-user-usage", bytes.NewReader([]byte("{}")))
+	if rerr != nil {
+		return 0, 0, 0, 0, rerr
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+af.Auth.AccessToken)
+	resp, rerr := client.Do(req)
+	if rerr != nil {
+		return 0, 0, 0, 0, rerr
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return 0, 0, 0, 0, fmt.Errorf("http %d: %s", resp.StatusCode, clipStr(string(raw), 120))
+	}
+	var r struct {
+		Credit        float64 `json:"credit"`
+		LimitNum      int64   `json:"limitNum"`
+		LimitNumSnake int64   `json:"limit_num"`
+		UsedNum       float64 `json:"used_num"`
+	}
+	if uerr := json.Unmarshal(raw, &r); uerr != nil {
+		return 0, 0, 0, 0, fmt.Errorf("enterprise parse: %w", uerr)
+	}
+	limit := r.LimitNum
+	if limit == 0 && r.LimitNumSnake != 0 {
+		limit = r.LimitNumSnake
+	}
+	return int64(r.Credit), int64(r.UsedNum), limit, 1, nil
+}
+
+// isEnterpriseOrAPIKey 判该账号是否走企业口径：有 enterpriseId，或 token 是
+// ck_/pt_ 前缀的静态 API Key（与 auth.IsAPIKey 同判据）。
+func isEnterpriseOrAPIKey(af *authFile) bool {
+	if strings.TrimSpace(af.Account.EnterpriseID) != "" {
+		return true
+	}
+	t := af.Auth.AccessToken
+	return strings.HasPrefix(t, "ck_") || strings.HasPrefix(t, "pt_")
 }
 
 func fetchUserResource(af *authFile) (remain, used, size int64, packs int, err error) {
@@ -256,7 +354,13 @@ func main() {
 			accounts = append(accounts, res)
 			continue
 		}
-		remain, used, size, packs, err := fetchUserResource(&af)
+		var remain, used, size int64
+		var packs int
+		if isEnterpriseOrAPIKey(&af) {
+			remain, used, size, packs, err = fetchEnterpriseResource(&af)
+		} else {
+			remain, used, size, packs, err = fetchUserResource(&af)
+		}
 		if err != nil {
 			res.Error = err.Error()
 		} else {
@@ -334,4 +438,12 @@ func printPretty(accounts []accountResult, totalRemain, totalUsed, totalSize int
 	for _, f := range failed {
 		fmt.Printf("⚠️ %s\n", f)
 	}
+}
+
+// clipStr 截断到 n 字节（CLI 错误文案用；超长上游原文不必整段打出来）。
+func clipStr(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 )
 
 //go:embed index.html
@@ -93,12 +92,8 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	writeStaticAsset(w, r, "text/html; charset=utf-8", etag, body)
 }
 
-// 版本化页面的缓存（cfg.Version 进程内不变，算一次就够）。
-var versionedHTMLCache struct {
-	once sync.Once
-	body []byte
-	etag string
-}
+// 版本化页面的缓存挂在 Panel 实例上（review #24）：cfg.Version 在单实例内不变，
+// 但包级单例会让同进程的第二个 Panel 复用第一个的版本串/ETag。
 
 // versionedIndex 返回带资源版本串的 index.html。
 //
@@ -115,17 +110,17 @@ func (p *Panel) versionedIndex() ([]byte, string) {
 	if v == "" || v == "dev" {
 		return indexHTML, indexHTMLETag
 	}
-	versionedHTMLCache.once.Do(func() {
+	p.idxOnce.Do(func() {
 		// 只替换内嵌的那处引用：indexHTML 是包级常量，改副本，不动原值。
 		body := bytes.ReplaceAll(indexHTML,
 			[]byte(`src="app.js"`),
 			[]byte(`src="app.js?v=`+url.QueryEscape(v)+`"`))
-		versionedHTMLCache.body = body
+		p.idxBody = body
 		// ETag 必须按**实际输出的字节**算：沿用 indexHTML 的 ETag 会让
 		// If-None-Match 与响应体错配（浏览器拿 304 却对应另一份内容）。
-		versionedHTMLCache.etag = contentETag(body)
+		p.idxETag = contentETag(body)
 	})
-	return versionedHTMLCache.body, versionedHTMLCache.etag
+	return p.idxBody, p.idxETag
 }
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -107,6 +108,7 @@ type Recorder struct {
 	clock func() time.Time // 便于测试注入
 
 	stopOnce sync.Once
+	started  atomic.Bool // Start 是否已跑过（review #23：Stop 在未 Start 时不得阻塞）
 	stop     chan struct{}
 	done     chan struct{}
 }
@@ -339,20 +341,28 @@ func (r *Recorder) flush(force bool) {
 	r.dirty = false
 	r.mu.Unlock()
 
+	// 失败要把 dirty 置回（review #10）：此前先清脏再写，任一步失败只打日志就 return，
+	// 这批采样在下次 Add 之前不会重试 —— 进程若在这期间退出，采样点永久丢失。
+	fail := func(what string, err error) {
+		log.Printf("[balance] %s失败: %v（保留 dirty，下次重试）", what, err)
+		r.mu.Lock()
+		r.dirty = true
+		r.mu.Unlock()
+	}
 	raw, err := json.Marshal(snap)
 	if err != nil {
-		log.Printf("[balance] 序列化失败: %v", err)
+		fail("序列化", err)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
-		log.Printf("[balance] 建目录失败: %v", err)
+		fail("建目录", err)
 		return
 	}
 	// 唯一临时名 + 原子替换（review #12）：固定 `path+".tmp"` 时，面板 Save() 与
 	// 后台 ticker 并发会互相覆盖（A 写、B 覆盖、A rename → 落盘成了 B 的内容）。
 	// 全仓标准写法是 auth.ReplaceAtomic（唯一 tmp + fsync + EBUSY 原地覆写）。
 	if err := auth.ReplaceAtomic(r.path, raw, 0o600); err != nil {
-		log.Printf("[balance] 落盘失败: %v", err)
+		fail("落盘", err)
 	}
 }
 
@@ -364,6 +374,10 @@ func (r *Recorder) Save() { r.flush(true) }
 // （重启即丢光历史）——这是很容易漏掉的一环。
 func (r *Recorder) Start() {
 	if r == nil {
+		return
+	}
+	// 幂等（review #23）：重复 Start 会起两个 goroutine，而 Stop 只等第一个。
+	if !r.started.CompareAndSwap(false, true) {
 		return
 	}
 	go func() {
@@ -386,6 +400,10 @@ func (r *Recorder) Start() {
 // Stop 停止后台协程并最终落盘（进程退出前调用）。
 func (r *Recorder) Stop() {
 	if r == nil {
+		return
+	}
+	// 未 Start 时 done 永远不会关闭，直接 return（review #23：此前会永久挂住）。
+	if !r.started.Load() {
 		return
 	}
 	r.stopOnce.Do(func() {

@@ -301,6 +301,7 @@ func main() {
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
 		ModelFallback:        cfg.Pool.ModelFallback,
+		ModelAliases:         livecfg.NormalizeModelAliases(cfg.Models.Aliases),
 	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
@@ -718,8 +719,8 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		"schedule.account_spread_seconds",
 		// review #4：以下键只在启动期装配，saveConfig 没有对应 setter —— 漏列会
 		// 让面板提示「已保存并立即生效」，实际要重启才生效。
-		"pool.model_fallback",                                               // handler 构造时快照（降级表）
-		"models.aliases",                                                    // 同上（别名表）
+		// pool.model_fallback / models.aliases 不在此列（review #12）：handler 每次
+		// 请求从 live 快照读，保存即生效 —— 列进来会诱导用户做无意义的重启。
 		"prompt.identity_override_enabled", "prompt.identity_override_text", // handler 构造时读入
 		"upstream.dump_dir", "upstream.dump_max_bytes", // up.DumpDir 启动期装配
 		"schedule.account_spread_minutes", "schedule.account_spread_min_gap_seconds", // scheduler 构造时读入
