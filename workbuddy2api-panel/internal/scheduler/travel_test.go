@@ -184,6 +184,33 @@ func TestRunKeepaliveDoesNotTriggerTravel(t *testing.T) {
 	}
 }
 
+// TestRunTravelNowForSingleAccount 按号端点：只推进指定账号，门控照旧。issue #227。
+func TestRunTravelNowForSingleAccount(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: "null"}
+	srv := stub.server()
+	defer srv.Close()
+
+	s, p := newTravelScheduler(t, srv, "u1", "u2")
+	if !s.RunTravelNowFor("u1") {
+		t.Fatal("u1 应被推进")
+	}
+	if n := stub.infoCalls.Load(); n != 1 {
+		t.Fatalf("buddy/info calls=%d want 1（只该推进 u1）", n)
+	}
+	// 不存在 / 禁用号：跳过且不碰上游。
+	if s.RunTravelNowFor("nobody") {
+		t.Error("不存在的号应返回 false")
+	}
+	p.Disable("u2", "test")
+	if s.RunTravelNowFor("u2") {
+		t.Error("禁用号应返回 false")
+	}
+	if n := stub.infoCalls.Load(); n != 1 {
+		t.Errorf("buddy/info calls=%d want 1（跳过的号不应发请求）", n)
+	}
+}
+
 // TestRunTravelStateMachine 表驱动覆盖状态机全部分支：每趟只做一个动作。
 func TestRunTravelStateMachine(t *testing.T) {
 	const buddyPresent = `{"id":7,"name":"档案喵 R"}`

@@ -85,6 +85,29 @@ func (s *Scheduler) RunTravelNowCtx(ctx context.Context) {
 	}
 }
 
+// RunTravelNowFor 只对指定账号执行一趟旅行巡检（按号端点用），门控与全池版本一致。
+// 返回是否真的推进了：false = 该号被门控跳过（禁用/暂停/无 refresh token/global/企业）。
+//
+// shortcut: 不加账号间限速，调用方自己控节奏——按号端点存在的意义就是让外部
+// 调度器做到每号独立随机时点，再叠加固定节拍等于把指纹加回去。
+func (s *Scheduler) RunTravelNowFor(uid string) bool {
+	st, ok := s.cfg.Pool.Status(uid)
+	if !ok || st.Disabled {
+		return false
+	}
+	a := s.cfg.Pool.AuthByUID(uid)
+	if a == nil || a.RefreshTokenValue() == "" {
+		return false
+	}
+	if a.IsGlobal() || a.IsEnterprise() {
+		return false
+	}
+	// 按号端点没有请求上下文可继承（调用方是面板的一次点击），用独立 context：
+	// 上游调用自带超时，这里不再叠加 deadline。
+	s.travelOne(context.Background(), a)
+	return true
+}
+
 // travelOne 单账号单趟状态机：查有无猫 + 查状态 + 最多一个动作，不轮询不等待。
 func (s *Scheduler) travelOne(ctx context.Context, a *auth.Auth) {
 	buddy, err := s.cfg.Upstream.BuddyInfo(a)

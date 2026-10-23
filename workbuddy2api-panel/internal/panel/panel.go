@@ -214,6 +214,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/travel", p.withAuth(p.accountTravel))
 	p.mux.HandleFunc("POST /panel/api/activity_all", p.withAuth(p.activityAll))
 	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.withAuth(p.keepaliveAll))
 	p.mux.HandleFunc("POST /panel/api/balance_all", p.withAuth(p.balanceAll))
@@ -817,6 +818,31 @@ func (p *Panel) travelAll(w http.ResponseWriter, r *http.Request) {
 	}()
 	log.Printf("panel: 手动全量旅行巡检已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
+}
+
+// accountTravel POST /panel/api/accounts/{uid}/travel：单号推进一趟猫猫旅行（issue #227）。
+// 与 checkin 同构——同步返回，外部调度器据此知道这一号本轮有没有动。门控在
+// Scheduler.RunTravelNowFor 里（禁用/暂停/无 refresh token/global/企业一律跳过）。
+func (p *Panel) accountTravel(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Scheduler == nil {
+		writeErr(w, http.StatusNotImplemented, "scheduler not available")
+		return
+	}
+	uid := r.PathValue("uid")
+	if p.cfg.Pool.AuthByUID(uid) == nil {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	ran := p.cfg.Scheduler.RunTravelNowFor(uid)
+	if !ran {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "ran": false, "skipped": true,
+			"skip_reason": "禁用/暂停/无 refresh token/国际区/企业版账号不参与旅行",
+		})
+		return
+	}
+	log.Printf("panel: 按号旅行巡检 uid=%s 完成", uid)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ran": true})
 }
 
 // activityAll 手动触发全量活跃上报（异步执行；点亮连登 + 解锁领养前置）。
