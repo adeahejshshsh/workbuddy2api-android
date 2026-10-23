@@ -166,6 +166,10 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// 官方 agenttool 联网检索的网关透传（非对话端点，与 images 同套取号/失败处置）。
+	h.mux.HandleFunc("POST /v1/search", h.withAuth(h.search))
+	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。
+	h.mux.HandleFunc("POST /v1/fetch", h.withAuth(h.fetch))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
