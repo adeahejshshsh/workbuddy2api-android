@@ -44,7 +44,7 @@ func (s *Scheduler) RunStreakBonusNowCtx(ctx context.Context) {
 		if a.IsGlobal() {
 			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
 		}
-		if a.IsEnterprise() {
+		if !a.SupportsPersonalGrowth() {
 			continue // 企业版门控：无成长体系（/activity/growth/streak 上游一律 403）
 		}
 		if !first && activityAccountDelay > 0 {

@@ -2246,7 +2246,8 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 	// 企业版分流（报告 #25）：企业额度不在「个人资源包」体系内，
 	// get-user-resource* 对 enterpriseId 非空的号恒返回空 Accounts（实测 code 0 + Accounts null），
 	// 面板「积分构成」对企业号永远为空。改用 get-enterprise-user-usage 合成一条周期额度。
-	if a != nil && a.IsEnterprise() {
+	// 企业版与静态 API Key 同走企业口径（个人 get-user-resource 对二者均返回空 Accounts）。
+	if a != nil && a.UsesEnterpriseBilling() {
 		remain, total, _, earliestAt, _, eerr := c.enterpriseResource(a, 30*24*time.Hour)
 		if eerr != nil {
 			return nil, 0, 0, eerr
@@ -2515,7 +2516,7 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 func (c *Client) UserResourceDetailedWithExpiryCtx(ctx context.Context, a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
 	// 企业版额度不在「个人资源包」体系内：get-user-resource* 对 enterpriseId 非空账号
 	// 恒返回空 Accounts（实测 code 0 且 Accounts null），故分流到企业口径端点。
-	if a.IsEnterprise() {
+	if a.UsesEnterpriseBilling() {
 		remain, total, expiring, earliestAt, earliestRemaining, err = c.enterpriseResourceCtx(ctx, a, soon)
 		c.notifyCredits(a, remain, err)
 		return

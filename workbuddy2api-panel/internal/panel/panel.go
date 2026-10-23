@@ -223,6 +223,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/balance_all", p.withAuth(p.balanceAll))
 	p.mux.HandleFunc("GET /panel/api/packages", p.withAuth(p.packages))
 	p.mux.HandleFunc("GET /panel/api/balance_history", p.withAuth(p.balanceHistory))
+	p.mux.HandleFunc("POST /panel/api/accounts/add_apikey", p.withAuth(p.addAPIKey))
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))

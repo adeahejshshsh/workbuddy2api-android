@@ -623,6 +623,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Cooling:      now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
 		Disabled:     e.disabled,
 		NeedAuth:     e.needAuth,
+		APIKey:       e.a != nil && e.a.IsAPIKey(),
 		Paused:       e.paused,
 		SuccessCount: e.successCount,
 		ErrTotal:     e.errTotal,

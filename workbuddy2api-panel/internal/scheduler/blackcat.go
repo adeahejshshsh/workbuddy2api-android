@@ -53,7 +53,7 @@ func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context, spread bool) {
 		if a.IsGlobal() {
 			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
 		}
-		if a.IsEnterprise() {
+		if !a.SupportsPersonalGrowth() {
 			continue // 企业版门控：无成长体系（growth 403 / claim-gift 400「企业账号不支持该操作」）
 		}
 		need, err := s.cfg.Upstream.BlackcatNeed(a)

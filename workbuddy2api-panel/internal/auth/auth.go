@@ -249,6 +249,12 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	// acct.NeedsRefresh(...)），用写锁会让同账号并发请求在这里串行化。
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	// 静态 API Key 永不刷新（refresh 端点只认 OAuth 设备流）：恒 false，否则请求
+	// 路径会先 refresh、失败后把该号当坏号冷却换号 —— Key 本身是好的。
+	// 判定只读 AccessToken，RLock 足够。
+	if a.isAPIKeyLocked() {
+		return false
+	}
 	if a.ExpiresAt <= 0 {
 		return true
 	}
@@ -635,3 +641,52 @@ func writeFileSync(path string, raw []byte, mode os.FileMode) error {
 	}
 	return f.Close()
 }
+
+// apiTokenPrefixes 静态 API Key 的前缀集合：ck_（CodeBuddy 控制台签发）与
+// pt_（官方 CLI @tencent-ai/codebuddy-code 另有该前缀）。
+//
+// 官方 CLI 的判据是 tokenType === "ApiKey" 且 token 以这两个前缀之一开头；auth
+// 文件不持久化 tokenType（refresh 只认 OAuth 设备流，静态 Key 无法刷新），前缀是
+// 落盘形态里唯一稳定、跨进程一致的判据。
+var apiTokenPrefixes = []string{"ck_", "pt_"}
+
+// isAPIKeyToken 判 token 是否以静态 API Key 前缀开头。
+func isAPIKeyToken(at string) bool {
+	for _, p := range apiTokenPrefixes {
+		if strings.HasPrefix(at, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAPIKeyLocked IsAPIKey 的无锁内部实现：仅限**已持 a.mu** 的调用方使用
+// （sync.Mutex 不可重入，锁内再调 AccessTokenValue 会自锁）。
+func (a *Auth) isAPIKeyLocked() bool { return isAPIKeyToken(a.AccessToken) }
+
+// IsAPIKey 报告账号是否为静态 API Key 账号（AccessToken 以 ck_/pt_ 开头）。
+//
+// 静态 Key 直接可用（Authorization: Bearer <key>），但它**没有**个人账号身份：
+// 签到 / 成长任务 / 连登 / 旅行 / 夜猫子一律不适用，额度只能走企业口径端点
+// （个人 get-user-resource 对静态 Key 返回空 Accounts），见 UsesEnterpriseBilling。
+func (a *Auth) IsAPIKey() bool {
+	if a == nil {
+		return false
+	}
+	return isAPIKeyToken(a.AccessTokenValue())
+}
+
+// UsesEnterpriseBilling 报告额度查询是否该走企业口径端点
+// （/v2/billing/meter/get-enterprise-user-usage）。
+//
+// 企业版与静态 API Key 同属此列：个人 get-user-resource 对二者均返回空 Accounts，
+// 额度必须走企业口径，否则余额恒为 0 → 积分保底把可用号当成耗尽号挡掉。
+func (a *Auth) UsesEnterpriseBilling() bool { return a.IsEnterprise() || a.IsAPIKey() }
+
+// SupportsPersonalGrowth 报告账号是否具备个人成长体系（签到 / 成长任务 / 连登管家 /
+// 猫猫旅行 / 夜猫子）。企业版与静态 API Key 都没有该体系。
+func (a *Auth) SupportsPersonalGrowth() bool { return !a.IsEnterprise() && !a.IsAPIKey() }
+
+// SupportsPersonalEndpoints 报告账号是否可调用「签到 / 任务列表」这类显式报错的个人端点。
+// 与 SupportsPersonalGrowth（执行类门控）刻意分开命名：判据相同、语义不同。
+func (a *Auth) SupportsPersonalEndpoints() bool { return !a.IsEnterprise() && !a.IsAPIKey() }

@@ -26,10 +26,28 @@ func (p *Panel) accountByUID(w http.ResponseWriter, uid string) *auth.Auth {
 	return a
 }
 
+// growthNotApplicableMsg 无个人成长体系（企业版 / 静态 API Key）时对任务类入口的统一答复。
+const growthNotApplicableMsg = "该账号没有个人账号身份（企业版 / 静态 API Key）：签到、成长任务、连登、旅行对其不适用"
+
+// accountByUIDForGrowth 取账号并校验其具备个人成长体系。
+// 企业版与静态 API Key 在上游都没有这套体系（前者 400/403，后者根本没身份），
+// 直接 400 讲清楚，避免面板空发一串注定失败的请求。
+func (p *Panel) accountByUIDForGrowth(w http.ResponseWriter, uid string) *auth.Auth {
+	a := p.accountByUID(w, uid)
+	if a == nil {
+		return nil
+	}
+	if !a.SupportsPersonalEndpoints() {
+		writeErr(w, http.StatusBadRequest, growthNotApplicableMsg)
+		return nil
+	}
+	return a
+}
+
 // accountTasks 查询单账号全量任务（进度/状态/可领取）。
 func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	a := p.accountByUID(w, uid)
+	a := p.accountByUIDForGrowth(w, uid)
 	if a == nil {
 		return
 	}
@@ -75,7 +93,7 @@ func (p *Panel) rejectNoGrowth(w http.ResponseWriter, a *auth.Auth) bool {
 // accountTaskAccept 接受任务（报名；幂等）。
 func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	a := p.accountByUID(w, uid)
+	a := p.accountByUIDForGrowth(w, uid)
 	if a == nil || p.rejectNoGrowth(w, a) {
 		return
 	}
@@ -103,7 +121,7 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 // 批量提交会分片（上游对 task_codes 数组长度无公开上限，保守每批 20 个）。
 func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	a := p.accountByUID(w, uid)
+	a := p.accountByUIDForGrowth(w, uid)
 	if a == nil || p.rejectNoGrowth(w, a) {
 		return
 	}
@@ -201,7 +219,7 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 // accountTaskClaim 领取任务奖励（未达标时上游返回业务错误，原样透出给前端提示）。
 func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	a := p.accountByUID(w, uid)
+	a := p.accountByUIDForGrowth(w, uid)
 	if a == nil || p.rejectNoGrowth(w, a) {
 		return
 	}

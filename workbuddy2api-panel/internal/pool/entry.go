@@ -92,7 +92,10 @@ type Status struct {
 	Disabled   bool `json:"disabled"`
 	// NeedAuth 快照恢复出的占位条目（只有 UID、没有凭证）。这类号永远选不到，
 	// 但此前不透出，导致 503 提示把它算成「本域健康号」（报告 #6）。
-	NeedAuth       bool   `json:"need_auth,omitempty"`
+	NeedAuth bool `json:"need_auth,omitempty"`
+	// APIKey 静态 API Key 账号（accessToken 以 ck_/pt_ 开头）：与 Enterprise 同类，
+	// 无个人成长体系，额度走企业口径；面板据此隐藏签到/任务按钮并打标签。
+	APIKey         bool   `json:"api_key,omitempty"`
 	DisabledReason string `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
 	// Paused 暂停选号：退出选号候选（与 disabled 一样不参与选号），但**照常参与**
 	// 签到 / 活跃上报 / 保活 / 余额刷新四类保号任务。与 disabled 正交——disabled 是

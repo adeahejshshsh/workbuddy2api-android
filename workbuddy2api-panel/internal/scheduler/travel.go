@@ -71,7 +71,7 @@ func (s *Scheduler) RunTravelNowCtx(ctx context.Context, spread bool) {
 		if a.IsGlobal() {
 			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
 		}
-		if a.IsEnterprise() {
+		if !a.SupportsPersonalGrowth() {
 			continue // 企业版门控：无成长体系（/activity/growth/* 上游一律 403），不发起任何上游调用
 		}
 		// 账号级摊开（issue #45 方案 A）：等本号在窗口内的偏移时刻。
@@ -97,7 +97,7 @@ func (s *Scheduler) RunTravelNowFor(uid string) bool {
 	if a == nil || a.RefreshTokenValue() == "" {
 		return false
 	}
-	if a.IsGlobal() || a.IsEnterprise() {
+	if a.IsGlobal() || !a.SupportsPersonalGrowth() {
 		return false
 	}
 	// 按号端点没有请求上下文可继承（调用方是面板的一次点击），用独立 context：

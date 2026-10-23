@@ -524,7 +524,7 @@ function renderAccounts(list) {
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div>' +
+      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + (s.api_key ? ' <span class="realm-tag">API Key</span>' : '') + '</div><div class="id">' + esc(short) + '</div>' +
         (s.remark ? '<div class="hint" style="font-size:11.5px;color:var(--accent);margin-top:2px">备注：' + esc(s.remark) + '</div>' : '') +
         '<button class="xs remark-btn" data-uid="' + esc(s.uid) + '" data-remark="' + esc(s.remark || '') + '" style="margin-top:3px">备注</button></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
@@ -544,10 +544,10 @@ function renderAccounts(list) {
         // upstream 的 get-enterprise-user-usage 口径填充。
         // 国际版（realm=global）同样没有签到/成长体系（bug-01）：与 enterprise 同口径隐藏，
         // 否则点了必然吃上游 404/403，看起来像网关坏了。
-        ((s.enterprise || s.realm === 'global') ? '' :
+        ((s.enterprise || s.api_key || s.realm === 'global') ? '' :
           '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>') +
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>' +
-        ((s.enterprise || s.realm === 'global') ? '' :
+        ((s.enterprise || s.api_key || s.realm === 'global') ? '' :
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
         // 暂停优先于冷却（bug #16）：一个"已暂停 + 正好在冷却中"的号此前会显示
         // 「解冻」（走 revive，会连带清掉暂停状态和全部冷却），与按钮文案不符。

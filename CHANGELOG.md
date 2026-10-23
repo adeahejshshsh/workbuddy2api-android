@@ -638,7 +638,27 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
   会被「年龄」先清空，断言却还在怪大小裁剪 —— 10-23 之后每天必红。改为按今天生成文件名。
 * `TestCheckinDoneExpiredYesterday` 见前文（`cst.DayKey`）。
 
-**静态 API Key 账号（`5ce1a2f4`）—— 评估后不做**：22 个文件冲突，核心不是「加个字段」，
+**静态 API Key 账号（`5ce1a2f4`）—— 精简版已落地**：不碰成长任务链，只做
+「建号 / 选号 / 额度」+ 任务入口门控。改动清单：
+`auth.IsAPIKey()`（`ck_`/`pt_` 前缀，落盘形态里唯一稳定判据）+ `UsesEnterpriseBilling`
++ `SupportsPersonalGrowth`/`SupportsPersonalEndpoints`；`NeedsRefresh` 对静态 Key 恒 false
+（refresh 只认 OAuth 设备流，否则会被当坏号冷却换号）；`pool.Status.APIKey` 字段；
+额度查询分流到企业口径端点（个人 `get-user-resource` 对静态 Key 恒返回空 Accounts）；
+`POST /panel/api/accounts/add_apikey`（先拿企业端点探测有效再落盘，坏 Key 不入池）；
+调度器 5 处门控从 `IsEnterprise()` 换成 `SupportsPersonalGrowth()`；面板任务类入口统一
+`accountByUIDForGrowth` → 400「该账号没有个人账号身份」；app.js 行内打「API Key」标记
+并隐藏签到/任务按钮。
+
+**未做的部分**：面板「添加 API Key」的图形入口（需要 index.html 新标签页），
+目前用接口加号：
+
+```bash
+curl -X POST http://127.0.0.1:7863/panel/api/accounts/add_apikey \
+  -H 'Authorization: Bearer <面板 api_key>' -H 'Content-Type: application/json' \
+  -d '{"access_token":"ck_xxx","nickname":"我的 key"}'
+```
+
+**（原评估，保留备查）静态 API Key 账号整条 cherry-pick 评估**：22 个文件冲突，核心不是「加个字段」，
 而是它与**成长任务重构**（PR #104：`globalTaskWriteMessage`、`ClaimReward` 四返值、
 `taskProgressReached`）绑在一起；只并静态 Key 那一半，任务中心会编译不过，全并则等于把
 整个任务链一起移植。静态 Key 账号本身适合独立开工：`auth.IsAPIKey`（ck_/pt_ 前缀）+
