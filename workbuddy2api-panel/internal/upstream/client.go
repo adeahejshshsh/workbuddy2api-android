@@ -409,10 +409,6 @@ func hasBusinessEnvelope(body string) bool {
 	return strings.Contains(body, `"code"`) || strings.Contains(body, `"msg"`)
 }
 
-// IsWafBlocked 报告 403 响应是否为 WAF 拦截形态：HTTP 403 且 body 无业务信封
-// （无 `"code":`/`"msg":` JSON 字段——HTML 拦截页、空体、纯文本均命中）。
-// 带业务信封的 403（11140 request illegal / 11-128 等）仍走既有分类链。
-// 403 含 accountFault 文案的维持现状（ErrAccountFault），由 Classify 的规则序保证。
 // IsGatewayUnauthorized 报告 401 响应是否为**网关层授权拒绝页**（无业务信封）。
 //
 // 形态（2026-10-17 实测 CN 站 copilot.tencent.com /v2/*，token 被上游判无效时）：
@@ -430,6 +426,10 @@ func IsGatewayUnauthorized(status int, body string) bool {
 	return status == http.StatusUnauthorized && !hasBusinessEnvelope(body)
 }
 
+// IsWafBlocked 报告 403 响应是否为 WAF 拦截形态：HTTP 403 且 body 无业务信封
+// （无 `"code":`/`"msg":` JSON 字段——HTML 拦截页、空体、纯文本均命中）。
+// 带业务信封的 403（11140 request illegal / 11-128 等）仍走既有分类链。
+// 403 含 accountFault 文案的维持现状（ErrAccountFault），由 Classify 的规则序保证。
 func IsWafBlocked(status int, body string) bool {
 	return status == http.StatusForbidden && !hasBusinessEnvelope(body)
 }
@@ -1115,7 +1115,11 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		// Retry-After 也要解析（review #11）：ChatStreamContext 一直解析它，
+		// 而 doJSON（refresh/checkin/balance/travel/report）此前不解析 —— 走这条路的
+		// 429 丢了上游明示的等待时长，冷却只能靠默认基数猜。
+		ra, _ := ParseRetryAfter(resp.Header)
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), RetryAfter: ra}
 	}
 	// 200 + 空 body 是**成功**（报告 #6）：/v2/report、appearance/set、
 	// claim-gift、claim-compensation 这些 RPC 成功时可能回空体，
@@ -2754,16 +2758,6 @@ func businessCodeStatus(code int) int {
 		return http.StatusUnauthorized
 	}
 	return 0
-}
-
-// mustJSONString 把字符串编成 JSON 字面量（失败时退化为手工转义的最小实现），
-// 供把「code + msg」拼成可被 Classify 解析的形态（bug B8）。
-func mustJSONString(s string) string {
-	if b, err := json.Marshal(s); err == nil {
-		return string(b)
-	}
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", " ", "\r", " ")
-	return `"` + r.Replace(s) + `"`
 }
 
 func truncate(s string, n int) string {

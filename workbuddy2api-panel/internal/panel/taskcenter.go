@@ -710,7 +710,11 @@ dispatchQueue:
 					}
 					log.Printf("panel: 任务无效 uid=%s code=%s %s（%s）", one.a.UID, code, note, why)
 				default:
-					p.skipReset(one.a.UID, code) // 有效 → 清掉历史失败计数
+					// 用生效任务码清零（review #6）：上面 skipNote 写的是
+					// effectiveTaskCode，这里用原始 code 删不掉那条记录，
+					// 按域换码的任务（WorkBuddy_Valorant）失败计数永不清零，
+					// 只能等 7 天自然过期。
+					p.skipReset(one.a.UID, p.effectiveTaskCode(one.a, code))
 				}
 				if !sleepAB(one.a.UID, reportGap) {
 					return

@@ -355,6 +355,12 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
 			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
 		}
+		if model != "" && e.modelOffed(model) {
+			// 手动关闭的组合（review #9）：正常路径在 healthyForModel 里判，
+			// 兜底是最后一道选号路径 —— 不查就会把运维明确关掉的组合捞回来，
+			// 请求必然失败，还白占一次在途名额。
+			continue
+		}
 		if model != "" && e.modelCooled(now, model) {
 			// 模型级冷却也要看（BUG-14）：此前兜底完全不查 modelCooled，
 			// ModelBlockedForRealm 判定的「整池对该模型不可用」会被兜底绕过，

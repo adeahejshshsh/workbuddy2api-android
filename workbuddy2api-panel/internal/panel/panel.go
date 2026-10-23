@@ -475,22 +475,9 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// 只有 id/name/tags，连 credits 键都没有；企业端点不列媒体模型），所以空倍率那一格
 	// 用**我们自己账本里的实扣值**兜底（credit_by_model 的 credits/credit_samples）。
 	// 实测 0.55 credit/张 vs 国内混元目录牌价 x5.00 —— 两个数都不是编的，来源不同故分列：
-	// credits 是牌价，measured_credit 是实测单价（前端加「实测」字样）。
-	// 账本行键是「域:模型」，故这里按 realm+":"+模型 id 查（跨域同名模型本就该各算各的）。
-	measured := map[string]string{}
-	if p.cfg.Usage != nil {
-		for _, c := range p.cfg.Usage.Snapshot(0, nil).CreditByModel {
-			if c.CreditSamples > 0 && c.Credits > 0 {
-				measured[c.Key] = strconv.FormatFloat(c.Credits/float64(c.CreditSamples), 'f', 2, 64)
-			}
-		}
-	}
-	for _, realm := range []string{"cn", "global"} {
-		if realm == "global" && !p.cfg.Upstream.GlobalEnabled {
-			continue
-		}
-	}
-
+	// 说明：出图/生成类模型（目录里被 tag 剔出对话列表的那批）本仓未移植，
+	// 因此这里不再有「补列 image_generation 模型」的循环 —— 早前移植时留下的空
+	// for 与随之无人读取的 measured 映射已一并删除（review #5）。
 	// 模型繁忙度（官方 /v2/chat/busy，只读观测，见 upstream/modelbusy.go）：与目录同一批
 	// 账号查，附到对应域的行上。查不到就不填字段（不编造）；失败只并入 fetchErrs（目录本身
 	// 已经拿到了，不该因为繁忙度查询失败把整个视图打成 502）。

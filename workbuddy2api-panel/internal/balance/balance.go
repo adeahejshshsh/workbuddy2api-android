@@ -18,6 +18,7 @@ package balance
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"log"
 	"os"
 	"path/filepath"
@@ -347,13 +348,11 @@ func (r *Recorder) flush(force bool) {
 		log.Printf("[balance] 建目录失败: %v", err)
 		return
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		log.Printf("[balance] 写临时文件失败: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, r.path); err != nil {
-		log.Printf("[balance] 原子替换失败: %v", err)
+	// 唯一临时名 + 原子替换（review #12）：固定 `path+".tmp"` 时，面板 Save() 与
+	// 后台 ticker 并发会互相覆盖（A 写、B 覆盖、A rename → 落盘成了 B 的内容）。
+	// 全仓标准写法是 auth.ReplaceAtomic（唯一 tmp + fsync + EBUSY 原地覆写）。
+	if err := auth.ReplaceAtomic(r.path, raw, 0o600); err != nil {
+		log.Printf("[balance] 落盘失败: %v", err)
 	}
 }
 

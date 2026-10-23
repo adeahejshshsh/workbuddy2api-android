@@ -312,6 +312,14 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 // 都在 → 被 pick 选中 → NeedsRefresh 因 ExpiresAt=0 恒真 → RefreshToken 报
 // no refreshToken → 熔断+轮转。表现为「面板显示 20 个号、每次请求全 503，
 // 日志全是 no refreshToken」。
+// healthy 账号级健康（模型无关口径）。
+//
+// review #10 指出它不看 modelOff：确实不看，也不该看 —— 「哪些模型被手动关掉」是
+// 模型维度的信息，而本函数回答的是「这个号还能不能接活」。真正决定某次请求能不能
+// 落到该号的是 healthyForModel（选号主路径都走它，且它先判 modelOffed）。若把
+// 「关了某个模型」当成账号不健康，会让 /healthz、AvailableUIDs 在只关一个模型时
+// 就报「无可用账号」，比现状更糟。全部模型都被关掉这种极端情形，选号会自然落到
+// 空候选 → 503 + model_unavailable，语义正确。
 func (e *entry) healthy(now time.Time) bool {
 	if e.disabled || e.paused {
 		return false

@@ -212,10 +212,18 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			if e.modelCooldowns == nil {
 				e.modelCooldowns = map[string]modelCooldown{}
 			}
+			// Hits 必须继承（review #8）：整体覆盖会把 11102 的 6h→12h→24h 退避
+			// 打回 6h —— 一次 6004 就抹掉了「这个模型反复不可用」的历史。
+			// 与 CooldownModelBusy / RecordModelRateLimitAudit 同口径。
+			prev := e.modelCooldowns[model]
 			e.modelCooldowns[model] = modelCooldown{
 				Until:   p.cappedSoftUntilLocked(now, resetAt, base),
 				ResetAt: resetAt,
 				Reason:  reason,
+				Hits:    prev.Hits,
+				// AuditOnly 也要继承：原本「只记账不参与选号」的条目不该被一次 6004
+				// 升级成参与路由（反之亦然，见 RecordModelRateLimitAudit 的守卫）。
+				AuditOnly: prev.AuditOnly,
 			}
 		} else {
 			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶

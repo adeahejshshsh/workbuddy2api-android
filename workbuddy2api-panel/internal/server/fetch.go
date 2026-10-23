@@ -76,7 +76,12 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		tried[a.UID] = true
+		// 占在途名额（review #7）：与 chat 路径同口径。
+		if !h.cfg.Pool.Acquire(a.UID) {
+			continue
+		}
 		data, ferr := h.cfg.Upstream.WebFetch(r.Context(), a, target)
+		h.cfg.Pool.Release(a.UID)
 		if ferr == nil {
 			out, perr := normalizeFetchResponse(data, target)
 			if perr != nil {

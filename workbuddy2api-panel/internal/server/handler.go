@@ -138,9 +138,12 @@ const ServiceName = "workbuddy2api"
 
 // Handler 主路由。
 type Handler struct {
-	cfg     Config
-	mux     *http.ServeMux
-	degrade degradeGate
+	cfg Config
+	mux *http.ServeMux
+	// aliasOnce/aliasTable models.aliases 的归一化查找表，惰性构造一次（review #13）。
+	aliasOnce  sync.Once
+	aliasTable map[string]string
+	degrade    degradeGate
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
@@ -417,14 +420,30 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
 // modelHidden 报告该模型是否在黑名单里（上游 PR #225）：
 // 裸名=两域都藏；"cn:x"/"global:x"=只藏该域。大小写不敏感（与模型名口径一致）。
+// marshalNoEscape 序列化但不做 HTML 转义（review #2）：默认 encoder 会把
+// < > & 写成 \u003c 等，与客户端原文不一致；上游管线（payload/cache_key）同口径。
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 // modelAlias 查 models.aliases 映射（issue #30）：键为「小写 realm + ":" + 小写裸名」。
 // 未命中返回 ("", false)。
 func (h *Handler) modelAlias(realm, bare string) (string, bool) {
 	if bare == "" || len(h.cfg.ModelsAliases) == 0 {
 		return "", false
 	}
-	m := livecfg.NormalizeModelAliases(h.cfg.ModelsAliases)
-	target, ok := m[strings.ToLower(realm)+":"+strings.ToLower(bare)]
+	// 归一化只做一次（review #13）：别名表是进程内常量，此前每个 chat 请求都重建
+	// 一次 map（含 strings.ToLower/TrimSpace 与 map 分配），纯浪费。
+	h.aliasOnce.Do(func() {
+		h.aliasTable = livecfg.NormalizeModelAliases(h.cfg.ModelsAliases)
+	})
+	target, ok := h.aliasTable[strings.ToLower(realm)+":"+strings.ToLower(bare)]
 	return target, ok
 }
 
@@ -728,11 +747,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// aliasEcho 非空 = 本请求走了映射，响应侧把 model 覆写回客户端原发名。
 	aliasEcho := ""
 	if target, ok := h.modelAlias(realm, bareModel); ok && target != "" {
+		// UseNumber + 不转义 HTML（review #2）：改写别名不该顺手改写整份 body 的
+		// 数字精度与转义形态。
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.UseNumber()
 		var obj map[string]any
-		if json.Unmarshal(body, &obj) == nil {
+		if dec.Decode(&obj) == nil {
 			if cur, isStr := obj["model"].(string); isStr && cur == peek.Model {
 				obj["model"] = target
-				if nb, merr := json.Marshal(obj); merr == nil {
+				if nb, merr := marshalNoEscape(obj); merr == nil {
 					body = nb
 					realm, bareModel = resolveModel(target)
 					aliasEcho = peek.Model
@@ -788,10 +811,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 出站 body 重写：上游必须收到等价模型名。与上方 models.aliases 同一手法
 		// （解析 → 改顶层 model → 重序列化），保持单一路径、避免两套改写逻辑漂移。
 		// 解析失败时不动 body —— 那说明请求体本就不是合法 JSON，后续会按原样失败。
+		// 同 review #2：UseNumber + 不转义 HTML。
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.UseNumber()
 		var obj map[string]any
-		if json.Unmarshal(body, &obj) == nil {
+		if dec.Decode(&obj) == nil {
 			obj["model"] = to
-			if nb, merr := json.Marshal(obj); merr == nil {
+			if nb, merr := marshalNoEscape(obj); merr == nil {
 				body = nb
 			}
 		}

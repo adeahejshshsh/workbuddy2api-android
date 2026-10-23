@@ -27,6 +27,7 @@
 package upstream
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -43,8 +44,12 @@ func injectConversationFields(body []byte, convReqID string) []byte {
 	if len(body) == 0 || convReqID == "" {
 		return body
 	}
+	// UseNumber 保住数字原文（review #1）：默认解码把整数落成 float64，超过 2^53 的
+	// seed / 微秒时间戳会被静默改写成近似值。这是「透传型」网关，body 必须逐字节可信。
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	if err := dec.Decode(&obj); err != nil {
 		return body
 	}
 	msgs, ok := obj["messages"].([]any)
@@ -81,7 +86,9 @@ func injectConversationFields(body []byte, convReqID string) []byte {
 	}
 	msgs[idx] = cur
 	obj["messages"] = msgs
-	out, err := json.Marshal(obj)
+	// 不转义 HTML（review #1）：默认 encoder 会把 < > & 写成 \u003c 等，
+	// 与客户端原文不一致；payload.go 的同一批改写都用 marshalNoEscape。
+	out, err := marshalNoEscape(obj)
 	if err != nil {
 		return body
 	}

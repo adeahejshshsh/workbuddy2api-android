@@ -630,6 +630,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
+		// review #3：这两个表是 handler 每次请求从 live 快照读的，漏填等于「保存任意
+		// 配置 → 运行时降级表/别名表被清空」，直到进程重启才恢复。
+		ModelFallback: newCfg.Pool.ModelFallback,
+		ModelAliases:  livecfg.NormalizeModelAliases(newCfg.Models.Aliases),
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
@@ -712,6 +716,13 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		// account_spread_seconds 在 Scheduler 构造时读入 cfg（报告 #5）：保存路径没有
 		// 对应 setter，不列进来就会提示「已保存并立即生效」，实际要重启才生效。
 		"schedule.account_spread_seconds",
+		// review #4：以下键只在启动期装配，saveConfig 没有对应 setter —— 漏列会
+		// 让面板提示「已保存并立即生效」，实际要重启才生效。
+		"pool.model_fallback",                                               // handler 构造时快照（降级表）
+		"models.aliases",                                                    // 同上（别名表）
+		"prompt.identity_override_enabled", "prompt.identity_override_text", // handler 构造时读入
+		"upstream.dump_dir", "upstream.dump_max_bytes", // up.DumpDir 启动期装配
+		"schedule.account_spread_minutes", "schedule.account_spread_min_gap_seconds", // scheduler 构造时读入
 	}
 	var out []string
 	for _, k := range keys {

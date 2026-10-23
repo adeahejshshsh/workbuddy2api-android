@@ -674,6 +674,30 @@ curl -X POST http://127.0.0.1:7863/panel/api/accounts/add_apikey \
 | `56057810` conversationRequestId | 与 headers.go 现有 trace id 逻辑耦合 |
 | `79a70ef8` `280fee08` `2089c262` `2999a8d2` `3fb80272` `f9b2f07a` `54e9862b` `00fea446` `3d5900fd` `58262f31` `e1735298` `cce39c30` 等 | 逐个适配中，见 `.tmp/analysis/misakano-gap-20261023.md` |
 
+### 五、代码审查 19 条（CODE-REVIEW-BUGS）
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| 1 | `conv_fields.go` 用 `json.Unmarshal`+`Marshal` 重编码整份 body：>2^53 整数丢精度、`< > &` 被转义 | 改 `UseNumber` 解码 + `marshalNoEscape`（与 payload/cache_key 同口径） |
+| 2 | handler 的别名/降级改写同款问题 | 同上，并在 server 包加 `marshalNoEscape` |
+| 3 | `saveConfig` 的 `live.Store` 漏 `ModelFallback`/`ModelAliases`：**保存任意配置后降级表被清空** | 补两个字段 |
+| 4 | `restartRequiredFields` 漏 8 个启动期装配键 | 补 `pool.model_fallback` / `models.aliases` / `prompt.identity_override_*` / `upstream.dump_*` / `schedule.account_spread_*` |
+| 5 | 面板出图模型段是**空 for 循环**，`measured` 无人读 | 删空循环与死映射（出图模型本仓未移植），留注释说明 |
+| 6 | 跳过名单键不一致：`skipNote` 用生效码、`skipReset` 用原始码 → 失败计数永不清零 | 统一用 `effectiveTaskCode` |
+| 7 | `/v1/search`、`/v1/fetch` 不占在途名额 | 补 `Pool.Acquire`/`Release` |
+| 8 | `CooldownSoftForModel` 整体覆盖条目 → `Hits` 清零，11102 的 6h→12h→24h 被打回 6h | 继承 `Hits` 与 `AuditOnly` |
+| 9 | 全冷却兜底路径不查 `modelOffed` | 兜底补判据 |
+| 10 | `healthy()` 不看 `modelOffed` | **不改**，补注释说明为何：模型维度门控属 `healthyForModel`；把「关了某个模型」当账号不健康会让 `/healthz` 在只关一个模型时就报无可用账号 |
+| 11 | `doJSON` 的 ≥400 分支不解析 `Retry-After` | 补 `ParseRetryAfter`，与 `ChatStreamContext` 同口径 |
+| 12 | `balance.flush` 用固定 `.tmp` 名，并发互相覆盖 | 改 `auth.ReplaceAtomic`（唯一 tmp + fsync） |
+| 13 | `modelAlias` 每请求重建归一化表 | `sync.Once` 缓存 |
+| 14 | `mergeV3Routes` 无调用点 | **保留**：代码内注释明确「供日后恢复多路探测」，不是遗留垃圾 |
+| 15 | `mustJSONString` 无调用点 | 删除 |
+| 16 | `readFile` 无调用点 | **保留**：`regression_20261021_test.go` 在用（删了测试编译不过） |
+| 17 | `PickExcluding` / `PickExcludingForModel` 无生产调用点 | 保留（pool 测试覆盖在用） |
+| 18 | `RecordModelRateLimitAudit` 无调用点 | 保留（6004 无重置时间时的展示台账入口，删除会改变面板语义） |
+| 19 | `IsWafBlocked` 的文档挂在 `IsGatewayUnauthorized` 上方 | 文档归位 |
+
 ### 未合并
 
 | kk-cao 提交 | 内容 | 判断 |
