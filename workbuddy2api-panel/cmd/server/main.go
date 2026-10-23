@@ -227,17 +227,19 @@ func main() {
 	log.Printf("[balance] 余额趋势采样已启用: %s 每 %v 一点（%s）", balPath, balance.Interval(), bal.Describe())
 
 	sch := scheduler.New(scheduler.Config{
-		Pool:                 p,
-		Upstream:             up,
+		Pool:     p,
+		Upstream: up,
 		// 余额采样记录器：挂在余额刷新之后，不额外打上游。
-		Balance:              bal,
-		AccountSpreadSeconds: cfg.Schedule.AccountSpreadSeconds,
-		CheckinHours:         cfg.Schedule.CheckinHours,
-		TravelHours:          cfg.Schedule.TravelHours,
-		ActivityHours:        cfg.Schedule.ActivityHours,
-		KeepaliveHours:       cfg.Schedule.KeepaliveHours,
-		BlackcatHours:        cfg.Schedule.BlackcatHours,
-		GrowthHours:          cfg.Schedule.GrowthHours,
+		Balance:                    bal,
+		AccountSpreadSeconds:       cfg.Schedule.AccountSpreadSeconds,
+		AccountSpreadMinutes:       cfg.Schedule.AccountSpreadMinutes,
+		AccountSpreadMinGapSeconds: cfg.Schedule.AccountSpreadMinGapSeconds,
+		CheckinHours:               cfg.Schedule.CheckinHours,
+		TravelHours:                cfg.Schedule.TravelHours,
+		ActivityHours:              cfg.Schedule.ActivityHours,
+		KeepaliveHours:             cfg.Schedule.KeepaliveHours,
+		BlackcatHours:              cfg.Schedule.BlackcatHours,
+		GrowthHours:                cfg.Schedule.GrowthHours,
 		// 快过期积分优先消耗：签到/余额刷新按此窗口分桶（issue:积分过期）。
 		ExpiringSoonWindow: cfg.ExpiringSoonDur,
 		CheckinDisabled:    !cfg.Schedule.CheckinEnabled,

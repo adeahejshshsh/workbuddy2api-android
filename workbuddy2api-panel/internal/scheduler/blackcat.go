@@ -24,9 +24,9 @@ var nowForNightWindow = cst.Now
 // RunBlackcatNow 对所有可用账号执行夜猫子对话补足（窗口外跳过）。
 // 由 blackcat_hours 排程（默认 [23]）触发；执行前二次校验 InNightWindow。
 // RunBlackcatNowCtx 带 ctx 的夜猫子补足（bug #13）。
-func (s *Scheduler) RunBlackcatNow() { s.RunBlackcatNowCtx(context.Background()) }
+func (s *Scheduler) RunBlackcatNow() { s.RunBlackcatNowCtx(context.Background(), false) }
 
-func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context) {
+func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context, spread bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -34,12 +34,14 @@ func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context) {
 		log.Printf("blackcat: 当前不在 23:00–08:00 计数窗口，跳过")
 		return
 	}
-	for _, st := range s.cfg.Pool.List() {
-		// 暂停选号（paused）账号跳过：夜猫子是全任务体系中唯一「整任务都是
-		// 真实模型对话」的（RunNightChats 逐条 ChatStream 发 glm-5.2 短对话），
-		// 与「让位防风控」正面冲突。旅行/成长任务都是纯上报或领奖 RPC，照常跑。
-		if st.Disabled || st.Paused {
-			continue
+	plan := s.spreadPlan(taskBlackcat, spread, cst.Now())
+	for _, st := range plan.order(s.cfg.Pool.List()) {
+		// 暂停选号（paused）账号跳过：夜猫子是全任务体系里**唯一「整任务都是真实模型
+		// 对话」**的（RunNightChats 逐条 ChatStream 发 glm-5.2 短对话），与「让位防风控」
+		// 正面冲突。旅行 / 成长任务 / 连登管家都走上报与领奖 RPC，照常参与
+		// （吸收上游 b1a2284 的口径修正）。
+		if st.Paused {
+			continue // 暂停选号：夜猫子是唯一「整任务都是真实模型对话」的，让位防关联
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if s.skipBehaviorTask(a) {

@@ -50,14 +50,14 @@ func travelDay(t time.Time) string {
 // 账号间限速 travelAccountDelay。
 // RunTravelNowCtx 带 ctx 的旅行巡检（bug #13）：账号间节流用传入 ctx，
 // 停机时不必把剩余账号的节流全睡完。RunTravelNow 保留为 Background 包装。
-func (s *Scheduler) RunTravelNow() { s.RunTravelNowCtx(context.Background()) }
+func (s *Scheduler) RunTravelNow() { s.RunTravelNowCtx(context.Background(), false) }
 
-func (s *Scheduler) RunTravelNowCtx(ctx context.Context) {
+func (s *Scheduler) RunTravelNowCtx(ctx context.Context, spread bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	first := true
-	for _, st := range s.cfg.Pool.List() {
+	plan := s.spreadPlan(taskTravel, spread, cst.Now())
+	for _, st := range plan.order(s.cfg.Pool.List()) {
 		if st.Disabled {
 			continue
 		}
@@ -74,13 +74,11 @@ func (s *Scheduler) RunTravelNowCtx(ctx context.Context) {
 		if a.IsEnterprise() {
 			continue // 企业版门控：无成长体系（/activity/growth/* 上游一律 403），不发起任何上游调用
 		}
-		if !first {
-			// 可中断等待（issue ISSUE-17）：关机/停机信号到来时不要卡在节流里。
-			if !sleepCtx(ctx, s.accountDelay(travelAccountDelay)) {
-				return
-			}
+		// 账号级摊开（issue #45 方案 A）：等本号在窗口内的偏移时刻。
+		// wait 内部用 sleepCtx，停机/取消时立即返回（issue ISSUE-17）。
+		if !plan.wait(ctx, st.UID) {
+			return
 		}
-		first = false
 		s.travelOne(ctx, a)
 	}
 }

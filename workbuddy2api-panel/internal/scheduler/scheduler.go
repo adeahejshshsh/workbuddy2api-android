@@ -28,6 +28,10 @@ type Config struct {
 	Upstream *upstream.Client
 	// AccountSpreadSeconds 账号遍历型任务的账号间最小间隔（秒），0 = 关闭。
 	AccountSpreadSeconds int
+	// AccountSpreadMinutes / AccountSpreadMinGapSeconds 账号级摊开（issue #45 方案 A）：
+	// 窗口分钟数 + 同轮相邻账号的最小间隔秒。0 = 关闭（回落旧的串行延迟 accountDelay）。
+	AccountSpreadMinutes       int
+	AccountSpreadMinGapSeconds int
 	// Balance 余额采样记录器（可为 nil = 不采样）。
 	// 采样动作挂在 RunBalanceRefreshNow 之后：那里已拿到新鲜余额，不额外打上游。
 	Balance        *balance.Recorder
@@ -585,15 +589,15 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			}()
 			switch k {
 			case taskCheckin:
-				s.RunCheckinNowCtx(ctx)
+				s.RunCheckinNowCtx(ctx, true)
 			case taskTravel:
-				s.RunTravelNowCtx(ctx)
+				s.RunTravelNowCtx(ctx, true)
 			case taskActivity:
-				s.runActivity(ctx)
+				s.runActivity(ctx, true)
 			case taskKeepalive:
-				s.RunKeepaliveNowCtx(ctx)
+				s.RunKeepaliveNowCtx(ctx, true)
 			case taskBlackcat:
-				s.RunBlackcatNowCtx(ctx)
+				s.RunBlackcatNowCtx(ctx, true)
 			case taskGrowth:
 				// 成长任务队列：回调在 panel 侧异步启动（返回不等执行完），nil 未挂载则跳过。
 				s.schedMu.Lock()
@@ -637,20 +641,20 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 var checkinAccountDelay = 800 * time.Millisecond
 
 func (s *Scheduler) RunCheckinNow() {
-	s.RunCheckinNowCtx(context.Background())
+	s.RunCheckinNowCtx(context.Background(), false)
 }
 
 // RunCheckinNowCtx 带 ctx 的全量签到（bug #11）：账号间节流用传入 ctx，
 // SIGTERM / 停机时不必把剩余账号的 0.8s 全睡完（此前传 Background，
 // sleepCtx 永远返回 true，`if !... { return }` 是死代码）。
-func (s *Scheduler) RunCheckinNowCtx(ctx context.Context) {
+func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
-	first := true
-	for _, st := range s.cfg.Pool.List() {
+	plan := s.spreadPlan(taskCheckin, spread, cst.Now())
+	for _, st := range plan.order(s.cfg.Pool.List()) {
 		if st.Disabled && !includeDisabled {
 			continue
 		}
@@ -668,13 +672,11 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context) {
 		// 400 code 10001「企业账号不支持该操作」。跳过签到，但**不 continue**——
 		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
 		// credit_floor 判定与面板额度展示的唯一数据源）。
-		// 账号间节流：第一个号不等，之后每个号之间等一次。
-		if !first && s.accountDelay(checkinAccountDelay) > 0 {
-			if !sleepCtx(ctx, s.accountDelay(checkinAccountDelay)) {
-				return // 停机/取消：不再把剩余账号的节流全睡完
-			}
+		// 账号级摊开（issue #45 方案 A）：等本号在窗口内的偏移时刻再动手。
+		// 计划为 nil（未启用摊开）时 wait 立即返回。
+		if !plan.wait(ctx, st.UID) {
+			return // 停机/取消：不再把剩余账号的等待全睡完
 		}
-		first = false
 		if !a.IsEnterprise() {
 			if err := s.cfg.Upstream.DailyCheckinCtx(ctx, a); err != nil {
 				// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
@@ -720,14 +722,15 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context) {
 // RunActivityNow 是无 ctx 的外部入口（面板/测试一次性触发）；排程主循环走
 // runActivity（ctx 取消时立即放弃剩余账号，不等限速睡满）。
 func (s *Scheduler) RunActivityNow() {
-	s.runActivity(context.Background())
+	s.runActivity(context.Background(), false)
 }
 
 // runActivity 活跃上报遍历，随 ctx 取消立即退出。
-func (s *Scheduler) runActivity(ctx context.Context) {
+func (s *Scheduler) runActivity(ctx context.Context, spread bool) {
 	first := true
 	includeDisabled := s.includeDisabledInTasks()
-	for _, st := range s.cfg.Pool.List() {
+	plan := s.spreadPlan(taskActivity, spread, cst.Now())
+	for _, st := range plan.order(s.cfg.Pool.List()) {
 		if st.Disabled && !includeDisabled {
 			continue
 		}
@@ -815,13 +818,13 @@ func (s *Scheduler) accountDelay(fallback time.Duration) time.Duration {
 }
 
 // RunKeepaliveNow 无 ctx 版本（保留给旧调用方）。
-func (s *Scheduler) RunKeepaliveNow() { s.RunKeepaliveNowCtx(context.Background()) }
+func (s *Scheduler) RunKeepaliveNow() { s.RunKeepaliveNowCtx(context.Background(), false) }
 
 // RunKeepaliveNowCtx 带 ctx：停机时可打断，账号之间做节流。
-func (s *Scheduler) RunKeepaliveNowCtx(ctx context.Context) {
+func (s *Scheduler) RunKeepaliveNowCtx(ctx context.Context, spread bool) {
 	includeDisabled := s.includeDisabledInTasks()
-	first := true
-	for _, st := range s.cfg.Pool.List() {
+	plan := s.spreadPlan(taskKeepalive, spread, cst.Now())
+	for _, st := range plan.order(s.cfg.Pool.List()) {
 		if st.Disabled && !includeDisabled {
 			continue
 		}
@@ -829,12 +832,10 @@ func (s *Scheduler) RunKeepaliveNowCtx(ctx context.Context) {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
-		if !first && s.accountDelay(keepaliveAccountDelay) > 0 {
-			if !sleepCtx(ctx, s.accountDelay(keepaliveAccountDelay)) {
-				return // 停机/取消：立刻退出
-			}
+		// 账号级摊开：等本号在窗口内的偏移时刻（未启用时立即返回）。
+		if !plan.wait(ctx, st.UID) {
+			return // 停机/取消：立刻退出
 		}
-		first = false
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error

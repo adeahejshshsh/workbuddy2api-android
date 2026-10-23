@@ -32,3 +32,6 @@ func Today() time.Time {
 
 // DayKey 北京时间的日期键（"2006-01-02"），用于「今天是否已跑过」这类去重。
 func DayKey(t time.Time) string { return t.In(Loc).Format("2006-01-02") }
+
+// Day 与 DayKey 同义（上游命名，供 spread 的日确定性哈希使用）。
+func Day(t time.Time) string { return DayKey(t) }
