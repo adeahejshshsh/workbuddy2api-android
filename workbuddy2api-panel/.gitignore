@@ -45,3 +45,8 @@ docs/
 *.zip
 server.exe
 .DS_Store
+signin
+data/
+auths/
+config.json
+gotest.log

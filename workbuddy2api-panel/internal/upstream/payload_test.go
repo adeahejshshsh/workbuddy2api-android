@@ -465,3 +465,21 @@ func TestClampGPTMinMaxTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestPrepareBodyOptNormalizeStop(t *testing.T) {
+	cases := []struct {
+		name, in, wantStop string // wantStop 为期望的 stop 字段 JSON 片段
+	}{
+		{"字符串形态转数组", `{"model":"m","stop":"\n\nHuman:"}`, `"stop":["\n\nHuman:"]`},
+		// 前后空白是停止词语义本身，不得 TrimSpace（首版裁剪被此用例抓到）。
+		{"保留空白", `{"model":"m","stop":" END "}`, `"stop":[" END "]`},
+		{"空串保留", `{"model":"m","stop":""}`, `"stop":[""]`},
+		{"数组形态原样", `{"model":"m","stop":["a","b"]}`, `"stop":["a","b"]`},
+	}
+	for _, c := range cases {
+		out := string(PrepareBodyOpt([]byte(c.in), false))
+		if !strings.Contains(out, c.wantStop) {
+			t.Errorf("%s: out=%s want 含 %s", c.name, out, c.wantStop)
+		}
+	}
+}

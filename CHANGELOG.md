@@ -602,6 +602,34 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，
 多条折叠成一条汇总，模型名放 title。
 
+### 四、上游 misakano7545 移植（第一批，2026-10-23）
+
+按「0.1 必须跟 / 0.2 建议跟」清单逐条 cherry-pick，冲突逐个手工适配（我们的树有 24 批
+独立修复，直接套补丁会互相踩）。本批已落地 4 条，均带测试：
+
+| 提交 | 内容 | 落地情况 |
+|---|---|---|
+| `02639df2` | `stop` 字符串形态归一为数组 | 全量移植（函数 + 用例）。上游把 stop 定义成 `[]string`，客户端发字符串即 400 `11101`，网关判 ErrBadParams 但**仍轮换** → 全池试完报 503 |
+| `e7c42b9c` | 账号级冷却字段落盘惰性清洗 | 只取 `persist.go` 的落盘判据；配套的 `persist_guard_test.go` 依赖未移植的「损坏 state.json 要打日志」行为，未收 |
+| `e278bf3a` | 刷新后落盘有界重试 | 取 `SaveAtomicRetry` + 三处调用点；`RefreshTokenIfNeeded` 封装在未移植的 `280fee08` 里，handler 处改回我们的 `RefreshToken`（`NeedsRefresh` 已在上一行判定） |
+| `c7ce5fb8` | 字符串 content 里的图也识别 | `hasImagePart` 改用 `json.RawMessage` 逐条解析；用例里的 `imagePartIfPresent` 属未移植提交，断言已移除 |
+
+顺带修两处**与移植无关**的定时炸弹：
+
+* `TestArchivePruneHonorsSize` 把文件名日期写死成 `2026-09-2x`，真实日期越过 30 天保留期后
+  会被「年龄」先清空，断言却还在怪大小裁剪 —— 10-23 之后每天必红。改为按今天生成文件名。
+* `TestCheckinDoneExpiredYesterday` 见前文（`cst.DayKey`）。
+
+**未落地（依赖我们还没移植的机制，强行套会编译不过）**：
+
+| 提交 | 阻塞原因 |
+|---|---|
+| `0eb9e37d` `f1eca4ad` `c587c090` model_fallback | handler 冲突块里混着 admin audit / busy-wait(issue #46) / hard-credit 细化，整块取会引入不存在符号；需按我们的 chat 循环单独改写 |
+| `5ee3b8fe` reserve_credits 兜底 | 依赖 `reserveBlocked` / `modelFreeOf`（未移植） |
+| `065b088a` 品牌词作用域 | 与我们刚做的 ZWSP 改写叠加，需先定作用域语义 |
+| `56057810` conversationRequestId | 与 headers.go 现有 trace id 逻辑耦合 |
+| `79a70ef8` `280fee08` `2089c262` `2999a8d2` `3fb80272` `f9b2f07a` `54e9862b` `00fea446` `3d5900fd` `58262f31` `e1735298` `cce39c30` 等 | 逐个适配中，见 `.tmp/analysis/misakano-gap-20261023.md` |
+
 ### 未合并
 
 | kk-cao 提交 | 内容 | 判断 |

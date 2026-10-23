@@ -67,6 +67,7 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
+	normalizeStop(obj)
 	// tool 配对三步（见 tool_pairing.go）：先合并再重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
 	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
@@ -341,6 +342,91 @@ func normalizeImageURL(obj map[string]any) {
 	}
 }
 
+// normalizeStop 兼容 OpenAI chat 请求 stop 字段的两种合法写法。
+//
+// OpenAI 规范允许 stop 为字符串或字符串数组（≤4 个停止词），部分客户端（SillyTavern
+// 等）只发字符串形态；但上游 Go struct 把 stop 定义成 []string，字符串形态直接解码
+// 失败：400 code=11101 "cannot unmarshal string into Go struct field ***.stop of type
+// []string"。网关把 11101 归 ErrBadParams（不罚号但**仍轮换**），同一 body 换任何号都
+// 必然同样 400——全池试完走末端透传，客户端看到「所有账号不可用」，与账号健康无关。
+//
+// 只做形状转换：字符串 → 单元素数组。**不 TrimSpace**——停止词的前后空白是匹配语义
+// 本身（"\n\nHuman:"、"\n\n" 靠前导换行触发），裁剪等于静默改写客户端意图。空串同样
+// 转 [""] 保留（不替客户端判定什么是无效值）；数组 / null / 其他类型 / 字段缺失一律不动。
+func normalizeStop(obj map[string]any) {
+	s, ok := obj["stop"].(string)
+	if !ok {
+		return
+	}
+	obj["stop"] = []string{s}
+}
+
+// dropReasoningContentParts 剔除 chat content 数组里的 reasoning_text / reasoning 片段
+// （吸收上游 PR #159）。
+//
+// 场景：Codex 只走 /v1/responses，第三方中转的 responses→chat 转换器（如 new-api 的
+// openai_responses_to_openai_chat_completions）会把助手历史里的思考片段原样透传进
+// /v1/chat/completions；上游 content 类型白名单不含它，命中即 HTTP 400 code=11101
+// 「unsupported content type at index 0: reasoning_text」。本仓自己的 responses 入站
+// 不产这种片段（客户端回传的 reasoning item 在 convertInputItems 里就丢弃了），这条
+// 是给「链路上游还有别的转换器」兜底。
+//
+// 思考片段只是模型私有推理，下游续写不需要，剔除无副作用：
+//   - 删除 type 为 reasoning_text / reasoning 的片段（TrimSpace 后比较）
+//   - 删除后 content 为空且该消息无 tool_calls → 整条消息一并删除；有 tool_calls 则保留
+//     （留空数组，避免破坏工具调用配对）
+func dropReasoningContentParts(obj map[string]any) {
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return
+	}
+	out := make([]any, 0, len(msgs))
+	for _, rawMsg := range msgs {
+		msg, ok := rawMsg.(map[string]any)
+		if !ok {
+			out = append(out, rawMsg)
+			continue
+		}
+		parts, ok := msg["content"].([]any)
+		if !ok {
+			out = append(out, rawMsg)
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				kept = append(kept, rawPart)
+				continue
+			}
+			ptype, _ := part["type"].(string)
+			if tv := strings.TrimSpace(ptype); tv == "reasoning_text" || tv == "reasoning" {
+				continue
+			}
+			kept = append(kept, rawPart)
+		}
+		if len(kept) == 0 {
+			if _, hasToolCalls := msg["tool_calls"]; !hasToolCalls {
+				// 整条删掉会破坏 user/assistant 交替（报告 #6）：Codex 经
+				// responses→chat 转换后会产出「content 全是 reasoning 片段」的 assistant
+				// 轮，删掉它历史就少一轮，上游可能直接 400，而日志里毫无痕迹。
+				// 改为保留该轮、把 content 置空串（最小改动，交替关系不变）。
+				msg["content"] = ""
+				out = append(out, msg)
+				continue
+			}
+			// 带 tool_calls 但内容全是思考片段：**删掉 content 键**而不是写 []（报告 #7）。
+			// `"content": []` 与 `"content": null` 在上游是不同的形态，空数组可能被判非法。
+			delete(msg, "content")
+			out = append(out, rawMsg)
+			continue
+		}
+		msg["content"] = kept
+		out = append(out, rawMsg)
+	}
+	obj["messages"] = out
+}
+
 // ensureConsoleSystem global realm 兜底 system 注入（吸收 PR #45，防 console 域上游 code 11-128）：
 // 首条消息非 system 时在 messages 最前补一条 fallback system（"You are a helpful assistant."）。
 // 仅对 global 请求调用（CN 现状不动；即使首条就是 system 也不重复注入）。
@@ -495,62 +581,6 @@ func unescapePatternLiteralEscapes(node any) {
 			unescapePatternLiteralEscapes(v)
 		}
 	}
-}
-
-// dropReasoningContentParts 剔除 chat content 数组里的 reasoning_text / reasoning 片段
-// （上游 PR #159）。Codex 只走 /v1/responses，responses→chat 的转换器会把助手历史里的
-// 思考片段原样透传进 /v1/chat/completions；上游 content 类型白名单不含 reasoning_text，
-// 命中即 HTTP 400 code=11101。思考片段是模型私有推理，下游续写不需要，剔除无副作用。
-func dropReasoningContentParts(obj map[string]any) {
-	msgs, ok := obj["messages"].([]any)
-	if !ok {
-		return
-	}
-	out := make([]any, 0, len(msgs))
-	for _, rawMsg := range msgs {
-		msg, ok := rawMsg.(map[string]any)
-		if !ok {
-			out = append(out, rawMsg)
-			continue
-		}
-		parts, ok := msg["content"].([]any)
-		if !ok {
-			out = append(out, rawMsg)
-			continue
-		}
-		kept := make([]any, 0, len(parts))
-		for _, rawPart := range parts {
-			part, ok := rawPart.(map[string]any)
-			if !ok {
-				kept = append(kept, rawPart)
-				continue
-			}
-			ptype, _ := part["type"].(string)
-			if tv := strings.TrimSpace(ptype); tv == "reasoning_text" || tv == "reasoning" {
-				continue
-			}
-			kept = append(kept, rawPart)
-		}
-		if len(kept) == 0 {
-			if _, hasToolCalls := msg["tool_calls"]; !hasToolCalls {
-				// 整条删掉会破坏 user/assistant 交替（报告 #6）：Codex 经
-				// responses→chat 转换后会产出「content 全是 reasoning 片段」的 assistant
-				// 轮，删掉它历史就少一轮，上游可能直接 400，而日志里毫无痕迹。
-				// 改为保留该轮、把 content 置空串（最小改动，交替关系不变）。
-				msg["content"] = ""
-				out = append(out, msg)
-				continue
-			}
-			// 带 tool_calls 但内容全是思考片段：**删掉 content 键**而不是写 []（报告 #7）。
-			// `"content": []` 与 `"content": null` 在上游是不同的形态，空数组可能被判非法。
-			delete(msg, "content")
-			out = append(out, rawMsg)
-			continue
-		}
-		msg["content"] = kept
-		out = append(out, rawMsg)
-	}
-	obj["messages"] = out
 }
 
 // marshalNoEscape 序列化但不做 HTML 转义（保持与客户端原文一致）。

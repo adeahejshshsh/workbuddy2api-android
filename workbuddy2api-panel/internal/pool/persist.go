@@ -335,9 +335,6 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			CreditsTotal:             e.creditsTotal,
 			Disabled:                 e.disabled,
 			Paused:                   e.paused,
-			Reason:                   e.reason,
-			Until:                    e.until,
-			CoolKind:                 e.coolKind,
 			SuccessCount:             e.successCount,
 			ErrTotal:                 e.errTotal,
 			LastSuccess:              e.lastSuccess,
@@ -350,6 +347,12 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			CreditsExpiring:          e.creditsExpiring,
 			CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 			CreditsEarliestRemaining: e.creditsEarliestRemaining,
+		}
+		// 账号级冷却字段：仅禁用或仍在冷却时限内落盘（与熔断/降权同款惰性清洗）。
+		// 软冷却按墙钟到期、字段本身不清理，无条件落盘会让过期 reason 在 state.json 里
+		// 长生不老并被重启原样拾回（issue #207-4）。
+		if e.disabled || (!e.until.IsZero() && now.Before(e.until)) {
+			s.Reason, s.Until, s.CoolKind = e.reason, e.until, e.coolKind
 		}
 		// 熔断截止：仅未过期才落盘（指针 nil 才能被 omitempty 真省略）。
 		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {

@@ -241,7 +241,12 @@ func TestArchiveQueueDropCounter(t *testing.T) {
 
 func TestArchivePruneHonorsSize(t *testing.T) {
 	dir := t.TempDir()
-	for i, name := range []string{"requests-2026-09-20.jsonl", "requests-2026-09-21.jsonl", "requests-2026-09-22.jsonl"} {
+	// 文件名日期必须相对「今天」生成：写死 2026-09-2x 时，一旦真实日期越过
+	// 保留期（RetentionDays=30）这些文件会被**年龄**先清掉，用例在 10-23 之后
+	// 每天必红，而断言却还在怪「大小裁剪」。
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		name := "requests-" + now.AddDate(0, 0, -2+i).Format("2006-01-02") + ".jsonl"
 		path := filepath.Join(dir, name)
 		if err := os.WriteFile(path, []byte("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), 0o600); err != nil {
 			t.Fatal(err)
@@ -257,7 +262,8 @@ func TestArchivePruneHonorsSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "requests-2026-09-22.jsonl" {
+	wantName := "requests-" + now.Format("2006-01-02") + ".jsonl"
+	if len(entries) != 1 || entries[0].Name() != wantName {
 		t.Fatalf("remaining = %+v, want newest file only", entries)
 	}
 }

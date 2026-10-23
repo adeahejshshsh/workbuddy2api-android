@@ -978,7 +978,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
-			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
+			if err := h.cfg.Upstream.RefreshToken(acct); err != nil { // 我们无 RefreshTokenIfNeeded（该封装在 280fee08 里），NeedsRefresh 已在上一行判定
 				lastErr = err
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
@@ -998,7 +998,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			if err := acct.SaveAtomic(); err != nil {
+			if err := acct.SaveAtomicRetry(); err != nil {
 				// 刷新成功但落盘失败：下次启动会用旧 token，必须暴露
 				log.Printf("ERR: [server] chat refresh acct=%s: save auth failed: %v", logfmt.Label(acct.UID, acct.NicknameValue()), err)
 			}
@@ -2176,23 +2176,23 @@ func hasImagePart(body []byte) bool {
 	// reqHasImage 恒 false，11133「模型不支持图片」的 hint 分支永远不触发。
 	var peek struct {
 		Messages []struct {
-			Content any `json:"content"`
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
 	if json.Unmarshal(body, &peek) != nil {
 		return false
 	}
 	for _, m := range peek.Messages {
-		parts, ok := m.Content.([]any)
-		if !ok {
-			continue // 字符串形态（纯文本消息）：没有图片段
+		// Text-only system/history messages use strings; tool-call messages
+		// may use null. Neither should hide images in another message.
+		var parts []struct {
+			Type string `json:"type"`
 		}
-		for _, raw := range parts {
-			p, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if t, _ := p["type"].(string); t == "image_url" {
+		if json.Unmarshal(m.Content, &parts) != nil {
+			continue
+		}
+		for _, p := range parts {
+			if p.Type == "image_url" {
 				return true
 			}
 		}

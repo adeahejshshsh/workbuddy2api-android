@@ -776,8 +776,8 @@ func (s *Scheduler) RunKeepaliveNowCtx(ctx context.Context) {
 			continue
 		}
 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
-		if err := a.SaveAtomic(); err != nil {
-			log.Printf("keepalive %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
+		if err := a.SaveAtomicRetry(); err != nil {
+			log.Printf("WARN: keepalive %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
 		}
 	}
 }
