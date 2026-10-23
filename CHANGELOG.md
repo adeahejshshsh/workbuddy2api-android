@@ -638,6 +638,12 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
   会被「年龄」先清空，断言却还在怪大小裁剪 —— 10-23 之后每天必红。改为按今天生成文件名。
 * `TestCheckinDoneExpiredYesterday` 见前文（`cst.DayKey`）。
 
+**静态 API Key 账号（`5ce1a2f4`）—— 评估后不做**：22 个文件冲突，核心不是「加个字段」，
+而是它与**成长任务重构**（PR #104：`globalTaskWriteMessage`、`ClaimReward` 四返值、
+`taskProgressReached`）绑在一起；只并静态 Key 那一半，任务中心会编译不过，全并则等于把
+整个任务链一起移植。静态 Key 账号本身适合独立开工：`auth.IsAPIKey`（ck_/pt_ 前缀）+
+`SupportsPersonalGrowth`/`SupportsPersonalEndpoints` 门控 + 面板建号端点 + 企业计费口径。
+
 **未落地（依赖我们还没移植的机制，强行套会编译不过）**：
 
 | 提交 | 阻塞原因 |
