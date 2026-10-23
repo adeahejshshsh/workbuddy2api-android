@@ -46,6 +46,7 @@ const (
 	ErrChannelRefused                // 11‑-128 request illegal 通道校验失败（上游认为非官方客户端）→ 不罚账号
 	ErrModelBusy                     // 14003「模型繁忙」（间歇）→ (账号,模型) 10s 起短冷却，封顶 1m
 	ErrClient                        // 其他 4xx / 业务错误
+	ErrToolMismatch                  // 11148「tool calls and tool results do not match」→ 请求内容级配对断裂：不罚号、不轮转，末端 400 透传原文
 )
 
 func (k ErrKind) String() string {
@@ -72,6 +73,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrUpstreamBusy:
 		return "upstream_busy"
+	case ErrToolMismatch:
+		return "tool_mismatch"
 	case ErrChannelRefused:
 		return "channel_refused"
 	case ErrModelBusy:
@@ -618,12 +621,6 @@ func Classify(status int, body string) ErrKind {
 		}
 		return ErrSessionDead
 	}
-	// 网关 401（APISIX/openresty HTML 页，无业务信封）：token 被上游判无效。
-	// 落 ErrClient（旧行为）的代价是「只换号不罚」——死号永远留在池里，每个请求
-	// 再打一遍、日志刷一串 401（2026-10-17 现场：18 个号里 16 个已死）。
-	if IsGatewayUnauthorized(status, body) {
-		return ErrSessionDead
-	}
 	// 通道校验失败必须先于 accountFault 判（上游 PR #233）：11‑-128 的 msg 与
 	// 11140 同为 "request illegal"，而 accountFaultMarkers 里就有这句 —— 先判会把
 	// 健康账号判成账号故障并硬禁用。双条件（code 11‑-128 + 文案）才分流到通道。
@@ -683,6 +680,14 @@ func Classify(status int, body string) ErrKind {
 	}
 	if status == http.StatusNotFound {
 		return ErrNotFound
+	}
+	// 11148「tool calls and tool results do not match」：**请求内容**级配对断裂（上游
+	// 明示「直接重试无效，请新建任务」）。不在此分流会落 ErrClient → 全池轮转一遍
+	// （每个健康号白记一笔连败）+ 末端 503，而同一 body 换任何账号都是同样的 400。
+	// 判在状态码兜底之前——上游可能套 5xx 外壳；codeMarker 走空白容差，文案留中英兜底。
+	if codeMarker(lower, "11148") || strings.Contains(lower, "tool results do not match") ||
+		strings.Contains(body, "工具调用与工具结果不匹配") {
+		return ErrToolMismatch
 	}
 	if status >= 500 {
 		return ErrServer

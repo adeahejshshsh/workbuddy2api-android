@@ -61,6 +61,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "account credits exhausted at upstream; waiting for daily check-in to restore"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
+	case ErrToolMismatch:
+		// 11148 工具配对断裂：请求内容的问题（会话历史里的 tool_calls 与 tool 结果对不上），
+		// 换号/重试都不会好，只能新建会话。
+		return "tool calls and tool results do not match in the conversation history; retrying will not help — start a new conversation/thread"
 	case ErrContentBlocked:
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。

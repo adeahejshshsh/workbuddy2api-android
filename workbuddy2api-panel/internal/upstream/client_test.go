@@ -673,3 +673,24 @@ func TestClassifyGatewayUnauthorized(t *testing.T) {
 		}
 	}
 }
+
+// 11148 工具配对断裂是**请求内容**级错误：同一 body 换任何账号都是同样的 400，
+// 必须 fail-fast，不能落 ErrClient 让全池轮转一遍。
+func TestClassifyToolMismatch(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+		want   ErrKind
+	}{
+		{400, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrToolMismatch},
+		// 上游可能套 5xx 外壳，判在状态码兜底之前
+		{500, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrToolMismatch},
+		{400, `工具调用与工具结果不匹配`, ErrToolMismatch},
+		{400, `{"code":1,"msg":"unrelated business error"}`, ErrClient},
+	}
+	for _, c := range cases {
+		if got := Classify(c.status, c.body); got != c.want {
+			t.Errorf("Classify(%d,%q)=%v want %v", c.status, c.body, got, c.want)
+		}
+	}
+}
