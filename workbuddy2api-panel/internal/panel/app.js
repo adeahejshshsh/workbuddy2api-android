@@ -867,6 +867,9 @@ function is1017Model(m) {
 }
 
 // mdRowHtml 单个模型行（纯渲染，便于独立测试）。
+// 上游模型繁忙度（/v2/chat/busy）文案：只标需要避让的三档，idle/normal 不打扰。
+const BUSY_WORDS = { busy: '繁忙', congested: '拥堵', unavailable: '不可用' };
+
 function mdRowHtml(m, pr) {
   const eff = (m.supported_efforts || []).slice();
   if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
@@ -880,6 +883,10 @@ function mdRowHtml(m, pr) {
   if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
   if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
   if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
+  if (BUSY_WORDS[m.busy]) {
+    const bad = m.busy === 'congested' || m.busy === 'unavailable';
+    caps.push('<span class="tag ' + (bad ? 'bad' : 'warn') + '" title="上游繁忙度 ' + esc(m.busy) + '（/v2/chat/busy 实时；服务端偶发无数据，同一批重查可能变）">' + BUSY_WORDS[m.busy] + '</span>');
+  }
   const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
   const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
   return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +

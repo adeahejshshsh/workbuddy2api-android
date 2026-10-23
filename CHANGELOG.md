@@ -619,6 +619,7 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 | `0eb9e37d` | **model_fallback：6004 限流时同账号改道等价模型** | 本轮最大一条。取 `curModel` / `fallbackTried` / `fallbackTo` / `applyFallback` 全套 + 两处调用点（选不到号时先降级、6004 时同账号换模型重试）。**剔掉**同块里的 busy-wait（issue #46，我们没这套 helper）与 hard-credit 细化；6 条用例全过，含「全池该模型冷却时降级而非报 503」与「A→B→A 不循环」 |
 | `2892e6a8` | 诊断开关 `WB2A_DUMP_UPSTREAM` | 落上游原始报文（`upstream.dump_dir`，默认空 = 不落盘，正文含用户提示词）。与 `DNSServers` 字段并存 |
 | `575611b5` | `upstream.dump_max_bytes` | dump 请求体上限可配（issue #44），干净合入 |
+| `2737aed3` | 模型与档位显示官方实时繁忙度 | 取 `internal/upstream/modelbusy.go` + 面板模型列表繁忙度列；**剔掉**同块的出图模型（`GenerationModels` 属未移植的 images 提交），并把该用例一并去掉。繁忙度查询用与目录同一批账号（`cnAcct`/`globalAcct`），不额外选号；查不到就不填字段、不编造 |
 | `0b6fe19a` | 账号级摊开改按计划时刻顺序执行 | 用 `spreadPlan`/`plan.order`/`plan.wait` 替换我们原来的「串行延迟」（`accountDelay`）；偏移按「任务｜uid｜日」哈希，当天确定性、重启不重排。新增 `schedule.account_spread_minutes` + `account_spread_min_gap_seconds` 两个配置项；五个任务函数加 `spread bool` 参数（排程 true / 面板手动 false，手动点击不该等半小时）；补 `cst.Day`、`spreadEnabled` |
 | `e1735298` | **余额趋势视图** | 新包 `internal/balance`（643 行 + 658 行测试，原样入库）+ 面板新视图。手工合并点：`scheduler.Config.Balance` 采样钩子挂在我们自己的 `RunBalanceRefreshNow` 循环里；`app.js` 只追加视图代码（752 行）并补 `TITLES`/`go()` 路由；`index.html` **不取对方整份**（会带进一套不同的配置表单版本），只加导航 + `<section id="view-balhist">` + 余额趋势专用样式 |
 | `44de7912` | scheduler 重构：`enabledSlots` 统一时点枚举 | 把「有哪些任务族 / 下次何时跑」收敛成一个口径，`nextWake` 与 `missedToday` 共用。我们这版没有 `nextFireKind`/`JitterMinutes`，改用现有 `nextFire`（无抖动，行为不变）；另补 `taskKind.String()` 供落盘去重记录用 |

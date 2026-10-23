@@ -394,12 +394,14 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
+	var cnAcct, globalAcct *auth.Auth // 供下方模型繁忙度复用同一批账号
 	if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
 		// 取凭证失败要回退到下一个 uid，并记录真实原因（bug B20）：
 		// AvailableUIDsForRealm 与 AuthByUID 是两次独立加锁查询，若两次之间该账号
 		// 被移除/SyncToDir 剔除，原先静默跳过该域 → 最终 503「没有可用账号」，
 		// 而池里其实还有别的号，日志里也没有任何线索。
 		acct := p.cfg.Pool.PickExistingAuth(uids)
+		cnAcct = acct // 供下方模型繁忙度复用同一批账号（不额外选号）
 		if acct == nil {
 			fetchErrs = append(fetchErrs, fmt.Sprintf("cn: %d 个可用账号在查询间隙被移除", len(uids)))
 		}
@@ -430,6 +432,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
 			// 同 CN 域：取凭证失败回退下一个 uid 并记录原因（bug B20）。
 			gAcct := p.cfg.Pool.PickExistingAuth(uids)
+			globalAcct = gAcct
 			if gAcct == nil {
 				fetchErrs = append(fetchErrs, fmt.Sprintf("global: %d 个可用账号在查询间隙被移除", len(uids)))
 			}
@@ -458,6 +461,61 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 						}
 						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
 					}
+				}
+			}
+		}
+	}
+
+	// 出图模型：目录按 tag 把它们从**对话**列表剔掉了（/v1/models 同样单列），面板
+	// 「模型与档位」也必须看得到——否则用户不知道有哪些能调。字段与对话模型同口径，
+	// 另加 image_generation 标记（前端据此标「出图」）。视频不列：没有网关端点。
+	//
+	// 倍率：上游对图片模型**不报**倍率（全字段实测：v3 目录里 gpt-image-2.5-sunburst
+	// 只有 id/name/tags，连 credits 键都没有；企业端点不列媒体模型），所以空倍率那一格
+	// 用**我们自己账本里的实扣值**兜底（credit_by_model 的 credits/credit_samples）。
+	// 实测 0.55 credit/张 vs 国内混元目录牌价 x5.00 —— 两个数都不是编的，来源不同故分列：
+	// credits 是牌价，measured_credit 是实测单价（前端加「实测」字样）。
+	// 账本行键是「域:模型」，故这里按 realm+":"+模型 id 查（跨域同名模型本就该各算各的）。
+	measured := map[string]string{}
+	if p.cfg.Usage != nil {
+		for _, c := range p.cfg.Usage.Snapshot(0, nil).CreditByModel {
+			if c.CreditSamples > 0 && c.Credits > 0 {
+				measured[c.Key] = strconv.FormatFloat(c.Credits/float64(c.CreditSamples), 'f', 2, 64)
+			}
+		}
+	}
+	for _, realm := range []string{"cn", "global"} {
+		if realm == "global" && !p.cfg.Upstream.GlobalEnabled {
+			continue
+		}
+	}
+
+	// 模型繁忙度（官方 /v2/chat/busy，只读观测，见 upstream/modelbusy.go）：与目录同一批
+	// 账号查，附到对应域的行上。查不到就不填字段（不编造）；失败只并入 fetchErrs（目录本身
+	// 已经拿到了，不该因为繁忙度查询失败把整个视图打成 502）。
+	for realm, acct := range map[string]*auth.Auth{"cn": cnAcct, "global": globalAcct} {
+		if acct == nil {
+			continue
+		}
+		prefix := realm + ":"
+		var ids []string
+		for _, e := range out {
+			if id, _ := e["id"].(string); strings.HasPrefix(id, prefix) {
+				ids = append(ids, strings.TrimPrefix(id, prefix))
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		levels, err := p.cfg.Upstream.ModelBusy(acct, ids)
+		if err != nil {
+			fetchErrs = append(fetchErrs, realm+" busy: "+err.Error())
+			continue
+		}
+		for _, e := range out {
+			if id, _ := e["id"].(string); strings.HasPrefix(id, prefix) {
+				if lv := levels[strings.TrimPrefix(id, prefix)]; lv != "" {
+					e["busy"] = lv
 				}
 			}
 		}

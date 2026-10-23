@@ -1144,3 +1144,62 @@ process.exit(0);
 		t.Fatalf("renderRequestTable 空列表渲染失败: %v\n%s", err, out)
 	}
 }
+
+// TestAppJSModelBusyTag 模型行渲染行为：busy/congested 必须出标签（bad 色），
+// idle/normal 与缺字段必须安静——「模型与档位」是唯一能看到 congested/unavailable 的地方。
+// 行为断言而非字符串断言：后者在 `if (false)` 这种「代码在但永远不跑」下仍会通过。
+func TestAppJSModelBusyTag(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; model busy tag test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('// 上游模型繁忙度（/v2/chat/busy）文案');
+const end = src.indexOf('function renderModels()');
+if (start < 0 || end < start) throw new Error('busy block not found');
+const ctx = {
+  esc: (s) => String(s == null ? '' : s),
+  rateCell: () => '<td></td>',
+  outCell: () => '<td></td>',
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.rowHtml = mdRowHtml;', ctx);
+const base = { id: 'cn:glm-5.2', supported_efforts: [], image_generation: false };
+const out = {
+  congested: ctx.rowHtml({ ...base, busy: 'congested' }, null),
+  busy: ctx.rowHtml({ ...base, busy: 'busy' }, null),
+  idle: ctx.rowHtml({ ...base, busy: 'idle' }, null),
+  normal: ctx.rowHtml({ ...base, busy: 'normal' }, null),
+  none: ctx.rowHtml(base, null),
+};
+process.stdout.write(JSON.stringify({
+  congestedBad: out.congested.includes('拥堵') && out.congested.includes('tag bad'),
+  busyWarn: out.busy.includes('繁忙') && out.busy.includes('tag warn'),
+  idleQuiet: !out.idle.includes('拥堵') && !out.idle.includes('繁忙'),
+  normalQuiet: !out.normal.includes('拥堵') && !out.normal.includes('繁忙'),
+  noneQuiet: !out.none.includes('拥堵') && !out.none.includes('繁忙'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "busy-tag-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	// node 在本机（Android）可能找得到但**执行不了**（私有目录 exec 受限）：
+	// 与其他 JS 用例同口径，先真跑一次 --version 再决定跳过。
+	if _, err := exec.Command(node, "--version").Output(); err != nil {
+		t.Skipf("node 不可执行（%v）; JS checks skipped", err)
+	}
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("model busy tag node test failed: %v\n%s", err, out)
+	}
+	const want = `{"congestedBad":true,"busyWarn":true,"idleQuiet":true,"normalQuiet":true,"noneQuiet":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("繁忙度标签渲染不符:\n got=%s\nwant=%s", strings.TrimSpace(string(out)), want)
+	}
+}
