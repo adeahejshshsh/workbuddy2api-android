@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/balance"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -27,12 +28,15 @@ type Config struct {
 	Upstream *upstream.Client
 	// AccountSpreadSeconds 账号遍历型任务的账号间最小间隔（秒），0 = 关闭。
 	AccountSpreadSeconds int
-	CheckinHours         []int // 默认 [9, 21]
-	TravelHours          []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
-	ActivityHours        []int // 默认 [10]
-	KeepaliveHours       []int // 默认 [22]
-	BlackcatHours        []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
-	GrowthHours          []int // 默认 [1]：成长任务队列（Sequential 族每日零点解锁一环，
+	// Balance 余额采样记录器（可为 nil = 不采样）。
+	// 采样动作挂在 RunBalanceRefreshNow 之后：那里已拿到新鲜余额，不额外打上游。
+	Balance        *balance.Recorder
+	CheckinHours   []int // 默认 [9, 21]
+	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
+	ActivityHours  []int // 默认 [10]
+	KeepaliveHours []int // 默认 [22]
+	BlackcatHours  []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
+	GrowthHours    []int // 默认 [1]：成长任务队列（Sequential 族每日零点解锁一环，
 	// 01:00 自动扫描+执行；避开零点整防解锁竞态）
 
 	// ExpiringSoonWindow 快过期积分窗口：签到/余额刷新查余额时，把到期时间
@@ -905,6 +909,14 @@ dispatch:
 			}
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
 			s.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
+			// 余额采样：这里已拿到新鲜余额，顺手记一点（不额外打上游）。
+			// 内部按 30 分钟节流，故多数刷新周期不会落点。
+			if s.cfg.Balance != nil {
+				s.cfg.Balance.SetName(uid, a.NicknameValue())
+				if s.cfg.Balance.Add(uid, remain) {
+					log.Printf("balance-sample %s: credits=%d", uid, remain)
+				}
+			}
 		}(a, st.UID)
 	}
 	wg.Wait()

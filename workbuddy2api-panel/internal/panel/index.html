@@ -600,6 +600,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .dlg .tabs { margin-left: 0; }
 }
 /* ══ DSH-MOBILE-PATCH-END ══ */
+/* ── 余额趋势（view-balhist）──────────────────────────────── */
+.stats .st { padding: 14px 17px; border-right: 1px solid var(--line-soft); }
+.stats .st:last-child { border-right: none; }
+.stats .st .k { display: block; color: var(--ink-3); font-size: 11.5px; margin-bottom: 5px; }
+.stats .st .v { display: block; font: 600 26px/1.15 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; white-space: nowrap; }
+.stats .st .v.ok { color: var(--ok); }
+.stats .st .v.warn { color: var(--warn); }
+.stats .st .v.bad { color: var(--bad); }
+/* 卡数不固定（余额趋势 4 张、别处 7 张）：auto-fit 自适应列数 */
+.stats.auto { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+.bh-daylegend { display: flex; gap: 12px; flex-wrap: wrap; padding: 6px 2px 0; font-size: 11.5px; color: var(--ink-3); }
 </style>
 </head>
 <body>
@@ -619,6 +630,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#packages" data-view="packages">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/></svg>
         积分构成</a></li>
+      <li><a href="#balhist" data-view="balhist">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 11.5 6 7l3 2.6L14 4.5"/><path d="M14 8.5v-4h-4"/></svg>
+        余额趋势</a></li>
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
@@ -768,6 +782,62 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
           <tbody id="mdBody"></tbody>
         </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 余额趋势 -->
+    <section class="view" id="view-balhist" hidden>
+      <div class="box">
+        <header>
+          <h3>余额趋势</h3>
+          <span class="grow"></span>
+          <span class="seg" id="bhRealmSeg"></span>
+          <span class="note" id="bhNote">—</span>
+          <select id="bhWindow" class="xs">
+            <option value="1">近 24 小时</option>
+            <option value="7">近 7 天</option>
+            <option value="30" selected>近 30 天</option>
+          </select>
+          <button class="xs" id="btnBalHist">刷新</button>
+        </header>
+        <div class="stats auto" id="bhStats"></div>
+        <div class="pad">
+          <div class="uschart">
+            <div class="uschart-hd">
+              <span class="lb">积分水位（每 30 分钟一点）</span>
+              <span class="grow"></span>
+              <span class="legend" id="bhLegend"></span>
+            </div>
+            <div id="bhChart" class="uschart-body"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>每日变化</h3><span class="grow"></span>
+          <span class="note" id="bhDailyNote">每账号每天一根：绿=当日净增，红=当日净减；浅色/斜纹 = 该日采样不完整</span>
+        </header>
+        <div class="pad">
+          <div id="bhDaily" class="uschart-body"></div>
+          <div class="bh-daylegend" id="bhDailyLegend"></div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>按账号</h3><span class="grow"></span>
+          <span class="note">净变化 = 窗口末值 − 窗口首值</span></header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th class="mark" aria-hidden="true"></th><th>账号</th>
+              <th class="num">当前</th><th class="num">最低</th><th class="num">最高</th>
+              <th class="num">净变化</th><th class="num">今日</th><th class="num">昨日</th>
+              <th class="num">消耗*</th><th class="num">到账*</th><th class="num">采样点</th>
+            </tr></thead>
+            <tbody id="bhAccBody"></tbody>
+            <tfoot id="bhAccFoot"></tfoot>
+          </table>
         </div>
       </div>
     </section>

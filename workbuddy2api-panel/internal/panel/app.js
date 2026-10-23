@@ -427,7 +427,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -440,6 +440,7 @@ function go(v) {
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
+  if (v === 'balhist') loadBalance();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
@@ -3159,3 +3160,755 @@ document.addEventListener('click', async (ev) => {
     toast('备注保存失败：' + (e && e.message ? e.message : e), 'err');
   }
 });
+
+/* 账号身份色板（8 槽）。槽位 0 = var(--accent)（**主题主色**，浅色主题下
+   自动跟随；刻意保留，因为它承载的是"第一条线=当前主题强调色"的既有语义，
+   不是与状态语义撞车），槽位 1~7 走 CSS 变量 --bh-1..--bh-7，两套主题各一份。
+
+   ── 各槽色相与选它的理由（色相为实测值） ──────────────────────────
+   槽0 227°  var(--accent)   主题主色，非新增取舍
+   槽1  58°  黄                语义色的 38°(warn) 与 154°(ok) 之间唯一能放的点
+   槽2  96°  黄绿              离三语义色都远（≥46°），最"安全"的槽位
+   槽3 135°  绿                在 warn/ok 之间的另一侧，与 58° 相距 77°
+   槽4 191°  青                冷色区，与 accent(227°) 相距 36°
+   槽5 247°  蓝紫              与 accent 相距 19°，靠明度/饱和度区分（见下）
+   槽6 295°  品红              远离所有语义色（≥66°）
+   槽7 343°  玫红              与 bad(2.6°) 相距 20°，靠低饱和暖粉区分
+   相邻间距：77/40/42/42/42/42/40 度（槽1→槽7 内部链），最小 40°。
+
+   ── 为何避开语义色 ────────────────────────────────────────────────
+   绿/红/黄已被状态语义占用（--ok 可用 / --bad 失败 / --warn 限流告警）。
+   账号身份色若与它们同色相，同一颜色就有两个互斥含义（"某账号" vs "状态"），
+   读者必然误读 —— 这是 §十一"一个视觉通道只承载一种含义"的直接推论。
+   故 1~7 槽都把色相放在距 warn/ok/bad 至少 20° 的位置（浅色主题下
+   warn 37°、ok 155°、bad 3°，均已核验）。
+
+   ⚠️ 这里有一个**已实测的取舍**，勿轻改：要求「8 色 + 相邻相差距 ≥40° +
+   同时避开 全部 4 个语义色(含 accent) ±20°」三者**数学上不可同时成立** ——
+   4 个禁区共占 160°，而 8 槽相邻 ≥40° 需要 320° 的弧，160+320 > 360。
+   穷举求解证实：若同时避开 accent，最大可实现的相邻最小间距只有 38.5°。
+   因此本色板选择：**槽位 0 复用 accent（不视为撞车）**，1~7 槽避开 warn/ok/bad
+   且相邻间距 ≥40°。槽 5(247°) 与 accent 相距仅 19° 是这一取舍的唯一代价 ——
+   它靠**明显不同的明度/饱和度**（accent 是高饱和靛蓝、槽5 是亮紫）来区分，
+   这是 20° 色相判据之外的第二条判据，符合任务"或明度/饱和度明显不同"的允许。
+
+   ── 两套主题（硬编码 hex 必须两套，见 index.html） ────────────────
+   对比度实测（深底 #14171f / 浅底 #ffffff，WCAG 对比度）：
+     槽1 13.3/4.6  槽2 14.1/4.5  槽3 13.5/4.5  槽4 11.8/4.5
+     槽5  6.4/11.8 槽6  7.1/5.9  槽7  6.7/6.4   槽0(var(--accent)) 4.9/5.4
+   全部达到非文本对比度 3:1 的要求，且多数 ≥4.5:1。 */
+const BH_COLORS = [
+  'var(--accent)', 'var(--bh-1)', 'var(--bh-2)', 'var(--bh-3)',
+  'var(--bh-4)', 'var(--bh-5)', 'var(--bh-6)', 'var(--bh-7)',
+];
+/* 域元数据：cn = 国内（CodeBuddy），global = 国际（WorkBuddy）。
+   两域的积分不同源、不可互换（连上游 base 与模型目录都不同），
+   因此**跨域求和语义不成立** —— 余额趋势与模型页都必须分域展示，
+   不做"国内 + 国际"的全局总计。 */
+const BH_REALMS = [
+  { key: 'cn', label: '国内' },
+  { key: 'global', label: '国际' },
+];
+/* bhRealm 当前选中的域。null = 尚未初始化（首次加载时按数据自动选一个非空域）。 */
+let bhRealm = null;
+/* realmOf 归一化账号域：空/未知归入 'other'（不静默丢弃，让它可见）。 */
+function realmOf(s) {
+  const r = (s && s.realm) || '';
+  return r === 'cn' || r === 'global' ? r : 'other';
+}
+/* pickRealm 选择默认域：优先记住的选择，其次第一个有数据的已知域。 */
+function pickRealm(rows) {
+  const have = {};
+  rows.forEach(s => { have[realmOf(s)] = true; });
+  const remembered = (function () {
+    try { return localStorage.getItem('bhRealm'); } catch (e) { return null; }
+  })();
+  if (remembered && have[remembered]) return remembered;
+  const first = BH_REALMS.find(r => have[r.key]);
+  if (first) return first.key;
+  return have.other ? 'other' : (BH_REALMS[0] && BH_REALMS[0].key) || 'cn';
+}
+/* filterRealm 取当前域的账号行。 */
+function filterRealm(rows, realm) {
+  return rows.filter(s => realmOf(s) === realm);
+}
+/* renderBalanceChart 画多账号余额折线。
+   x 轴按**真实时间比例**排布（30 分钟等间隔），而非数据序号等距——
+   因为"什么时候到账/掉分"本身就是这张图要回答的问题。 */
+function renderBalanceChart(series) {
+  const host = $('bhChart');
+  const rows = (series || []).filter(s => (s.points || []).length >= 1);
+  if (!rows.length) {
+    host.innerHTML = '<div class="us-empty">暂无余额采样。服务每 30 分钟自动记录一点，' +
+      '余额刷新后即出现（也可点上方「刷新」立即采样一次）。</div>';
+    return;
+  }
+  let t0 = Infinity, t1 = -Infinity, lo = Infinity, hi = -Infinity;
+  rows.forEach(s => s.points.forEach(p => {
+    const t = Number(p.t) * 1000;
+    if (t < t0) t0 = t;
+    if (t > t1) t1 = t;
+    const c = Number(p.c);
+    if (c < lo) lo = c;
+    if (c > hi) hi = c;
+  }));
+  if (t1 <= t0) t1 = t0 + 1;                  // 单点：给最小跨度，避免除零
+  if (hi <= lo) hi = lo + 1;                  // 水平线：撑开一点，否则贴边
+  // y 轴下界（20260918 用户反馈"丑"的真实根因）。
+  //
+  // 现象：坐标轴 1854~7499，但两条线都在 2400 以上 —— 底部一大片空白。
+  // 根因：`lo = Math.max(0, lo - pad)` 把下界夹到 0。夹 0 本身是对的
+  //       （§十：余额非负，不能画负刻度），但代价是最低值离 0 很远时底部全空。
+  //
+  // 关键区分（我一开始诊断错了）：所谓"中间空档"实测只有 440/7833 = 5.6%，
+  // 不是问题；真正的浪费是 0 ~ 最低值 这段（30.6%）。
+  //
+  // 修法：下界取 max(0, 最低值-留白)，仅当最低值本身贴近 0（< 轴高 15%）时
+  // 才贴 0（那时更符合"余额从 0 起"的直觉）。
+  // 不违反 §十：下界仍是真实值域下沿，轴标签是真余额，不产出不可能的刻度。
+  const pad = (hi - lo) * 0.12;
+  const rawLo = Math.max(0, lo - pad);
+  const dataLo = lo;
+  hi += pad;
+  const AXIS_ZERO_SNAP = 0.15;
+  lo = (dataLo <= (hi - rawLo) * AXIS_ZERO_SNAP) ? 0 : rawLo;
+
+  // 坐标系 1:1：W 取容器实际宽度，文字/线宽不再被 CSS 缩放（见 measureWidth 注释）。
+  const W = measureWidth(host), H = 200, PL = 52, PR = 12, PT = 12, PB = 26;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  const X = t => PL + iw * ((t - t0) / (t1 - t0));
+  // Y 映射：单段线性（不压缩空档 —— 实测空档仅 5.6%，压缩反而放大它）。
+  const Y = c => PT + ih - ih * ((c - lo) / (hi - lo));
+  let out = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img">';
+  for (let i = 0; i <= 4; i++) {              // y 轴 4 档刻度
+    const v = lo + (hi - lo) * i / 4;
+    const y = Y(v);
+    out += '<line class="gl" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR) + '" y2="' + y.toFixed(1) + '"/>';
+    out += '<text class="tk" x="' + (PL - 6) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' +
+      fmtNum(Math.round(v)) + '</text>';
+  }
+  out += '<line class="ax" x1="' + PL + '" y1="' + (PT + ih) + '" x2="' + (W - PR) + '" y2="' + (PT + ih) + '"/>';
+
+  // 轴不从 0 起时**必须显式标注**（§十一：口径不标注会被误读）。
+  // 不标的话，读者会把"两线贴得很近/很远"按 0 基线理解，从而**高估相对差距**。
+  // 这里画一个标准的"截断轴"符号（轴左下两道斜杠）+ 文字说明。
+  if (lo > 0) {
+    const yb = PT + ih;
+    out += '<path class="axbreak" d="M' + (PL - 4) + ' ' + (yb - 3) + ' l4 -6 M' + (PL + 1) + ' ' +
+      (yb - 3) + ' l4 -6" fill="none" stroke-width="1.4"/>';
+    out += '<text class="tk" x="' + (PL + 9) + '" y="' + (yb - 4) + '" text-anchor="start">轴不从 0 起</text>';
+  }
+
+  const spanDays = (t1 - t0) / 86400000;      // x 轴标签：首/中/末三点
+  const fmtT = t => {
+    const d = new Date(t);
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    if (spanDays <= 2) return mm + '-' + dd + ' ' + String(d.getHours()).padStart(2, '0') + ':00';
+    return mm + '-' + dd;
+  };
+  // x 轴刻度：与下方「每日变化」图**用同一套刻度密度**（都按天数 / 10 取整）。
+  // 为什么必须一致（设计心理学 · 格式塔相似律）：两张图上下排列、共享同一个时间窗，
+  // 读者想回答「10-15 那根大绿柱对应上图的哪一段」时靠的是纵向对齐刻度；
+  // 旧实现上图固定 3 点、下图按天算 8 点，两张图刻度错位，无法对照。
+  const tickCount = Math.max(2, Math.min(10, Math.ceil(spanDays / 3) + 1));
+  for (let i = 0; i < tickCount; i++) {
+    const t = t0 + (t1 - t0) * (tickCount === 1 ? 0 : i / (tickCount - 1));
+    out += '<text class="tk" x="' + X(t).toFixed(1) + '" y="' + (H - 8) +
+      '" text-anchor="' + (i === 0 ? 'start' : i === tickCount - 1 ? 'end' : 'middle') + '">' + esc(fmtT(t)) + '</text>';
+  }
+
+  rows.forEach((s, si) => {
+    const color = BH_COLORS[si % BH_COLORS.length];
+    const pts = s.points.map(p => ({ x: X(Number(p.t) * 1000), y: Y(Number(p.c)), c: Number(p.c), t: Number(p.t) * 1000, g: p.d }));
+    // 平滑 <path>（monotone，不过冲 —— 见 smoothPath 注释）+ 统一线宽/线帽。
+    // 线宽按**本图系列数**取档，两处折线共用同一函数，风格不会各走各的。
+    out += '<path fill="none" stroke="' + color + '" stroke-width="' + lineWidthFor(rows.length) +
+      '" stroke-linecap="round" stroke-linejoin="round" d="' + smoothPath(pts) + '"/>';
+    // 点标记：**只标"显著变化"**，不是每个点都画圈。
+    //
+    // 为何改（20260918 用户反馈"丑"）：原先 delta !== 0 就画圈，151 个采样点
+    // × 2 账号 ≈ 300 个绿/红圆点。折线本身已表达趋势，圆点是**重复编码**；
+    // 而鲜艳小圆点是人眼**前注意加工**最易捕捉的特征 —— 结果注意力被 300 个点
+    // 抓走，反而看不见"线"（想看的趋势）。且相邻点间距 ~7px、圆点直径 6px，
+    // 已经糊成一条花带，退化为噪音。
+    //
+    // 阈值取该账号**自身跨度**的 3%（而非固定值）：水位 4000 的号与 400 的号，
+    // "显著"的绝对量不同，用相对值才等价可比。跨度极小时保底 1，避免永不标记。
+    const span = Math.max(1, hi - lo);
+    const markMin = Math.max(1, span * 0.03);
+    // 点数自适应：点数 > POINT_MARK_MAX 时不再逐点画实心小圆（见其注释），
+    // 显著变化点仍然标记 —— 两者是不同用途：前者是"采样点"，后者是"事件"。
+    const markAll = shouldMarkPoints(pts.length);
+    pts.forEach((p, i) => {
+      const prev = i > 0 ? pts[i - 1] : null;
+      const delta = prev ? p.c - prev.c : 0;
+      const sig = prev && Math.abs(delta) >= markMin;
+      const up = delta > 0;
+      const when = new Date(p.t).toLocaleString('zh-CN', { hour12: false });
+      const head = (s.name || s.uid.slice(0, 8)) + '  ' + when + (p.g ? '（日粒度）' : '');
+      const tip = head + '\n余额 ' + fmtNum(p.c) +
+        (prev ? '\n较上一点 ' + (delta > 0 ? '+' : '') + fmtNum(delta) : '');
+      if (sig) {
+        // 显著变化：涨=绿、跌=红（唯一允许"借用"语义色的地方 —— 因为它
+        // 表达的**就是**涨跌语义，不是账号身份）。
+        out += '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="2.6" ' +
+          'fill="' + (up ? 'var(--ok)' : 'var(--bad)') + '"><title>' + esc(tip) + '</title></circle>';
+      } else if (markAll) {
+        out += drawPointMarker(p.x, p.y, true, color, tip);
+      } else {
+        // 点太密：不画圆点，但**保留透明热区**，悬停仍可查任意点。
+        // 减少的是视觉噪音，不是信息量 —— 这是"降噪"与"减信息"的关键区别。
+        out += drawPointMarker(p.x, p.y, false, color, tip);
+      }
+    });
+    const last = pts[pts.length - 1];          // 末点加大命中圈，便于悬停
+    out += '<circle cx="' + last.x.toFixed(1) + '" cy="' + last.y.toFixed(1) + '" r="9" fill="transparent">' +
+      '<title>' + esc(s.name || s.uid.slice(0, 8)) + '  当前 ' + fmtNum(last.c) + '</title></circle>';
+  });
+  out += '</svg>';
+  host.innerHTML = out;
+
+  const lg = $('bhLegend');
+  // 账号名加 truncate 包装：超长名（如「汪羽杰（工作相关内容不要发v）」）会挤压卡头，
+  // 按 12em 截断 + 省略号，完整名放 title 悬浮可见（识别优先、完整信息可及）。
+  if (lg) lg.innerHTML = rows.map((s, i) => {
+    const nm = s.name || s.uid.slice(0, 8);
+    return '<i class="sw" style="background:' + BH_COLORS[i % BH_COLORS.length] + '"></i>' +
+      '<span class="lg-name" title="' + esc(nm) + '">' + esc(nm) + '</span>';
+  }).join(' ');
+}
+/* renderDailyBars 画「每日变化」分组柱状图：x = 日期，每账号一根。
+   与余额折线的区别：折线看"水位随时间"，这里看"每天的净变化量"（涨跌方向 + 幅度）。
+   不完整日（今日 / 服务中途启用那天）用低透明度 + 虚线描边标出 —— 否则
+   「今天只涨了一点」会被误读成「今天赚得少」，其实是当天还没采完。 */
+function renderDailyBars(series) {
+  const host = $('bhDaily');
+  if (!host) return;
+  // 收集所有日期（并集，升序）
+  const daySet = new Set();
+  series.forEach(s => (s.daily || []).forEach(d => daySet.add(d.day)));
+  const days = [...daySet].sort();
+  if (!days.length) {
+    host.innerHTML = '<div class="us-empty">暂无按日数据（需跨过零点后才出现第一天）。</div>';
+    const lg = $('bhDailyLegend');
+    if (lg) lg.innerHTML = '';
+    return;
+  }
+  // 每个账号每天的变化值，以及是否有任一不完整
+  const map = new Map(); // uid -> {day: {change, full}}
+  const fullMap = new Map();
+  series.forEach(s => {
+    const m = {};
+    (s.daily || []).forEach(d => { m[d.day] = d.change; if (!d.full) fullMap.set(s.uid + '|' + d.day, true); });
+    map.set(s.uid, m);
+  });
+  // y 轴范围：正负分开，零轴居中
+  let hi = 0, lo = 0;
+  series.forEach(s => (s.daily || []).forEach(d => {
+    if (d.change > hi) hi = d.change;
+    if (d.change < lo) lo = d.change;
+  }));
+  // ⭐ 离群点裁剪（20261021）：纵轴用 P95 分位而非极值，超出者单独标记。
+  // 为什么：一次 +4414 的到账（如新手礼包）会把轴拉到 ±4414，其余日常 ±500
+  // 的波动被压成 2px 短线 —— 韦伯-费希纳定律：人读的是**比例**，轴被离群值
+  // 撑开后，真正想看的「今天比昨天多赚多少」在视觉上消失，80% 的像素在
+  // 表达「接近零」（数据墨水比极低）。
+  // 做法：把 |change| 排序取 P95 作为轴范围，超出者画成贴顶的三角标记 +
+  // title 标注真实值 —— 既保留离群点的存在感，又让主体数据可读。
+  const absVals = [];
+  series.forEach(sr => (sr.daily || []).forEach(d => {
+    if (!d || typeof d.change !== 'number') return;
+    if (!days.includes(d.day)) return;
+    absVals.push(Math.abs(d.change));
+  }));
+  if (absVals.length >= 8) {
+    absVals.sort((a, b) => a - b);
+    const p95 = absVals[Math.floor(absVals.length * 0.95)];
+    // 只用 P95 收窄「明显比主体大一个量级」的离群点；不无条件裁剪，
+    // 否则数据本身就在高位时会被误裁。判据：极值 > P95 的 3 倍才启用。
+    const curMax = Math.max(Math.abs(hi), Math.abs(lo));
+    if (p95 > 0 && curMax > p95 * 3) {
+      hi = Math.min(hi, p95 * 1.12);
+      lo = Math.max(lo, -p95 * 1.12);
+    }
+  }
+
+  // 上下独立缩放 + 各留 12% 余量（不再强制对称）。
+  // 为什么：强制对称（hi=lo=-span）在"几乎只涨"的数据上会把下半区留成
+  // 5 倍空白（实测 +1998/-393 → 轴 ±1998），视觉上又空又怪，且正柱贴顶。
+  // 独立缩放让柱高比例真实反映数值比例。
+  // 边界断言（§十：不得产出物理上不可能的值）：日变化可正可负，故只在
+  // 该侧确有数据时才外扩；两侧都无数据时兜底 ±1 避免除零。
+  if (hi > 0) hi *= 1.12;
+  if (lo < 0) lo *= 1.12;
+  // 单侧有数据时，给另一侧留一点呼吸空间，否则零轴贴边、柱子像被裁掉。
+  if (hi > 0 && lo === 0) lo = -Math.max(1, hi * 0.15);
+  if (lo < 0 && hi === 0) hi = Math.max(1, -lo * 0.15);
+  if (hi === 0 && lo === 0) { hi = 1; lo = -1; }
+
+  // 坐标系 1:1（同余额折线，见 measureWidth 注释）。
+  const W = measureWidth(host), H = 180, PL = 56, PR = 12, PT = 14, PB = 34;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  const Y = v => PT + ih - ih * ((v - lo) / (hi - lo));
+  const zeroY = Y(0);
+
+  const nAcc = Math.max(1, series.length);
+  const groupW = iw / days.length;
+  const bw = Math.max(2, Math.min(14, (groupW - 8 - Math.max(0, nAcc - 1)) / nAcc));
+
+  let out = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img">';
+  // 网格（4 档）+ 零轴加粗
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4;
+    const y = Y(v);
+    const isZero = Math.abs(v) < Math.max(hi, -lo) / 8;
+    out += '<line class="' + (isZero ? 'ax' : 'gl') + '" x1="' + PL + '" y1="' + y.toFixed(1) +
+      '" x2="' + (W - PR) + '" y2="' + y.toFixed(1) + '"/>';
+    out += '<text class="tk" x="' + (PL - 6) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' +
+      (v > 0 ? '+' : '') + fmtNum(Math.round(v)) + '</text>';
+  }
+  // 每日一组柱
+  days.forEach((day, di) => {
+    const gx = PL + di * groupW;
+    series.forEach((s, si) => {
+      const v = (map.get(s.uid) || {})[day];
+      if (v === undefined) return;
+      const color = BH_COLORS[si % BH_COLORS.length];
+      // 组内柱之间留 1px 缝：无缝隙时相邻两柱会被知觉成一个整体
+      // （格式塔共边界效应），看不出"两根独立的柱"。
+      const gap = nAcc > 1 ? 1 : 0;
+      const x = gx + (groupW - (bw * nAcc + gap * (nAcc - 1))) / 2 + si * (bw + gap);
+      const y0 = Math.min(zeroY, Y(v)), h = Math.max(1, Math.abs(Y(v) - zeroY));
+      const incomplete = fullMap.get(s.uid + '|' + day);
+      // 零值画一条中性底痕（与 buka 规范一致：0 值也要可见）
+      if (v === 0) {
+        out += '<rect x="' + x.toFixed(1) + '" y="' + (zeroY - 1).toFixed(1) + '" width="' + bw.toFixed(1) +
+          '" height="2" fill="var(--line)" rx="1"/>';
+      } else {
+        // 离群点（超出裁剪后的轴范围）：柱子贴边 + 顶部三角标记，
+        // 让读者一眼看出「这根比轴还高」，而不是误以为它只有这么高。
+        const clippedHi = v > hi, clippedLo = v < lo;
+        out += '<rect x="' + x.toFixed(1) + '" y="' + y0.toFixed(1) + '" width="' + bw.toFixed(1) +
+          '" height="' + h.toFixed(1) + '" fill="' + (v > 0 ? 'var(--ok)' : 'var(--bad)') + '"' +
+          (incomplete ? ' opacity=".38" stroke="' + color + '" stroke-width="1" stroke-dasharray="2 2"' : '') +
+          ' rx="1.5"/>';
+        if (clippedHi || clippedLo) {
+          const ty = clippedHi ? PT : PT + ih;
+          out += '<path d="M' + (x + bw / 2).toFixed(1) + ' ' + (clippedHi ? ty : ty - 5).toFixed(1) +
+            ' l-3.5 ' + (clippedHi ? 5 : -5) + ' h7 z" fill="var(--ink-2)" opacity=".9">' +
+            '<title>超出纵轴范围（已裁剪），实际 ' + (v > 0 ? '+' : '') + fmtNum(v) + '</title></path>';
+        }
+      }
+      out += '<title>' + esc(s.name || s.uid.slice(0, 8)) + '  ' + esc(day) + '\n' +
+        (v > 0 ? '+' : '') + fmtNum(v) + (incomplete ? '\n⚠️ 该日采样不完整（当天未结束或中途启用）' : '') + '</title>';
+    });
+    // x 轴日期标签（稀疏）
+    // 与上方「积分水位」图同一口径（天数 / 3 + 1，夹在 2~10 之间），保证可纵向对照。
+    const every = Math.max(1, Math.ceil(days.length / Math.max(2, Math.min(10, Math.ceil(days.length / 3) + 1))));
+    if (di % every === 0) {
+      out += '<text class="tk" x="' + (gx + groupW / 2).toFixed(1) + '" y="' + (H - 12) +
+        '" text-anchor="middle">' + esc(day.slice(5)) + '</text>';
+    }
+  });
+  out += '</svg>';
+  host.innerHTML = out;
+
+  // 图例：柱色表示**涨跌**（绿=净增、红=净减），不表示账号——账号由组内
+  // 左→右的位置区分（与下方表格行序一致）。故这里只说明颜色语义，
+  // 再按位置列出账号顺序，避免"颜色=账号"的错误暗示。
+  const lg = $('bhDailyLegend');
+  if (lg) lg.innerHTML =
+    '<span class="lg-key"><i class="sw" style="background:var(--ok)"></i>净增</span>' +
+    '<span class="lg-key"><i class="sw" style="background:var(--bad)"></i>净减</span>' +
+    '<span class="lg-sep"></span>' +
+    '<span class="lg-order">组内左→右：' +
+    series.map((s, i) => (i + 1) + '. ' + esc(s.name || s.uid.slice(0, 8))).join('　') +
+    '</span>';
+}
+/* 取某账号的「今日/昨日」变化（用于表格列）。 */
+function dayChangeOf(s, which) {
+  const d = s.daily || [];
+  if (!d.length) return null;
+  if (which === 'today') return d[d.length - 1];
+  return d.length >= 2 ? d[d.length - 2] : null;
+}
+function fmtChange(v, full) {
+  if (v === null || v === undefined) return '—';
+  const txt = (v > 0 ? '+' : '') + fmtNum(v);
+  const color = v > 0 ? 'var(--ok)' : v < 0 ? 'var(--bad)' : 'inherit';
+  // 不完整日用虚线底 + 提示，避免与完整日直接比较
+  return '<span style="color:' + color + (full ? '' : '; opacity:.6') + '"' +
+    (full ? '' : ' title="该日采样不完整（当天未结束或中途启用），不宜与完整日直接比较"') + '>' + txt + '</span>';
+}
+/* monthFlowOf 取某账号**当月**的消耗/到账合计，以及这份合计是否覆盖了整月。
+   返回 { consumed, gained, covered, firstDay, today }：
+     - consumed/gained：本月已发生部分的下界估计（口径同 Daily，相邻采样差值累加）；
+     - covered=false 表示 s.daily 里没有当月 1 号及更早的点 → 窗口没覆盖整月，
+       此时数值只是「窗口内那几天」的和，必须淡化并标注，否则会被当成整月值；
+     - firstDay 是当月最早有数据的那天，用于标题说明到底从哪天算起。
+
+   为什么不做「全年」：balance 折叠成日粒度后每账号每天只剩 1 个点，虽然
+   折叠时已把当日流量写在点上（Point.Consumed/Gained），但 30 天窗口以外的
+   日仍受 dayKeep 约束，且 balance_history 的 days 被钳在 30（panel.go）。
+   超出窗口的月份这里拿不到数据，故只算本月、且显式标注覆盖范围。 */
+function monthFlowOf(s, now) {
+  const d = s.daily || [];
+  const today = new Date(now || Date.now());
+  const ym = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0');
+  const firstOfMonth = ym + '-01';
+  let consumed = 0, gained = 0, n = 0, firstDay = null;
+  d.forEach(x => {
+    if (!x || typeof x.day !== 'string' || x.day.slice(0, 7) !== ym) return;
+    if (typeof x.consumed === 'number') consumed += x.consumed;
+    if (typeof x.gained === 'number') gained += x.gained;
+    n++;
+    if (!firstDay || x.day < firstDay) firstDay = x.day;
+  });
+  return {
+    consumed: consumed,
+    gained: gained,
+    covered: !!firstDay && firstDay <= firstOfMonth,
+    firstDay: firstDay,
+    days: n,
+  };
+}
+/* fmtFlow 渲染「消耗/到账」这类恒非负的流量值。
+   与 fmtChange 的区别：这些量不表示方向（消耗恒 >=0），故不用涨跌色，
+   用中性色 + 弱化不完整日。0 显示为 "–"（无变化比 "0" 更易扫读）。 */
+/* fmtFlow 渲染「消耗/到账」单个数值（今日或本月的一行）。
+   「无数据」与「零」必须用**不同符号**（§十一 口径标注）。
+
+   事故：原先零值用 en-dash「–」(U+2013)、无数据用 em-dash「—」(U+2014) ——
+   两者都是一条横线，12px 下仅差 6px 宽，扫视时无法区分（用户看到「今日消耗 –」
+   以为是"没数据"，实际是当天消耗 0）。故：零值显式写 0（灰化），无数据才「—」。
+   dim=true 表示该数口径受限（不完整日 / 本月未覆盖整月），淡化 + title 说明。 */
+function fmtFlow(v, dim, dimTitle) {
+  if (v === null || v === undefined) return '<span class="fl-na">—</span>';
+  const n = Number(v);
+  if (!n) {
+    return '<span class="fl-zero" title="' + (dim ? esc(dimTitle || "该日采样不完整") :
+      "该区间无消耗记录（余额未下降过）") + '">0</span>';
+  }
+  return '<span class="fl-v' + (dim ? ' fl-dim' : '') + '"' +
+    (dim ? ' title="' + esc(dimTitle || "该区间采样不完整，为下界估计") + '"' : '') + '>' +
+    fmtNum(n) + '</span>';
+}
+/* fmtFlowCell 把「今日 / 本月」两行合成一个单元格（方案 A：不增列）。
+   上行 = 今日（完整度口径同「今日」列），下行 = 本月。
+   本月行有两种受限情形，都必须标注而不是静默给数字：
+     - 窗口未覆盖整月（monthFlowOf().covered === false）→ 淡化 + 说明起算日；
+     - bhWindow 选了「近 24 小时」→ 本月合计几乎等于今日，等于没意义，直接说明。 */
+function fmtFlowCell(today, month, key, winDays) {
+  const t = fmtFlow(today && today[key], !!today && !today.full,
+    '该日采样不完整（当天未结束或中途启用），消耗/到账均为下界估计');
+  let m;
+  if (!month || !month.days) {
+    m = fmtFlow(null); // 本月无任何采样
+  } else if (Number(winDays) < 28) {
+    // 窗口短于 28 天时「本月」必然不含全月，数字虽真但会误导 —— 只标下标不显示值。
+    m = '<span class="fl-na" title="当前窗口不足以覆盖整月，切到「近 30 天」才可看本月值">—</span>';
+  } else if (!month.covered) {
+    m = fmtFlow(month[key], true,
+      '窗口只覆盖本月 ' + String(month.firstDay || '').slice(5) + ' 起，本月值为该区间之和（下界）');
+  } else {
+    m = fmtFlow(month[key], false);
+  }
+  return '<td class="num fl" title="上行 今日 / 下行 本月">' +
+    '<span class="fl-row">' + t + '</span>' +
+    '<span class="fl-row fl-sub">' + m + '</span></td>';
+}
+function bhCard(k, v, tone) {
+  return '<div class="st"><span class="k">' + esc(k) + '</span><span class="v' +
+    (tone ? ' ' + tone : '') + '">' + esc(v) + '</span></div>';
+}
+/* renderRealmSeg 画域切换分段控件。只列出**有数据的域**（避免点了空白页），
+   并在按钮上标明账号数，让"这个域有几个号"一眼可见。 */
+function renderRealmSeg(all) {
+  const seg = $('bhRealmSeg');
+  if (!seg) return;
+  const count = {};
+  all.forEach(s => { const r = realmOf(s); count[r] = (count[r] || 0) + 1; });
+  const items = BH_REALMS.filter(r => count[r.key]).concat(
+    count.other ? [{ key: 'other', label: '其他' }] : []);
+  if (!items.length) { seg.innerHTML = ''; return; }
+  seg.innerHTML = items.map(r =>
+    '<button type="button" aria-pressed="' + (r.key === bhRealm ? 'true' : 'false') + '" data-realm="' + esc(r.key) + '">' +
+    esc(r.label) + ' · ' + count[r.key] + '</button>').join('');
+  Array.prototype.forEach.call(seg.querySelectorAll('button'), function (b) {
+    b.onclick = function () {
+      bhRealm = b.getAttribute('data-realm');
+      try { localStorage.setItem('bhRealm', bhRealm); } catch (e) { /* 隐私模式：忽略 */ }
+      loadBalance();
+    };
+  });
+}
+/* renderBalanceFoot 画「按账号」表的合计行（**域内小计**）。
+   口径纪律（§十：不得产出语义错误的数）：
+     - 当前 / 净变化 / 今日 / 昨日 / 采样点 —— 可加，给出合计；
+     - 最低 / 最高 —— **不可加**！各账号的低谷/高峰不在同一时刻，
+       Σ最低 没有任何物理含义（会得出一个从未存在过的水位），故填 "—"。
+   不做跨域总计：cn 与 global 的积分不同源、不可互换（见 BH_REALMS）。 */
+function renderBalanceFoot(rows, now, winDays) {
+  const host = $('bhAccFoot');
+  if (!host) return;
+  if (!rows.length) { host.innerHTML = ''; return; }
+  // 合计行的本月口径与明细行必须**同源**（同一个 now、同一个窗口），
+  // 否则行与合计会在"覆盖了几天"上打架。
+  const footNow = now, footDays = winDays;
+  let cur = 0, chg = 0, pts = 0;
+  let todaySum = 0, todayHas = false, ydaySum = 0, ydayHas = false;
+  let consSum = 0, consHas = false, gainSum = 0, gainHas = false;
+  // 本月合计：逐账号求和（同域绝对量可加），覆盖范围按「是否所有账号都覆盖整月」
+  // 取严 —— 只要有一个账号的本月不全，合计就不全，不能当成整月值展示。
+  let mcSum = 0, mgSum = 0, mHas = false, mCovered = true, mFirstDay = null;
+  rows.forEach(s => {
+    cur += Number(s.current || 0);
+    chg += Number(s.change || 0);
+    pts += (s.points || []).length;
+    const t = dayChangeOf(s, 'today'), y = dayChangeOf(s, 'yesterday');
+    if (t && typeof t.change === 'number') { todaySum += t.change; todayHas = true; }
+    if (y && typeof y.change === 'number') { ydaySum += y.change; ydayHas = true; }
+    // 消耗/到账可跨账号相加（都是同域的绝对量），但**同为下界估计**
+    if (t && typeof t.consumed === 'number') { consSum += t.consumed; consHas = true; }
+    if (t && typeof t.gained === 'number') { gainSum += t.gained; gainHas = true; }
+    const mo = monthFlowOf(s, footNow);
+    if (mo.days) {
+      mHas = true;
+      mcSum += mo.consumed;
+      mgSum += mo.gained;
+      if (!mo.covered) mCovered = false;
+      if (mo.firstDay && (!mFirstDay || mo.firstDay < mFirstDay)) mFirstDay = mo.firstDay;
+    }
+  });
+  const num = (v, has) => has
+    ? '<td class="num" style="color:' + (v > 0 ? 'var(--ok)' : v < 0 ? 'var(--bad)' : 'inherit') + '">' +
+      (v > 0 ? '+' : '') + fmtNum(v) + '</td>'
+    : '<td class="num na">—</td>';
+  host.innerHTML = '<tr>' +
+    '<td class="mark" aria-hidden="true"></td>' +
+    '<td>合计（' + esc(realmLabel(bhRealm)) + '）</td>' +
+    '<td class="num">' + fmtNum(cur) + '</td>' +
+    // 最低/最高不求和——见函数头注释
+    '<td class="num na" title="各账号低谷不在同一时刻，不可相加">—</td>' +
+    '<td class="num na" title="各账号高峰不在同一时刻，不可相加">—</td>' +
+    '<td class="num" style="color:' + (chg > 0 ? 'var(--ok)' : chg < 0 ? 'var(--bad)' : 'inherit') + '">' +
+      (chg > 0 ? '+' : '') + fmtNum(chg) + '</td>' +
+    num(todaySum, todayHas) + num(ydaySum, ydayHas) +
+    fmtFlowCell({ consumed: consSum, gained: gainSum, full: true }, { consumed: mcSum, gained: mgSum, days: mHas ? 1 : 0, covered: mCovered, firstDay: mFirstDay }, 'consumed', footDays) +
+    fmtFlowCell({ consumed: consSum, gained: gainSum, full: true }, { consumed: mcSum, gained: mgSum, days: mHas ? 1 : 0, covered: mCovered, firstDay: mFirstDay }, 'gained', footDays) +
+    '<td class="num">' + fmtNum(pts) + '</td>' +
+    '</tr>';
+}
+async function loadBalance() {
+  const host = $('bhChart');
+  const days = Number(($('bhWindow') || {}).value || 30);
+  try {
+    const d = await api('balance_history?days=' + days);
+    const all = d.series || [];
+    // 首次进入（或记忆的域已无数据）时确定默认域；之后保持用户的显式选择。
+    if (bhRealm === null || !all.some(s => realmOf(s) === bhRealm)) {
+      bhRealm = pickRealm(all);
+    }
+    renderRealmSeg(all);
+    const rows = filterRealm(all, bhRealm);
+    renderBalanceChart(rows);
+    renderDailyBars(rows);
+    // 分域小计：同域内可加（语义成立）；**不做跨域总计**——cn 与 global 的
+    // 积分不同源、不可互换，相加得出的数没有意义（见 BH_REALMS 注释）。
+    let total = 0, delta = 0;
+    rows.forEach(s => { total += Number(s.current || 0); delta += Number(s.change || 0); });
+    const st = $('bhStats');
+    if (st) st.innerHTML =
+      bhCard('账号', String(rows.length)) +
+      bhCard('当前合计', fmtNum(total)) +
+      bhCard('窗口净变化', (delta > 0 ? '+' : '') + fmtNum(delta), delta > 0 ? 'ok' : delta < 0 ? 'bad' : '') +
+      bhCard('采样点数', fmtNum(rows.reduce((a, s) => a + (s.points || []).length, 0)));
+    const tb = $('bhAccBody');
+    if (tb) tb.innerHTML = rows.length ? rows.map((s, i) =>
+      '<tr><td class="mark"><i class="dot" style="background:' + BH_COLORS[i % BH_COLORS.length] + '"></i></td>' +
+      '<td>' + esc(s.name || s.uid.slice(0, 8)) + '</td>' +
+      '<td class="num">' + fmtNum(s.current) + '</td>' +
+      '<td class="num">' + fmtNum(s.min) + '</td>' +
+      '<td class="num">' + fmtNum(s.max) + '</td>' +
+      '<td class="num" style="color:' + (s.change > 0 ? 'var(--ok)' : s.change < 0 ? 'var(--bad)' : 'inherit') + '">' +
+        (s.change > 0 ? '+' : '') + fmtNum(s.change) + '</td>' +
+      (function () {
+        const t = dayChangeOf(s, 'today'), y = dayChangeOf(s, 'yesterday');
+        // 本月口径：与窗口脱钩判定覆盖范围（见 monthFlowOf 注释）
+        const mo = monthFlowOf(s, d.now);
+        return '<td class="num">' + fmtChange(t && t.change, t && t.full) + '</td>' +
+               '<td class="num">' + fmtChange(y && y.change, y && y.full) + '</td>' +
+               // 消耗/到账：上行今日、下行本月（方案 A，不增列）
+               fmtFlowCell(t, mo, 'consumed', days) +
+               fmtFlowCell(t, mo, 'gained', days);
+      })() +
+      '<td class="num">' + (s.points || []).length + '</td></tr>').join('')
+      : '<tr><td colspan="11"><div class="empty"><div class="big">该域暂无采样</div>' +
+        '切到其他域，或等待下一次余额刷新</div></td></tr>';
+    renderBalanceFoot(rows, d.now, days);
+    const note = $('bhNote');
+    if (note) note.textContent = '更新于 ' + new Date(d.now).toLocaleTimeString('zh-CN', { hour12: false });
+  } catch (e) {
+    if (host) host.innerHTML = '<div class="us-empty">读取余额趋势失败：' + esc(e.message) + '</div>';
+  }
+}
+
+/* ── 图表与域标签工具（迁移遗漏，20261021 补齐）── */
+const CHART_FALLBACK_W = 760;
+
+/* measureWidth 量容器内容宽（去掉 padding）。
+   为什么用 clientWidth-padding 而不用 getBoundingClientRect：
+   后者包含 border、且受 CSS transform 影响，算出来的坐标系
+   会与 CSS 布局尺寸不一致（一个被 transform 缩放的容器会让图表
+   再次被非等比拉伸）。 */
+function measureWidth(el) {
+  if (!el) return CHART_FALLBACK_W;
+  const cs = getComputedStyle(el);
+  const pl = parseFloat(cs.paddingLeft) || 0;
+  const pr = parseFloat(cs.paddingRight) || 0;
+  const w = el.clientWidth - pl - pr;
+  return w > 40 ? Math.round(w) : CHART_FALLBACK_W;
+}
+
+/* ── 折线共用的三个渲染规则（两处折线图必须一致，故抽成共享函数） ──────
+   为什么抽出来：余额趋势图与账号×模型图是**同类图形**（都是"真实时间 x
+   轴 + 值 y 轴的多序列折线"）。同一类图形若各写一套线宽/平滑/点标记，
+   两处必然逐渐漂移，用户看到的是"同一个面板里两种线风格" —— 这正是
+   本次要修的问题本身。故把三者收敛为共享实现，两处只负责传数据。 */
+
+/* lineWidthFor 按**系列数**给线宽：系列多时略细、少时略粗。
+   为什么与系列数挂钩：线宽是"信息密度"的补偿手段。1~3 条线时线细会显得
+   单薄、且单条线的视觉权重不足以承载注意力；>6 条时线越细越不糊 ——
+   60px 高的绘图区里 8 条 2.0px 线会互相吃掉、趋势读不出来。
+   这与既有的"点标记按点数自适应"是同一思路：**图形密度决定笔触粗细**。
+   分档取整（2.0/1.8/1.5）而非连续函数，是为了让同一系列数在任何容器宽度
+   下都得到同一线宽，避免"窗口一拉线宽就变"的抖动感。 */
+function lineWidthFor(n) {
+  if (n > 6) return 1.5;
+  if (n >= 4) return 1.8;
+  return 2.0;
+}
+
+/* smoothPath 用 **Monotone 三次插值（Fritsch–Carlson）** 生成平滑 <path> 的
+   d 属性。入参 pts = [{x, y}, ...]（已投影到屏幕坐标，x 单调递增）。
+
+   ⚠️ 为什么**必须**是 monotone，不能用 Catmull-Rom / 普通三次样条：
+   后两者只保证**经过**控制点与一阶连续，**不保证不过冲**。在"余额/用量"
+   这类统计图上，过冲会在两个真实点之间画出**数据里不存在的波峰或负值** ——
+   例如余额从 4000→4100 的两点之间被样条拱到 4150，用户据此判断"当时冲到
+   过 4150"，而成因只是曲线形状。这是**虚构数据**，比"线条不好看"严重得多。
+   Fritsch–Carlson 的做法是：先按三点斜率算切线，再把切线限制在相邻割线
+   斜率的 3 倍以内（即保证插值函数在每个子区间内单调），于是平滑段
+   **始终夹在两端真实值之间**，不会产生局部极值。
+
+   边界：点数 <2 退回直线（无插值意义）；点数 ==2 直接给一条线段
+   （两点之间任何"平滑"都是凭空造的弧度）。 */
+function smoothPath(pts) {
+  if (!pts || pts.length < 2) return '';
+  if (pts.length === 2) {
+    return 'M' + pts[0].x.toFixed(1) + ' ' + pts[0].y.toFixed(1) +
+      'L' + pts[1].x.toFixed(1) + ' ' + pts[1].y.toFixed(1);
+  }
+  const n = pts.length;
+  // 1) 相邻割线斜率 d[i] = (y[i+1]-y[i]) / (x[i+1]-x[i])
+  const dx = [], dy = [], d = [];
+  for (let i = 0; i < n - 1; i++) {
+    dx[i] = pts[i + 1].x - pts[i].x;
+    dy[i] = pts[i + 1].y - pts[i].y;
+    d[i] = dx[i] === 0 ? 0 : dy[i] / dx[i];
+  }
+  // 2) 各点切线 m[i]：端点用单侧割线，内部点用相邻割线的加权平均
+  //    （Fritsch–Carlson 的标准初始化；下一步再对 m 作单调性约束）。
+  const m = new Array(n);
+  m[0] = d[0];
+  m[n - 1] = d[n - 2];
+  for (let i = 1; i < n - 1; i++) {
+    if (d[i - 1] * d[i] <= 0) {
+      m[i] = 0;                     // 极值点/拐点：切线必须为 0，否则必然过冲
+    } else {
+      m[i] = (d[i - 1] + d[i]) / 2;
+    }
+  }
+  // 3) 单调性约束（本算法的关键）：把每点切线夹到相邻割线的 3 倍以内。
+  //    这一步才是"单调保持"的来源；只做第 2 步仍会过冲。
+  for (let i = 0; i < n - 1; i++) {
+    if (d[i] === 0) {               // 水平段：两端切线都归零，段内恒为常数
+      m[i] = 0;
+      m[i + 1] = 0;
+      continue;
+    }
+    const a = m[i] / d[i], b = m[i + 1] / d[i];
+    const s = a * a + b * b;
+    if (s > 9) {                    // 限制在半径 3 的圆内（Fritsch–Carlson 判据）
+      const t = 3 / Math.sqrt(s);
+      m[i] = t * a * d[i];
+      m[i + 1] = t * b * d[i];
+    }
+  }
+  // 4) 转成三次贝塞尔：控制点 = 端点沿切线外推 1/3 段长（与 Hermite 等价）
+  let out = 'M' + pts[0].x.toFixed(1) + ' ' + pts[0].y.toFixed(1);
+  for (let i = 0; i < n - 1; i++) {
+    const c1x = pts[i].x + dx[i] / 3, c1y = pts[i].y + m[i] * dx[i] / 3;
+    const c2x = pts[i + 1].x - dx[i] / 3, c2y = pts[i + 1].y - m[i + 1] * dx[i] / 3;
+    out += 'C' + c1x.toFixed(1) + ' ' + c1y.toFixed(1) + ' ' +
+      c2x.toFixed(1) + ' ' + c2y.toFixed(1) + ' ' +
+      pts[i + 1].x.toFixed(1) + ' ' + pts[i + 1].y.toFixed(1);
+  }
+  return out;
+}
+
+/* POINT_MARK_MAX 点标记（实心小圆）的**点数上限**：超过即不画圆点。
+   为什么：60 个点 × 每点一个 r=2.2 实心圆，在 ~7px 点距下糊成花带——
+   圆点是前注意加工最易捕捉的特征，注意力被它抓走反而看不到"线"（趋势）。
+   阈值 30 的经验来源：绘图区宽约 900px 时，30 点在 30px 间距下圆点互不
+   粘连，仍能起"采样点"的作用；再多就退化为噪音。
+   ⚠️ 不画圆点 ≠ 少给信息：hover 仍靠透明大热区（见 POINT_HIT_R）逐点可查，
+   且"显著变化"的点在两个图上都仍然保留标记（降噪 ≠ 减信息）。 */
+const POINT_MARK_MAX = 30;
+/* POINT_HIT_R 无圆点时使用的**透明热区半径**：圆点不画了，但命中判定不能
+   跟着消失，否则 tooltip 只能靠线宽命中、悬停极难触发（线宽仅 1.5~2px）。
+   取 6px ≈ 手指/光标可稳定停留的范围，且相邻热区不重叠（点距通常 >12px）。 */
+const POINT_HIT_R = 6;
+
+/* shouldMarkPoints 是否画实心圆点（点数自适应）。
+   为什么做成函数而不是各处内联比较：这条规则是**两个折线图共有的产品决策**，
+   分散写会漂移；且集中一处后"阈值"只有一个真源，调整时不会漏改一处。 */
+function shouldMarkPoints(n) {
+  return n <= POINT_MARK_MAX;
+}
+
+/* drawPointMarker 画一个数据点的标记 + hover 文案。
+   marked=true → 实心小圆（能被看见）；false → 透明大热区（不可见但可悬停）。
+   两个折线图共用，保证"看不见的点同样查得到值"这一行为在两处一致。 */
+function drawPointMarker(x, y, marked, color, title) {
+  const r = marked ? 2.6 : 0;
+  const t = esc(title);
+  if (marked) {
+    return '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="' + r +
+      '" fill="' + color + '"><title>' + t + '</title></circle>';
+  }
+  return '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="' + POINT_HIT_R +
+    '" fill="transparent"><title>' + t + '</title></circle>';
+}
+
+
+/* realmOf 归一化账号域：空/未知归入 'other'（不静默丢弃，让它可见）。 */
+
+function realmLabel(key) {
+  const r = BH_REALMS.find(x => x.key === key);
+  return r ? r.label : '其他';
+}
+
+/* ── 数值格式化（迁移遗漏）── */
+function fmtNum(v) {
+  const n = Number(v) || 0;
+  return n.toLocaleString('zh-CN');
+}
+/* fmtTokens 人类可读 token 量（额度评估的数量级都是"亿"）。 */
+function fmtTokens(n) {
+  n = Number(n) || 0;
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + ' 亿';
+  if (n >= 1e4) return (n / 1e4).toFixed(1) + ' 万';
+  return String(n);
+}

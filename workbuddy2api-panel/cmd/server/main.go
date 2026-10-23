@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/balance"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -217,9 +218,19 @@ func main() {
 	// 回落仓库内嵌种子；models.dev 按需拉取成功后原子写回。
 	upstream.SetModelCatalogPath(stateSibling(cfg.StateFile, "model.json"))
 
+	// 余额采样记录器：与 state 文件同目录（路径由 state 推出，不加配置项）。
+	// 采样动作挂在余额刷新之后（见 internal/scheduler），这里只管装配与落盘生命周期。
+	balPath := stateSibling(cfg.StateFile, "balance_history.json")
+	bal := balance.New(balPath)
+	bal.Start()
+	defer bal.Stop()
+	log.Printf("[balance] 余额趋势采样已启用: %s 每 %v 一点（%s）", balPath, balance.Interval(), bal.Describe())
+
 	sch := scheduler.New(scheduler.Config{
 		Pool:                 p,
 		Upstream:             up,
+		// 余额采样记录器：挂在余额刷新之后，不额外打上游。
+		Balance:              bal,
 		AccountSpreadSeconds: cfg.Schedule.AccountSpreadSeconds,
 		CheckinHours:         cfg.Schedule.CheckinHours,
 		TravelHours:          cfg.Schedule.TravelHours,
@@ -323,6 +334,7 @@ func main() {
 
 	pn := panel.New(panel.Config{
 		Pool:        p,
+		Balance:     bal, // 余额趋势采样记录器（nil 时该视图返回 501）
 		Usage:       rec,
 		RequestLog:  requestLog,
 		Upstream:    up,
