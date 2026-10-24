@@ -1,17 +1,101 @@
 # 变更记录
 
-## v1.35.2（当前）
+## v1.35.3（当前）
 
-**本版 = 27 条上游移植 + 两轮代码审查（47 条缺陷）+ 429 冷却修复 + 品牌词改零宽形态。**
+**本版 = 上游 13 条移植（10-23 批 9 条 + 10-24 批 4 条），其中 3 条修的是线上正在踩的坑。**
 
-八个部分按影响排序（一～三为本仓自有修复，四～六为移植与审查，七～八为上游 10-23/10-24 增量）：
+**三条要紧的**：`reasoning_effort=off/none` 关不掉思考（`effortRank` 里 `off` 的 rank 0 只是
+排序占位，被降级管线抬成最弱正档 —— 实测 `off` 仍返回 157 字思维链，与 `high` 无异）；
+`primary-model` 上游 `modelTiers` 漏收录、被面板和 `/v1/models` 当免费可选，实发
+`11158 not allowed for user type [personal]`；网关 401 不分成因直接计死、3 次误杀健康号
+（issue #66 两号被禁，revive 后连续全 200）。
 
-**四、上游 misakano7545 移植（27 条）**：model_fallback（6004 限流同账号改道等价模型）、
+**其余**：企业 `1<<40` 哨兵污染权重分母、4 个专家体验任务、临期窗口刷新 token、
+突发积分与低缓存率两道预算闸、`POST /v2/chat/busy`、`/v1/search` 的 count 兼容、
+静默回合（声明了 tools 却 stop + 零 tool_calls）记账、面板「⤳ 已路由至」标注、
+首屏主题预热；新增 `GET /v1/capacity?model=` 按模型查可用账号容量。
+
+### 一、上游 10-23/10-24 增量（9 条）
+
+对 misakano7545 最新提交逐条评估后合并的 9 条：
+
+| 提交 | 内容 | 合并要点 |
+|---|---|---|
+| `e0512bc9` | 企业不限量 `1<<40` 哨兵污染权重分母（issue #222） | 取 `secondCredits`（最大值是哨兵时取第二大）+ 余额钳到满权重；`pickWeighted` 改为内部自算分母，签名去掉 `maxCredits` 参数 |
+| `4c45b1de` | 适配 4 个专家体验任务 | 任务标签 + `desktop.go` 补 `strings` 导入；测试文件的模块路径改回本仓 |
+| `5d037aad` | 首屏主题预热 | 干净合入 |
+| `8bb30762` | 记「声明了 tools 却 stop + 零 tool_calls」的静默回合 | 统计结构体合并：保留我们的 `pendErr`，取对方的 `sawToolCalls`/`finishReason`/`thinkTokens` |
+| `f1eca4ad` | 面板「⤳ 已路由至 <等价模型>」 | 面板 Config 加 `ModelFallback` 闭包 + overview 输出 `model_fallback`；`app.js` 在我们已有的限流渲染里加标注（对方整块重写过，未采用） |
+| `657e7a42` | `/v1/search` 兼容 DeepSeek Search API（count 字段） | 只取 `Count` 与 `compatDeepSeekSearch`；`deep:true`（agentic_search）未移植，对应用例删除。**顺带修**：调用点原本用 `req.MaxResults`，count 回落永远不生效 |
+| `14f1824c` | `POST /v2/chat/busy` 端点 | 与 `/v1/fetch` 路由并存 |
+| `764293b8` | 按临期窗口刷新 token（PR #244） | `schedule.keepalive_refresh_window`（默认 168h）；`RunKeepaliveNowCtx` 拆出 `runKeepalive(ctx, spread, selective)`，排程 selective=true、手动 false。**窗口 <= 0 视为不过滤**（裸用 Config 的路径不该变成「一个都不刷」） |
+| `58262f31` | 突发积分 + 连续低缓存率两道闸 | 只取 `budget.go` 的闸逻辑与 `handler` 的 `setGuards`/`admit`/`snapshot`；同提交里的 admin 端点、`/metrics`、成长并发等未移植。**顺带修**：合并时构造行被覆盖，已恢复 `h := &Handler{...}` 并把 `budget` 初始化进去 |
+
+### 二、上游 10-24 增量（4 条）
+
+上一批 9 条之后上游又推了 9 条，逐条评估后合 4 条（2 条我们上一批已合过、1 条纯文档、
+1 条主体在我们这里没有落点）：
+
+| 提交 | 内容 | 合并要点 |
+|---|---|---|
+| `e7d1e70` | 尊重客户端 `off`/`none` 关闭思考（摘 PR #40 honorClose） | 新增 `effortValueOff`：`off`/`none`/`disabled` 命中时 deepseek 写 `thinking.type=disabled` 并清档位字段，`normalizeReasoningEffort` 开头同样截住。**这是真 bug**：`effortRank` 里 `off` 是 0（排序占位，不是能力声明），又没有模型声明 off 档，于是「关思考」被降级管线抬成最弱正档——实测 `effort=off` 仍返回 157 字思维链，与 `high` 的 159 字无异 |
+| `b51ce6d` | `primary-model` 补挂 Pro Only（上游 modelTiers 漏收录） | 加本地兜底清单 `proOnlyFallback`：上游给了文案时以上游为准不覆盖，目录里没有该模型时不凭空造条目。**这是真 bug**：三个 global 号实测全回 `11158 not allowed for user type [personal]`，同档 `gpt-5.4`/`6.x` 都在表内，只有它漏标 → 面板与 `/v1/models` 都把它当免费可选 |
+| `afdfe93` | 新增 `GET /v1/capacity?model=<name>`（PR #65） | `Pool.CapacityForModel(model, realm)` + handler 路由；上游的 `hiddenModel` 在本仓叫 `modelHidden`。刻意不过滤在途满载（容量是事实，能不能立刻派单由准入自己判）。保留上游两处已知偏差：`available_accounts` 不按 realm 过滤、未配 APIKey 时回 401 |
+| `614e7b4` | 网关 401 先 refresh 求证再计 session dead（issue #66） | 我们那处 `IsGatewayUnauthorized` 分支改成分三路：refresh 成功 → 清计数 + 软冷却 + **落盘新 RT**（refresh 只改内存，不落盘会让重启拿旧 RT 刷新 = 账号真死）；refresh 被应用层明确拒绝 → 计死；无判词（传输错 / 5xx / 429 / HTML 拦截页）→ 只软冷却。冷却用 `CooldownSoftRate` 而非固定 60s，防「chat 恒 401 但 refresh 恒成功」的降级 token 每 60s 轮换一次 RT（1440 次/天） |
+
+顺带给 `pool.Status` 补 `session_dead_fails`（`614e7b4` 的测试要读它；运维也能一眼看出某号是刚踩一次抖动、还是真在往禁用走）。
+
+### 未合并
+
+| 提交 | 内容 | 判断 |
+|---|---|---|
+| `9151570`（10-24 批） | 错误汇总 title 用全文 + 前端切片严格模式 | **主体无落点** —— 我们整个没有错误汇总视图（无 `internal/panel/errors.go`、无 `ErrStat`、`app.js` 无 `renderErrorSummary`），`sample_full` 无处挂 |
+| `f6b6324`（10-24 批） | README 徽章更新（Go 1.26.10 / API 含 Anthropic） | **不适用** —— 工具链是 go1.27.2，也没有 Anthropic 路由 |
+
+### 测试
+
+**一（9 条）新增 25 个用例**，按风险挑关键的：
+`TestSecondCreditsIssue222` / `TestSecondCreditsNormalMaxKept` / `TestSecondCreditsSingleCandidate`
+（企业 `1<<40` 哨兵不进权重分母，正常最大值仍保留）；
+`TestScheduledKeepaliveRefreshesWithinWindow` / `TestScheduledKeepaliveSkipsFreshToken` /
+`TestScheduledKeepaliveNegativeWindowNoFilter` / `TestScheduledKeepaliveDefaultWindowWhenUnset` /
+`TestScheduledKeepaliveExpiryMissingOrExpired` / `TestKeepaliveRefreshWindow` /
+`TestSetKeepaliveRefreshWindowHot`（临期窗口七分支，含「窗口 <= 0 视为不过滤」）；
+`TestDailyBudgetBurstGuard` / `TestDailyBudgetCacheGuard` / `TestDailyBudgetStopsAtLimit` /
+`TestDailyBudgetGuardsOffByDefault`（两道闸 + 默认关闭）；
+`TestChatBusyBadJSON` / `TestChatBusyLevels`（`/v2/chat/busy` 契约）；
+`TestCompatDeepSeekSearch` / `TestDeepSeekSearchClientDetection`（count 兼容）；
+`TestStatsReaderSeesToolCalls` / `TestStatsReaderSeesNoToolCallsOnStop`（静默回合）；
+`TestExpertExperienceSpecsRegistered` / `TestRunExpertExperiencePicksExpertByID` /
+`TestRunExpertExperienceUnknownCode` / `TestRunExpertExperienceFallsBackToStaticSpec`（4 个专家任务）；
+`TestThemeBootScriptRunsBeforeStyles`（首屏主题预热）。
+
+**二（4 条）新增 10 个用例**：
+`TestThinkingHonorsEffortOff`（snake `off` / camel `none` / off+enabled thinking / 大写带空格
+四分支，断言 `thinking.type=disabled` 且档位字段被删）、
+`TestThinkingEffortOffNotLeakedToOtherModels`（非 deepseek 不注入 thinking，但非法档位值清掉）、
+`TestApplyModelTiersProOnlyFallback`（空 tiers 也挂 Pro Only / 上游文案不被覆盖 / 目录外不造条目）、
+`TestCapacityRequiresBearerKeyAndModel` + `TestCapacityRejectsUnconfiguredKey` +
+`TestCapacityCountsHealthyModelAccountsWithoutInFlightFiltering`（在途满载不计入过滤）+
+`TestCapacityHonorsRealmAliasesAndHiddenModels`（realm 前缀 / 别名 / 隐藏模型归 0）、
+`TestGateway401TransientNotDisabled`（refresh 成功 → 不禁用、计数清零、新 RT 落盘）+
+`TestGateway401RefreshBlockedNotDisables`（refresh 被边缘拦 502 HTML → 不计死）+
+`TestGateway401RealDeadStillDisables`（refresh 被应用层拒 → 达阈仍禁用）。
+
+**891 通过 / 0 失败**（server 134 / upstream 250 / panel 66 / pool 201 / scheduler 85 /
+auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
+口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
+
+## v1.35.2
+
+**本版 = 23 条上游移植 + 两轮代码审查（47 条缺陷）+ 429 冷却修复 + 品牌词改零宽形态。**
+
+六个部分按影响排序（一～三为本仓自有修复，四～六为移植与审查）：
+
+**四、上游 misakano7545 移植（23 条）**：model_fallback（6004 限流同账号改道等价模型）、
 余额趋势视图、`/v1/search` 与 `/v1/fetch`、models.aliases、静态 API Key 账号（精简版）、
 dump 诊断开关、启动补跑去重、账号级摊开按计划时刻、实时繁忙度、11148/11133 请求级错误、
-网关 401 归 session 死、缓存槽按对话分配、tier 透出、旅行端点、scheduler 时点枚举重构等；
-10-23/10-24 增量另见七、八两节（企业哨兵、专家任务、临期刷新、预算闸、honorClose、
-primary-model 层级、`/v1/capacity`、网关 401 求证）。
+网关 401 归 session 死、缓存槽按对话分配、tier 透出、旅行端点、scheduler 时点枚举重构等。
 
 **五、代码审查 19 条**：重编码丢精度（`UseNumber` + 不转义 HTML）、热更丢表、
 空 for 循环、跳过名单键不一致、在途名额缺失、`Hits` 被清零等。
@@ -226,45 +310,6 @@ curl -X POST http://127.0.0.1:7863/panel/api/accounts/add_apikey \
 | 27 | 按号旅行 skip 文案称「暂停」会被跳过，实际不会 | 文案纠正 |
 | 28 | `ReviveJobService` 日志写死 7863 | 改 `GwConfig.port(ctx)` |
 
-### 七、上游 10-23/10-24 增量（9 条）
-
-对 misakano7545 最新提交逐条评估后合并的 9 条：
-
-| 提交 | 内容 | 合并要点 |
-|---|---|---|
-| `e0512bc9` | 企业不限量 `1<<40` 哨兵污染权重分母（issue #222） | 取 `secondCredits`（最大值是哨兵时取第二大）+ 余额钳到满权重；`pickWeighted` 改为内部自算分母，签名去掉 `maxCredits` 参数 |
-| `4c45b1de` | 适配 4 个专家体验任务 | 任务标签 + `desktop.go` 补 `strings` 导入；测试文件的模块路径改回本仓 |
-| `5d037aad` | 首屏主题预热 | 干净合入 |
-| `8bb30762` | 记「声明了 tools 却 stop + 零 tool_calls」的静默回合 | 统计结构体合并：保留我们的 `pendErr`，取对方的 `sawToolCalls`/`finishReason`/`thinkTokens` |
-| `f1eca4ad` | 面板「⤳ 已路由至 <等价模型>」 | 面板 Config 加 `ModelFallback` 闭包 + overview 输出 `model_fallback`；`app.js` 在我们已有的限流渲染里加标注（对方整块重写过，未采用） |
-| `657e7a42` | `/v1/search` 兼容 DeepSeek Search API（count 字段） | 只取 `Count` 与 `compatDeepSeekSearch`；`deep:true`（agentic_search）未移植，对应用例删除。**顺带修**：调用点原本用 `req.MaxResults`，count 回落永远不生效 |
-| `14f1824c` | `POST /v2/chat/busy` 端点 | 与 `/v1/fetch` 路由并存 |
-| `764293b8` | 按临期窗口刷新 token（PR #244） | `schedule.keepalive_refresh_window`（默认 168h）；`RunKeepaliveNowCtx` 拆出 `runKeepalive(ctx, spread, selective)`，排程 selective=true、手动 false。**窗口 <= 0 视为不过滤**（裸用 Config 的路径不该变成「一个都不刷」） |
-| `58262f31` | 突发积分 + 连续低缓存率两道闸 | 只取 `budget.go` 的闸逻辑与 `handler` 的 `setGuards`/`admit`/`snapshot`；同提交里的 admin 端点、`/metrics`、成长并发等未移植。**顺带修**：合并时构造行被覆盖，已恢复 `h := &Handler{...}` 并把 `budget` 初始化进去 |
-
-### 八、上游 10-24 增量（4 条）
-
-上一批 9 条之后上游又推了 9 条，逐条评估后合 4 条（2 条我们上一批已合过、1 条纯文档、
-1 条主体在我们这里没有落点）：
-
-| 提交 | 内容 | 合并要点 |
-|---|---|---|
-| `e7d1e70` | 尊重客户端 `off`/`none` 关闭思考（摘 PR #40 honorClose） | 新增 `effortValueOff`：`off`/`none`/`disabled` 命中时 deepseek 写 `thinking.type=disabled` 并清档位字段，`normalizeReasoningEffort` 开头同样截住。**这是真 bug**：`effortRank` 里 `off` 是 0（排序占位，不是能力声明），又没有模型声明 off 档，于是「关思考」被降级管线抬成最弱正档——实测 `effort=off` 仍返回 157 字思维链，与 `high` 的 159 字无异 |
-| `b51ce6d` | `primary-model` 补挂 Pro Only（上游 modelTiers 漏收录） | 加本地兜底清单 `proOnlyFallback`：上游给了文案时以上游为准不覆盖，目录里没有该模型时不凭空造条目。**这是真 bug**：三个 global 号实测全回 `11158 not allowed for user type [personal]`，同档 `gpt-5.4`/`6.x` 都在表内，只有它漏标 → 面板与 `/v1/models` 都把它当免费可选 |
-| `afdfe93` | 新增 `GET /v1/capacity?model=<name>`（PR #65） | `Pool.CapacityForModel(model, realm)` + handler 路由；上游的 `hiddenModel` 在本仓叫 `modelHidden`。刻意不过滤在途满载（容量是事实，能不能立刻派单由准入自己判）。保留上游两处已知偏差：`available_accounts` 不按 realm 过滤、未配 APIKey 时回 401 |
-| `614e7b4` | 网关 401 先 refresh 求证再计 session dead（issue #66） | 我们那处 `IsGatewayUnauthorized` 分支改成分三路：refresh 成功 → 清计数 + 软冷却 + **落盘新 RT**（refresh 只改内存，不落盘会让重启拿旧 RT 刷新 = 账号真死）；refresh 被应用层明确拒绝 → 计死；无判词（传输错 / 5xx / 429 / HTML 拦截页）→ 只软冷却。冷却用 `CooldownSoftRate` 而非固定 60s，防「chat 恒 401 但 refresh 恒成功」的降级 token 每 60s 轮换一次 RT（1440 次/天） |
-
-顺带给 `pool.Status` 补 `session_dead_fails`（`614e7b4` 的测试要读它；运维也能一眼看出某号是刚踩一次抖动、还是真在往禁用走）。
-
-### 未合并
-
-| kk-cao 提交 | 内容 | 判断 |
-|---|---|---|
-| `9214bf72` | `rateLimitMeta` 未声明 `detail` 导致账号池表格空白 | **不需要** —— 我们 v1.29.0 起就是 `let detail;`（`app.js:311`） |
-| `c515ae1c` / `cbefb1bb` | 面板可改目录探测 UA / 版本字段成对排列 | 纯 UI，按需 |
-| `9151570`（10-24 批） | 错误汇总 title 用全文 + 前端切片严格模式 | **主体无落点** —— 我们整个没有错误汇总视图（无 `internal/panel/errors.go`、无 `ErrStat`、`app.js` 无 `renderErrorSummary`），`sample_full` 无处挂 |
-| `f6b6324`（10-24 批） | README 徽章更新（Go 1.26.10 / API 含 Anthropic） | **不适用** —— 工具链是 go1.27.2，也没有 Anthropic 路由 |
-
 ### 测试
 
 新增 `TestCooldownSoftForModelHonorsResetBeyondSoftRateMax`（10h 权威墙钟不被 2h 截断）、
@@ -277,19 +322,8 @@ curl -X POST http://127.0.0.1:7863/panel/api/accounts/add_apikey \
 顺带修 `TestCheckinDoneExpiredYesterday`：日期改用 `cst.DayKey` —— Go 运行时读不到
 `/etc/localtime` 时是 UTC，与北京日界差一天，每天 00:00–08:00（CST）必红。
 
-八批新增：`TestThinkingHonorsEffortOff`（snake `off` / camel `none` / off+enabled thinking /
-大写带空格 四分支，断言 `thinking.type=disabled` 且档位字段被删）、
-`TestThinkingEffortOffNotLeakedToOtherModels`（非 deepseek 不注入 thinking，但非法档位值清掉）、
-`TestApplyModelTiersProOnlyFallback`（空 tiers 也挂 Pro Only / 上游文案不被覆盖 / 目录外不造条目）、
-`TestCapacityRequiresBearerKeyAndModel` + `TestCapacityRejectsUnconfiguredKey` +
-`TestCapacityCountsHealthyModelAccountsWithoutInFlightFiltering`（含在途满载不计入过滤）+
-`TestCapacityHonorsRealmAliasesAndHiddenModels`（realm 前缀 / 别名 / 隐藏模型归 0）、
-`TestGateway401TransientNotDisabled`（refresh 成功 → 不禁用、计数清零、新 RT 落盘）+
-`TestGateway401RefreshBlockedNotDisables`（refresh 被边缘拦 502 HTML → 不计死）+
-`TestGateway401RealDeadStillDisables`（refresh 被应用层拒 → 达阈仍禁用）。
-
-**891 通过 / 0 失败**（server 134 / upstream 250 / panel 66 / pool 201 / scheduler 85 /
-auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
+**808 通过 / 0 失败**（server 104 / upstream 235 / panel 60 / pool 192 / scheduler 65 /
+auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 59）。
 
 
 ## v1.35.1
@@ -807,6 +841,13 @@ auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 `model_unavailable` 是确定性负缓存（6h 起、指数退避），重试无意义。此前显示
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，
 多条折叠成一条汇总，模型名放 title。
+
+### 未合并
+
+| kk-cao 提交 | 内容 | 判断 |
+|---|---|---|
+| `9214bf72` | `rateLimitMeta` 未声明 `detail` 导致账号池表格空白 | **不需要** —— 我们 v1.29.0 起就是 `let detail;`（`app.js:311`） |
+| `c515ae1c` / `cbefb1bb` | 面板可改目录探测 UA / 版本字段成对排列 | 纯 UI，按需 |
 
 ### 测试
 
