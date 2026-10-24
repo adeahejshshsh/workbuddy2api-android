@@ -76,6 +76,51 @@ func IsUpstreamReadError(err error) bool { return errors.Is(err, errUpstreamRead
 // IsStreamBrokeBeforeFlush 报告错误是否为「一帧未发就断流」——调用方此时可以换号重试。
 func IsStreamBrokeBeforeFlush(err error) bool { return errors.Is(err, ErrStreamBrokeBeforeFlush) }
 
+// errSilentEmptyTurn 上游以 finish_reason=stop 收尾，但整条流既没有正文也没有工具
+// 调用；配合 WithHoldUntilContent 时客户端一个字节都没收到，调用方可以重发。
+//
+// 典型成因（issue #44）：客户端声明了几十个 tools，模型却只回一句 stop —— agent
+// 回合就此静默结束，用户只能手动再催一句。重发时把 tool_choice 改成 required
+// 通常能把它掰回「调工具」。
+var errSilentEmptyTurn = errors.New("upstream stream ended with no content and no tool calls")
+
+// IsSilentEmptyTurn 报告错误是否为「静默空回合」（零正文 + 零工具调用）。
+func IsSilentEmptyTurn(err error) bool { return errors.Is(err, errSilentEmptyTurn) }
+
+// frameHasContent 该帧是否带「真内容」：正文 / 工具调用 / 旧式 function_call。
+// 只有 role、只有 reasoning_content、只有 finish_reason 的帧都不算 —— 静默回合的
+// 判据正是「整条流一帧真内容都没有」。
+func frameHasContent(obj map[string]any) bool {
+	chs, ok := obj["choices"].([]any)
+	if !ok {
+		return false
+	}
+	for _, ci := range chs {
+		c, ok := ci.(map[string]any)
+		if !ok {
+			continue
+		}
+		d, ok := c["delta"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if v, ok := d["content"].(string); ok && v != "" {
+			return true
+		}
+		if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+			return true
+		}
+		if fc, ok := d["function_call"].(map[string]any); ok && fc != nil {
+			n, _ := fc["name"].(string)
+			a, _ := fc["arguments"].(string)
+			if n != "" || a != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // clientWriteErr 包装写客户端的错误（保留原错误文本，供日志）。
 func clientWriteErr(err error) error { return fmt.Errorf("%w: %v", errClientWrite, err) }
 
@@ -627,6 +672,9 @@ type streamOptions struct {
 	// review #25）：客户端按请求名校验响应时，流式与非流式必须一致。
 	modelEcho string
 	modelReal string
+	// holdUntilContent 把「不含内容」的前导帧先扣住，直到出现正文/工具调用才刷出
+	// （见 WithHoldUntilContent）。默认 false = 逐帧透传。
+	holdUntilContent bool
 }
 
 // WithMarkupRepair 注册「模型原生工具调用标记」修复器（见 dsml.go）。
@@ -648,6 +696,20 @@ func WithMarkupRepair(r *MarkupRepair) StreamOption {
 // real 是上游实际模型名，echo 是客户端请求名；任一为空 → 不改写。
 func WithModelEcho(real, echo string) StreamOption {
 	return func(o *streamOptions) { o.modelReal, o.modelEcho = real, echo }
+}
+
+// WithHoldUntilContent 让 StreamHint 把「不含内容」的前导帧（只有 role、
+// 只有 reasoning_content、只有 finish_reason）先扣在手里，直到出现真正的正文或
+// 工具调用帧才整批刷出。
+//
+// 为什么需要：模型「既没说话也没调工具」就 stop 是真实形态（issue #44 静默回合）。
+// 逐帧透传时客户端早就收到了 role/finish 帧，网关再想换号重发就会在同一个 HTTP
+// 响应里串两条流。扣住这几帧之后，静默回合下客户端一个字节都没收到 —— 重发对它
+// 完全不可见。正常流在第一个内容帧就把扣住的帧刷出，延迟零变化。
+//
+// 上限：最多扣 256 帧 / 64KB，超了就当成「上游确实在吐东西」，刷出并转直写。
+func WithHoldUntilContent() StreamOption {
+	return func(o *streamOptions) { o.holdUntilContent = true }
 }
 
 func WithErrorFrameObserver(fn func(payload string)) StreamOption {
@@ -695,10 +757,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	maxToolIdx := -1
 	toolFinishSent := false
 
-	// writeSSE 原样写出一帧并 flush。
+	// writeOut 真正把一帧写到客户端并 flush（不做任何扣帧判定）。
 	// 写失败一律包成 errClientWrite：上游帧本身是好的，写不出去只可能是客户端
 	// 断连。handler 据此区分「人走了」与「上游坏了」——两者对账号的处置相反。
-	writeSSE := func(payload string) error {
+	writeOut := func(payload string) error {
 		// 别名回显（review #25）：只替换精确的 "model":"<real>" 片段，
 		// 不做整帧重编码（帧体积小、字段多，重编码风险大于收益）。
 		if o.modelEcho != "" && o.modelReal != "" && o.modelEcho != o.modelReal {
@@ -715,6 +777,66 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		return nil
 	}
 
+	// ── 扣帧（WithHoldUntilContent）───────────────────────────────────────
+	// 目的：模型「既没说话也没调工具」就 stop 时（issue #44 静默回合），让客户端
+	// 一个字节都还没收到 —— 调用方因此可以换号/改参数重发，对客户端完全透明。
+	// 只扣「不含内容」的前导帧（role-only、finish-only、纯 reasoning），一旦出现
+	// 正文或工具调用就整批刷出并转入逐帧直写，正常流的延迟零变化。
+	hold := o.holdUntilContent
+	meaningful := false
+	var pending []string
+	holdBytes := 0
+	const (
+		holdMaxFrames = 256      // 上限一：帧数（防止长时间只吐 reasoning 把内存吃光）
+		holdMaxBytes  = 64 << 10 // 上限二：字节
+	)
+
+	flushPending := func() error {
+		for _, p := range pending {
+			if werr := writeOut(p); werr != nil {
+				return werr
+			}
+		}
+		pending = nil
+		holdBytes = 0
+		return nil
+	}
+
+	// emit 写出一帧。isContent 表示该帧带正文/工具调用（即「这一跳真的产生了东西」）。
+	emit := func(payload string, isContent bool) error {
+		if isContent && !meaningful {
+			meaningful = true
+			if werr := flushPending(); werr != nil {
+				return werr
+			}
+			return writeOut(payload)
+		}
+		if !hold || meaningful {
+			return writeOut(payload)
+		}
+		// 扣得太多说明上游确实在吐东西（只是没有正文），别再赌了：刷出并直写。
+		if len(pending) >= holdMaxFrames || holdBytes+len(payload) > holdMaxBytes {
+			meaningful = true
+			if werr := flushPending(); werr != nil {
+				return werr
+			}
+			return writeOut(payload)
+		}
+		pending = append(pending, payload)
+		holdBytes += len(payload)
+		return nil
+	}
+
+	// emitForce 强制写（上游 error 帧 / 网关本地故障帧）：这些必须送达客户端，
+	// 不能被扣住，也不能因为它们而误判成「静默回合」。
+	emitForce := func(payload string) error {
+		meaningful = true
+		if werr := flushPending(); werr != nil {
+			return werr
+		}
+		return writeOut(payload)
+	}
+
 	// writeRaw 原样写出一帧（绕过 normalizeFrame）。上游 error 帧（error-passthrough）
 	// 与空流错误帧需保留 error 字段，不能被白名单剥掉，故经此写出。
 	// gateway_hint：上游 error 帧透出前按 hintFn 附加 error.gateway_hint 字段
@@ -724,7 +846,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		if hint := frameGatewayHint(hintFn, payload); hint != "" {
 			payload = attachHintToErrorFrame(payload, hint)
 		}
-		return writeSSE(payload)
+		return emitForce(payload)
 	}
 
 	// writeChunk 把一个 chunk 对象按规范白名单重建后写出并 flush，同时维护三件跨帧
@@ -765,6 +887,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 				}
 			}
 		}
+		isContent := frameHasContent(obj)
 		raw, err := json.Marshal(normalizeFrame(obj))
 		if err != nil {
 			// 合成帧规范化失败时**跳过这一帧**（报告 #9）：repairFrame 拆出的多个
@@ -773,9 +896,9 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			if fallback == "" {
 				return nil
 			}
-			return writeSSE(fallback)
+			return emit(fallback, isContent)
 		}
-		return writeSSE(string(raw))
+		return emit(string(raw), isContent)
 	}
 
 	// repairFrame 在透传前跑标记修复，并把一帧展开成「可能多帧」：正文帧（标记被摘掉
@@ -853,7 +976,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		var obj map[string]any
 		if json.Unmarshal([]byte(payload), &obj) != nil {
 			// 非 JSON 帧：原样降级写出，**计一次有效转发**（已成功交给客户端）。
-			if werr := writeSSE(payload); werr != nil {
+			// 按内容帧处理：上游确实吐了东西，不该被当成静默回合。
+			if werr := emit(payload, true); werr != nil {
 				return 0, werr
 			}
 			return 1, nil
@@ -966,7 +1090,7 @@ readLoop:
 		// frameGatewayHint(hintFn, payload)，而这是**网关本地补写的故障帧**，
 		// 不该带上游语义提示。此刻不出问题只因 FrameKind 对该 payload 恰好返回
 		// ErrClient（无 hint），属"靠巧合正确"——与下面空流分支同一个坑，那里已改。
-		_ = writeSSE(`{"error":{"message":"upstream stream broke before completion","type":"upstream_error","code":"upstream_read_error"}}`)
+		_ = emitForce(`{"error":{"message":"upstream stream broke before completion","type":"upstream_error","code":"upstream_read_error"}}`)
 	}
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
 	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。
@@ -977,7 +1101,13 @@ readLoop:
 		// 直写路径"，而 writeRaw 内部会调 frameGatewayHint(hintFn, payload) ——
 		// 当前 FrameKind 判 ErrClient 恰好不给 hint，属"靠巧合正确"；一旦 hint.go
 		// 给 ErrClient 加了兜底文案，本地故障帧就会带上误导性的上游语义提示。
-		_ = writeSSE(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+		_ = emitForce(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+	}
+	// 扣住的帧一直没等到内容：模型既没说话也没调工具就收尾（issue #44 静默回合）。
+	// 此刻客户端一个字节都没收到，调用方可以换号 / 改参数重发 —— 对客户端完全透明。
+	// 不重发也不会丢东西：调用方下次会用「不扣帧」的方式重放，帧照旧透传。
+	if hold && !meaningful && !wroteAny && readErr == nil && validFrames > 0 {
+		return errSilentEmptyTurn
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {

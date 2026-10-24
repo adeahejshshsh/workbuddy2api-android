@@ -10,8 +10,12 @@
 `11158 not allowed for user type [personal]`；网关 401 不分成因直接计死、3 次误杀健康号
 （issue #66 两号被禁，revive 后连续全 200）。
 
-**本版另有 1 条本仓自有修复**：流式断流若发生在**首帧之前**（一个字节都没写给客户端），
-旧实现伪 200 + error 帧把回合钉死，现在改为换号重试（对客户端透明），名额用尽才回正经 502。
+**本版另有 2 条本仓自有修复**：
+
+- 流式断流若发生在**首帧之前**（一个字节都没写给客户端），旧实现伪 200 + error 帧把
+  回合钉死，现在改为换号重试（对客户端透明），名额用尽才回正经 502。
+- **静默回合**：模型声明了 tools 却只回 `finish_reason=stop`（零正文零工具调用）时，
+  扣住前导帧、把 `tool_choice` 改成 `required` 重发一次 —— agent 回合不再静默结束。
 
 **其余**：企业 `1<<40` 哨兵污染权重分母、4 个专家体验任务、临期窗口刷新 token、
 突发积分与低缓存率两道预算闸、`POST /v2/chat/busy`、`/v1/search` 的 count 兼容、
@@ -76,6 +80,37 @@ handler 因此能 `continue` 换号，并把 `st.status`/`st.outcome` 复位，�
 顺带：`chatStatsReader` 加 `Frames()`，断流 WARN 从 `upstream read error: %v` 变成
 `upstream read error after 45.2s (frames=312): %v`。
 
+### 四、静默回合：模型不调工具就收尾 → 强制 required 重发（2026-10-24 线上）
+
+线上现象（用户原话「使用时会报错……随后对话无报错停止」）：`WARN: [server] stream
+acct=… model=deepseek-v4.1-flash-sg: finish_reason=stop with zero tool_calls despite 82
+declared tool(s) (silent stop; client may treat the turn as complete)`。
+
+客户端声明了 82 个 tools，模型回 `finish_reason=stop`、零 `tool_calls`、零正文 ——
+agent 回合就此静默结束，用户只能手动再催一句。此前这条 WARN 是**唯一**痕迹
+（issue #44 的原始决策是「只记日志、不改成错误」，因为「模型判断不需要工具、直接回答」
+是合法行为）。
+
+本版加**救援**而不是改判：只在「整条流一帧真内容都没有」时动手，且对客户端不可见。
+
+| 环节 | 做法 |
+|---|---|
+| 扣帧 | `WithHoldUntilContent`：`role` / `finish_reason` / 纯 reasoning 这类非内容帧先扣住（上限 256 帧 / 64KB），出现正文或工具调用才整批刷出 —— 正常流延迟零变化 |
+| 判定 | 扣到流尾仍无内容 → `StreamHint` 返回 `errSilentEmptyTurn`，**一个字节都不写** |
+| 重发 | handler 把 `tool_choice` 改成 `required` 重发一次（`forceToolChoiceRequired`）；只改「客户端没钉死工具选择」的请求，`none` / 具体函数名一律不动 |
+| 兜底 | 只重发一次（`silentRetried`）；第二次不扣帧，按原样透传，不会无限重试 |
+
+为什么不 NoteFailures：这一跳上游是**合法响应**（200 + 完整流），卡住的是模型的选择，
+记成连败会把健康号降权出池。
+
+顺带两处诊断修正：
+
+- `chatStatsReader` 加 `ContentBytes()`，静默 WARN 从「零 tool_calls」变成带
+  `content=0B tool_choice="auto"` —— 一眼区分「模型什么都没说」（已救援）与「模型改说
+  人话、把工具晾在一边」（模型行为，网关只能记录）。
+- `tool_choice=none` 时不再打这条 WARN：那种请求上游根本没收到 tools，模型不调工具是
+  **正确行为**，此前把正常回合报成了故障。
+
 ### 未合并
 
 | 提交 | 内容 | 判断 |
@@ -121,7 +156,21 @@ handler 因此能 `continue` 换号，并把 `st.status`/`st.outcome` 复位，�
 `TestStreamEarlyBreakReturns502JSONWhenRetriesExhausted`（名额用尽 → 502 JSON + hint，
 SSE 头撤净、不写任何 `data: ` 帧）。
 
-**895 通过 / 0 失败**（server 136 / upstream 252 / panel 66 / pool 201 / scheduler 85 /
+**四（静默回合）新增 8 个用例**：`TestStreamHintSilentTurnWritesNothingWhenHolding`
+（扣帧时一个字节都不写、不 flush、错误与断流/空流口径分开）、
+`TestStreamHintSilentTurnWithoutHoldKeepsLegacyBehavior`（不扣帧时行为零变化）、
+`TestStreamHintHoldFlushesBufferedFramesOnContent`（扣住的 role 帧按序刷出）、
+`TestStreamHintHoldToolCallsAreContent`（工具调用算内容）、
+`TestForceToolChoiceRequired`（8 分支：缺省/auto 两种形态改写，none 两种形态、钉死
+函数、无 tools、非法 JSON 一律不改）、`TestForceToolChoiceRequiredKeepsBigNumbers`
+（`seed` 超过 2^53 不被改写精度）、
+`TestStreamSilentStopRetriesWithRequiredToolChoice`（端到端：零内容 stop → 重发带
+`tool_choice=required` → 客户端拿到工具调用，且从未见到被丢弃那跳的 `finish_reason=stop`）、
+`TestStreamSilentStopNoRetryWhenToolsOff`（`tool_choice=none` 不重发）、
+`TestStreamSilentStopRetryWorksWithSingleAccount`（单账号池 + `MaxRotate=1` 也有救援
+机会：救援名额独立于轮转额度，且静默那个号会从 `tried` 摘掉以便重选）。
+
+**904 通过 / 0 失败**（server 141 / upstream 256 / panel 66 / pool 201 / scheduler 85 /
 auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
 口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
 

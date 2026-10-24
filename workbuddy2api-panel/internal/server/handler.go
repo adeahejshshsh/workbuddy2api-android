@@ -1138,7 +1138,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
-	for i := 0; i < h.cfg.MaxRotate; i++ {
+	// 静默回合救援（issue #44）：客户端声明了 tools，模型却只回一句 stop —— agent
+	// 回合就此静默结束，用户只能手动再催一句（2026-10-24 线上：82 个 tools、
+	// finish_reason=stop、零 tool_calls）。
+	//
+	// 救援方式：把请求改成 tool_choice=required 重发一次。只有改得动（客户端没把
+	// 工具关掉、也没钉死某个函数）才值得扣帧等待 —— 否则重发就是原样再撞一次。
+	_, canForceTools := forceToolChoiceRequired(body)
+	// 客户端原发的 tool_choice 短标签（空串 = 没发，默认 auto）：静默回合 WARN 用它
+	// 判断「是不是客户端自己把工具关了」。必须在 body 被救援改写前取。
+	clientToolChoice := toolChoiceLabel(body)
+	silentRetried := false
+	// silentBudget 静默回合救援的**额外**名额，不占轮转额度：MaxRotate=1 的部署
+	// 也该有一次救援机会（否则这条修复在最保守的配置下等于不存在）。
+	silentBudget := 0
+
+	for i := 0; i < h.cfg.MaxRotate+silentBudget; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
@@ -1467,14 +1482,49 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 第二个参数为 true = 名单为空时启用弱判定——tools 声明在链路上丢失是
 			// 实测最常见的泄漏成因，只做严格判定等于对主场景不设防。
 			repair := upstream.NewMarkupRepair(declaredTools, true)
-			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
-				return h.hintContext(bareModel, reqHasImage)
-			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }),
+			// 扣帧只在「可能重发」时启用：还有轮转名额、本次还没重试过、客户端确实
+			// 声明了 tools、且 tool_choice 改得动。其余情形逐帧透传（零行为变化）。
+			holdFrames := canForceTools && !silentRetried && len(declaredTools) > 0
+			opts := []upstream.StreamOption{
+				upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }),
 				upstream.WithMarkupRepair(repair),
 				// 别名回显（review #25）：流式帧里的 model 也改回客户端原发名，
 				// 与非流式路径（resp["model"]）保持一致。
-				upstream.WithModelEcho(bareModel, aliasEcho))
+				upstream.WithModelEcho(bareModel, aliasEcho),
+			}
+			if holdFrames {
+				opts = append(opts, upstream.WithHoldUntilContent())
+			}
+			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
+				return h.hintContext(bareModel, reqHasImage)
+			}), opts...)
 			switch {
+			case upstream.IsSilentEmptyTurn(sErr):
+				// 模型既没说话也没调工具就收尾，而客户端一个字节都没收到（扣帧生效）。
+				// 改成 tool_choice=required 重发一次 —— 这是静默回合的标准恢复手段，
+				// 且对客户端完全不可见（没有任何帧被写出去）。
+				//
+				// 不 NoteFailures：上游这一跳是**合法响应**（200 + 完整流），卡住的是
+				// 模型的选择，不该把账号记成连败（那会把健康号降权出池）。
+				recordAttempt(acct.UID, stats.Usage(), 0, false, attemptStarted, stats.TTFB())
+				releaseHeld()
+				rc.Close()
+				forced := false
+				if rb, ok := forceToolChoiceRequired(body); ok {
+					body = rb
+					forced = true
+				}
+				silentRetried = true
+				silentBudget = 1
+				// 这个号本身没问题（上游回了合法流），只是模型没选工具 —— 从 tried 里
+				// 摘掉，单账号池也能拿到重试机会（同降级重试分支的处理）。
+				delete(tried, acct.UID)
+				st.status = 0
+				st.outcome = ""
+				st.ttfb = 0
+				log.Printf("WARN: [server] stream acct=%s model=%s: silent stop with %d declared tool(s), zero content → retry once (tool_choice=required: %v)",
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, len(declaredTools), forced)
+				continue
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
 				// 兜底（HTTP 头已发出只能 200），但这是上游缺陷不是成功——日志/
@@ -1597,9 +1647,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 只能手动催一句。此前网关侧完全无痕（这是定位困难的主因），这里只记日志
 			// 并非把流改成错误：模型「判断不需要工具、直接回答」是合法行为，强行改写成
 			// 错误会让这类正常回合反复重试、每次都真实计费。
-			if len(declaredTools) > 0 && !stats.SawToolCalls() && stats.FinishReason() == "stop" {
-				log.Printf("WARN: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (silent stop; client may treat the turn as complete)",
-					logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools))
+			// 客户端自己把工具关了（tool_choice=none）时上游根本没收到 tools，模型不调
+			// 工具是**正确行为** —— 此前照样打这条 WARN，等于把正常回合报成故障。
+			toolsOff := strings.EqualFold(strings.TrimSpace(clientToolChoice), "none")
+			if len(declaredTools) > 0 && !toolsOff && !stats.SawToolCalls() && stats.FinishReason() == "stop" {
+				// content 字节数区分两种完全不同的成因：0 = 模型什么都没说（静默空回合，
+				// 已在上面用 tool_choice=required 重试过）；>0 = 模型改说人话、把工具
+				// 晾在一边（模型行为，网关只能记录）。tool_choice 一并打出来，便于判断
+				// 是不是客户端自己把工具关了。
+				log.Printf("WARN: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (content=%dB tool_choice=%q; client may treat the turn as complete)",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools),
+					stats.ContentBytes(), clientToolChoice)
 			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），

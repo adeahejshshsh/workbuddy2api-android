@@ -127,9 +127,11 @@ type chatStatsReader struct {
 	hasThink    bool
 	// frames 本流收到的 data 帧数（不含 [DONE] 与注释行）。断流排障时「断了多少帧」
 	// 比「断了」有用得多：0 帧=上游压根没开始吐，几百帧=说到一半被掐。
-	frames  int
-	pend    []byte // 已读未返回的行缓存
-	pendErr error  // 与 pend 伴随的 EOF（bug 12）：必须等尾巴吐完再返回
+	frames int
+	// contentBytes 累计正文字节数（delta.content 之和）。静默回合日志用。
+	contentBytes int
+	pend         []byte // 已读未返回的行缓存
+	pendErr      error  // 与 pend 伴随的 EOF（bug 12）：必须等尾巴吐完再返回
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -143,6 +145,10 @@ func (s *chatStatsReader) TTFB() time.Duration { return s.ttfb }
 // Frames 本流已收到的 data 帧数（不含 [DONE]/注释行）。断流日志用它区分
 // 「首帧之前就断」与「吐了几百帧后被掐」。
 func (s *chatStatsReader) Frames() int { return s.frames }
+
+// ContentBytes 本流累计正文字节数（delta.content 之和，不含 reasoning_content）。
+// 静默回合日志用它区分「模型什么都没说」与「模型改说人话、把工具晾在一边」。
+func (s *chatStatsReader) ContentBytes() int { return s.contentBytes }
 
 // Tokens 返回末帧 usage.completion_tokens 与是否缺失；无 usage 时 ok=false。
 func (s *chatStatsReader) Tokens() (int, bool) { return s.completionTokens, s.hasCompletionTokens }
@@ -206,6 +212,8 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		Choices []struct {
 			Delta struct {
 				ToolCalls []json.RawMessage `json:"tool_calls"`
+				// Content 只用来量长度（静默回合判据），不保留正文本身。
+				Content string `json:"content"`
 			} `json:"delta"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -229,6 +237,7 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		if len(c.Delta.ToolCalls) > 0 {
 			s.sawToolCalls = true
 		}
+		s.contentBytes += len(c.Delta.Content)
 		if c.FinishReason != "" {
 			s.finishReason = c.FinishReason
 		}
