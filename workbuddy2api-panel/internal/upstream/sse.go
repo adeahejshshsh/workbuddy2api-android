@@ -87,9 +87,15 @@ var errSilentEmptyTurn = errors.New("upstream stream ended with no content and n
 // IsSilentEmptyTurn 报告错误是否为「静默空回合」（零正文 + 零工具调用）。
 func IsSilentEmptyTurn(err error) bool { return errors.Is(err, errSilentEmptyTurn) }
 
-// frameHasContent 该帧是否带「真内容」：正文 / 工具调用 / 旧式 function_call。
-// 只有 role、只有 reasoning_content、只有 finish_reason 的帧都不算 —— 静默回合的
-// 判据正是「整条流一帧真内容都没有」。
+// frameHasContent 该帧是否「该立刻写出去」：正文 / 工具调用 / 旧式 function_call /
+// 思维链（reasoning_content）。
+//
+// 为什么思维链也算：扣帧是为了救静默回合，而思考型模型会先吐几十 KB 的
+// reasoning_content。把它扣住会让客户端的「思考中」显示先卡住再一次性倾倒 ——
+// 这是每一条正常请求都会吃到的体验回退，代价远大于「纯思考后 stop」这一种罕见
+// 形态救不回来。所以思维链一律直写，扣帧只覆盖 role / finish_reason 这类空壳帧。
+//
+// 换句话说：只有 role、只有 finish_reason 的帧才扣；一帧里但凡有实质载荷就放行。
 func frameHasContent(obj map[string]any) bool {
 	chs, ok := obj["choices"].([]any)
 	if !ok {
@@ -105,6 +111,10 @@ func frameHasContent(obj map[string]any) bool {
 			continue
 		}
 		if v, ok := d["content"].(string); ok && v != "" {
+			return true
+		}
+		// 思维链也算实质载荷（见函数头注释）：扣住会让思考显示卡顿。
+		if v, ok := d["reasoning_content"].(string); ok && v != "" {
 			return true
 		}
 		if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {

@@ -97,3 +97,24 @@ func TestStreamHintHoldToolCallsAreContent(t *testing.T) {
 		t.Fatalf("应以 [DONE] 收尾: %q", out)
 	}
 }
+
+// 思维链帧必须**立刻**写出去，不能被扣住：思考型模型先吐几十 KB 的
+// reasoning_content，扣住会让客户端的「思考中」先卡顿再一次性倾倒 —— 这是每条
+// 正常请求都会吃到的体验回退。代价是「纯思考后 stop」这种罕见形态救不回来。
+func TestStreamHintHoldLetsReasoningThroughImmediately(t *testing.T) {
+	raw := "data: {\"id\":\"c4\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c4\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"想一想\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c4\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	rec := httptest.NewRecorder()
+	if err := StreamHint(rec, strings.NewReader(raw), nil, WithHoldUntilContent()); err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "reasoning_content") {
+		t.Fatalf("思维链帧被吞了: %q", out)
+	}
+	if strings.Contains(out, "errSilentEmptyTurn") {
+		t.Fatal("不该判成静默回合")
+	}
+}

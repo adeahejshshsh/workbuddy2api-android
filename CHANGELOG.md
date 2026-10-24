@@ -100,6 +100,11 @@ agent 回合就此静默结束，用户只能手动再催一句。此前这条 W
 | 重发 | handler 把 `tool_choice` 改成 `required` 重发一次（`forceToolChoiceRequired`）；只改「客户端没钉死工具选择」的请求，`none` / 具体函数名一律不动 |
 | 兜底 | 只重发一次（`silentRetried`）；第二次不扣帧，按原样透传，不会无限重试 |
 
+扣帧边界刻意收得很窄：**只扣 `role` / `finish_reason` 这类空壳帧**。思维链
+（`reasoning_content`）一律直写 —— 思考型模型先吐几十 KB 思维链，扣住会让客户端的
+「思考中」先卡顿再一次性倾倒，那是每条正常请求都会吃到的体验回退，代价远大于
+「纯思考后 stop」这一种罕见形态救不回来。
+
 为什么不 NoteFailures：这一跳上游是**合法响应**（200 + 完整流），卡住的是模型的选择，
 记成连败会把健康号降权出池。
 
@@ -168,9 +173,10 @@ SSE 头撤净、不写任何 `data: ` 帧）。
 `tool_choice=required` → 客户端拿到工具调用，且从未见到被丢弃那跳的 `finish_reason=stop`）、
 `TestStreamSilentStopNoRetryWhenToolsOff`（`tool_choice=none` 不重发）、
 `TestStreamSilentStopRetryWorksWithSingleAccount`（单账号池 + `MaxRotate=1` 也有救援
-机会：救援名额独立于轮转额度，且静默那个号会从 `tried` 摘掉以便重选）。
+机会：救援名额独立于轮转额度，且静默那个号会从 `tried` 摘掉以便重选）、
+`TestStreamHintHoldLetsReasoningThroughImmediately`（思维链帧不被扣住，钉死上面的边界）。
 
-**904 通过 / 0 失败**（server 141 / upstream 256 / panel 66 / pool 201 / scheduler 85 /
+**905 通过 / 0 失败**（server 141 / upstream 257 / panel 66 / pool 201 / scheduler 85 /
 auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
 口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
 
