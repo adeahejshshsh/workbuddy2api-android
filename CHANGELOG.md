@@ -10,12 +10,15 @@
 `11158 not allowed for user type [personal]`；网关 401 不分成因直接计死、3 次误杀健康号
 （issue #66 两号被禁，revive 后连续全 200）。
 
-**本版另有 2 条本仓自有修复**：
+**本版另有 3 条本仓自有修复**：
 
 - 流式断流若发生在**首帧之前**（一个字节都没写给客户端），旧实现伪 200 + error 帧把
   回合钉死，现在改为换号重试（对客户端透明），名额用尽才回正经 502。
 - **静默回合**：模型声明了 tools 却只回 `finish_reason=stop`（零正文零工具调用）时，
   扣住前导帧、把 `tool_choice` 改成 `required` 重发一次 —— agent 回合不再静默结束。
+- **传输层失败**：`connection reset by peer` 这类「一个上游响应都没拿到」的失败不再把
+  失败号留在 `tried` 里 —— 单账号池此前会因「选不到号」直接 502，一次瞬时重置被放大成
+  「网关连不上上游」。
 
 **其余**：企业 `1<<40` 哨兵污染权重分母、4 个专家体验任务、临期窗口刷新 token、
 突发积分与低缓存率两道预算闸、`POST /v2/chat/busy`、`/v1/search` 的 count 兼容、
@@ -116,6 +119,27 @@ agent 回合就此静默结束，用户只能手动再催一句。此前这条 W
 - `tool_choice=none` 时不再打这条 WARN：那种请求上游根本没收到 tools，模型不调工具是
   **正确行为**，此前把正常回合报成了故障。
 
+### 五、传输层失败不再把单账号池放大成 502（2026-10-24 线上）
+
+线上现象：`ERR: [upstream] chat_stream acct=…: transport error: Post "…/v2/chat/completions":
+read tcp …: read: connection reset by peer`，流水行 `stream | 502 | TTFB=- | total=10.0s |
+out=http_error | try=1`。
+
+`try=1` 是关键：**一次都没重试**。传输层错误分支把失败号留在 `tried` 里，下一圈
+`PickExcludingForRealm` 选不到号 → 终端的 `no_healthy_account` 被改写成 502
+`upstream_unreachable` —— 一次瞬时连接重置被放大成「网关连不上上游」。
+
+而传输层失败**跟账号无关**：同一个 realm 的所有号打的是同一个上游 host
+（cn 全走 `copilot.tencent.com`），换号只是换 token。所以放开重选同一个号是安全的：
+
+| 项 | 改动 |
+|---|---|
+| 重试 | 传输层错误后 `delete(tried, acct.UID)`，单账号池也能重试；次数仍受 `MaxRotate` 约束 |
+| 连败计数 | 同一个号一次请求只计一次（`transportCounted`）—— 否则一次抖动被记 3 次，两次抖动就把唯一那个号推过降权阈值（默认 5） |
+| 测试提速 | `TestMain` 真的把 `rotateBackoffBase` 归零（backoff.go 里那句「TestMain 已置 0」此前是空头承诺），server 套件从 ~10s 降到 ~6s |
+
+终端语义不变：重试仍全失败时照样 502 `upstream_unreachable`，账号不禁用。
+
 ### 未合并
 
 | 提交 | 内容 | 判断 |
@@ -178,7 +202,12 @@ SSE 头撤净、不写任何 `data: ` 帧）。
 `TestStreamHintHoldFlushesOnSilentTurnWhenAlreadyWrote`（客户端已收到心跳行时静默判定
 跳过，扣住的 role/finish 帧仍须刷出，不能被 `[DONE]` 顶掉）。
 
-**906 通过 / 0 失败**（server 141 / upstream 258 / panel 66 / pool 201 / scheduler 85 /
+**五（传输层）新增 2 个用例**：`TestTransportErrorRetriesSameAccount`（单账号池 +
+一次 `connection reset by peer` → 重试同一个号并 200）、
+`TestTransportErrorCountsOncePerAccount`（重试全失败 → 502 `upstream_unreachable`、
+打满 `MaxRotate`、连败只记 1、账号不禁用）。
+
+**908 通过 / 0 失败**（server 143 / upstream 258 / panel 66 / pool 201 / scheduler 85 /
 auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
 口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
 

@@ -1152,6 +1152,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// silentBudget 静默回合救援的**额外**名额，不占轮转额度：MaxRotate=1 的部署
 	// 也该有一次救援机会（否则这条修复在最保守的配置下等于不存在）。
 	silentBudget := 0
+	// transportCounted 本轮请求里「传输层失败」已经计过连败的号。传输错误跟账号无关，
+	// 单账号池会对同一个号重试多次（见下方分支），若不拦，一次网络抖动就能把一个号
+	// 连败计数推到阈值（默认 5）—— 两次抖动就把唯一那个号降权出池。
+	transportCounted := map[string]bool{}
 
 	for i := 0; i < h.cfg.MaxRotate+silentBudget; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
@@ -1290,8 +1294,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
-			h.cfg.Pool.NoteFailures(acct.UID)
+			// 同一个号一次请求只计一次连败：下面会放开重试同一个号（单账号池），
+			// 一次网络抖动被记 3 次连败就足以把它推过降权阈值。
+			if !transportCounted[acct.UID] {
+				transportCounted[acct.UID] = true
+				h.cfg.Pool.NoteFailures(acct.UID)
+			}
 			fail(acct.UID)
+			// 传输层失败**跟账号无关**：`read: connection reset by peer` 是连接/网络事件，
+			// 同一个 realm 的所有号打的是同一个上游 host（cn 全走 copilot.tencent.com），
+			// 换号只是换 token。此前把失败号留在 tried 里，单账号池（CN 单号部署很常见）
+			// 第二圈直接选不到号 → 502 upstream_unreachable，把「一次瞬时重置」放大成
+			// 「网关连不上上游」。放开重选后单账号池也能重试，次数仍受 MaxRotate 约束。
+			delete(tried, acct.UID)
 			if !rotateBackoff(i, r.Context()) {
 				break // ctx 取消：终止轮转（传输层错误换号退避）
 			}

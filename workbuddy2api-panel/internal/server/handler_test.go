@@ -28,6 +28,9 @@ import (
 // 断言表格行输出的测试（logging_test.go 中的 ChatLogs/LogChatRow 系列）用 withChatLog 临时开启。
 func TestMain(m *testing.M) {
 	chatLogEnabled = false
+	// 轮转退避归零（backoff.go 里那句「TestMain 已置 0」此前是空头承诺）：真实取值
+	// 500ms 起，MaxRotate=3 的用例要白等 1.5s+。退避**界**的断言由用例自己临时恢复。
+	rotateBackoffBase = 0
 	os.Exit(m.Run())
 }
 
