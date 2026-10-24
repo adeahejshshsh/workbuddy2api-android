@@ -125,8 +125,11 @@ type chatStatsReader struct {
 	// 实测 completion=100 里 91 是思考）。用于解释「速率看着慢」。
 	thinkTokens int
 	hasThink    bool
-	pend        []byte // 已读未返回的行缓存
-	pendErr     error  // 与 pend 伴随的 EOF（bug 12）：必须等尾巴吐完再返回
+	// frames 本流收到的 data 帧数（不含 [DONE] 与注释行）。断流排障时「断了多少帧」
+	// 比「断了」有用得多：0 帧=上游压根没开始吐，几百帧=说到一半被掐。
+	frames  int
+	pend    []byte // 已读未返回的行缓存
+	pendErr error  // 与 pend 伴随的 EOF（bug 12）：必须等尾巴吐完再返回
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -136,6 +139,10 @@ func newChatStatsReaderSince(r io.Reader, since time.Time) *chatStatsReader {
 
 // TTFB 返回首个 data 帧到达耗时；无帧时为 0。
 func (s *chatStatsReader) TTFB() time.Duration { return s.ttfb }
+
+// Frames 本流已收到的 data 帧数（不含 [DONE]/注释行）。断流日志用它区分
+// 「首帧之前就断」与「吐了几百帧后被掐」。
+func (s *chatStatsReader) Frames() int { return s.frames }
 
 // Tokens 返回末帧 usage.completion_tokens 与是否缺失；无 usage 时 ok=false。
 func (s *chatStatsReader) Tokens() (int, bool) { return s.completionTokens, s.hasCompletionTokens }
@@ -187,6 +194,7 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	if payload == "[DONE]" {
 		return
 	}
+	s.frames++
 	if !s.seen {
 		s.seen = true
 		s.ttfb = time.Since(s.start)

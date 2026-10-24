@@ -10,6 +10,9 @@
 `11158 not allowed for user type [personal]`；网关 401 不分成因直接计死、3 次误杀健康号
 （issue #66 两号被禁，revive 后连续全 200）。
 
+**本版另有 1 条本仓自有修复**：流式断流若发生在**首帧之前**（一个字节都没写给客户端），
+旧实现伪 200 + error 帧把回合钉死，现在改为换号重试（对客户端透明），名额用尽才回正经 502。
+
 **其余**：企业 `1<<40` 哨兵污染权重分母、4 个专家体验任务、临期窗口刷新 token、
 突发积分与低缓存率两道预算闸、`POST /v2/chat/busy`、`/v1/search` 的 count 兼容、
 静默回合（声明了 tools 却 stop + 零 tool_calls）记账、面板「⤳ 已路由至」标注、
@@ -44,6 +47,34 @@
 | `614e7b4` | 网关 401 先 refresh 求证再计 session dead（issue #66） | 我们那处 `IsGatewayUnauthorized` 分支改成分三路：refresh 成功 → 清计数 + 软冷却 + **落盘新 RT**（refresh 只改内存，不落盘会让重启拿旧 RT 刷新 = 账号真死）；refresh 被应用层明确拒绝 → 计死；无判词（传输错 / 5xx / 429 / HTML 拦截页）→ 只软冷却。冷却用 `CooldownSoftRate` 而非固定 60s，防「chat 恒 401 但 refresh 恒成功」的降级 token 每 60s 轮换一次 RT（1440 次/天） |
 
 顺带给 `pool.Status` 补 `session_dead_fails`（`614e7b4` 的测试要读它；运维也能一眼看出某号是刚踩一次抖动、还是真在往禁用走）。
+
+### 三、流式断流：首帧之前断流改为换号重试（2026-10-24 线上）
+
+线上现象：DSH 偶发「对话失败」，日志是 `WARN: [server] stream acct=… model=…: upstream
+read error: upstream stream read failed: unexpected EOF`，流水行 `stream | 502 | TTFB=3845ms |
+total=49.0s | out=stream_error | try=1`。
+
+`unexpected EOF` 是上游在 chunked 响应中途关连接。不是我们的超时：超时会报
+deadline/timeout，且 `upstream.idle_timeout_seconds` 默认 300s，45s 的静默不会触发。
+按「断在第几帧」分两种处置：
+
+| 形态 | 旧处置 | 新处置 |
+|---|---|---|
+| **首帧之前就断**（一个字节都没写给客户端） | 伪 200 + error 帧 —— 客户端只能把整个回合判死，而此刻换个号本可以完全透明 | **换号重试**；名额用尽才回正经的 502 JSON（客户端可按可重试处理） |
+| 吐了若干帧后断 | 补 error 帧 + `[DONE]`（正确，救不回来） | 不变，但 WARN 行补上「断了多久 / 断在第几帧」 |
+
+实现：`StreamHint` 记 `wroteAny`（任一次写成功即置位）。读错误且 `!wroteAny` 时**不写**
+error 帧与 `[DONE]`，直接返回 `ErrStreamBrokeBeforeFlush`（包装 `errUpstreamRead`，
+旧口径 `IsUpstreamReadError` 仍成立）。此刻响应头还没发出（`WriteHeader` 由首次写触发），
+handler 因此能 `continue` 换号，并把 `st.status`/`st.outcome` 复位，让流水行反映最终
+真正服务成功的那次。
+
+边界刻意钉在「字节」而不是「内容」：`role` 帧一旦写出，客户端就已经看到一条流，再开
+一条会在同一个 HTTP 响应里串流 —— 所以只有**一个字节都没发**才算可重试。线上这条
+（TTFB=3845ms 已吐帧、45s 后断）属于第二种，救不回来，但至少现在能看清断在第几帧。
+
+顺带：`chatStatsReader` 加 `Frames()`，断流 WARN 从 `upstream read error: %v` 变成
+`upstream read error after 45.2s (frames=312): %v`。
 
 ### 未合并
 
@@ -82,7 +113,15 @@
 `TestGateway401RefreshBlockedNotDisables`（refresh 被边缘拦 502 HTML → 不计死）+
 `TestGateway401RealDeadStillDisables`（refresh 被应用层拒 → 达阈仍禁用）。
 
-**891 通过 / 0 失败**（server 134 / upstream 250 / panel 66 / pool 201 / scheduler 85 /
+**三（断流）新增 4 个用例**：`TestStreamHintBrokeBeforeFirstFrameWritesNothing`
+（首帧前断 → 一个字节都不写、不 flush、错误可识别）、
+`TestStreamHintCommentLineThenBreakKeepsFake200`（已写过心跳行 → 头已发出，退回旧收尾
+且**不得**报成可重试）、`TestStreamRetriesWhenUpstreamBrokeBeforeFirstFrame`
+（两个账号，首个断流 → 客户端拿到完整流、上游被调 2 次且不是同一个号）、
+`TestStreamEarlyBreakReturns502JSONWhenRetriesExhausted`（名额用尽 → 502 JSON + hint，
+SSE 头撤净、不写任何 `data: ` 帧）。
+
+**895 通过 / 0 失败**（server 136 / upstream 252 / panel 66 / pool 201 / scheduler 85 /
 auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
 口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
 

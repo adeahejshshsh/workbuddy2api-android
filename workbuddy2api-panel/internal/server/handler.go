@@ -1510,6 +1510,43 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					if sessKey != "" && h.cfg.Session != nil {
 						h.cfg.Session.Bind(sessKey, acct.UID)
 					}
+				} else if upstream.IsStreamBrokeBeforeFlush(sErr) {
+					// 上游在吐第一帧之前就断了，而我们一个字节都没写给客户端 ——
+					// 响应头还没发出（WriteHeader 由首次写触发），换号重试对客户端
+					// **完全透明**。此前这里和「流到一半断」共用同一条收尾：伪 200 +
+					// error 帧，客户端只能把整个回合判失败，而其实换个号就能成。
+					//
+					// 这不会放大上游压力：NoteFailures 已记这笔，断流的号会按连败
+					// 降权；且重试受 MaxRotate 约束，与其它换号路径同额度。
+					recordAttempt(acct.UID, stats.Usage(), 0, false, attemptStarted, stats.TTFB())
+					h.cfg.Pool.NoteFailures(acct.UID)
+					fail(acct.UID)
+					rc.Close()
+					if i+1 < h.cfg.MaxRotate {
+						log.Printf("WARN: [server] stream acct=%s model=%s: upstream broke before first frame after %s (no bytes sent) → retry on another account (%d/%d)",
+							logfmt.Label(acct.UID, acct.NicknameValue()), bareModel,
+							time.Since(attemptStarted).Round(time.Millisecond), i+1, h.cfg.MaxRotate)
+						// 本次尝试什么都没送达：观测复位，让请求流水行反映最终真正服务的那次
+						// （否则 status/outcome 会停在这笔失败的 502 上，看着像整轮都失败）。
+						st.status = 0
+						st.outcome = ""
+						st.ttfb = 0
+						continue
+					}
+					// 轮转名额用尽：头还没发，回正经的 502 JSON。客户端拿到的是一条
+					// 可重试的普通 HTTP 错误，而不是「200 但带 error 帧」这种只能判死的流。
+					st.status = http.StatusBadGateway
+					st.outcome = reqlog.OutcomeStreamError
+					log.Printf("WARN: [server] stream acct=%s model=%s: upstream broke before first frame, retries exhausted (%d): %v",
+						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, h.cfg.MaxRotate, sErr)
+					// 清掉 StreamHint 设的 SSE 头（它们还没被发出，可以撤）
+					w.Header().Del("Cache-Control")
+					w.Header().Del("Connection")
+					w.Header().Del("X-Accel-Buffering")
+					writeOpenAIErrorHint(w, http.StatusBadGateway, "upstream_error",
+						"upstream closed the connection before sending any data",
+						"upstream 断在首帧之前，本请求未产生任何内容；换号重试已用尽，可直接重试本请求")
+					return
 				} else {
 					// 读上游失败（中途 RST / unexpected EOF）：这是**上游故障**，不是
 					// 「人走了」。此前不分来源一律记 Interrupted + NoteSuccess，等于把
@@ -1518,8 +1555,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					st.status = http.StatusBadGateway
 					st.outcome = reqlog.OutcomeStreamError
 					h.cfg.Pool.NoteFailures(acct.UID)
-					log.Printf("WARN: [server] stream acct=%s model=%s: upstream read error: %v",
-						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, sErr)
+					log.Printf("WARN: [server] stream acct=%s model=%s: upstream read error after %s (frames=%d): %v",
+						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel,
+						time.Since(attemptStarted).Round(time.Millisecond), stats.Frames(), sErr)
 				}
 			default:
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。

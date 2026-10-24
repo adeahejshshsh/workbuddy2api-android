@@ -114,3 +114,65 @@ type failWriter struct{}
 func (failWriter) Header() http.Header         { return http.Header{} }
 func (failWriter) Write(p []byte) (int, error) { return 0, errors.New("broken pipe") }
 func (failWriter) WriteHeader(statusCode int)  {}
+
+// 首帧之前就断：此时响应头还没发出（WriteHeader 由首次写触发），必须**一个字节都不写**
+// 并返回 ErrStreamBrokeBeforeFlush —— 调用方据此换号重试，或回一个正经的 502 JSON。
+//
+// 反例的代价是实打实的：伪 200 + error 帧会把客户端钉死在「回合失败」，而换个号
+// 本可以完全透明地成功（2026-10-24 线上：DSH 报「对话失败」的就是这一类）。
+func TestStreamHintBrokeBeforeFirstFrameWritesNothing(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		// 一个字节都不给，直接断
+		pw.CloseWithError(io.ErrUnexpectedEOF)
+	}()
+	rec := httptest.NewRecorder()
+	err := StreamHint(rec, pr, nil)
+	if err == nil {
+		t.Fatal("want error on upstream break before first frame")
+	}
+	if !IsStreamBrokeBeforeFlush(err) {
+		t.Fatalf("want ErrStreamBrokeBeforeFlush, got %v", err)
+	}
+	// 旧口径不变：它仍然是「读上游失败」
+	if !IsUpstreamReadError(err) {
+		t.Fatalf("must still satisfy IsUpstreamReadError, got %v", err)
+	}
+	if IsClientWriteError(err) {
+		t.Fatal("upstream break must not look like a client write error")
+	}
+	if got := rec.Body.String(); got != "" {
+		t.Fatalf("must write nothing when no frame was sent (否则 200 就钉死了): %q", got)
+	}
+	if rec.Flushed {
+		t.Fatal("must not flush: flushing sends the 200 header and kills the retry option")
+	}
+}
+
+// 已经写过心跳/注释行 → 头已发出，不能重试：退回旧的「补 error 帧 + [DONE]」收尾，
+// 且**不得**报成 ErrStreamBrokeBeforeFlush（否则调用方会去重试一个已开流的响应）。
+func TestStreamHintCommentLineThenBreakKeepsFake200(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		pw.Write([]byte(": ping\n\n"))
+		pw.CloseWithError(io.ErrUnexpectedEOF)
+	}()
+	rec := httptest.NewRecorder()
+	err := StreamHint(rec, pr, nil)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if IsStreamBrokeBeforeFlush(err) {
+		t.Fatalf("头已发出（心跳行已写）就不该报可重试错误，got %v", err)
+	}
+	if !IsUpstreamReadError(err) {
+		t.Fatalf("want errUpstreamRead, got %v", err)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "upstream_read_error") {
+		t.Fatalf("missing error frame: %s", out)
+	}
+	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "data: [DONE]") {
+		t.Fatalf("stream must end with exactly one [DONE]: %q", out)
+	}
+}

@@ -57,11 +57,24 @@ var errClientWrite = errors.New("client write failed")
 // 但错误必须能追溯到上游，不能让调用方当成「客户端走了」。
 var errUpstreamRead = errors.New("upstream stream read failed")
 
+// ErrStreamBrokeBeforeFlush 上游在吐第一帧之前就断了，且我们**一个字节都没写给客户端**。
+//
+// 与「流到一半断」有本质区别：HTTP 响应头由首次写触发，此形态下 WriteHeader 还没发生，
+// 调用方仍能换号重试，或直接回一个正常的 502 JSON —— 不该伪造成 200 + error 帧。
+// 伪 200 的代价是实打实的：客户端拿到「200 但带 error 帧」，只能把整个回合判失败，
+// 而此刻换一个账号重发本可以完全透明。
+//
+// 它包装了 errUpstreamRead，所以 IsUpstreamReadError 仍然成立（旧分支口径不变）。
+var ErrStreamBrokeBeforeFlush = fmt.Errorf("%w: broke before any frame was sent", errUpstreamRead)
+
 // IsClientWriteError 报告错误是否为写客户端失败（客户端断连）。
 func IsClientWriteError(err error) bool { return errors.Is(err, errClientWrite) }
 
 // IsUpstreamReadError 报告错误是否为读上游失败（上游中途断流）。
 func IsUpstreamReadError(err error) bool { return errors.Is(err, errUpstreamRead) }
+
+// IsStreamBrokeBeforeFlush 报告错误是否为「一帧未发就断流」——调用方此时可以换号重试。
+func IsStreamBrokeBeforeFlush(err error) bool { return errors.Is(err, ErrStreamBrokeBeforeFlush) }
 
 // clientWriteErr 包装写客户端的错误（保留原错误文本，供日志）。
 func clientWriteErr(err error) error { return fmt.Errorf("%w: %v", errClientWrite, err) }
@@ -658,6 +671,9 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	h.Set("Cache-Control", "no-cache")
 	h.Set("Connection", "keep-alive")
 	h.Set("X-Accel-Buffering", "no")
+	// wroteAny 客户端是否已收到任何字节。false 时响应头**还没发出**（WriteHeader 由
+	// 首次写触发），调用方仍可换号重试或回正经的 502 JSON（见 ErrStreamBrokeBeforeFlush）。
+	wroteAny := false
 	fl, _ := w.(http.Flusher)
 
 	// toolCallSeen 跨帧记录 delta.tool_calls 里已发过首片的 index，
@@ -692,6 +708,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
 			return clientWriteErr(werr)
 		}
+		wroteAny = true
 		if fl != nil {
 			fl.Flush()
 		}
@@ -895,6 +912,7 @@ readLoop:
 			if _, werr := io.WriteString(w, line); werr != nil {
 				return clientWriteErr(werr)
 			}
+			wroteAny = true
 			if fl != nil {
 				fl.Flush()
 			}
@@ -938,6 +956,12 @@ readLoop:
 	// 上游读错误（流中途断）：补一帧 error 再补 [DONE]。客户端因此能区分
 	// 「说完了」与「说到一半上游断了」，不会把半截答案当完整答案。
 	if readErr != nil {
+		// 一帧未发就断：此时响应头还没发出（wroteAny=false），**不写** error 帧与
+		// [DONE]——那会把 200 钉死，白白放弃换号重试的机会。交给调用方决定：换号
+		// 重试，或回一个正经的 502 JSON（见 ErrStreamBrokeBeforeFlush）。
+		if !wroteAny {
+			return fmt.Errorf("%w (%v)", ErrStreamBrokeBeforeFlush, readErr)
+		}
 		// 走 writeSSE 而不是 writeRaw（报告 #7）：writeRaw 内部会调
 		// frameGatewayHint(hintFn, payload)，而这是**网关本地补写的故障帧**，
 		// 不该带上游语义提示。此刻不出问题只因 FrameKind 对该 payload 恰好返回
