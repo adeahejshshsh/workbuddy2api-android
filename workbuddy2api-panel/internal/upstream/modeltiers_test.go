@@ -37,6 +37,33 @@ func TestApplyModelTiers(t *testing.T) {
 	}
 }
 
+// primary-model 上游 modelTiers 漏标、但三个 global 号实测 11158 拒（2026-10-23）：
+// 空 tiers 也要挂上；上游给了文案时以上游为准。
+func TestApplyModelTiersProOnlyFallback(t *testing.T) {
+	out := map[string]ModelInfo{"primary-model": {ID: "primary-model"}}
+	applyModelTiers(out, nil)
+	if got := out["primary-model"].Tier; got != "Pro Only" {
+		t.Fatalf("空 tiers 时 primary-model tier = %q，want Pro Only", got)
+	}
+
+	// 上游若收录了它，用上游文案，不被兜底覆盖。
+	out2 := map[string]ModelInfo{"primary-model": {ID: "primary-model"}}
+	applyModelTiers(out2, []v3ModelTier{{Enabled: true, Priority: 1, ModelIDs: []string{"primary-model"},
+		Badge: &struct {
+			Label string `json:"label"`
+		}{Label: "订阅优先"}}})
+	if got := out2["primary-model"].Tier; got != "订阅优先" {
+		t.Fatalf("上游文案被兜底覆盖：tier = %q", got)
+	}
+
+	// 目录里没有该模型时不凭空造条目。
+	out3 := map[string]ModelInfo{"other": {ID: "other"}}
+	applyModelTiers(out3, nil)
+	if _, ok := out3["primary-model"]; ok {
+		t.Fatal("目录外模型不该被兜底补进来")
+	}
+}
+
 // 同模型命中多条 enabled 层级时取 priority 最高那条的文案。
 func TestApplyModelTiersPriority(t *testing.T) {
 	out := map[string]ModelInfo{"m": {ID: "m"}}

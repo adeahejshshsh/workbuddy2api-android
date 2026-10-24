@@ -303,3 +303,46 @@ func TestInjectThinkingStringPreserved(t *testing.T) {
 		t.Errorf("stream 未强制: %s", out)
 	}
 }
+
+// TestThinkingHonorsEffortOff 客户端用档位字段表达「关闭思考」时必须真的关掉。
+// 回归实测：off 在 effortRank 里 rank=0，模型又不声明 off 档位，于是被就近降级
+// 成最弱正档——实测仍返回 157 字思维链，与 high 无异。
+func TestThinkingHonorsEffortOff(t *testing.T) {
+	efforts := map[string][]string{"deepseek-v4.1-flash": {"low", "high", "max"}}
+	cases := []struct{ name, body string }{
+		{"snake off", `{"model":"deepseek-v4.1-flash","reasoning_effort":"off","messages":[]}`},
+		{"camel none", `{"model":"deepseek-v4.1-flash","reasoningEffort":"none","messages":[]}`},
+		{"off with enabled thinking", `{"model":"deepseek-v4.1-flash","thinking":{"type":"enabled"},"reasoning_effort":"off","messages":[]}`},
+		{"uppercase OFF", `{"model":"deepseek-v4.1-flash","reasoning_effort":" OFF ","messages":[]}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := PrepareBodyOptWithEffortsAndDefault([]byte(c.body), false, efforts, nil)
+			typ, _ := getThinkingType(t, out)
+			if typ != "disabled" {
+				t.Fatalf("thinking.type=%q want disabled (out=%s)", typ, out)
+			}
+			// 档位字段必须清掉：留着会被降级管线抬回正档，关思考又失效。
+			for _, k := range []string{"reasoning_effort", "reasoningEffort"} {
+				if _, ok := objFieldString(t, out, k); ok {
+					t.Errorf("%s 应被删除 (out=%s)", k, out)
+				}
+			}
+		})
+	}
+}
+
+// TestThinkingEffortOffNotLeakedToOtherModels 非 deepseek 模型不注入 thinking
+// （关闭形态由上游自己认），但非法档位值 off/none 一律清掉——上游只认自己的
+// 档位表，透传 off 只会得到 400 或静默降级。
+func TestThinkingEffortOffNotLeakedToOtherModels(t *testing.T) {
+	out := PrepareBodyOptWithEffortsAndDefault(
+		[]byte(`{"model":"glm-5.3","reasoning_effort":"off","messages":[]}`), false,
+		map[string][]string{"glm-5.3": {"low", "high", "max"}}, nil)
+	if _, ok := getThinkingType(t, out); ok {
+		t.Errorf("非 deepseek 不应被注入 thinking (out=%s)", out)
+	}
+	if v, ok := objFieldString(t, out, "reasoning_effort"); ok {
+		t.Errorf("off 非法档位应被清掉, got %q", v)
+	}
+}

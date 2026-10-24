@@ -424,6 +424,27 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 	return uids
 }
 
+// CapacityForModel 报告 (realm, model) 下健康账号数，以及全池健康账号数。
+// 刻意不过滤 in-flight 满载：容量是「有多少号能用」的事实，能不能立刻派单由
+// 调用方（准入/轮换）自己判——混进来会让 /v1/capacity 随并发抖动，客户端拿它
+// 做扩缩容判断就会误判。
+func (p *Pool) CapacityForModel(model, realm string) (modelAvailable, poolAvailable int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	now := time.Now()
+	for _, e := range p.byUID {
+		if e.healthy(now) {
+			poolAvailable++
+		}
+		if (realm == "" || e.a.Realm() == realm) && e.healthyForModel(now, model) &&
+			!p.floorBlockedForRealmModel(e, model, realm, now) {
+			modelAvailable++
+		}
+	}
+	return modelAvailable, poolAvailable
+}
+
 // PickByUIDForModel 同 PickByUID，但用 healthyForModel 校验：绑定号在当前模型被
 // 6004 限流时返回 nil，让调用方（handler）解绑并回落普通轮换。
 // 这是粘性能"换得动"的关键：绑定只记 uid，若只按账号级 healthy 校验，
@@ -620,13 +641,15 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// disabled|paused 四维或门，而 /status 的汇总 cooling 计数用的是 !healthy ——
 		// 此前这里只取前两维，于是"仅因连败降权出池"的号在汇总里算 cooling、
 		// 在行内却 cooling=false / cool_kind 空，监控按行判断会漏掉它。
-		Cooling:      now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
-		Disabled:     e.disabled,
-		NeedAuth:     e.needAuth,
-		APIKey:       e.a != nil && e.a.IsAPIKey(),
-		Paused:       e.paused,
-		SuccessCount: e.successCount,
-		ErrTotal:     e.errTotal,
+		Cooling:  now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
+		Disabled: e.disabled,
+		// 12153/网关 401 的连击进度：0 时省略（omitempty），非 0 就是「离禁用还差几次」。
+		SessionDeadFails: e.sessionDeadFails,
+		NeedAuth:         e.needAuth,
+		APIKey:           e.a != nil && e.a.IsAPIKey(),
+		Paused:           e.paused,
+		SuccessCount:     e.successCount,
+		ErrTotal:         e.errTotal,
 		// 读侧必须与写侧同源（报告 #2）：写侧是 cst.DayKey，读侧用宿主本地日期时，
 		// 非 CST 宿主每天有一段窗口两个日期键不一致 —— 刚签到的号显示「未签到」，
 		// 前一天的「已签」又多留 8 小时。

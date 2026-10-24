@@ -190,6 +190,7 @@ func NewHandler(cfg Config) *Handler {
 	// 见 busy.go 文件头）。本地按池台账算，不打上游。
 	h.mux.HandleFunc("POST /v2/chat/busy", h.withAuth(h.chatBusy))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	// 存活探针（bug P2-2）：/healthz 是「可服务」语义（池里没有可用账号就 503），
@@ -268,6 +269,39 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		body["realm_servable"] = realmServable
 	}
 	writeJSON(w, status, body)
+}
+
+// capacity GET /v1/capacity?model=<name>：按模型查询可用账号容量（官方客户端契约）。
+// 返回 {model, model_available_accounts, available_accounts}。
+//
+// 已知偏差（沿用上游实现，不影响本仓使用）：
+//   - available_accounts 不按 realm 过滤，恒为全池健康数
+//   - 未配置 APIKey 时回 401，与 withAuth 的放行语义不同（本仓生产始终配置 key）
+func (h *Handler) capacity(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if strings.TrimSpace(h.loadLive().APIKey) == "" {
+		writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", "API key is required")
+		return
+	}
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	if model == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
+		return
+	}
+
+	realm, bareModel := resolveModel(model)
+	if target, ok := h.modelAlias(realm, bareModel); ok && target != "" {
+		realm, bareModel = resolveModel(target)
+	}
+	modelAvailable, poolAvailable := h.cfg.Pool.CapacityForModel(bareModel, realm)
+	if h.modelHidden(realm, bareModel) {
+		modelAvailable = 0
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":                    model,
+		"model_available_accounts": modelAvailable,
+		"available_accounts":       poolAvailable,
+	})
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
@@ -2250,8 +2284,45 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 故与 12153 一样走**连续阈值**才禁；阈值内死号仍会被重试，但最多 3 次出池，
 		// 不再「每请求刷一遍 401」。
 		if uerr != nil && upstream.IsGatewayUnauthorized(uerr.Status, body) {
-			if h.cfg.Pool.NoteSessionDead(uid) {
-				log.Printf("WARN: [server] acct=%s disabled after %d consecutive gateway 401 (token invalid)",
+			// 先 refresh 求证再计死：网关 401 有两种成因，响应体完全一样（APISIX/
+			// openresty 的 HTML 页，无业务信封），单看 401 分不出来——
+			//   a) token 真失效 → refresh 被拒 → 该计死；
+			//   b) 网关瞬时拦截（风控/边缘抖动）→ refresh 仍成功 → 不该罚。
+			// 实测（2026-10-24 issue #66）：两号各累计 3 次 401 被禁，revive 后立刻
+			// 全 200，即情形 b。不清零计数，多次瞬时拦截会累积到阈值误杀健康号。
+			//
+			// 代价：每个网关 401 多一次 refresh 往返；refresh 轻量且 401 低频，另由下面
+			// 的软冷却兜住「同一账号每请求都来问一次」。
+			if acct := h.cfg.Pool.AuthByUID(uid); acct != nil && acct.RefreshTokenValue() != "" && h.cfg.Upstream != nil {
+				rerr := h.cfg.Upstream.RefreshToken(acct)
+				if rerr == nil {
+					// 上游已轮换 RT：必须落盘，否则重启拿旧 RT 刷新 = 账号真死。
+					if serr := acct.SaveAtomicRetry(); serr != nil {
+						log.Printf("ERR: [server] 网关 401 后 refresh 成功但落盘失败: %v", serr)
+					}
+					h.cfg.Pool.ClearSessionDead(uid)
+					// 用 CooldownSoftRate 而非固定 Cooldown：60s 起按 softStreak 翻倍
+					// （封顶 soft_rate_max），任何一次成功即清零。防「chat 恒 401 但
+					// refresh 恒成功」的降级 token 每 60s 轮换一次 RT（1440 次/天）。
+					h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "gateway 401 (refresh ok, transient)")
+					log.Printf("INFO: [server] 账号 %s 网关 401 但 refresh 成功 → 瞬时拦截，不计 session dead",
+						logfmt.Label(uid, ""))
+					return
+				}
+				// 只有上游**应用层明确拒绝**才算 token 失效。refresh 端点同样挂在
+				// /v2/* 上，边缘瞬时拦截时它也回 HTML 页（401/403 无业务信封）——
+				// 那是「拦截」不是「判词」，计入就等于换个地方复发同一个误杀。
+				var re *upstream.Error
+				if !errors.As(rerr, &re) || re.Status >= 500 || re.Status == http.StatusTooManyRequests ||
+					upstream.IsGatewayUnauthorized(re.Status, re.Msg) || upstream.IsWafBlocked(re.Status, re.Msg) {
+					h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "gateway 401 (refresh inconclusive)")
+					log.Printf("INFO: [server] 账号 %s 网关 401，refresh 未给出明确判词 → 不计 session dead: %v",
+						logfmt.Label(uid, ""), rerr)
+					return
+				}
+			}
+			if h.cfg.Pool.NoteSessionDeadWith(uid, gatewayUnauthorizedReason) {
+				log.Printf("WARN: [server] acct=%s disabled after %d consecutive gateway 401 (refresh verdict: token invalid)",
 					logfmt.Label(uid, ""), pool.SessionDeadThreshold())
 			}
 			return

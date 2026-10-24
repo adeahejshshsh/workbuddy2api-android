@@ -1915,11 +1915,16 @@ type v3ModelTier struct {
 	} `json:"badge"`
 }
 
+// proOnlyFallback 上游 modelTiers 漏收录、但实测被拒的模型。2026-10-23 实测：
+// primary-model 三个 global 号全回 11158 not allowed for user type [personal]，
+// 同档 gpt-5.4/6.x 都在表内，只有它漏标。上游补进表后本清单即可删。
+var proOnlyFallback = []string{"primary-model"}
+
 // applyModelTiers 给受限模型挂官方标识文案（同模型多条命中取 priority 最高）。
 // 只标注不过滤：一次 /v1/models 是全池共享的，而层级是账号级属性，在列表接口上
 // 没有「当前账号」，硬过滤会按池里最差的号降级掉所有人的选择。
 func applyModelTiers(out map[string]ModelInfo, tiers []v3ModelTier) {
-	if len(tiers) == 0 || len(out) == 0 {
+	if len(out) == 0 {
 		return
 	}
 	best := map[string]int{}
@@ -1937,6 +1942,13 @@ func applyModelTiers(out map[string]ModelInfo, tiers []v3ModelTier) {
 			}
 			best[id] = t.Priority
 			mi.Tier = t.Badge.Label
+			out[id] = mi
+		}
+	}
+	// 上游表漏标的兜底：已有官方文案的不覆盖（上游才是权威）。
+	for _, id := range proOnlyFallback {
+		if mi, ok := out[id]; ok && mi.Tier == "" {
+			mi.Tier = "Pro Only"
 			out[id] = mi
 		}
 	}

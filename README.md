@@ -22,6 +22,8 @@
 **对外提供 OpenAI 兼容接口**
 
 * `/v1/chat/completions`（流式 / 非流式）、`/v1/models`
+* 兼容入口：`/v1/search`（DeepSeek Search）、`/v1/fetch`（网页抓取）、
+  `/v2/chat/busy`（模型忙预检）、`/v1/capacity?model=`（按模型查可用账号容量）
 * 多账号池 + 轮转：失败自动换号、模型级冷却、成本分层（优先免费号）、会话粘性
 * 双域路由：`[realm:]model` 前缀区分国内（cn）与海外（global），跨域自动隔离
 * 上游错误原样透传（code / requestId / 原文），并附带 `gateway_hint` 说明该怎么处理

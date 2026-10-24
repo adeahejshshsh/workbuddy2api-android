@@ -223,6 +223,15 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	if model == "" {
 		return
 	}
+	// off/none 是「关闭思考」的表达，不是可降级的档位。没有模型声明 off 档位
+	// （effortRank 里 rank 0 的 off 只是排序占位），不截住就会被就近降级成最弱
+	// 正档——客户端要关闭，网关却给它开了最弱的思考（实测 glm 变 low）。
+	// deepseek 的关闭形态由 injectThinking 写成 thinking.type=disabled。
+	if effortValueOff(obj) {
+		delete(obj, "reasoning_effort")
+		delete(obj, "reasoningEffort")
+		return
+	}
 	supported, ok := efforts[model]
 	if !ok || len(supported) == 0 {
 		return

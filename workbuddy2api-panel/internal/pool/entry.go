@@ -90,6 +90,9 @@ type Status struct {
 	// 面板据此隐藏对应按钮；选号、保活、额度展示不受影响。
 	Enterprise bool `json:"enterprise,omitempty"`
 	Disabled   bool `json:"disabled"`
+	// SessionDeadFails 连续 12153 / 网关 401（ErrSessionDead）计数，即「离禁用还差
+	// 几次」的进度。运维据此判断某号是刚踩一次抖动还是真在往禁用走。
+	SessionDeadFails int `json:"session_dead_fails,omitempty"`
 	// NeedAuth 快照恢复出的占位条目（只有 UID、没有凭证）。这类号永远选不到，
 	// 但此前不透出，导致 503 提示把它算成「本域健康号」（报告 #6）。
 	NeedAuth bool `json:"need_auth,omitempty"`
