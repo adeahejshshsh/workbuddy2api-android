@@ -1420,6 +1420,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		resp, err := c.chatHTTP().Do(req)
 		if err != nil {
 			cancel()
+			// 父 ctx 已取消 = **客户端先走了**（DSH 超时 / 点了停止 / 关页面），不是上游
+			// 故障。此前一律打 `ERR ... transport error: context canceled`，把「人走了」
+			// 报成「上游坏了」——排障方向完全反了（会去查上游和网络，实际该查客户端超时）。
+			// 也不清连接池：清池是给「连接坏了」用的，客户端取消与连接健康无关，用户
+			// 频繁点停止时按次清池反而拖慢后续请求。
+			if ctx.Err() != nil {
+				log.Printf("INFO: [upstream] chat_stream acct=%s: 客户端已取消请求，放弃出站（上游尚未回响应头）",
+					logfmt.Label(a.UID, a.NicknameValue()))
+				return nil, 0, nil, err
+			}
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
 			// 留在空闲池里，下一个请求会继续捡到它——仅靠 IdleConnTimeout 等过期

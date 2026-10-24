@@ -14,9 +14,11 @@ package server
 // 「网关连不上上游」。
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -105,5 +107,70 @@ func TestTransportErrorCountsOncePerAccount(t *testing.T) {
 	}
 	if st.Disabled {
 		t.Fatal("传输层失败不该禁用账号")
+	}
+}
+
+// ctxAwareUpstream 只在 ctx 还活着时才应答；被取消就直接返回 ctx 错误，
+// 并记下「真的发出去过几次」。
+type ctxAwareUpstream struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (u *ctxAwareUpstream) client() *upstream.Client {
+	return &upstream.Client{
+		ChatBaseCN: "https://fake-upstream.test",
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if err := r.Context().Err(); err != nil {
+				return nil, err
+			}
+			u.mu.Lock()
+			u.n++
+			u.mu.Unlock()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(okChatSSE)),
+			}, nil
+		})},
+	}
+}
+
+func (u *ctxAwareUpstream) count() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.n
+}
+
+// 客户端先走（ctx 取消）时：不真打上游、不罚号、不再往死连接写响应。
+// `context canceled` 是**客户端行为**的结果，不是上游故障 —— 记成失败会把健康号
+// 打成连败（用户频繁点停止时整池号轮着进降权期）。
+func TestClientCancelDoesNotPenalizeAccount(t *testing.T) {
+	up := &ctxAwareUpstream{}
+	p := testPoolWith(&auth.Auth{UID: "a1", AccessToken: "at-a1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up.client(), MaxRotate: 3})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	body := `{"model":"deepseek-v4.1-flash","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if n := up.count(); n != 0 {
+		t.Fatalf("ctx 已取消时不该真的打上游，实际 %d 次", n)
+	}
+	st, ok := p.Status("a1")
+	if !ok {
+		t.Fatal("账号应仍在池中")
+	}
+	if st.ConsecutiveFails != 0 {
+		t.Fatalf("客户端取消不该记连败，实际 %d", st.ConsecutiveFails)
+	}
+	if st.Disabled {
+		t.Fatal("客户端取消不该禁用账号")
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("客户端已断连，不该再写响应: %q", rec.Body.String())
 	}
 }

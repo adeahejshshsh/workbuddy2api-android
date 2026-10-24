@@ -1266,6 +1266,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusServiceUnavailable
 				st.outcome = reqlog.OutcomeInterrupted
 				fail(acct.UID)
+				// 打出「客户端等了多久才走」：这是判断「谁先超时」的唯一线索 ——
+				// 客户端取消而上游还没回响应头，说明客户端的耐心比上游 TTFB 短，
+				// 网关这边再改超时也没用（要改的是客户端，或换更快的模型/线路）。
+				log.Printf("INFO: [server] chat acct=%s model=%s: 客户端在 %s 后取消（上游尚未回响应头）→ 记 Interrupted，不罚号",
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel,
+					time.Since(attemptStarted).Round(time.Millisecond))
 				break
 			}
 			// 上游超时 / 停滞：**不换号、不罚号**。

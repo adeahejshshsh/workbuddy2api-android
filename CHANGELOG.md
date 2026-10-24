@@ -10,7 +10,7 @@
 `11158 not allowed for user type [personal]`；网关 401 不分成因直接计死、3 次误杀健康号
 （issue #66 两号被禁，revive 后连续全 200）。
 
-**本版另有 3 条本仓自有修复**：
+**本版另有 4 条本仓自有修复**：
 
 - 流式断流若发生在**首帧之前**（一个字节都没写给客户端），旧实现伪 200 + error 帧把
   回合钉死，现在改为换号重试（对客户端透明），名额用尽才回正经 502。
@@ -19,6 +19,8 @@
 - **传输层失败**：`connection reset by peer` 这类「一个上游响应都没拿到」的失败不再把
   失败号留在 `tried` 里 —— 单账号池此前会因「选不到号」直接 502，一次瞬时重置被放大成
   「网关连不上上游」。
+- **`context canceled`**：这是客户端先走了（DSH 超时/点停止/关页面），不是上游故障。
+  日志从 `ERR transport error` 改成 `INFO 客户端已取消请求`，并带上「等了多久才走」。
 
 **其余**：企业 `1<<40` 哨兵污染权重分母、4 个专家体验任务、临期窗口刷新 token、
 突发积分与低缓存率两道预算闸、`POST /v2/chat/busy`、`/v1/search` 的 count 兼容、
@@ -140,6 +142,26 @@ out=http_error | try=1`。
 
 终端语义不变：重试仍全失败时照样 502 `upstream_unreachable`，账号不禁用。
 
+### 六、`context canceled` 是客户端先走了，不该报成上游故障（2026-10-24 线上）
+
+线上现象：`ERR: [upstream] chat_stream acct=…: transport error: Post "…/v2/chat/completions":
+context canceled`。
+
+`context canceled` 意味着**出站请求的父 ctx 被取消**，也就是客户端（DSH）先走了：
+它自己的超时到了、用户点了停止、或页面关了。这不是上游故障，但日志按 ERR
+"transport error" 打出来，排障方向完全反了 —— 会去查上游和网络，实际该查的是
+客户端为什么先放弃。
+
+| 项 | 改动 |
+|---|---|
+| 分级 | 父 ctx 已取消 → `INFO: 客户端已取消请求，放弃出站`；真实传输错误仍 `ERR: transport error` |
+| 连接池 | 客户端取消时**不**清空闲连接池 —— 清池是给「连接坏了」用的，用户频繁点停止时按次清池反而拖慢后续请求 |
+| 定位线索 | handler 的客户端取消分支补一行 INFO，带「客户端在 Xs 后取消」，这是判断「谁先超时」的唯一线索 |
+
+配套钉子：`TestClientCancelDoesNotPenalizeAccount`（ctx 取消 → 不真打上游、连败 0、
+不禁用、不再往死连接写响应）；`TestChatStreamContextRealTransportErrorStillErrors`
+（对照组，别把两条路径合并掉）。
+
 ### 未合并
 
 | 提交 | 内容 | 判断 |
@@ -207,7 +229,12 @@ SSE 头撤净、不写任何 `data: ` 帧）。
 `TestTransportErrorCountsOncePerAccount`（重试全失败 → 502 `upstream_unreachable`、
 打满 `MaxRotate`、连败只记 1、账号不禁用）。
 
-**908 通过 / 0 失败**（server 143 / upstream 258 / panel 66 / pool 201 / scheduler 85 /
+**六（客户端取消）新增 3 个用例**：`TestChatStreamContextClientCancelIsNotTransportError`
+（父 ctx 已取消 → 不真发请求、返回 `context.Canceled`）、
+`TestChatStreamContextRealTransportErrorStillErrors`（对照组，真实传输错误不被误判成取消）、
+`TestClientCancelDoesNotPenalizeAccount`（端到端：不罚号、不写死连接）。
+
+**911 通过 / 0 失败**（server 144 / upstream 260 / panel 66 / pool 201 / scheduler 85 /
 auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
 口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
 
