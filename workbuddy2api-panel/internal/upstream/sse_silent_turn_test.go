@@ -118,3 +118,27 @@ func TestStreamHintHoldLetsReasoningThroughImmediately(t *testing.T) {
 		t.Fatal("不该判成静默回合")
 	}
 }
+
+// 扣住的帧在「静默判定没命中」时必须照旧刷出：客户端先收到心跳行（注释行直写，
+// wroteAny=true）→ 静默判定跳过 → 若此时不刷 pending，role/finish 帧会被 [DONE]
+// 顶掉，客户端拿到一条没有 role、没有 finish_reason 的残流。
+func TestStreamHintHoldFlushesOnSilentTurnWhenAlreadyWrote(t *testing.T) {
+	raw := ": ping\n\n" +
+		"data: {\"id\":\"c5\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c5\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	rec := httptest.NewRecorder()
+	if err := StreamHint(rec, strings.NewReader(raw), nil, WithHoldUntilContent()); err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, `"role":"assistant"`) {
+		t.Fatalf("role 帧被 [DONE] 顶掉了: %q", out)
+	}
+	if !strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Fatalf("finish 帧被 [DONE] 顶掉了: %q", out)
+	}
+	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "data: [DONE]") {
+		t.Fatalf("应以 [DONE] 收尾: %q", out)
+	}
+}

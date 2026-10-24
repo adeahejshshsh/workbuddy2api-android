@@ -1119,6 +1119,12 @@ readLoop:
 	if hold && !meaningful && !wroteAny && readErr == nil && validFrames > 0 {
 		return errSilentEmptyTurn
 	}
+	// 兜底：走到这里说明「扣住的帧要保留」（静默判定没命中，例如客户端已收到心跳行
+	// 导致 wroteAny=true）。必须先把 pending 刷出去，否则 role/finish 帧会被 [DONE]
+	// 顶掉，客户端拿到一条没有 role、没有 finish_reason 的残流。
+	if werr := flushPending(); werr != nil {
+		return werr
+	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
 		return clientWriteErr(err)

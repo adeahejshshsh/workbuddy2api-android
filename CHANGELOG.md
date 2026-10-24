@@ -174,9 +174,11 @@ SSE 头撤净、不写任何 `data: ` 帧）。
 `TestStreamSilentStopNoRetryWhenToolsOff`（`tool_choice=none` 不重发）、
 `TestStreamSilentStopRetryWorksWithSingleAccount`（单账号池 + `MaxRotate=1` 也有救援
 机会：救援名额独立于轮转额度，且静默那个号会从 `tried` 摘掉以便重选）、
-`TestStreamHintHoldLetsReasoningThroughImmediately`（思维链帧不被扣住，钉死上面的边界）。
+`TestStreamHintHoldLetsReasoningThroughImmediately`（思维链帧不被扣住，钉死上面的边界）、
+`TestStreamHintHoldFlushesOnSilentTurnWhenAlreadyWrote`（客户端已收到心跳行时静默判定
+跳过，扣住的 role/finish 帧仍须刷出，不能被 `[DONE]` 顶掉）。
 
-**905 通过 / 0 失败**（server 141 / upstream 257 / panel 66 / pool 201 / scheduler 85 /
+**906 通过 / 0 失败**（server 141 / upstream 258 / panel 66 / pool 201 / scheduler 85 /
 auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
 口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
 
