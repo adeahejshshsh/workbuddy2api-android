@@ -347,10 +347,15 @@ function rateLimitRowsHtml(rows, now) {
   const list = all.filter(row => String(row.kind || '') !== 'model_unavailable');
   let html = '';
   if (list.length) {
+    // 降级路由标注（overview.model_fallback）：限流的模型若配了等价模型，请求已被
+    // 同账号改道 —— 不标出来用户会以为「v4.1 限流 = 服务断了」。
+    const fbTable = (overviewData && overviewData.model_fallback) || {};
     html += list.map(row => {
       const m = rateLimitMeta(row, now);
+      const to = fbTable[m.model] || fbTable['cn:' + m.model] || fbTable['global:' + m.model] || '';
+      const route = to ? ' <i class="bh-route" title="该模型限流期间，请求已改道到 ' + esc(to) + '">⤳ ' + esc(to) + '</i>' : '';
       return '<div class="rate-limit" title="' + esc(m.title) + '"><b>' + esc(m.model) +
-        '</b><span>' + esc(m.detail) + '</span></div>';
+        '</b><span>' + esc(m.detail) + route + '</span></div>';
     }).join('');
   }
   if (unavailable.length) {
@@ -1173,6 +1178,7 @@ const CFG_MAP = {
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
   keepalive_hours: ['schedule', 'keepalive_hours'], keepalive_enabled: ['schedule', 'keepalive_enabled'],
+  keepalive_refresh_window: ['schedule', 'keepalive_refresh_window'],
   balance_refresh_enabled: ['schedule', 'balance_refresh_enabled'], balance_refresh_minutes: ['schedule', 'balance_refresh_minutes'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
   // 补齐缺失键（报告 #20）：这些字段此前在配置页既回显不了也改不了。
@@ -1331,7 +1337,8 @@ function collectConfig() {
 // 此前正则要求必须带单位，填 0 会被标红且 onsubmit 直接拦截，保存请求发不出去（bug #8）。
 const DURATION_RE = /^(0|(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+)$/;
 const DURATION_FIELDS = ['soft_rate', 'soft_rate_max', 'breaker_cooldown', 'breaker_cooldown_max',
-  'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'expiring_soon', 'ttl'];
+  'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'expiring_soon', 'ttl',
+  'keepalive_refresh_window'];
 const DURATION_TIP = '格式应为 Go 时长：30m / 2h / 600s / 1h30m';
 function durationBad(name) {
   const el = $('cfgForm').elements[name];
@@ -1560,6 +1567,11 @@ const AUTO_TASKS = {
   'Hp_Appearance': '设置主题 API + 皮肤生效事件（两账号实测点亮）',
   'black_cat': '夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示等 23 点排程）',
   'Expert_lighthouse': '真实轻量云专家召唤+使用链（真实对话 requestId，两账号实测点亮）',
+  'WorkBuddy_Valorant': '真实「无畏契约拼豆专家」召唤+使用链（真实对话 requestId，截止 11-15）',
+  'expert_use_maidehao': '「中国电商运营专家」召唤+使用链（专家页搜索口径，截止 11-20，+50 分）',
+  'expert_use_douyinyin': '「抖音策略师」召唤+使用链（专家页搜索口径，截止 11-20，+50 分）',
+  'expert_use_shangjia_xuanchuan': '「商家宣传页与海报设计师」召唤+使用链（专家页搜索口径，截止 11-20，+50 分）',
+  'expert_use_bowangwang': '「直播电商教练」召唤+使用链（专家页搜索口径，截止 11-20，+50 分）',
   'skill_1': '真实对话 + skill_info 技能加载事件（实测点亮）',
   'school_season': '校园日（小程序口径）：accept → mini 对话+activityId 上报 → 领奖（+100c+5e）',
   'Sequential_Tasks_1': '小程序首对话（小程序口径）：accept → mini 对话上报 → 领奖（+100c+5e）',

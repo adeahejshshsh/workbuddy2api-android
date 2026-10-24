@@ -83,12 +83,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
 	// maxCredits 统一用**全集口径**（tier 过滤前的全部 healthy 候选）：截断排序与
 	// 抽签权重共享同一基准，两个阶段权重可比。
-	var maxCredits int64
-	for _, e := range cands {
-		if e.credits > maxCredits {
-			maxCredits = e.credits
-		}
-	}
+	maxCredits := secondCredits(cands)
 	// 成本分层（reqModel 非空时）：按该模型的实测扣费把候选分层，只保留最优层。
 	//   0 = 已实测免费（限免期/夜间免费的号，最强偏好）
 	//   1 = 无观测（含观测过期）
@@ -257,7 +252,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			}
 		}
 	} else {
-		e = p.pickWeighted(eligible, maxCredits) // eligible 保序 = top5 降序子集
+		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -429,8 +424,9 @@ var minPickGap = 100 * time.Millisecond
 // 截断排序与抽签权重共享同一基准，两阶段权重可比（issue B13）。此前本函数在传入的
 // eligible 子集上重新算 max —— 子集里最高 credits 的号若刚好被 minPickGap 排除，
 // 基准就变小、credits 权重被相对放大，与注释承诺不符。
-func (p *Pool) pickWeighted(cands []*entry, maxCredits int64) *entry {
+func (p *Pool) pickWeighted(cands []*entry) *entry {
 	now := time.Now()
+	maxCredits := secondCredits(cands)
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
 	var total int64
@@ -459,10 +455,46 @@ func (p *Pool) pickWeighted(cands []*entry, maxCredits int64) *entry {
 
 // weightOf 计算单个账号的普通加权分值。
 func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
+	return p.weightOfScaled(e, maxCredits, now, 1)
+}
+
+// sentinelCredits 企业版「不限量」在池内的哨兵剩余量，与
+// upstream.enterpriseUnlimitedRemain 同值（pool 不 import upstream，故重复一次常量）。
+const sentinelCredits int64 = 1 << 40
+
+// secondCredits 返回权重分母：正常情况下就是最大余额；最大余额是哨兵时取第二大。
+//
+// 哨兵当分母会把其余账号的 credits 项压到 0 → 不限量号独吞流量（issue #222）。
+// shortcut: 只按哨兵值本身判，不按倍数——100000 对 10 也是 1e4 倍，但那是真实余额差。
+func secondCredits(cands []*entry) int64 {
+	var first, second int64
+	for _, e := range cands {
+		switch {
+		case e.credits > first:
+			second, first = first, e.credits
+		case e.credits > second:
+			second = e.credits
+		}
+	}
+	if first >= sentinelCredits {
+		return second
+	}
+	return first
+}
+
+// weightOfScaled 同 weightOf，但 credits 项乘 creditScale（1 = 原口径）。
+// 窗口内账号传 expiringCreditScale，把余额从主轴降为次轴（见该常量）。
+func (p *Pool) weightOfScaled(e *entry, maxCredits int64, now time.Time, creditScale float64) float64 {
 	w := 1.0
 	// 1. credits 比例 ×10（会计入 mid-credit 锚点，避免全员 0 时 credits 项为 0）。
+	// 超分母的余额钳到满权重。分母已排除哨兵，所以这里只可能命中企业「不限量」
+	// （1<<40）；正常余额差（哪怕 1e4 倍）不会被钳，「余额最多优先」照旧（issue #222）。
 	if maxCredits > 0 {
-		w += float64(e.credits) / float64(maxCredits) * 10
+		cred := e.credits
+		if cred > maxCredits {
+			cred = maxCredits
+		}
+		w += float64(cred) / float64(maxCredits) * 10 * creditScale
 	}
 	// 2. 闲置补偿。
 	if e.lastUsed.IsZero() {

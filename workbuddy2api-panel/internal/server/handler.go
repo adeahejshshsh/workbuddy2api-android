@@ -46,6 +46,11 @@ type Config struct {
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
 	RedisMode    string
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
+	// DailyBudget 日预算上限（credit）；0 = 不限。BurstCreditLimit / CacheLowRate 见
+	// budget.go：前者是 5 分钟窗口的突发积分闸，后者是连续低缓存命中率闸（均 0 = 关）。
+	DailyBudget      float64
+	BurstCreditLimit float64
+	CacheLowRate     float64
 	// MaxBodyMB /v1/chat/completions 请求体上限（MB）。0 = 不限制（旧语义）。
 	MaxBodyMB   int
 	RefreshSkew time.Duration // token 提前刷新窗口，默认 10m
@@ -144,6 +149,8 @@ type Handler struct {
 	aliasOnce  sync.Once
 	aliasTable map[string]string
 	degrade    degradeGate
+	// budget 日预算 + 突发积分闸 + 缓存率闸（budget.go）。
+	budget *dailyBudget
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
@@ -171,12 +178,17 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "custom" && cfg.PromptText == "" {
 		log.Printf("WARN: [server] prompt.mode=custom 但 prompt.text 为空：本次不会改写客户端 system（疑似配置漏项）")
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), budget: newDailyBudget(cfg.DailyBudget)}
+	// 突发积分闸 / 缓存率闸（review 移植 58262f31）：0 = 关闭。
+	h.budget.setGuards(cfg.BurstCreditLimit, cfg.CacheLowRate)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	// 官方 agenttool 联网检索的网关透传（非对话端点，与 images 同套取号/失败处置）。
 	h.mux.HandleFunc("POST /v1/search", h.withAuth(h.search))
 	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。
 	h.mux.HandleFunc("POST /v1/fetch", h.withAuth(h.fetch))
+	// POST /v2/chat/busy：官方客户端的「模型忙」预检（国区上游 200、国际版上游 404，
+	// 见 busy.go 文件头）。本地按池台账算，不打上游。
+	h.mux.HandleFunc("POST /v2/chat/busy", h.withAuth(h.chatBusy))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -272,6 +284,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
+	budgetUsed, budgetLimit, budgetRejected, budgetLastReject := h.budget.snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":       h.cfg.Pool.List(),
 		"total":          total,
@@ -299,6 +312,13 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
+		},
+		"daily_budget": map[string]any{
+			"used":        budgetUsed,
+			"limit":       budgetLimit,
+			"rejected":    budgetRejected,
+			"last_reject": budgetLastReject,
+			"day":         cstDay(time.Now()),
 		},
 	})
 }
@@ -703,6 +723,17 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	if ok, why := h.budget.admit(); !ok {
+		used, limit, _, _ := h.budget.snapshot()
+		code, msg := "daily_budget_exceeded", fmt.Sprintf(
+			"daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit)
+		if why != "" {
+			// 快速闸的拒因自带可读说明，别和「当日用光」混成一句话
+			code, msg = "credit_guard_tripped", why
+		}
+		writeOpenAIError(w, http.StatusTooManyRequests, code, msg)
+		return
+	}
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
@@ -1488,6 +1519,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 参数畸形）。单独记一行，排障时能一眼区分「没识别到」与「识别到但拒绝」。
 				log.Printf("WARN: [server] stream acct=%s model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
 					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, m, len(declaredTools))
+			}
+			// issue #44：声明了 tools 却拿到 finish_reason=stop 且全流零 tool_calls ——
+			// 上游把这个形态当正常收尾，客户端据此认为回合完成、工具一次没跑，用户
+			// 只能手动催一句。此前网关侧完全无痕（这是定位困难的主因），这里只记日志
+			// 并非把流改成错误：模型「判断不需要工具、直接回答」是合法行为，强行改写成
+			// 错误会让这类正常回合反复重试、每次都真实计费。
+			if len(declaredTools) > 0 && !stats.SawToolCalls() && stats.FinishReason() == "stop" {
+				log.Printf("WARN: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (silent stop; client may treat the turn as complete)",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools))
 			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），

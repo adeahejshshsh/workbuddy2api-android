@@ -79,6 +79,10 @@ type Config struct {
 	SkipFile string
 	// Balance 余额趋势采样记录器（nil = 该视图返回 501）
 	Balance *balance.Recorder
+	// ModelFallback 模型降级路由表（读 live 快照，支持热更）。nil = 未配置。
+	// 面板据它在限流提示里标注「已路由至 X」—— 否则用户看到「v4.1 限流」
+	// 会以为服务断了，实际请求已被自动改道到等价模型继续服务。
+	ModelFallback func() map[string]string
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -180,6 +184,7 @@ func (p *Panel) Logs() *Ring { return p.logs }
 
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
+	p.mux.HandleFunc("GET /panel/theme.js", p.themeScript)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
@@ -314,6 +319,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	balanceRefreshing := p.cfg.Scheduler != nil && p.cfg.Scheduler.TaskRunning(scheduler.TaskBalance)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"balance_refreshing": balanceRefreshing,
+		"model_fallback":     p.modelFallbackTable(), // 面板标注「已路由至」
 		"version":            p.cfg.Version,
 		"uptime_sec":         int(time.Since(p.started).Seconds()),
 		"auth_required":      p.apiKey() != "",
@@ -1331,6 +1337,15 @@ func (p *Panel) creditHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": out, "total": len(entries)})
+}
+
+// modelFallbackTable 返回降级路由表（nil = 未配置）。面板用它把「已路由至 X」
+// 标注到限流行上 —— 否则用户看到「v4.1 限流」会以为服务断了，实际请求已被改道。
+func (p *Panel) modelFallbackTable() map[string]string {
+	if p.cfg.ModelFallback == nil {
+		return nil
+	}
+	return p.cfg.ModelFallback()
 }
 
 // modelToggle 手动开关某 (账号, 模型) 组合。

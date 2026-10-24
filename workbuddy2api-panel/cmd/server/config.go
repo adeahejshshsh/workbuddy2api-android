@@ -128,6 +128,9 @@ type Config struct {
 		// 缺省 false = 保持既有行为，对老配置零影响。打开后禁用号仍会签到 / 保活，但
 		// **依旧不参与选号**：pool 选号侧的 disabled 过滤不受本开关影响。
 		IncludeDisabledInTasks bool `json:"include_disabled_in_tasks"`
+		// KeepaliveRefreshWindow 周期保活刷新的临期窗口（PR #244）：排程路径只刷新
+		// 剩余有效期 <= 该值的账号；空/非法见 normalize 的回落与 fail-fast。
+		KeepaliveRefreshWindow string `json:"keepalive_refresh_window"`
 
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
@@ -149,6 +152,16 @@ type Config struct {
 	} `json:"global"`
 
 	// Models 模型目录（上游 PR #225）。
+	// Budget 日预算与两道快速闸（移植 58262f31）。三项均 0 = 关闭，老配置零影响。
+	Budget struct {
+		// DailyBudget 日预算上限（credit）；0 = 不限。
+		DailyBudget float64 `json:"daily_budget"`
+		// BurstCreditLimit 5 分钟窗口内累计 credit 达此值即拒绝（0 = 关闭）。
+		BurstCreditLimit float64 `json:"burst_credit_limit"`
+		// CacheLowRate 连续 5 轮缓存命中率低于此百分比即冷却 60s（0 = 关闭）。
+		CacheLowRate float64 `json:"cache_low_rate"`
+	} `json:"budget"`
+
 	Models struct {
 		// Hidden 不对外暴露的模型黑名单：裸名=两域都藏；"cn:x"/"global:x"=只藏该域。
 		// 生效点：/v1/models 列表过滤 + chat 点名拒绝（400 model_unavailable）。改动需重启。
@@ -300,6 +313,8 @@ type Config struct {
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
+	// KeepaliveRefreshWindowDur 解析后的周期保活临期窗口；空回落 168h，<=0 报错。
+	KeepaliveRefreshWindowDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
@@ -334,6 +349,8 @@ func Default() *Config {
 	c.Schedule.TravelHours = []int{9, 21}
 	c.Schedule.ActivityHours = []int{10}
 	c.Schedule.KeepaliveHours = []int{22}
+	// 周期保活临期窗口默认 7 天：排程保活只刷新一周内到期的凭证，其余账号不动。
+	c.Schedule.KeepaliveRefreshWindow = "168h"
 	c.Schedule.BlackcatHours = []int{23}
 	c.Schedule.GrowthHours = []int{1}
 	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
@@ -742,6 +759,16 @@ func (c *Config) normalize() error {
 	if c.SoftResetMaxDur, err = time.ParseDuration(c.Cooldown.SoftResetMax); err != nil {
 		return fmt.Errorf("cooldown.soft_reset_max: %w", err)
 	}
+	// 预算闸的取值校验：负值无语义，缓存率是百分比。
+	if c.Budget.DailyBudget < 0 {
+		return fmt.Errorf("budget.daily_budget: %v 不得为负；0 = 不限", c.Budget.DailyBudget)
+	}
+	if c.Budget.BurstCreditLimit < 0 {
+		return fmt.Errorf("budget.burst_credit_limit: %v 不得为负；0 = 关闭", c.Budget.BurstCreditLimit)
+	}
+	if c.Budget.CacheLowRate < 0 || c.Budget.CacheLowRate > 100 {
+		return fmt.Errorf("budget.cache_low_rate: %v 须在 0-100 之间（百分比）；0 = 关闭", c.Budget.CacheLowRate)
+	}
 	// 空值回落必须在 ParseDuration **之前**（issue B4）：`ParseDuration("")` 直接
 	// 返回 invalid duration，配置里写 `"degrade_cooldown": ""` 会让进程启动失败，
 	// 而下面那段"空值回落默认"的分支永远走不到。口径与 soft_rate_max 一致：
@@ -874,6 +901,18 @@ func (c *Config) normalize() error {
 	}
 	if len(c.Schedule.KeepaliveHours) == 0 {
 		c.Schedule.KeepaliveHours = []int{22}
+	}
+	// 周期保活临期窗口：空回落默认 168h（Default 已置，兜底显式 ""）；非法值
+	// fail fast（拼写错误静默吞掉等于窗口变 0 → 全量刷新，违背本字段意图）；
+	// <=0 无合理语义（0/负值想全量应直接删键），报错。
+	if c.Schedule.KeepaliveRefreshWindow == "" {
+		c.Schedule.KeepaliveRefreshWindow = "168h"
+	}
+	if c.KeepaliveRefreshWindowDur, err = time.ParseDuration(c.Schedule.KeepaliveRefreshWindow); err != nil {
+		return fmt.Errorf("schedule.keepalive_refresh_window: %w", err)
+	}
+	if c.KeepaliveRefreshWindowDur <= 0 {
+		return fmt.Errorf("schedule.keepalive_refresh_window: %q 必须为正时长（如 168h）", c.Schedule.KeepaliveRefreshWindow)
 	}
 	if len(c.Schedule.BlackcatHours) == 0 {
 		c.Schedule.BlackcatHours = []int{23}

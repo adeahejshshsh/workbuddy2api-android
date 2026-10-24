@@ -48,6 +48,12 @@ type Config struct {
 	// entry.creditsEarliestExpiry）。<=0 时不做路由门槛；展示仍使用完整逐包数据。
 	ExpiringSoonWindow time.Duration
 
+	// KeepaliveRefreshWindow 周期保活的临期窗口：排程到点的 token 保活只刷新
+	// NeedsRefresh(window) 为真的账号（剩余有效期 <= window，或已过期/无 expiry），
+	// 避免每天对全部账号轮换 refresh token。面板手动「全部保活」（RunKeepaliveNow）
+	// 不受本窗口影响，始终全量刷新。0 = 未配置（New 回落默认 7 天）。
+	KeepaliveRefreshWindow time.Duration
+
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
 	// 禁用后不再有任何签到时点。旅行不再搭签到便车（已剥离为独立排程）。
 	CheckinDisabled bool
@@ -128,6 +134,9 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.GrowthHours) == 0 {
 		cfg.GrowthHours = []int{1}
 	}
+	if cfg.KeepaliveRefreshWindow == 0 {
+		cfg.KeepaliveRefreshWindow = 7 * 24 * time.Hour
+	}
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
@@ -157,6 +166,21 @@ func (s *Scheduler) SetExpiringSoonWindow(d time.Duration) {
 	if changed && poolRef != nil {
 		poolRef.ClearExpiringSnapshots()
 	}
+}
+
+// keepaliveRefreshWindow 返回周期保活的临期窗口（配置快照）。
+func (s *Scheduler) keepaliveRefreshWindow() time.Duration {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	return s.cfg.KeepaliveRefreshWindow
+}
+
+// SetKeepaliveRefreshWindow 热更新周期保活的临期窗口（schedule.keepalive_refresh_window，
+// 面板保存配置后调用）。<=0 视为不过滤（等价全量刷新）。
+func (s *Scheduler) SetKeepaliveRefreshWindow(d time.Duration) {
+	s.schedMu.Lock()
+	s.cfg.KeepaliveRefreshWindow = d
+	s.schedMu.Unlock()
 }
 
 // Reconfigure 热更新排程参数（面板保存配置后调用）：改时点/开关并通知运行中的循环重算。
@@ -828,7 +852,17 @@ func (s *Scheduler) accountDelay(fallback time.Duration) time.Duration {
 func (s *Scheduler) RunKeepaliveNow() { s.RunKeepaliveNowCtx(context.Background(), false) }
 
 // RunKeepaliveNowCtx 带 ctx：停机时可打断，账号之间做节流。
+// RunKeepaliveNowCtx 带 ctx 的全量保活（面板/外部入口）：selective=false 恒刷新。
 func (s *Scheduler) RunKeepaliveNowCtx(ctx context.Context, spread bool) {
+	s.runKeepalive(ctx, spread, false)
+}
+
+// runKeepalive 保活遍历。
+//
+// selective=true（排程到点）时只刷新「剩余有效期 <= keepalive_refresh_window」的账号
+// （移植上游 PR #244）：350+ 号每天全量换 RT 既没必要也放大风控面。
+// NeedsRefresh 对已过期 / 无 expiry 恒真，天然兜底。
+func (s *Scheduler) runKeepalive(ctx context.Context, spread, selective bool) {
 	includeDisabled := s.includeDisabledInTasks()
 	plan := s.spreadPlan(taskKeepalive, spread, cst.Now())
 	for _, st := range plan.order(s.cfg.Pool.List()) {
@@ -838,6 +872,14 @@ func (s *Scheduler) RunKeepaliveNowCtx(ctx context.Context, spread bool) {
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
+		}
+		// 临期窗口门控（PR #244）：排程路径只刷快过期的号；手动入口恒全量。
+		// 窗口 <= 0 视为不过滤（等价全量）—— 配置 normalize 会拒绝 <=0，但裸用
+		// Config 的测试/嵌入路径不该因此变成「一个都不刷」。
+		if selective {
+			if w := s.keepaliveRefreshWindow(); w > 0 && !a.NeedsRefresh(w) {
+				continue
+			}
 		}
 		// 账号级摊开：等本号在窗口内的偏移时刻（未启用时立即返回）。
 		if !plan.wait(ctx, st.UID) {

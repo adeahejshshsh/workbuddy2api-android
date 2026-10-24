@@ -17,6 +17,7 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 	p := newTestPanel()
 	paths := []struct{ method, path string }{
 		{"GET", "/panel/"},
+		{"GET", "/panel/theme.js"},
 		{"GET", "/panel/app.js"},
 		{"GET", "/panel/api/overview"}, // 401（未提供 key）
 		{"POST", "/panel/api/config"},  // 401
@@ -94,6 +95,38 @@ func TestAppScriptServed(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "'use strict'") {
 		t.Error("app.js body looks wrong")
+	}
+}
+
+// 首屏主题预热脚本：必须能同源取到，且引用的位置早于样式表。
+// 顺序是这个问题唯一的关键——放到 <body> 或 <style> 之后，就会退回到
+// 「刷新先按默认深色画一帧，再翻成用户选的主题」的老毛病（用户可见的闪烁）。
+func TestThemeBootScriptRunsBeforeStyles(t *testing.T) {
+	p := newTestPanel()
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/theme.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("theme.js code=%d want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+		t.Errorf("theme.js Content-Type=%q want javascript", ct)
+	}
+	// 键名与 app.js 的 LS_THEME 必须一致，否则预热读不到用户偏好、白闪照旧。
+	if !strings.Contains(rec.Body.String(), "wb2api.theme") {
+		t.Error("theme.js 未读取 wb2api.theme，与 app.js 的存储键对不上")
+	}
+
+	page := httptest.NewRecorder()
+	p.ServeHTTP(page, httptest.NewRequest("GET", "/panel/", nil))
+	body := page.Body.String()
+	iScript := strings.Index(body, `<script src="theme.js"></script>`)
+	if iScript < 0 {
+		t.Fatal("index.html 未引用 theme.js")
+	}
+	iStyle := strings.Index(body, "<style>")
+	if iStyle < 0 || iScript > iStyle {
+		t.Errorf("theme.js 必须早于 <style> 加载: script@%d style@%d", iScript, iStyle)
 	}
 }
 

@@ -2,6 +2,7 @@
 //
 // 资源经 go:embed 打进二进制（随服务部署，无外部构建步骤）：
 //   - index.html  页面骨架
+//   - theme.js    首屏主题预热（<head> 同步加载，早于样式表）
 //   - app.js      全部前端逻辑（独立文件而非内联，为了启用无需 unsafe-inline 的严格 CSP）
 //
 // 安全头对"面板页面与全部 /panel/api/* 响应"统一生效：CSP 限制脚本只能来自本服务，
@@ -20,6 +21,9 @@ import (
 
 //go:embed index.html
 var indexHTML []byte
+
+//go:embed theme.js
+var themeJS []byte
 
 //go:embed app.js
 var appJS []byte
@@ -121,6 +125,18 @@ func (p *Panel) versionedIndex() ([]byte, string) {
 		p.idxETag = contentETag(body)
 	})
 	return p.idxBody, p.idxETag
+}
+
+// themeScript 输出首屏主题预热脚本。
+//
+// 它必须被 <head> 以同步外链方式加载（CSP 禁内联）：晚于样式表就回到「刷新先闪深色」，
+// 因为用户的明暗偏好只存在浏览器 localStorage 里，服务端无从得知。
+func (p *Panel) themeScript(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(themeJS)
 }
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。

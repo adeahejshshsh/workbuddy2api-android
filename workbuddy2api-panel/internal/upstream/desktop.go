@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -406,6 +407,24 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	if expertType != "" {
 		body["expert_type"] = expertType
 	}
+	return c.marketExpertList(a, body)
+}
+
+// MarketExpertSearch 按关键词检索专家市场（等价于客户端「专家页搜索框」）。
+//
+// 请求体里的关键词字段名是 keyword（实测：keyword 生效时 total_count 收窄到 220，
+// search_keyword / query / search 均被忽略返回全量 25318）。同一关键词可能命中多个
+// 同名专家（display_name_zh 与 profession_zh 都会参与匹配），调用方必须按 expert_id
+// 二次筛选，不能取首条。
+func (c *Client) MarketExpertSearch(a *auth.Auth, keyword string) ([]MarketExpert, error) {
+	if strings.TrimSpace(keyword) == "" {
+		return nil, fmt.Errorf("market expert search: keyword required")
+	}
+	return c.marketExpertList(a, map[string]any{"page": 1, "page_size": 20, "keyword": keyword})
+}
+
+// marketExpertList 专家市场列表/搜索的公共请求（POST .../market/expert/list）。
+func (c *Client) marketExpertList(a *auth.Auth, body map[string]any) ([]MarketExpert, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, err

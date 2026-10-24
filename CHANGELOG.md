@@ -756,6 +756,22 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 「预计 X 后重试」既误导又刷屏（一次目录差异能堆二十多行）。改为「该账号无此模型（不重试）」，
 多条折叠成一条汇总，模型名放 title。
 
+### 七、上游 10-23/10-24 增量（9 条）
+
+对 misakano7545 最新提交逐条评估后合并的 9 条：
+
+| 提交 | 内容 | 合并要点 |
+|---|---|---|
+| `e0512bc9` | 企业不限量 `1<<40` 哨兵污染权重分母（issue #222） | 取 `secondCredits`（最大值是哨兵时取第二大）+ 余额钳到满权重；`pickWeighted` 改为内部自算分母，签名去掉 `maxCredits` 参数 |
+| `4c45b1de` | 适配 4 个专家体验任务 | 任务标签 + `desktop.go` 补 `strings` 导入；测试文件的模块路径改回本仓 |
+| `5d037aad` | 首屏主题预热 | 干净合入 |
+| `8bb30762` | 记「声明了 tools 却 stop + 零 tool_calls」的静默回合 | 统计结构体合并：保留我们的 `pendErr`，取对方的 `sawToolCalls`/`finishReason`/`thinkTokens` |
+| `f1eca4ad` | 面板「⤳ 已路由至 <等价模型>」 | 面板 Config 加 `ModelFallback` 闭包 + overview 输出 `model_fallback`；`app.js` 在我们已有的限流渲染里加标注（对方整块重写过，未采用） |
+| `657e7a42` | `/v1/search` 兼容 DeepSeek Search API（count 字段） | 只取 `Count` 与 `compatDeepSeekSearch`；`deep:true`（agentic_search）未移植，对应用例删除。**顺带修**：调用点原本用 `req.MaxResults`，count 回落永远不生效 |
+| `14f1824c` | `POST /v2/chat/busy` 端点 | 与 `/v1/fetch` 路由并存 |
+| `764293b8` | 按临期窗口刷新 token（PR #244） | `schedule.keepalive_refresh_window`（默认 168h）；`RunKeepaliveNowCtx` 拆出 `runKeepalive(ctx, spread, selective)`，排程 selective=true、手动 false。**窗口 <= 0 视为不过滤**（裸用 Config 的路径不该变成「一个都不刷」） |
+| `58262f31` | 突发积分 + 连续低缓存率两道闸 | 只取 `budget.go` 的闸逻辑与 `handler` 的 `setGuards`/`admit`/`snapshot`；同提交里的 admin 端点、`/metrics`、成长并发等未移植。**顺带修**：合并时构造行被覆盖，已恢复 `h := &Handler{...}` 并把 `budget` 初始化进去 |
+
 ### 未合并
 
 | kk-cao 提交 | 内容 | 判断 |
