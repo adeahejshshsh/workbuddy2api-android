@@ -1547,6 +1547,9 @@ $('btnRefresh').onclick = async () => {
 function refreshVisible() {
   if (view === 'accounts') loadOverview(true);
   else if (view === 'logs') loadLogs();
+  // 余额趋势的「可用 N/M」取自 overview 缓存（口径与账号池同一处，避免两处漂移），
+  // 所以停在这一屏时也要跟着刷新，否则显示的是打开那一刻的账号状态。
+  else if (view === 'balhist') loadOverview(true);
 }
 function start() {
   loadOverview(true);
