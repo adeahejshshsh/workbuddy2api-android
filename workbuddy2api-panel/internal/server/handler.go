@@ -1672,13 +1672,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 工具是**正确行为** —— 此前照样打这条 WARN，等于把正常回合报成故障。
 			toolsOff := strings.EqualFold(strings.TrimSpace(clientToolChoice), "none")
 			if len(declaredTools) > 0 && !toolsOff && !stats.SawToolCalls() && stats.FinishReason() == "stop" {
-				// content 字节数区分两种完全不同的成因：0 = 模型什么都没说（静默空回合，
-				// 已在上面用 tool_choice=required 重试过）；>0 = 模型改说人话、把工具
-				// 晾在一边（模型行为，网关只能记录）。tool_choice 一并打出来，便于判断
-				// 是不是客户端自己把工具关了。
-				log.Printf("WARN: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (content=%dB tool_choice=%q; client may treat the turn as complete)",
-					logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools),
-					stats.ContentBytes(), clientToolChoice)
+				// 按 content 字节数分两级（上游 2026-10-24 同一处改动）：
+				//   content > 0 → 模型选择用文字回答，是**合法收尾**，记 INFO。
+				//     记 WARN 会进面板「错误汇总」的兜底桶，把正常回合当成故障（持续误报）。
+				//   content = 0 → 真正的空回合：上面已经用 tool_choice=required 重试过，
+				//     仍为空说明救援没成，这个才是异常，留 WARN。
+				// tool_choice 一并打出来，便于判断是不是客户端自己把工具关了。
+				level := "WARN"
+				note := "zero content even after tool_choice=required retry"
+				if stats.ContentBytes() > 0 {
+					level = "INFO"
+					note = "本轮无工具调用，正常收尾"
+				}
+				log.Printf("%s: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (content=%dB tool_choice=%q; %s)",
+					level, logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools),
+					stats.ContentBytes(), clientToolChoice, note)
 			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
@@ -2410,9 +2418,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			//
 			// 代价：每个网关 401 多一次 refresh 往返；refresh 轻量且 401 低频，另由下面
 			// 的软冷却兜住「同一账号每请求都来问一次」。
+			// 判据收敛到 upstream.VerifySessionByRefresh（上游 21a6e45）：chat 路径与
+			// 面板探活共用同一套口径，不再各写一遍。
+			//
+			// 无 RT（静态 API Key）保持本仓旧语义：外层守卫拦掉，落到下面的计死分支。
+			// 上游那版把「无 RT」也归 Inconclusive（只软冷却、永不判死），对静态 key
+			// 来说等于永不自动下线 —— 本仓静态 key 是精简形态，保留旧语义更可预期。
 			if acct := h.cfg.Pool.AuthByUID(uid); acct != nil && acct.RefreshTokenValue() != "" && h.cfg.Upstream != nil {
-				rerr := h.cfg.Upstream.RefreshToken(acct)
-				if rerr == nil {
+				switch h.cfg.Upstream.VerifySessionByRefresh(acct) {
+				case upstream.VerifyAlive:
 					// 上游已轮换 RT：必须落盘，否则重启拿旧 RT 刷新 = 账号真死。
 					if serr := acct.SaveAtomicRetry(); serr != nil {
 						log.Printf("ERR: [server] 网关 401 后 refresh 成功但落盘失败: %v", serr)
@@ -2425,18 +2439,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 					log.Printf("INFO: [server] 账号 %s 网关 401 但 refresh 成功 → 瞬时拦截，不计 session dead",
 						logfmt.Label(uid, ""))
 					return
-				}
-				// 只有上游**应用层明确拒绝**才算 token 失效。refresh 端点同样挂在
-				// /v2/* 上，边缘瞬时拦截时它也回 HTML 页（401/403 无业务信封）——
-				// 那是「拦截」不是「判词」，计入就等于换个地方复发同一个误杀。
-				var re *upstream.Error
-				if !errors.As(rerr, &re) || re.Status >= 500 || re.Status == http.StatusTooManyRequests ||
-					upstream.IsGatewayUnauthorized(re.Status, re.Msg) || upstream.IsWafBlocked(re.Status, re.Msg) {
+				case upstream.VerifyInconclusive:
+					// refresh 未给出明确判词（网络/5xx/429/refresh 端点自身被拦）：
+					// 既不能判活也不能判死，只短退避。判死会在同一层再误杀一次。
 					h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "gateway 401 (refresh inconclusive)")
-					log.Printf("INFO: [server] 账号 %s 网关 401，refresh 未给出明确判词 → 不计 session dead: %v",
-						logfmt.Label(uid, ""), rerr)
+					log.Printf("INFO: [server] 账号 %s 网关 401，refresh 未给出明确判词 → 不计 session dead",
+						logfmt.Label(uid, ""))
 					return
 				}
+				// VerifyDead：落到下面的计死逻辑。
 			}
 			if h.cfg.Pool.NoteSessionDeadWith(uid, gatewayUnauthorizedReason) {
 				log.Printf("WARN: [server] acct=%s disabled after %d consecutive gateway 401 (refresh verdict: token invalid)",

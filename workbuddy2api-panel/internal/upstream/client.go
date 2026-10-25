@@ -249,6 +249,16 @@ func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 // 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
 const modelRateLimitCode = "6004"
 
+// modelUsageLimitCode 上游「用量频率限制」的业务码（2026-10 实测出现在 kimi 系模型）。
+// 与 6004 同属模型级——msg 明确写「您也可以切换其他模型继续使用」——但 code 不同。
+// 不能直接并进 modelRateLimitCode：只凭 code 放宽会把**账号级** 6000 也当成模型级，
+// 那会让整号受限被误判成「换个模型就好」。故单独判定、要求文案佐证。
+const modelUsageLimitCode = "6000"
+
+// modelSwitchModelHint 官方在「单模型用量超限」答复里给出的换模型提示语。
+// 真正的账号级限制不会这么提示，用它当佐证是安全的。
+const modelSwitchModelHint = "切换其他模型"
+
 // softRateResetPatternCN/EN 匹配重置文案（CN「将在 … 重置」/ global 域英文
 // "reset at <固定格式时间>"），捕获中间的时间串。
 const softRateResetPatternCN = `将在 (.+?) 重置`
@@ -259,6 +269,7 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 轰炸）时尤甚。模式串均为纯常量。regexp 并发安全（匹配只读），无需额外锁。
 var (
 	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	reModelUsageLimit = regexp.MustCompile(`"code"\s*:\s*"?` + modelUsageLimitCode + `"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -266,11 +277,18 @@ var (
 // softRateTimeLayout 上游重置时间的格式（无时区后缀；时区固定 UTC+8）。
 const softRateTimeLayout = "2006-01-02 15:04:05"
 
-// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004）。
+// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004 / 6000）。
 // 用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
+//
+// 6000 是上游新码（2026-10-24 实测），语义靠文案区分：带「切换其他模型」提示的
+// 才是单模型超限；不带该文案的 6000 语义未知，仍走账号级（宁可保守罚号，
+// 也不要把整号受限误判成「换个模型就好」）。
 func IsModelRateLimit(body string) bool {
 	// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
-	return reModelRateLimit.MatchString(body)
+	if reModelRateLimit.MatchString(body) {
+		return true
+	}
+	return reModelUsageLimit.MatchString(body) && strings.Contains(body, modelSwitchModelHint)
 }
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
@@ -650,7 +668,7 @@ func Classify(status int, body string) ErrKind {
 	// 6021 queue.full 渠道级容量满载（上游 PR #185）：判在 429 兜底**之前** ——
 	// 它是比「限流」更具体的渠道级信号。上游集群排队打满时换任何号都撞同一堵墙，
 	// 按限流处置会逐号软冷却（实测 2 秒绞杀整池），换号白撞还把无效请求放大 MaxRotate 倍。
-	if isQueueFullBody(lower) {
+	if isQueueBody(body, lower) {
 		return ErrUpstreamBusy
 	}
 	if status == http.StatusTooManyRequests {
@@ -2799,10 +2817,21 @@ func truncate(s string, n int) string {
 	return logfmt.Truncate(s, n)
 }
 
-// isQueueFullBody 判定渠道级容量满载文案（6021 queue.full 家族，上游 PR #185）。
+// isQueueBody 判定渠道级排队/容量满载（6020 queue.waiting + 6021 queue.full 家族）。
+//
+// 两个 code 同族同判（2026-10-24 上游新增 6020）：都是「上游集群在排队」，换任何号
+// 都撞同一堵墙，按限流处置会逐号软冷却 —— 实测单次 6020 就让整号 CoolSoft 10 分钟，
+// 同号其他模型一并不可调度。
+//
+// 双判据：文案（历史口径，上游 PR #185 只给了文案）+ 结构化 code（更权威；
+// hasBusinessCode 只认 "code": 键，requestId 恰好含 "6020" 不误伤）。
 // 该形态与具体账号无关：换号在任何时刻都撞同一堵墙，正确处置是不罚号不轮转。
-func isQueueFullBody(lower string) bool {
-	return strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full")
+func isQueueBody(body, lower string) bool {
+	if strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full") ||
+		strings.Contains(lower, "queue.waiting") || strings.Contains(lower, "queue waiting") {
+		return true
+	}
+	return hasBusinessCode(body, "6020") || hasBusinessCode(body, "6021")
 }
 
 // accountRestrictedMsg 账号级限制与通道校验失败共用的文案（上游 PR #233）。

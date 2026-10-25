@@ -240,7 +240,14 @@ func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) !=
 // 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。
 func isGlobalDomain(d string) bool {
 	d = strings.ToLower(strings.TrimSpace(d))
-	return d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai")
+	if d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai") {
+		return true
+	}
+	// 官方 CLI 国际站域（product.json externalDomain: www.codebuddy.ai）。与
+	// workbuddy.ai 同后端不同主机名，但 domain 落盘值不同——不认它会把国际站账号
+	// 误判成 cn（显式 realm 键可兜住面板登录的账号，手写 auth 文件则直接错域路由，
+	// 而 token 只在签发域可用）。
+	return d == "codebuddy.ai" || strings.HasSuffix(d, ".codebuddy.ai")
 }
 
 // NeedsRefresh 报告 token 是否将在 within 内过期（或已过期/无 expiry）。
@@ -335,7 +342,30 @@ func Parse(raw []byte) (*Auth, error) {
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
+	// 归一在两条解析分支**汇合之后**（嵌套形/扁平形都要覆盖）：只归一其中一条，
+	// 另一种形态的凭据照样会把到期时间推到公元 58800 年。
+	a.ExpiresAt = normalizeExpiresAt(a.ExpiresAt)
 	return &a, nil
+}
+
+// expiresAtMillisThreshold 区分「秒」与「毫秒」时间戳的分界（1e11）。
+//
+// 单位到 1e11 秒已是公元 5138 年，真实凭证不可能；而 1e11 毫秒 = 1973 年，
+// 毫秒制当前值（~1.8e12）远在其上。阈值取在两者之间，不会误判任一侧。
+const expiresAtMillisThreshold = 100_000_000_000
+
+// normalizeExpiresAt 把上游凭据的 expiresAt 归一到 Unix 秒。
+//
+// 为什么需要：官方 CodeBuddy CLI 的凭据文件写的是**毫秒**（实测 1795254516410），
+// 而本仓与旧插件 OAuth 落盘的是**秒**。直接按秒解释毫秒会把到期时间推到公元
+// 58800 年 → NeedsRefresh 恒 false → token 永不刷新 → 到期后账号静默失效
+// （表现为「用了一个月突然全部 401」，极难排查）。导入官方凭据是本仓支持的用法，
+// 所以解析入口必须归一，而不是靠使用者手改文件。
+func normalizeExpiresAt(v int64) int64 {
+	if v > expiresAtMillisThreshold {
+		return v / 1000
+	}
+	return v
 }
 
 // SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持嵌套形（插件可读）格式。

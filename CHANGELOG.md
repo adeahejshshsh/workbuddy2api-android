@@ -10,7 +10,7 @@
 `11158 not allowed for user type [personal]`；网关 401 不分成因直接计死、3 次误杀健康号
 （issue #66 两号被禁，revive 后连续全 200）。
 
-**本版另有 4 条本仓自有修复**：
+**本版另有 4 条本仓自有修复，另有第七节的上游 10-24/10-25 增量（5 条 + 2 个片段）**：
 
 - 流式断流若发生在**首帧之前**（一个字节都没写给客户端），旧实现伪 200 + error 帧把
   回合钉死，现在改为换号重试（对客户端透明），名额用尽才回正经 502。
@@ -162,6 +162,36 @@ context canceled`。
 不禁用、不再往死连接写响应）；`TestChatStreamContextRealTransportErrorStillErrors`
 （对照组，别把两条路径合并掉）。
 
+### 七、上游 10-24/10-25 增量（合 5 条 + 2 个片段）
+
+上游 17 条提交去掉 merge 与 PR 分支原件后 11 个独立改动，逐条评估后合 5 条、
+另取 2 个片段；2 条不用（见下）。
+
+| 提交 | 内容 | 合并要点 |
+|---|---|---|
+| `cdad965` | 429 code 6000 按模型级限流（msg 含「切换其他模型」） | `IsModelRateLimit` 增加 6000，但**要求文案佐证**：不带该提示的 6000 语义未知，仍走账号级。此前 6000 落账号级 → 单模型超限被放大成整号冻结 2 小时，其他模型一并被殃及 |
+| `1e70717` | 429 code 6020「queue.waiting」与 6021 同判渠道级排队 | `isQueueFullBody` 只认 `queue.full` 文本 → 6020 落 429 兜底成 `ErrSoftRate`，实测单次就让整号 `CoolSoft` 10 分钟。改成 `isQueueBody(body, lower)`：文案（`queue.full`/`queue.waiting`）+ 结构化 code（6020/6021）双判 |
+| `f0c427d` 片段① | `auth.Parse` 归一 expiresAt 毫秒→秒 | 官方 CLI 凭据写毫秒（`1795254516410`），本仓按秒 → 到期时间推到公元 58800 年 → `NeedsRefresh` 恒 false → token 永不刷新 → 到期后账号**静默全 401**。归一挂在两条解析分支汇合处（嵌套形/扁平形都覆盖） |
+| `f0c427d` 片段② | `isGlobalDomain` 认 `*.codebuddy.ai` | 官方 CLI 国际站域是 `www.codebuddy.ai`，与 `workbuddy.ai` 同后端不同主机名，而 token 只在签发域可用。不认它 → 国际站账号被判成 cn → 错域路由 |
+| `185ce77` | 静默回合按 content 分级 | 我们那版带 `content=NdB tool_choice=...` 且加了救援，只取级别：`content > 0` → **INFO**（模型选择用文字回答是合法收尾，记 WARN 会进面板「错误汇总」兜底桶持续误报）；`content = 0` → 仍 WARN（救援没成才是真异常） |
+| `21a6e45` | 401 求证收敛到 `upstream.VerifySessionByRefresh` | 把昨天内联的判据抽成 `VerifyVerdict`（`Alive`/`Dead`/`Inconclusive`）。这套判据上游已经踩了两次（chat 路径 + 面板探活），收敛后新加的 401 处理不会再各写一套 |
+| `b58341f` | 封禁账号只读探活 + 余额趋势「可用 N/M」 | `POST /panel/api/accounts/{uid}/probe_ban`：用余额端点（最轻的只读端点，不占在途、不记连败、不参与选号）探上游是否已解封，**完全不改池状态**。11140 封禁号此前只能靠反复 revive 确认，而每次 revive 都会重新参与选号、立刻再撞 11140，可能加重风控 |
+
+**两处与上游不同、刻意保留的**：
+
+1. **无 RT（静态 API Key）仍按旧语义计死**。上游 `21a6e45` 把「无 RT」归 `Inconclusive`
+   （只软冷却、永不判死），对静态 key 来说等于永不自动下线。我们在 handler 外层保留
+   `RefreshTokenValue() != ""` 守卫，落到计死分支。
+2. **`85e44b2` 不合**：上游说 `CooldownSoftForModel` 的 `Until` 被 `soft_rate_max`(2h)
+   截断。我们的 `cappedSoftUntilLocked` 在 429 那次修复里已把 `softResetMax`(24h) 设成
+   权威上限、`resetAt` 在 24h 内原样采用 —— 同一问题已覆盖。差别只剩「超过 24h 的荒谬
+   值」：他们照抄，我们截到 24h，我们的更保守。
+
+**未合**：`4b489a4`（禁用状态分类标签 + `disabled_at`）、`71e14a5`（任务中心默认收起）、
+`b21e471`（账号池操作列槽位对齐）—— 前两条是面板 UX、第三条纯 CSS，按需再取；
+`f0c427d` 主体（`loginsite` 包 + 登录码语义 + 站点三选一 + UA 2.174.0，1491 行）
+需要真实登录实测，单独一轮做。
+
 ### 未合并
 
 | 提交 | 内容 | 判断 |
@@ -234,8 +264,21 @@ SSE 头撤净、不写任何 `data: ` 帧）。
 `TestChatStreamContextRealTransportErrorStillErrors`（对照组，真实传输错误不被误判成取消）、
 `TestClientCancelDoesNotPenalizeAccount`（端到端：不罚号、不写死连接）。
 
-**911 通过 / 0 失败**（server 144 / upstream 260 / panel 66 / pool 201 / scheduler 85 /
-auth 29 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
+**七（上游 10-24/10-25 增量）新增 16 个用例**：
+`TestClassifyQueueWaitingIsUpstreamBusy`（6020 文案/code/换状态码三分支 + 6021 回归 +
+`requestId` 含 6020 不误伤）、`TestIsModelRateLimit` 补 6000 三例（带文案命中、
+无文案不命中）、`TestNormalizeExpiresAt`（6 分支，含阈值两侧）、
+`TestParseNormalizesExpiresAtBothShapes`（嵌套形/扁平形都必须归一）、
+`TestIsGlobalDomainRecognizesCodebuddyAI`（含 `codebuddy.ai.evil.test` 反向）、
+`TestVerifyAliveOnRefreshOK` / `TestVerifyDeadOnAppReject` /
+`TestVerifyInconclusiveOnGateway401`（⭐ refresh 端点自己也被拦）/ `On5xx` / `On429` /
+`WithoutRefreshToken` / `TestVerifyNilSafe`、
+`TestProbeBanLiftedWhenBalanceOK`（含「不改池状态」断言）/ `StillBannedOnAccountFault` /
+`BlockedWhenRefreshStillWorks`（⭐ 401 分不出来时靠 refresh 求证）/ `SessionDeadWhenRefreshRejected` /
+`InconclusiveOn5xx`。
+
+**927 通过 / 0 失败**（server 144 / upstream 268 / panel 71 / pool 201 / scheduler 85 /
+auth 32 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
 口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
 
 ## v1.35.2

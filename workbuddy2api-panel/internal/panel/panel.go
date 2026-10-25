@@ -13,6 +13,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -195,6 +196,8 @@ func (p *Panel) routes() {
 	// (账号 × 模型) 手动开关：运维显式禁用某账号的某模型（永久语义，仅手动解）。
 	// 与上游触发的临时冷却（6004/11102）正交，且手动优先。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_toggle", p.withAuth(p.modelToggle))
+	// 封禁账号探活：只读探测上游是否已解封，不 revive、不参与选号。
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/probe_ban", p.withAuth(p.accountProbeBan))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
@@ -1435,4 +1438,113 @@ func (p *Panel) balanceHistory(w http.ResponseWriter, r *http.Request) {
 		"days":   days,
 		"series": series,
 	})
+}
+
+// accountProbeBan 探测被封禁账号在上游是否已解封（**只读**，不改池状态）。
+//
+// 为什么需要（用户需求）：账号被 11140「账号存在异常行为」判死后，唯一的确认方式
+// 是反复 revive —— 但每次 revive 都会让账号重新参与选号、立刻再撞 11140，
+// 反复触发可能加重上游风控判定。需要一个「不惊动它」的问法。
+//
+// 用什么探：UserResource（余额查询）是最轻的只读端点，不占在途、不记连败、
+// 不参与选号，且 11140 会在这里原样返回（上游 auth/auth_forbidden 在 billing
+// 侧同样生效）。不用 chat —— 那会占在途、记连败、可能被计入风控。
+//
+// 判据（网关 401 的求证与 chat 路径同一套：upstream.VerifySessionByRefresh）：
+//   - 200            → 已解封（可以 revive 了）
+//   - 11140/封禁类   → 仍被封（继续等）
+//   - 401/session    → 不是封禁问题，是登录失效（该重登）
+//   - 其它           → 无结论（网络/限流等，稍后再试）
+//
+// 不写任何池状态：探测是观测行为，不该改变账号的可用性判断 —— 否则运维点一下
+// 探活就把号放回池子，等于变相 revive。
+func (p *Panel) accountProbeBan(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	st, ok := p.cfg.Pool.Status(uid)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	a := p.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		writeErr(w, http.StatusNotFound, "account credentials not found")
+		return
+	}
+	resp := map[string]any{
+		"ok":           true,
+		"uid":          uid,
+		"nickname":     st.Nickname,
+		"was_disabled": st.Disabled,
+		"was_reason":   st.DisabledReason,
+		"probed_at":    time.Now().Format(time.RFC3339),
+	}
+	if p.cfg.Upstream == nil {
+		resp["verdict"] = "unknown"
+		resp["detail"] = "upstream client not configured"
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	_, _, err := p.cfg.Upstream.UserResource(a)
+	// 网关 401 的响应体是 APISIX 的 HTML 页，**封禁（11140）与登录失效看起来完全
+	// 一样**，单看 401 分不出来。refresh 才是权威判词。
+	if err != nil && isSessionDeadErr(err) {
+		switch p.cfg.Upstream.VerifySessionByRefresh(a) {
+		case upstream.VerifyAlive:
+			// 会话仍活：401 是风控/封禁拦截，不是登录失效。
+			resp["verdict"] = "blocked"
+			resp["detail"] = err.Error()
+			resp["advice"] = "会话仍有效，但请求被上游风控拦截（可能仍是 11140 封禁）—— 继续观察，勿反复 revive"
+			log.Printf("panel: probe_ban uid=%s → 被拦截但会话有效（refresh ok）", uid)
+			writeJSON(w, http.StatusOK, resp)
+			return
+		case upstream.VerifyInconclusive:
+			resp["verdict"] = "inconclusive"
+			resp["detail"] = err.Error()
+			resp["advice"] = "refresh 未给出明确判词（网络/限流等），稍后再试"
+			log.Printf("panel: probe_ban uid=%s → 无明确结论", uid)
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		// VerifyDead：落到下面的 session_dead 分支。
+	}
+	switch {
+	case err == nil:
+		resp["verdict"] = "lifted"
+		resp["advice"] = "上游已解封，可以点「解冻」恢复使用"
+		log.Printf("panel: probe_ban uid=%s → 已解封", uid)
+	case isAccountFaultErr(err):
+		resp["verdict"] = "still_banned"
+		resp["detail"] = err.Error()
+		resp["advice"] = "仍被封禁，继续等待；勿反复 revive（可能加重风控）"
+		log.Printf("panel: probe_ban uid=%s → 仍被封", uid)
+	case isSessionDeadErr(err):
+		resp["verdict"] = "session_dead"
+		resp["detail"] = err.Error()
+		resp["advice"] = "不是封禁问题，是登录态失效 —— 需重新登录"
+		log.Printf("panel: probe_ban uid=%s → 登录失效（非封禁）", uid)
+	default:
+		resp["verdict"] = "inconclusive"
+		resp["detail"] = err.Error()
+		resp["advice"] = "无明确结论（网络/限流等），稍后再试"
+		log.Printf("panel: probe_ban uid=%s → 无结论: %v", uid, err)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// isAccountFaultErr 判断错误是否为账号级封禁/风控（11140 request illegal 等）。
+func isAccountFaultErr(err error) bool {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.Kind == upstream.ErrAccountFault
+}
+
+// isSessionDeadErr 判断错误是否为登录态失效。
+func isSessionDeadErr(err error) bool {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.Kind == upstream.ErrSessionDead
 }

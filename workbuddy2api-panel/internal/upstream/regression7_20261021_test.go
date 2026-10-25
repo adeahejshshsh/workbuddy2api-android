@@ -51,3 +51,30 @@ func TestClassifyQueueFull(t *testing.T) {
 		t.Fatalf("普通 429 判成 %v，期望 ErrSoftRate", got)
 	}
 }
+
+// 6020「queue.waiting」与 6021 同族（2026-10-24 上游新增）：都是渠道级排队，
+// 换任何号都撞同一堵墙。此前只认 queue.full 文案 → 6020 落到 429 兜底成 ErrSoftRate，
+// 实测单次就把整号 CoolSoft 10 分钟，同号其他模型一并不可调度。
+func TestClassifyQueueWaitingIsUpstreamBusy(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"6020 文案形态", 429, `{"code":6020,"msg":"queue.waiting.title"}`},
+		{"6020 结构化 code（文案不含 queue）", 429, `{"code":6020,"msg":"请稍候"}`},
+		{"6020 换状态码也认", 503, `{"code":6020,"msg":"queue.waiting.title"}`},
+		{"6021 回归", 429, `{"code":6021,"msg":"queue.full.title"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Classify(c.status, c.body); got != ErrUpstreamBusy {
+				t.Fatalf("Classify(%d, %q)=%v，期望 ErrUpstreamBusy", c.status, c.body, got)
+			}
+		})
+	}
+	// 防过宽：requestId 恰好含 6020 不算（hasBusinessCode 只认 "code": 键）。
+	if got := Classify(429, `{"requestId":"6020","msg":"rate limit"}`); got != ErrSoftRate {
+		t.Fatalf("requestId 含 6020 不该误判成渠道级排队，got %v", got)
+	}
+}
