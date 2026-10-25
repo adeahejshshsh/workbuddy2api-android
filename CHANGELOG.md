@@ -42,7 +42,9 @@ azp 全是 console，其中 25 个 plugin 源 refresh 正常）。唯一稳定�
 - 瞬时忙分支的 `Retry-After` **封顶 600s**
 
 `error.code` 用数字是刻意的：客户端按数字业务码判能不能重试，写成
-`insufficient_quota` 字符串会让它既认不出配额也认不出业务码。
+`insufficient_quota` 字符串会让它既认不出配额也认不出业务码。上游的结构化字段
+（`upstream_code` / `upstream_request_id` / `upstream_display` / `upstream_message`）
+照带 —— 503 路径本来就给这些键，配额分支不给就是一处静默的信息回退。
 
 ### 三、周期任务人味化（默认全关）
 
@@ -60,6 +62,16 @@ azp 全是 console，其中 25 个 plugin 源 refresh 正常）。唯一稳定�
 错峰**只作用于后台周期刷新**：面板「刷新余额」是人点的，本身就是人味；共用一条路径
 会让按钮背后的操作凭空慢出最多 frac×间隔（200‰ × 5 分钟 = 60s），而面板只等 30s，
 结果是在刷新其实还在跑的时候弹「仍在后台进行」。
+
+自查时抓到并修掉的两个实现 bug（都是这一版新写的）：
+
+- **错峰偏移会累加**：一开始写成「逐号睡自己的偏移」，而派发循环是串行的 —— 46 个号 ×
+  平均 30s（60s 窗口）≈ 23 分钟一轮，比不错峰还糟（一轮间隔才 5 分钟，后面几轮全被
+  任务族锁挡掉）。改成「锚点 + 绝对目标时刻」，总耗时回到 ≈ 窗口。
+  `TestRunBalanceRefreshStaggerTotalBounded` 钉住（用旧写法会 2.08s vs 阈值 1.5s）。
+- **夜间上限先截断再过滤**：`capByCredits(Pool.List(), N)` 在禁用/暂停门控**之前**截断，
+  于是「被禁用的高积分老号」会占满名额 —— 夜猫子整晚一个对话都不发，而且没有任何
+  日志（门控只是 `continue`）。改成 `nightCandidates`：先剔不参与的号再取前 N。
 
 **与上游不同**：本仓没有补领清扫的周期循环（`StartTaskSweep` 不存在），所以
 `task_sweep_jitter_permill` 无落点、不引入；账号错峰在抢并发槽**之前**等（本仓余额
@@ -109,7 +121,10 @@ hour=21，配上 CST 早上 6 点，「今天 21:00」还没过，补跑不触�
 `TestAppJSLoadOverviewNeverSwallowsError`（轮询留痕但不 toast / 手动留痕 + toast /
 正常路径不误报且仍返回响应体）。
 
-**970 通过 / 0 失败**（server 150 / upstream 269 / panel 77 / pool 205 / scheduler 93 /
+自查另补 2 条：`TestRunBalanceRefreshStaggerTotalBounded`（错峰总耗时有界 + 手动路径
+不等）、`TestNightCandidatesFiltersBeforeCapping`（先剔禁用/暂停再取 Top-N）。
+
+**972 通过 / 0 失败**（server 150 / upstream 269 / panel 77 / pool 205 / scheduler 95 /
 auth 33 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 62 /
 cmd-login 7 / loginsite 9）。
 

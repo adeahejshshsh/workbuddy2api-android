@@ -2203,7 +2203,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if quotaCode != 0 {
-		writeModelQuotaError(w, quotaCode, msg, hint)
+		writeModelQuotaError(w, quotaCode, msg, hint, upBrief)
 	} else {
 		writeOpenAIErrorFull(w, status, code, msg, hint, upBrief)
 	}
@@ -2855,7 +2855,7 @@ func modelQuotaCode(reason string) int {
 // 对 429 只重试 14003/6001/6002/6005/6006 这类瞬时速率码，6004 在黑名单外），
 // 写成 "insufficient_quota" 字符串会让它既认不出配额也认不出业务码。
 // type 仍标 insufficient_quota：OpenAI 口径里这就是「别重试，去等额度」。
-func writeModelQuotaError(w http.ResponseWriter, code int, msg, hint string) {
+func writeModelQuotaError(w http.ResponseWriter, code int, msg, hint string, br *upstream.ErrorBrief) {
 	e := map[string]any{
 		"message": msg,
 		"type":    "insufficient_quota",
@@ -2863,6 +2863,23 @@ func writeModelQuotaError(w http.ResponseWriter, code int, msg, hint string) {
 	}
 	if hint != "" {
 		e["gateway_hint"] = hint
+	}
+	// 上游的结构化字段照带：客户端（和排障的人）要拿 request_id 找上游核对，
+	// 只把它塞在 message 文本里等于丢了一半（此前 503 路径是带这些键的，
+	// 配额分支不给就是一处静默的信息回退）。
+	if br != nil {
+		if br.Code != "" {
+			e["upstream_code"] = br.Code
+		}
+		if br.RequestID != "" {
+			e["upstream_request_id"] = br.RequestID
+		}
+		if br.Display != "" {
+			e["upstream_display"] = br.Display
+		}
+		if br.Msg != "" {
+			e["upstream_message"] = br.Msg
+		}
 	}
 	writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": e})
 }

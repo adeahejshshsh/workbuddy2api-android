@@ -6,8 +6,16 @@ package scheduler
 // 「每 5 分钟整点、全账号并发齐射」的完全一致节拍活动 —— 最好认的机器人形状。
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 func TestJitterFracStableAndBounded(t *testing.T) {
@@ -96,5 +104,42 @@ func TestStaggerZeroWhenDisabled(t *testing.T) {
 	s.SetBalanceJitter(-5)
 	if got := s.balanceJitterFrac(); got != 0 {
 		t.Fatalf("负数应归 0，got %v", got)
+	}
+}
+
+// 错峰必须是「绝对目标时刻」而不是「逐个睡自己的偏移」：派发循环是串行的，后者的
+// 偏移会累加 —— 46 个号 × 平均 30s（60s 窗口）≈ 23 分钟一轮，比不错峰还糟（一轮
+// 间隔才 5 分钟，后面几轮全被任务族锁挡掉）。
+func TestRunBalanceRefreshStaggerTotalBounded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	for i := 0; i < 8; i++ {
+		p.Add(&auth.Auth{UID: fmt.Sprintf("u%d", i), AccessToken: "at", ExpiresAt: 9999999999})
+	}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+	s.SetBalanceInterval(time.Second)
+	s.SetBalanceJitter(500) // ±50% → 错峰窗口 = 500ms
+	setJitterSeed(20261026)
+	defer setJitterSeed(0)
+
+	const window = 500 * time.Millisecond
+	// 正确实现：总耗时 ≈ 窗口（末号到点后立即派发）；累加实现：8×平均 250ms = 2s。
+	start := time.Now()
+	s.runBalanceRefreshNowCtx(context.Background(), true)
+	elapsed := time.Since(start)
+	if elapsed > 3*window {
+		t.Fatalf("错峰总耗时 %v 超过 3×窗口(%v) —— 偏移被累加了（应为绝对目标时刻）", elapsed, window)
+	}
+
+	// 手动入口（spread=false）不该等：人点的刷新本身就是人味。
+	start = time.Now()
+	s.RunBalanceRefreshNowCtx(context.Background())
+	if got := time.Since(start); got > window/2 {
+		t.Fatalf("手动刷新等了 %v —— 错峰不该作用于手动路径", got)
 	}
 }

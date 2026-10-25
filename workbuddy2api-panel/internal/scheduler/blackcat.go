@@ -39,8 +39,9 @@ func (s *Scheduler) RunBlackcatNowCtx(ctx context.Context, spread bool) {
 	// 夜间参与上限（schedule.night_account_cap）：夜猫子是全任务体系里唯一「整任务
 	// 都是真实模型对话」的，指纹最重 —— 深夜全池同 IP 齐做真实对话是最好认的机器人
 	// 形状。>0 时候选收窄为积分最高的前 N 个（其余号夜里静默）；0 = 不限（旧行为）。
-	// 在 spread 计划之前收窄：不参与的不占窗口。
-	for _, st := range plan.order(capByCredits(s.cfg.Pool.List(), s.NightAccountCap())) {
+	// 先剔不参与的号再按积分取前 N（见 nightCandidates：反过来会让被禁用的高积分
+	// 老号占满名额，夜猫子整晚静默）。在 spread 计划之前收窄：不参与的不占窗口。
+	for _, st := range plan.order(nightCandidates(s.cfg.Pool.List(), includeDisabled, s.NightAccountCap())) {
 		// 禁用账号门控（review #2）：签到/旅行/活跃/保活/成长队列都有这道门，
 		// 只有夜猫子漏了 —— 被人工禁用或 12153 判死的号每天 23:00 仍会被发
 		// 真实模型对话，烧额度还继续打上游。

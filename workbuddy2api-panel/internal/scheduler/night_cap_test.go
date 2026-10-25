@@ -65,3 +65,41 @@ func TestNightAccountCapSetter(t *testing.T) {
 		t.Fatalf("负数应归 0，got %d", got)
 	}
 }
+
+// 先剔不参与的号、再按积分取前 N。反过来会让「被禁用的高积分老号」占满名额，
+// 夜猫子整晚一个对话都不发且没有任何日志。
+func TestNightCandidatesFiltersBeforeCapping(t *testing.T) {
+	list := []pool.Status{
+		{UID: "dead1", Credits: 9000, Disabled: true},
+		{UID: "dead2", Credits: 8000, Disabled: true},
+		{UID: "paused", Credits: 7000, Paused: true},
+		{UID: "ok1", Credits: 300},
+		{UID: "ok2", Credits: 100},
+	}
+	got := nightCandidates(list, false, 2)
+	if len(got) != 2 {
+		t.Fatalf("want 2, got %d (%v)", len(got), got)
+	}
+	set := map[string]bool{}
+	for _, st := range got {
+		set[st.UID] = true
+	}
+	if !set["ok1"] || !set["ok2"] {
+		t.Fatalf("应选健康的 ok1/ok2，实际 %v —— 被禁用的高积分号占满了名额", set)
+	}
+
+	// includeDisabledInTasks=true 时禁用号可以参加（与既有门控同口径），暂停号仍剔除。
+	got = nightCandidates(list, true, 3)
+	set = map[string]bool{}
+	for _, st := range got {
+		set[st.UID] = true
+	}
+	if !set["dead1"] || !set["dead2"] || !set["ok1"] || set["paused"] {
+		t.Fatalf("includeDisabled 语义不符: %v", set)
+	}
+
+	// 全部不参与 → 空候选（不该 panic，也不该退回全池）。
+	if got := nightCandidates([]pool.Status{{UID: "x", Disabled: true}}, false, 2); len(got) != 0 {
+		t.Fatalf("全禁用应得空候选，got %v", got)
+	}
+}

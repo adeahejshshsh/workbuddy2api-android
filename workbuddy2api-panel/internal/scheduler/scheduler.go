@@ -952,9 +952,16 @@ func (s *Scheduler) runBalanceRefreshNowCtx(ctx context.Context, spread bool) {
 	includeDisabled := s.includeDisabledInTasks()
 	// 账号遍历错峰窗口：量级 = frac×interval。仅后台周期路径启用（见入口注释）；
 	// 未启用抖动时恒 0（全并发 = 旧行为）。
+	//
+	// roundStart 是本轮锚点：每号的起跑时刻 = 锚点 + 它自己的偏移，等待量取「距目标
+	// 还差多少」。**不能**逐个 sleep 自己的偏移 —— 派发循环是串行的，偏移会累加：
+	// 46 个号 × 平均 30s（60s 窗口）≈ 23 分钟一轮，比不错峰还糟（一轮间隔才 5 分钟，
+	// 后面几轮全被任务族锁挡掉）。
 	var stagger time.Duration
+	var roundStart time.Time
 	if spread {
 		stagger = spreadIntervalStagger(time.Duration(s.balanceInterval.Load()), s.balanceJitterFrac())
+		roundStart = time.Now()
 	}
 dispatch:
 	for _, st := range s.cfg.Pool.List() {
@@ -971,9 +978,11 @@ dispatch:
 		// 账号级起跑错峰（人味化，humanize.go）：并发齐射改为窗口内逐号错开，消除
 		// 「同一秒全池同动作」的时间指纹。窗口 = frac×interval（抖动关闭时为 0，
 		// 行为与旧版逐字一致）。在抢 sem **之前**等：抢到再睡会占着并发槽空转。
-		if wait := spreadStaggerDelay(stagger, st.UID); wait > 0 {
-			if !sleepCtx(ctx, wait) {
-				break dispatch // 取消：剩余账号下一轮再刷
+		if stagger > 0 {
+			if wait := time.Until(roundStart.Add(spreadStaggerDelay(stagger, st.UID))); wait > 0 {
+				if !sleepCtx(ctx, wait) {
+					break dispatch // 取消：剩余账号下一轮再刷
+				}
 			}
 		}
 		select {
@@ -1118,6 +1127,26 @@ func (s *Scheduler) SetNightAccountCap(n int) {
 
 // NightAccountCap 当前夜间参与上限（0 = 不限）。
 func (s *Scheduler) NightAccountCap() int { return int(s.nightAccountCap.Load()) }
+
+// nightCandidates 夜间任务候选：**先**剔掉本轮不参与的号（禁用 / 暂停），再按积分
+// 取前 cap。
+//
+// 顺序不能反：先按积分截断再过滤的话，「被禁用的高积分老号」会占满名额 —— 夜猫子
+// 整晚一个对话都不发，而且没有任何日志（禁用门控只是 continue）。这种事只能靠
+// 「为什么昨晚什么都没跑」去反查，代价极高。
+func nightCandidates(list []pool.Status, includeDisabled bool, cap int) []pool.Status {
+	elig := make([]pool.Status, 0, len(list))
+	for _, st := range list {
+		if st.Disabled && !includeDisabled {
+			continue
+		}
+		if st.Paused {
+			continue
+		}
+		elig = append(elig, st)
+	}
+	return capByCredits(elig, cap)
+}
 
 // capByCredits 夜间任务候选收窄：按积分降序取前 cap 个。cap<=0 或候选不超上限时
 // 原样返回（不改序 —— 调用方要拿原顺序做摊开）。
