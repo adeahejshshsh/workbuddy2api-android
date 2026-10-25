@@ -67,5 +67,10 @@
 @media (max-width: 560px) {
   .nav a { font-size: 12px; padding: 7px 7px; }
   .qprog, .acts, .savebar { flex-wrap: wrap; }
+  /* 账号池操作列：桌面端是七个固定槽位的 grid（保证逐行对齐），一行放不下 360px 屏。
+     窄屏改回流式 + 换行：横向溢出比列对齐更糟。空槽（.slot）本来就是占位，
+     流式布局下没有意义，直接不显示。 */
+  .acts-inner { display: flex; flex-wrap: wrap; justify-content: flex-end; }
+  .acts-inner .slot { display: none; }
   .dlg .tabs { margin-left: 0; }
 }

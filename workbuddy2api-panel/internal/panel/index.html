@@ -557,7 +557,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
      ① .nav 的 7 个 tab 只露出 4 个，另外 3 个 off-screen（要横滑才够得着）
      ② .nav 窄屏被改成 position:static → 页面往下滚就没了入口
      ③ button 高 34px、button.xs 高 26px → 手指点不准（目标 ≥40/32px）
-     .srow/.shead(150px 1fr auto)
+     ④ .qrow(118px 1fr 52px 84px minmax(120,240)) 与 .srow/.shead(150px 1fr auto)
         是固定列宽网格，且**不在横向滚动容器里** → 把整页撑出横向滚动条
      ⑤ .view 左右各 24px + .acc min-width 640px → 360px 屏白扔 13% 宽度
      ⑥ .veil.on 居中 + 20px 内边距，弹层在手机上偏窄 → 改底部抽屉更顺手 */
@@ -586,6 +586,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   select.xs { min-height: 32px; padding: 6px 10px; }
 
   /* ④ 固定列宽网格 → 能收缩的两列，别再撑出横向滚动条 */
+  .qrow { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; padding: 9px 12px; }
+  .qrow .code, .qrow .msg { grid-column: 1 / -1; }
   .srow, .shead { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; padding: 11px 12px; }
   .shead .stasks, .srow .stasks { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
@@ -610,11 +612,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
   .dlg header, .dlg .body, .dlg footer { padding-left: 14px; padding-right: 14px; }
-  .acts, .savebar { flex-wrap: wrap; }
 }
 
 @media (max-width: 560px) {
   .nav a { font-size: 12px; padding: 7px 7px; }
+  .qprog, .acts, .savebar { flex-wrap: wrap; }
+  /* 账号池操作列：桌面端是七个固定槽位的 grid（保证逐行对齐），一行放不下 360px 屏。
+     窄屏改回流式 + 换行：横向溢出比列对齐更糟。空槽（.slot）本来就是占位，
+     流式布局下没有意义，直接不显示。 */
+  .acts-inner { display: flex; flex-wrap: wrap; justify-content: flex-end; }
+  .acts-inner .slot { display: none; }
   .dlg .tabs { margin-left: 0; }
 }
 /* ══ DSH-MOBILE-PATCH-END ══ */
