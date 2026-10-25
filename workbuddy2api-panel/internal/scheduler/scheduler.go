@@ -929,7 +929,16 @@ func (s *Scheduler) RunBalanceRefreshNow() { s.RunBalanceRefreshNowCtx(context.B
 
 // RunBalanceRefreshNowCtx 带 ctx 的余额刷新（bug B14）：sem 抢占与账号间节流都可取消，
 // 否则 SIGTERM 时可能卡在 sem 上直到超时。
+//
+// 这是**手动**入口（面板「刷新余额」）：不做人味化错峰 —— 人点的刷新本身就是人味，
+// 而且让按钮背后的操作凭空慢出几十秒（错峰窗口可达 frac×间隔）毫无意义。
 func (s *Scheduler) RunBalanceRefreshNowCtx(ctx context.Context) {
+	s.runBalanceRefreshNowCtx(ctx, false)
+}
+
+// runBalanceRefreshNowCtx 实际执行体。spread=true 时按 humanize 窗口把账号起跑错开
+// （仅后台周期路径用：要打散的是机械节拍，不是人点的操作）。
+func (s *Scheduler) runBalanceRefreshNowCtx(ctx context.Context, spread bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -941,8 +950,12 @@ func (s *Scheduler) RunBalanceRefreshNowCtx(ctx context.Context) {
 	sem := make(chan struct{}, 3)
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
-	// 账号遍历错峰窗口：量级 = frac×interval，抖动未启用时为 0（全并发 = 旧行为）。
-	stagger := spreadIntervalStagger(time.Duration(s.balanceInterval.Load()), s.balanceJitterFrac())
+	// 账号遍历错峰窗口：量级 = frac×interval。仅后台周期路径启用（见入口注释）；
+	// 未启用抖动时恒 0（全并发 = 旧行为）。
+	var stagger time.Duration
+	if spread {
+		stagger = spreadIntervalStagger(time.Duration(s.balanceInterval.Load()), s.balanceJitterFrac())
+	}
 dispatch:
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
@@ -1062,7 +1075,7 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 						// 必须用 Ctx 版本（bug-05）：无 ctx 版固定 Background，
 						// SIGTERM 后 sem 抢占与账号间请求都不会被打断，最多拖 46×30s，
 						// 把最后一次 Flush 挤进强杀窗口（正是 run.sh 8s 预算要保护的）。
-						s.RunBalanceRefreshNowCtx(ctx)
+						s.runBalanceRefreshNowCtx(ctx, true) // 后台周期：打散机械节拍
 					}()
 				}
 			}
