@@ -275,10 +275,11 @@ SSE 头撤净、不写任何 `data: ` 帧）。
 `WithoutRefreshToken` / `TestVerifyNilSafe`、
 `TestProbeBanLiftedWhenBalanceOK`（含「不改池状态」断言）/ `StillBannedOnAccountFault` /
 `BlockedWhenRefreshStillWorks`（⭐ 401 分不出来时靠 refresh 求证）/ `SessionDeadWhenRefreshRejected` /
-`InconclusiveOn5xx`。
+`InconclusiveOn5xx`、`TestRealmCodebuddyAIIsGlobal`（走 `Realm()`/`IsGlobal()` 真实入口，
+不只测 `isGlobalDomain` —— 函数被内联后单看二进制常量无法反推判据是否生效）。
 
-**927 通过 / 0 失败**（server 144 / upstream 268 / panel 71 / pool 201 / scheduler 85 /
-auth 32 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
+**928 通过 / 0 失败**（server 144 / upstream 268 / panel 71 / pool 201 / scheduler 85 /
+auth 33 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
 口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
 
 ## v1.35.2
