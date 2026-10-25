@@ -2449,7 +2449,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 				}
 				// VerifyDead：落到下面的计死逻辑。
 			}
-			if h.cfg.Pool.NoteSessionDeadWith(uid, gatewayUnauthorizedReason) {
+			// reason 带上「次数 + 已 refresh 验证」两个事实：面板只显示这一行，
+			// 运维要能一眼判断是「刚发生」还是「反复出现」，以及「是否已排除网关抖动」。
+			if h.cfg.Pool.NoteSessionDeadWith(uid, fmt.Sprintf(
+				"网关 401 × %d 且 refresh 验证失败（token 已确认失效）", pool.SessionDeadThreshold())) {
 				log.Printf("WARN: [server] acct=%s disabled after %d consecutive gateway 401 (refresh verdict: token invalid)",
 					logfmt.Label(uid, ""), pool.SessionDeadThreshold())
 			}
@@ -2457,7 +2460,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		// 三振判死，不再单次 Disable：12153 也会被网络抖动/上游闪断触发，
 		// 单次即永久禁用等于把健康号误杀（历史上有过 13 个号全是误判）。
-		if h.cfg.Pool.NoteSessionDead(uid) {
+		if h.cfg.Pool.NoteSessionDeadWith(uid, "上游 12153 session dead（业务码明说登录态失效，需重新登录）") {
 			log.Printf("ERR: [server] acct=%s disabled after %d consecutive 12153", uid, pool.SessionDeadThreshold())
 		}
 	case upstream.ErrNotFound:

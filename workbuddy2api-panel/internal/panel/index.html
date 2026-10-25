@@ -257,6 +257,19 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .rate-limit span { color: var(--ink-2); }
 .acts { display: flex; gap: 5px; justify-content: flex-end; white-space: nowrap; }
 .acts button { padding: 3.5px 8px; font-size: 12.5px; white-space: nowrap; flex: none; }
+/* 表格里的操作列是 <td class="acts">：上面的 display:flex 会把 td 踢出表格布局，
+   导致 vertical-align:middle 失效（按钮整体偏上、行线不齐）。这里强制恢复
+   table-cell，让该列和其他列一样参与行高与垂直居中；按钮排列交给内层 .acts-inner。 */
+td.acts { display: table-cell; vertical-align: middle; text-align: right; }
+/* 账号池操作列：每个动作占固定槽位（签到 / 余额 / 任务 / 探活 / 选号 / 禁用 / 移除），
+   缺哪个留空槽。否则「解冻 / 暂停选号 / 恢复选号」互斥、企业号没有签到/任务，
+   按钮个数随行变化，整列左右错位。
+   分列放在内层 div：td 保持 table-cell，vertical-align:middle 才继续生效
+   （直接给 td 设 display:grid 会退出表格布局，按钮变顶对齐）。 */
+.acts-inner { display: grid; grid-template-columns: repeat(3, 54px) 50px 68px repeat(2, 54px); gap: 5px; justify-content: end; align-items: center; }
+/* 统一盒模型：primary 与 ghost 的边框/行高不同会让「解冻」行比「暂停选号」行高 2~3px，
+   行线因此参差。固定高度 + border-box 后每行等高、按钮底边对齐。 */
+.acts-inner button { width: 100%; height: 26px; box-sizing: border-box; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 
 .empty { padding: 40px 20px; text-align: center; color: var(--ink-3); }
 .empty .big { font-size: 14px; color: var(--ink-2); margin-bottom: 6px; }

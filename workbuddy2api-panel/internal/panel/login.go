@@ -12,6 +12,7 @@ package panel
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,35 +20,33 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/loginsite"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
-const (
-	upstreamBaseCN      = "https://copilot.tencent.com"
-	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
-	originRefererCN     = "https://www.codebuddy.cn"
-	originRefererGlobal = "https://www.workbuddy.ai"
-)
+// clientUA 设备授权链路 UA。与 cmd/login 共用 internal/loginsite 的同一常量，
+// 避免「面板能登、CLI 工具不能登」的分叉。
+const clientUA = loginsite.ClientUA
 
 // loginEndpoints 按 realm 返回设备授权三端点（auth/state、token、account）+ Origin。
 // realm=="global" → 国际版（workbuddy.ai 同域）；cn/非法/缺省 → CN（零回归）。
 func loginEndpoints(realm string) (state, token, account, origin string) {
-	if realm == "global" {
-		base := upstreamBaseGlobal
-		return base + "/v2/plugin/auth/state?platform=CLI",
-			base + "/v2/plugin/auth/token?state=",
-			base + "/v2/plugin/login/account?state=",
-			originRefererGlobal
-	}
-	base := upstreamBaseCN
-	return base + "/v2/plugin/auth/state?platform=CLI",
-		base + "/v2/plugin/auth/token?state=",
-		base + "/v2/plugin/login/account?state=",
-		originRefererCN
+	return loginsite.ForRealm(realm).Endpoints()
+}
+
+// loginEndpointsFn 端点解析入口。抽成变量是为了让单测能把整条登录流程指到
+// httptest 服务器 —— 没有可登录的真实账号时，这是唯一能验「码表分流是否正确」的办法。
+var loginEndpointsFn = loginEndpoints
+
+// loginDeviceNonce 部署侧提供的桌面端设备 nonce（可选）。
+// 本仓没有官方桌面端的设备指纹 SDK，只能由部署侧注入；为空则不追加该参数 ——
+// 不伪造设备指纹（错值比缺值更容易被上游风控判异常）。
+func loginDeviceNonce() string {
+	return strings.TrimSpace(os.Getenv("CODEBUDDY_LOGIN_DEVICE_NONCE"))
 }
 
 // loginHTTP 设备授权专用 client：短超时、无 cookie（每请求携带 state，无会话态）。
@@ -110,10 +109,21 @@ func doJSON(method, fullURL, bearer string, body io.Reader, origin string) (json
 		return nil, resp.StatusCode, fmt.Errorf("parse failed: %w", err)
 	}
 	if env.Code != 0 {
-		return nil, resp.StatusCode, fmt.Errorf("code=%d msg=%s", env.Code, env.Msg)
+		return nil, resp.StatusCode, &loginEnvelopeError{Code: env.Code, Msg: env.Msg}
 	}
 	return env.Data, resp.StatusCode, nil
 }
+
+// loginEnvelopeError 上游业务码错误（code != 0）。
+//
+// 带**结构化 Code**：调用方要按码表分流（pending vs 终态），从 Error() 字符串里
+// 反解 code 既脆又会随文案漂移 —— 文案是给用户看的，随时可能改。
+type loginEnvelopeError struct {
+	Code int
+	Msg  string
+}
+
+func (e *loginEnvelopeError) Error() string { return fmt.Sprintf("code=%d msg=%s", e.Code, e.Msg) }
 
 // loginStart 发起设备授权：POST auth/state 拿授权 URL。
 // body 可带 {"realm":"global"}（缺省 cn）；state 会话记 realm，poll 同 realm 落盘。
@@ -129,7 +139,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	epState, _, _, origin := loginEndpoints(realm)
+	epState, _, _, origin := loginEndpointsFn(realm)
 	data, status, err := doJSON(http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), origin)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("auth state (upstream %d): %v", status, err))
@@ -152,8 +162,11 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	p.logins[st.State] = &loginSession{created: time.Now(), realm: realm}
 	p.loginMu.Unlock()
+	// 授权链接补官方参数（version，以及部署侧给了 nonce 时的 ww_device_nonce）：
+	// 官方登录页按 version 做灰度与埋点，写旧版本可能拿到旧登录页。
+	authURL := loginsite.DecorateAuthURL(st.AuthURL, loginsite.ForRealm(realm), loginDeviceNonce())
 	log.Printf("panel: 发起 OAuth 添加账号 realm=%s（state=%s...）", realm, st.State[:min(8, len(st.State))])
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": realm})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": authURL, "state": st.State, "realm": realm})
 }
 
 // loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。
@@ -202,14 +215,32 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		}
 		p.loginMu.Unlock()
 	}()
-	_, epToken, epAcct, origin := loginEndpoints(sess.realm)
+	_, epToken, epAcct, origin := loginEndpointsFn(sess.realm)
 
 	// auth/token 是权威登录状态端点：pending 时业务 code 非 0（"login ing"）。
 	// state 来自上游回调的 query 参数，必须转义（报告 #12）：含 & / # / 空格时
 	// 直接拼接会让请求目标被截断或串到别的参数上。
 	tokRaw, _, err := doJSON(http.MethodGet, epToken+url.QueryEscape(state), "", nil, origin)
 	if err != nil {
-		// pending / 未完成：面板前端继续轮询。
+		// 官方登录码分两类（对齐 CLI 2.174.0 的 SignLicenseError），混为一谈会让用户
+		// 在本该立刻报错的场景白等满 15 分钟 TTL：
+		//   11217/12151                → 还没登完，继续轮询
+		//   12005/11212/11216          → 终态许可错误，立刻把上游 msg 抛给用户
+		//   不在码表里的码             → 按 pending 处理（宁可多转，别把上游新增的
+		//                                中间态误报成致命错误）
+		var ee *loginEnvelopeError
+		if errors.As(err, &ee) && loginsite.CodeFatal(ee.Code) {
+			// state 已被上游消费，必须按终态收掉：复位 consumed 只会让前端拿着同一个
+			// state 反复轮询到 TTL，用户还是看不到这句真话。
+			completed = true
+			p.loginMu.Lock()
+			delete(p.logins, state)
+			p.loginMu.Unlock()
+			log.Printf("panel: 登录被上游拒绝（code=%d）state=%s...: %s", ee.Code, state[:min(8, len(state))], ee.Msg)
+			writeErr(w, http.StatusBadGateway, "登录被上游拒绝（"+ee.Msg+"），请换账号或稍后重试")
+			return
+		}
+		// pending / 未完成 / 未知码：面板前端继续轮询。
 		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": err.Error()})
 		return
 	}

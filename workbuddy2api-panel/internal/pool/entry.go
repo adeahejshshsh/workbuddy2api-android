@@ -100,6 +100,9 @@ type Status struct {
 	// 无个人成长体系，额度走企业口径；面板据此隐藏签到/任务按钮并打标签。
 	APIKey         bool   `json:"api_key,omitempty"`
 	DisabledReason string `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	// DisabledAt 禁用时刻（RFC3339；零值省略）。补上「何时」这一维：
+	// 只看原因分不清「刚被禁」和「禁了一周没人管」，而两者处置优先级差很远。
+	DisabledAt string `json:"disabled_at,omitempty"`
 	// Paused 暂停选号：退出选号候选（与 disabled 一样不参与选号），但**照常参与**
 	// 签到 / 活跃上报 / 保活 / 余额刷新四类保号任务。与 disabled 正交——disabled 是
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
@@ -227,9 +230,12 @@ type entry struct {
 	// paused 暂停选号：与 disabled 正交。置位后退出选号候选（healthy 判否），
 	// 但保号任务遍历只按 Disabled 过滤，故 paused 号天然继续参与签到 / 活跃上报 /
 	// 保活 / 余额刷新。持久化（state.json），跨重启不丢。
-	paused   bool
-	reason   string
-	lastUsed time.Time // 最近被选中时刻（防并发撞号）
+	paused bool
+	reason string
+	// disabledAt 禁用时刻（零值 = 未禁用）。与 reason 配对：运维需要知道
+	// 「什么时候被禁的」——同样一句 401，是刚刚发生还是挂了一周，处置完全不同。
+	disabledAt time.Time
+	lastUsed   time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效。
@@ -491,6 +497,7 @@ type stateAccount struct {
 	Disabled     bool      `json:"disabled"`
 	Paused       bool      `json:"paused,omitempty"`
 	Reason       string    `json:"reason,omitempty"`
+	DisabledAt   time.Time `json:"disabled_at,omitempty"` // 禁用时刻（持久化：重启后仍能看出禁了多久）
 	Until        time.Time `json:"until,omitempty"`
 	CoolKind     CoolKind  `json:"cool_kind"`
 	SuccessCount int64     `json:"success_count,omitempty"`

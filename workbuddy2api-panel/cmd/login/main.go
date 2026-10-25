@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,17 +32,14 @@ import (
 	"time"
 
 	auth2 "github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/loginsite"
 )
 
 // 上游常量：CN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
 // （base 与 Origin/Referer 同域）。端点 URL 由 realmConfig 按 realm 动态拼出，不再硬编码。
-const (
-	upstreamBaseCN      = "https://copilot.tencent.com"
-	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
-	originRefererCN     = "https://www.codebuddy.cn"
-	originRefererGlobal = "https://www.workbuddy.ai"
-)
+// UA 与站点表来自 internal/loginsite（与面板登录共用同一常量）：
+// 两处各写一份就会出现「面板能登、CLI 工具不能登」的分叉。
+const clientUA = loginsite.ClientUA
 
 // 登录 state 落盘路径（var 便于测试替换临时文件）
 // Portable across OSes: the upstream hardcoded "/tmp/...", which on
@@ -52,13 +50,16 @@ var stateFile = filepath.Join(os.TempDir(), "wb2api-login-state.json")
 // exitFunc 供测试替换（默认 os.Exit；测试持临时替换为 panic 以进程内捕获 fatal）。
 var exitFunc = os.Exit
 
+// errWriter fatal 的输出目标（默认 os.Stderr；测试替换以捕获文案）。
+// 抽出来是为了能断言「终态许可错误把上游 msg 抛给用户」——只断言退出码的话，
+// 报错文案退回那句无意义的「请确认已登录」也测不出来。
+var errWriter io.Writer = os.Stderr
+
 // realmConfig 按 realm 返回上游 base 与 Origin/Referer origin：global →
 // (www.workbuddy.ai, www.workbuddy.ai)；cn/非法/缺省 → (copilot.tencent.com, codebuddy.cn)。
 func realmConfig(realm string) (base, origin string) {
-	if realm == realmGlobal {
-		return upstreamBaseGlobal, originRefererGlobal
-	}
-	return upstreamBaseCN, originRefererCN
+	s := loginsite.ForRealm(realm)
+	return s.API, s.Origin
 }
 
 // commonHeaders 按 origin 设置通用请求头（Origin/Referer 随 realm 变化）。
@@ -91,7 +92,7 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 		headers(req)
 	} else {
 		// 缺省头：CN origin（与原 commonHeaders() 行为一致，零回归）
-		commonHeaders(originRefererCN)(req)
+		commonHeaders(loginsite.ForRealm(realmCN).Origin)(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -110,13 +111,22 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 		return nil, resp.StatusCode, fmt.Errorf("parse failed: %w", err)
 	}
 	if env.Code != 0 {
-		return nil, resp.StatusCode, fmt.Errorf("code=%d msg=%s", env.Code, env.Msg)
+		return nil, resp.StatusCode, &loginEnvelopeError{Code: env.Code, Msg: env.Msg}
 	}
 	return env.Data, resp.StatusCode, nil
 }
 
+// loginEnvelopeError 上游业务码错误（code != 0）。带结构化 Code 供调用方按码表
+// 分流（pending vs 终态）—— 从 Error() 字符串反解 code 会随文案漂移。
+type loginEnvelopeError struct {
+	Code int
+	Msg  string
+}
+
+func (e *loginEnvelopeError) Error() string { return fmt.Sprintf("code=%d msg=%s", e.Code, e.Msg) }
+
 func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "login: "+format+"\n", args...)
+	fmt.Fprintf(errWriter, "login: "+format+"\n", args...)
 	exitFunc(1)
 }
 
@@ -230,7 +240,13 @@ func runURL(base, origin, realm, statePath string, client *http.Client, out io.W
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		fatal("write state: %v", err)
 	}
-	fmt.Fprintln(out, st.AuthURL)
+	// 授权链接补官方参数（version，以及部署侧给了 nonce 时的 ww_device_nonce）。
+	fmt.Fprintln(out, loginsite.DecorateAuthURL(st.AuthURL, loginsite.ForRealm(realm), loginDeviceNonce()))
+}
+
+// loginDeviceNonce 部署侧提供的桌面端设备 nonce（可选，不伪造）。
+func loginDeviceNonce() string {
+	return strings.TrimSpace(os.Getenv("CODEBUDDY_LOGIN_DEVICE_NONCE"))
 }
 
 // runPoll 执行 poll 子命令：读 state 文件（realm 校验），向 upstreamBase 的 token 端点
@@ -256,6 +272,12 @@ func runPoll(base, origin, realm, statePath string, client *http.Client, out io.
 	if errTok != nil {
 		if status == 0 || status >= 500 {
 			fatal("token endpoint error: %v", errTok)
+		}
+		// 官方登录码分两类（对齐 CLI 2.174.0 的 SignLicenseError）：终态许可错误
+		// 直接把上游 msg 抛给用户并退出，别让它落进「请确认已登录」的无意义提示。
+		var ee *loginEnvelopeError
+		if errors.As(errTok, &ee) && loginsite.CodeFatal(ee.Code) {
+			fatal("登录被上游拒绝（code=%d）：%s", ee.Code, ee.Msg)
 		}
 		fatal("登录未完成（waiting for login）。请确认已在浏览器完成登录再按 y")
 	}

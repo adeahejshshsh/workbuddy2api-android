@@ -464,6 +464,41 @@ setTimeout(() => {
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
+// disabledKind 按 reason 归类禁用成因，每类带语气色与**建议动作**。
+//
+// 为什么要分类：四种成因的处置方式完全不同 —— 上游封禁要申诉（revive 无效）、
+// 登录失效要重登、鉴权失败要查账号类型、手动禁用随时可恢复。只给一行原始 reason，
+// 运维得先读懂才敢动手。
+function disabledKind(reason) {
+  const r = String(reason || '');
+  if (/11140|异常行为|封禁|封号|banned/i.test(r)) {
+    return { label: '上游封禁', tone: 'bad', advice: '需在官方申诉，解冻无效' };
+  }
+  if (/12153|401|refresh|session dead|登录/i.test(r)) {
+    return { label: '登录失效', tone: 'warn', advice: '需重新登录，解冻无效' };
+  }
+  if (/11‑-128|11129|channel|通道|鉴权/i.test(r)) {
+    return { label: '鉴权失败', tone: 'warn', advice: '检查账号类型与通道' };
+  }
+  if (/手动|manual/i.test(r)) {
+    return { label: '手动禁用', tone: 'mute', advice: '随时可解冻' };
+  }
+  return { label: '已禁用', tone: 'mute', advice: '见下方原因' };
+}
+
+// disabledAge 把禁用时刻转成「多久以前」。只看原因分不清「刚被禁」和「禁了一周
+// 没人管」，而后者往往意味着没人看面板，处置优先级差很远。
+function disabledAge(iso) {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return '';
+  const sec = Math.max(0, (Date.now() - t) / 1000);
+  if (sec < 60) return '刚刚';
+  if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前';
+  if (sec < 86400) return Math.floor(sec / 3600) + ' 小时前';
+  return Math.floor(sec / 86400) + ' 天前';
+}
+
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
@@ -477,7 +512,12 @@ function renderAccounts(list) {
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
     let cls = '', tag;
-    if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
+    if (s.disabled) {
+      cls = 'off';
+      const dk = disabledKind(s.disabled_reason);
+      const age = disabledAge(s.disabled_at);
+      tag = '<span class="tag ' + dk.tone + '">' + esc(dk.label) + (age ? ' · ' + esc(age) : '') + '</span>';
+    }
     else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
     else if (cool > 0) {
       cls = 'cool';
@@ -488,7 +528,12 @@ function renderAccounts(list) {
         || (bl > 0 ? '熔断' : (dg > 0 ? '连败降权' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     } else tag = '<span class="tag ok">可用</span>'; // 两个分支都返回空串的三元已删（bug-14）
-    const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
+    // 禁用行：先给「该怎么办」，原始 reason 作为细节跟在后面（运维排障时才需要它）。
+    const note = s.disabled
+      ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' +
+          esc(disabledKind(s.disabled_reason).advice) +
+          (s.disabled_reason ? ' · ' + esc(s.disabled_reason) : '') + '</div>'
+      : (s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '');
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     // 缺 uid 时兜底（报告 #15）：任一元素没有 uid（快照占位、字段裁剪、旧缓存）会抛
     // TypeError，map 中断 → 整张账号表只剩骨架。
@@ -543,26 +588,31 @@ function renderAccounts(list) {
         '<span class="usage-item usage-rate"><b>' + rate + '</b></span>' +
       '</span></td>' +
       '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
-      '<td class="acts">' +
+      // 七个动作按**固定槽位**输出，缺位留空 span —— CSS 用 grid 固定列宽逐行对齐。
+      // 否则按钮个数随状态变化（解冻/暂停/恢复互斥、企业号没有签到/任务），
+      // 不同行的按钮起点不一致，整列左右错位。
+      '<td class="acts"><div class="acts-inner">' + [
         // 企业版无个人成长体系（签到 400「企业账号不支持该操作」/ 成长任务 403）：
         // 不渲染「签到」「任务」按钮，只留「额度」——点它走 /balance，企业额度由
         // upstream 的 get-enterprise-user-usage 口径填充。
         // 国际版（realm=global）同样没有签到/成长体系（bug-01）：与 enterprise 同口径隐藏，
         // 否则点了必然吃上游 404/403，看起来像网关坏了。
         ((s.enterprise || s.api_key || s.realm === 'global') ? '' :
-          '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>') +
-        '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>' +
+          '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>'),
+        '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>',
         ((s.enterprise || s.api_key || s.realm === 'global') ? '' :
-          '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
+          '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>'),
+        // 探活只对冻结号有意义（只读探测上游是否已解封，不改池状态）。
+        ((frozen && !s.paused) ? '<button class="xs ghost" data-a="probe_ban" data-u="' + esc(s.uid) + '" title="只读探测上游是否已解封：不 revive、不参与选号、不改任何状态">探活</button>' : ''),
         // 暂停优先于冷却（bug #16）：一个"已暂停 + 正好在冷却中"的号此前会显示
         // 「解冻」（走 revive，会连带清掉暂停状态和全部冷却），与按钮文案不符。
         (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
-                  : (frozen ? '<button class="xs ghost" data-a="probe_ban" data-u="' + esc(s.uid) + '" title="只读探测上游是否已解封：不 revive、不参与选号、不改任何状态">探活</button>' +
-                              '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
-                            : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
-        (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
-        '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
-      '</td></tr>';
+                  : (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
+                            : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')),
+        (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>'),
+        '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>',
+      ].map(html => html || '<span class="slot" aria-hidden="true"></span>').join('') +
+      '</div></td></tr>';
   }).join('');
 }
 
@@ -3805,7 +3855,14 @@ async function loadBalance() {
     const tb = $('bhAccBody');
     if (tb) tb.innerHTML = rows.length ? rows.map((s, i) =>
       '<tr><td class="mark"><i class="dot" style="background:' + BH_COLORS[i % BH_COLORS.length] + '"></i></td>' +
-      '<td>' + esc(s.name || s.uid.slice(0, 8)) + '</td>' +
+      '<td>' + esc(s.name || s.uid.slice(0, 8)) + (function () {
+        // 每行是一条历史余额曲线：账号被封后曲线停止更新但历史仍在，不标注会把
+        // 「号被封」误读成「这段时间没在用」。
+        const a = acctStateOf(s.uid);
+        if (!a || !a.disabled) return '';
+        const dk = disabledKind(a.disabled_reason);
+        return ' <span class="tag ' + dk.tone + '">' + esc(dk.label) + '</span>';
+      })() + '</td>' +
       '<td class="num">' + fmtNum(s.current) + '</td>' +
       '<td class="num">' + fmtNum(s.min) + '</td>' +
       '<td class="num">' + fmtNum(s.max) + '</td>' +

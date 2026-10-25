@@ -38,12 +38,17 @@ for pkg in $pkgs; do
   printf "  %-11s %s\n" "$pkg" "$out"
   [ "$out" = "PASS" ] || fail=1
 done
-# cmd/server 只在配置类改动时需要
+# cmd/* 只在全量时跑（配置类改动才需要 cmd/server；cmd/login 有 realm/登录码用例，
+# 此前一直没进过测试轮 —— 等于那批断言从来没执行过）
 if [ "${1:-}" = "all" ]; then
-  if ( cd "$P" && go test -c -o "$PREFIX/tmp/cmdserver.test" ./cmd/server >/dev/null 2>&1 ); then
-    out=$(cd "$P/cmd/server" && /system/bin/linker64 "$PREFIX/tmp/cmdserver.test" 2>&1 | tail -1)
-    printf "  %-11s %s\n" "cmd/server" "$out"
-    [ "$out" = "PASS" ] || fail=1
-  fi
+  for c in server login; do
+    if ( cd "$P" && go test -c -o "$PREFIX/tmp/cmd$c.test" "./cmd/$c" >/dev/null 2>&1 ); then
+      out=$(cd "$P/cmd/$c" && /system/bin/linker64 "$PREFIX/tmp/cmd$c.test" 2>&1 | tail -1)
+      printf "  %-11s %s\n" "cmd/$c" "$out"
+      [ "$out" = "PASS" ] || fail=1
+    else
+      printf "  %-11s %s\n" "cmd/$c" "编译失败"; fail=1
+    fi
+  done
 fi
 exit $fail

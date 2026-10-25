@@ -189,6 +189,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			disabled:                 s.Disabled,
 			paused:                   s.Paused,
 			reason:                   s.Reason,
+			disabledAt:               s.DisabledAt,
 			until:                    s.Until,
 			coolKind:                 s.CoolKind,
 			successCount:             s.SuccessCount,
@@ -361,6 +362,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		// 长生不老并被重启原样拾回（issue #207-4）。
 		if e.disabled || (!e.until.IsZero() && now.Before(e.until)) {
 			s.Reason, s.Until, s.CoolKind = e.reason, e.until, e.coolKind
+			s.DisabledAt = e.disabledAt
 		}
 		// 熔断截止：仅未过期才落盘（指针 nil 才能被 omitempty 真省略）。
 		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {

@@ -10,7 +10,8 @@
 `11158 not allowed for user type [personal]`；网关 401 不分成因直接计死、3 次误杀健康号
 （issue #66 两号被禁，revive 后连续全 200）。
 
-**本版另有 4 条本仓自有修复，另有第七节的上游 10-24/10-25 增量（5 条 + 2 个片段）**：
+**本版另有 4 条本仓自有修复，另有第七节的上游 10-24/10-25 增量（5 条 + 2 个片段）、
+第八节的面板与登录四项（操作列对齐 / 禁用状态分类 / 登录码语义 / UA 与 version 对齐）**：
 
 - 流式断流若发生在**首帧之前**（一个字节都没写给客户端），旧实现伪 200 + error 帧把
   回合钉死，现在改为换号重试（对客户端透明），名额用尽才回正经 502。
@@ -192,6 +193,38 @@ context canceled`。
 `f0c427d` 主体（`loginsite` 包 + 登录码语义 + 站点三选一 + UA 2.174.0，1491 行）
 需要真实登录实测，单独一轮做。
 
+### 八、面板与登录：操作列对齐、禁用状态分类、登录码语义、UA/version
+
+| 提交 | 内容 | 合并要点 |
+|---|---|---|
+| `b21e471` | 账号池操作列固定槽位对齐 | 七个槽位（签到/余额/任务/探活/选号/禁用/移除）按 grid 固定列宽，缺位留空 span —— 否则「解冻/暂停/恢复」互斥、企业号没有签到/任务，按钮个数随行变化、整列左右错位。另两处：`td.acts` 恢复 `table-cell`（通用 `.acts{display:flex}` 会把 td 踢出表格布局 → `vertical-align:middle` 失效 → 按钮顶对齐、行线参差）；按钮固定 `height:26px` + `border-box`，消除 primary 与 ghost 的行高差 |
+| `4b489a4` | 禁用状态分类标签 + `disabled_at` | `disabledKind()` 按 reason 归四类（上游封禁 / 登录失效 / 鉴权失败 / 手动禁用），各带语气色与**建议动作**（如「需在官方申诉，解冻无效」）；`disabledAge()` 显示「禁了多久」；`disabled_at` 从 `entry` → `state.json` → `Status` 全链打通，`revive` 时清零。`disable` 端点支持可选 `{reason}` —— 原先把原因写死成「面板手动禁用」，任何来源的禁用都显示成管理员操作 |
+| `f0c427d` 片段③ | 登录码语义 | 新增 `internal/loginsite`（UA / 版本 / 码表 / 站点表唯一来源，面板与 `cmd/login` 共用）。`11217/12151` → pending 继续轮询；`12005/11212/11216` → 终态，立即报错并透出上游 msg。此前**任何** `code != 0` 都当 pending，许可类错误空转到 15 分钟 TTL，用户只看到「加账号一直转圈」 |
+| `f0c427d` 片段④ | UA / version 对齐 | UA `CLI/2.63.2` → `CLI/2.174.0`（与授权链接 `version=2.174.0` 同源）；`ww_device_nonce` 只在 workbuddy 站且部署侧提供 `CODEBUDDY_LOGIN_DEVICE_NONCE` 时追加 —— 本仓没有官方桌面端设备指纹 SDK，不伪造 |
+
+**没做的两条，理由**：
+
+- `71e14a5`（任务中心默认收起已完成/不适用行）—— **本仓无落点**。我们没有「任务中心
+  队列」这个视图：`renderQueue` / `qcList` / `tcSummary` / `tcEmpty` 全不存在，只有单号的
+  `openTasks` 弹窗（`app.js` 里那句「该界面已下线」说的就是它）。
+- `f0c427d` 的 `intl` 站点（`www.codebuddy.ai` 登录）—— 现有账号都是 cn / workbuddy
+  签发的，接入要真实登录实测。没有可登录账号时硬做只会做出「能发起登录、poll 必然
+  失败」的半成品。路由侧已认 `*.codebuddy.ai`，手写 auth 文件导入的 intl 账号能正常
+  走 global，只是面板没有发起登录的入口。
+
+**测试侧顺手补的两处**：
+
+- `patches/test.sh` 的全量轮加上 `cmd/login` —— 它一直有测试但**从来没被执行过**
+  （`ALL_PKGS` 只列 `internal/*`），等于那批 realm/登录码断言形同虚设。
+- `cmd/login` 的 `fatal` 输出抽成 `errWriter`，测试才能断言「终态码把上游 msg 抛给
+  用户」，而不是只看退出码 —— 只测退出码的话，文案退回那句无意义的「请确认已登录」
+  也测不出来。
+
+**没法验的部分（没有可登录账号）**：`version=2.174.0` 是否被上游登录页接受、终态码
+集合是否与线上一致 —— 这两条是照上游真机实测结果移植的，本仓只能用 httptest 验判据
+与流程，不能验上游行为。真加账号时如果报错，先看面板是否立刻显示上游 msg（而不是
+一直转圈）：显示 msg 说明码表生效，把 msg 发我。
+
 ### 未合并
 
 | 提交 | 内容 | 判断 |
@@ -278,8 +311,19 @@ SSE 头撤净、不写任何 `data: ` 帧）。
 `InconclusiveOn5xx`、`TestRealmCodebuddyAIIsGlobal`（走 `Realm()`/`IsGlobal()` 真实入口，
 不只测 `isGlobalDomain` —— 函数被内联后单看二进制常量无法反推判据是否生效）。
 
-**928 通过 / 0 失败**（server 144 / upstream 268 / panel 71 / pool 201 / scheduler 85 /
-auth 33 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61）。
+**八（面板与登录）新增 23 个用例**：`TestAppJSDisabledKindAndAge`（四类禁用成因 +
+六种时长 + 空/坏时间戳）、`TestDisabledAtSetOnDisableAndClearedOnRevive`（含 RFC3339
+与「落在刚刚附近」断言）、`TestDisabledAtPersists`（落盘 + 重新加载后仍在）、
+`internal/loginsite` 9 条（码表 pending/fatal/未知码不误判、realm→站点、三端点、
+`version` 补齐/不覆盖、`ww_device_nonce` 只对 workbuddy 且需部署侧提供、坏 URL 原样
+返回）、`TestLoginPollFatalCodeReportsImmediately`（三个终态码 → 502 + 上游 msg + 清会话）、
+`TestLoginPollPendingCodeKeepsPolling`、`TestLoginPollUnknownCodeTreatedAsPending`、
+`TestLoginStartDecoratesAuthURL`、`TestPollFatalLicenseCodes`（CLI 侧透出上游 msg、
+不落进 pending 提示）、`TestPollPendingCodeDoesNotFatal`。
+
+**951 通过 / 0 失败**（server 144 / upstream 268 / panel 76 / pool 203 / scheduler 85 /
+auth 33 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 61 /
+cmd-login 7 / loginsite 9）。
 口径是逐个跑测试二进制数 `--- PASS`（顶层用例），与上一版手工统计的 808 不同源。
 
 ## v1.35.2

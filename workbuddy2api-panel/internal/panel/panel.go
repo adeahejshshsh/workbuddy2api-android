@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -706,8 +707,23 @@ func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	p.cfg.Pool.Disable(uid, "manual disable (panel)")
-	log.Printf("panel: disable uid=%s（人工禁用）", uid)
+	// 可选 body {reason}：补录真实原因（历史禁用、按上游判定结果禁用等）。
+	// 缺省沿用「面板手动禁用（管理员操作）」——原先把这句写死，任何来源的禁用
+	// 在面板上都显示成管理员操作，运维分不清该不该点解冻。
+	reason := ""
+	if r.Body != nil {
+		var reqBody struct {
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&reqBody); err == nil {
+			reason = strings.TrimSpace(reqBody.Reason)
+		}
+	}
+	if reason == "" {
+		reason = "面板手动禁用（管理员操作）"
+	}
+	p.cfg.Pool.Disable(uid, reason)
+	log.Printf("panel: disable uid=%s（人工禁用：%s）", uid, reason)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
