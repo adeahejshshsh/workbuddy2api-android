@@ -425,6 +425,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	// 人味化参数（缺省 0 = 旧行为）：抖动比例先设，StartBalanceRefresh 每轮现读。
+	sch.SetBalanceJitter(cfg.Schedule.BalanceRefreshJitterPermill)
+	sch.SetNightAccountCap(cfg.Schedule.NightAccountCap)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
@@ -665,6 +668,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled,
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
+	sch.SetBalanceJitter(newCfg.Schedule.BalanceRefreshJitterPermill) // 人味化抖动热生效
+	sch.SetNightAccountCap(newCfg.Schedule.NightAccountCap)           // 夜间参与上限热生效
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
 	// 比对前把 prev 也规范化（bug #12）：prev 是**原始文件**反序列化结果，而 merged

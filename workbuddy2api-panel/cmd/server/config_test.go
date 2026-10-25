@@ -943,3 +943,60 @@ func TestServerReadTimeout(t *testing.T) {
 		t.Error("unparsable read_timeout should fail fast")
 	}
 }
+
+// 人味化参数解析与越界拒绝（上游 2026-10-26 `a24c10a`）。
+func TestScheduleHumanizeConfig(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(fp, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(`{"listen":":9999","api_key":"k","schedule":{"balance_refresh_jitter_permill":200,"night_account_cap":4}}`)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.BalanceRefreshJitterPermill != 200 {
+		t.Fatalf("jitter_permill=%d want 200", c.Schedule.BalanceRefreshJitterPermill)
+	}
+	if c.Schedule.NightAccountCap != 4 {
+		t.Fatalf("night_account_cap=%d want 4", c.Schedule.NightAccountCap)
+	}
+
+	// 缺省 0 = 关闭（旧行为逐字不变）。
+	write(`{"listen":":9999","api_key":"k"}`)
+	c, err = Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.BalanceRefreshJitterPermill != 0 || c.Schedule.NightAccountCap != 0 {
+		t.Fatalf("缺省应为 0（关闭）：%+v", c.Schedule)
+	}
+
+	// 越界 fail-fast：静默夹紧会把配错的数字藏起来。
+	write(`{"listen":":9999","api_key":"k","schedule":{"balance_refresh_jitter_permill":501}}`)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("jitter_permill > 500 应报错")
+	}
+	write(`{"listen":":9999","api_key":"k","schedule":{"night_account_cap":-1}}`)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("night_account_cap < 0 应报错")
+	}
+
+	// env 覆盖（与其它 WB2A_SCHEDULE_* 同口径）。
+	write(`{"listen":":9999","api_key":"k"}`)
+	t.Setenv("WB2A_SCHEDULE_BALANCE_REFRESH_JITTER_PERMILL", "150")
+	t.Setenv("WB2A_SCHEDULE_NIGHT_ACCOUNT_CAP", "2")
+	c, err = Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.BalanceRefreshJitterPermill != 150 || c.Schedule.NightAccountCap != 2 {
+		t.Fatalf("env 未生效：%+v", c.Schedule)
+	}
+}

@@ -439,9 +439,12 @@ func (p *Pool) BlockModelClear(uid, model string) {
 // ModelBlockStatus 描述某模型在全池范围内因模型级冷却而不可选的情况。
 type ModelBlockStatus struct {
 	Blocked bool      // true = 每个非禁用账号都对该模型处于冷却中
-	Reason  string    // 冷却原因（通常为上游原文，如 "11102 model ... not found"）
+	Reason  string    // 冷却原因（通常为上游原文，如 "11102 model ... not found"）；取最早解封的那条
 	Until   time.Time // 最早解封时间（零值 = 上游未给重置时刻）
 	Count   int       // 因此被挡的账号数
+	// Reasons 每个被挡账号的锁因（与 Count 等长）。Reason 只有一条，分不清「全池
+	// 是不是同一个原因」；调用方按需聚合（如「是不是清一色用量配额 6004」）。
+	Reasons []string
 }
 
 // ModelBlocked 报告该模型是否在全池范围内被模型级冷却挡住。
@@ -499,14 +502,19 @@ func (p *Pool) ModelBlockedForRealm(model, realm string) ModelBlockStatus {
 		}
 		st.Count++
 		if mc, ok := e.modelCooldowns[model]; ok {
-			if st.Reason == "" {
-				st.Reason = mc.Reason
-			}
-			// 取最早解封：那才是"再等多久值得重试"的答案。
+			st.Reasons = append(st.Reasons, mc.Reason)
+			// 取最早解封：那才是"再等多久值得重试"的答案。Reason 跟着这条走，
+			// 保证「原因」与「解锁时刻」出自同一个账号，不会张冠李戴。
 			if !mc.Until.IsZero() && (st.Until.IsZero() || mc.Until.Before(st.Until)) {
 				st.Until = mc.Until
+				st.Reason = mc.Reason
 			}
 		}
+	}
+	if st.Reason == "" && len(st.Reasons) > 0 {
+		// 全都没有解封时刻（如 14003 无墙钟的有界退避）：退回第一条，
+		// 保持「Blocked 必有 Reason」的既有语义。
+		st.Reason = st.Reasons[0]
 	}
 	if st.Count == 0 {
 		// 池里压根没有非禁用账号：这是"真的没号"，不是模型问题。

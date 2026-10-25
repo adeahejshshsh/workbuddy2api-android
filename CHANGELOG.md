@@ -1,6 +1,116 @@
 # 变更记录
 
-## v1.35.3（当前）
+## v1.35.4（当前）
+
+**本版 = 上游 10-25/10-26 增量 4 条**（`d30f7fd..4662949` 里挑的），其中两条修的是
+正在发生的事：把健康号误判成死号、以及让客户端按 `Retry-After` 静默挂起。
+
+### 一、refresh token 失效不再当账号死（上游 issue #83）
+
+refresh token 失效 ≠ 账号不可用。上游 2026-10-25 生产实测：**29 个账号里 4 个
+refresh 恒回 12153，AT 却还有 26~333 天，`/v2/chat/completions` 全 200**。旧逻辑把
+这种号按 session dead 连续计数，3 轮后永久禁用 —— 面板一片橙色「疑似登录失效」，
+对话却秒回。
+
+判据收敛到 `upstream.SessionDeadButUsable`（只看 AT 是否仍有效），本仓两处调用：
+
+| 位置 | 旧行为 | 现行为 |
+|---|---|---|
+| `scheduler.runKeepalive` | 计 session dead，3 轮禁用 | 不计死，降 INFO（面板错误汇总按 WARN 聚合，打 WARN 会让「保活失败」一直挂在页面上） |
+| `server.chatCompletions` 预刷新 | `fail` + 换号重试，累计后禁用 | 不罚号也不换号，**直接拿现有 AT 发这次请求** |
+
+判据为什么不能更省事：**不按上游文案**（同一账号重试，措辞会从「Session doesn't
+have required client」变成「Invalid refresh token」）、**不按 JWT azp**（实测 29 个号
+azp 全是 console，其中 25 个 plugin 源 refresh 正常）。唯一稳定判据是 AT 还能不能用。
+
+反向保护也有用例：AT **已过期**时 refresh 判死仍按老语义罚号换号 —— 那时账号是真的
+不能用了（`TestChatRefreshDeadAndAccessTokenExpiredStillFails`）。
+
+### 二、全池模型配额锁（6004/6000）直接回 429
+
+全池该模型都被「使用量已超出频率限制」挡住时，此前按「模型繁忙」回 503 +
+`Retry-After` = 剩余锁时长，**且无上限**。客户端把这个头当成「睡多久」的指令
+（codebuddy CLI 直接 `delayMs = retry-after×1000`，不看上限），20 分钟的冷却就变成
+20 分钟静默挂起 —— 比报错更难排查。而配额锁在重置前重试必然同样失败。
+
+- 全池锁因**清一色**是用量配额（6004/6000）时：**429** + `error.code` = 上游业务码
+  （数字）+ 上游原文，**不发 Retry-After**；混因（夹着 14003 瞬时忙）仍走可重试的 503
+- 模型级冷却的 reason 保留**上游原文**（此前写死成固定串）：上一批合入 6000 后，
+  6000 的锁会被标成 6004，锁因与上游原文对不上、面板也看不出为什么锁
+- `ModelBlockStatus.Reasons`（每个被挡账号的锁因）供「全池同因」判定；`Reason` 改为
+  绑定**最早解封那条** —— 此前取第一条非空，原因与解锁时刻可能来自不同账号
+- 瞬时忙分支的 `Retry-After` **封顶 600s**
+
+`error.code` 用数字是刻意的：客户端按数字业务码判能不能重试，写成
+`insufficient_quota` 字符串会让它既认不出配额也认不出业务码。
+
+### 三、周期任务人味化（默认全关）
+
+2026-10-24 上游 11140 集中封禁复盘：池内 6 个号在 3 分钟内被「request illegal /
+账号存在异常行为」封禁，日志显示同出口 IP 上全部账号以完全一致的机械节拍活动。
+
+| 新开关 | 缺省 | 作用 |
+|---|---|---|
+| `schedule.balance_refresh_jitter_permill`（0-500） | 0 = 关 | 余额刷新间隔在 ±该比例内稳定抖动（进程种子，重启换相位）；账号遍历同时摊开到同量级窗口，消除「每 5 分钟整点全池并发齐射」 |
+| `schedule.night_account_cap` | 0 = 不限 | 夜猫子只让积分最高的前 N 个号参加，其余号夜里静默 —— 夜猫子是唯一「整任务都是真实模型对话」的，指纹最重。白天任务仍全池保号 |
+
+越界 **fail-fast**（不静默夹紧）：静默夹紧会把配错的数字藏起来，配 5000‰ 以为开了
+强抖动、实际被夹到 500 仍是 50%，用户永远发现不了。面板配置页两项都可热改。
+
+**与上游不同**：本仓没有补领清扫的周期循环（`StartTaskSweep` 不存在），所以
+`task_sweep_jitter_permill` 无落点、不引入；账号错峰在抢并发槽**之前**等（本仓余额
+刷新有 sem=3 闸门，抢到槽再睡会占着槽空转）。
+
+### 四、首页刷新异常不再静默
+
+`loadOverview` 的 catch 此前是 `if (!quiet) toast(...)` —— 5 秒轮询（quiet）时异常被
+完全吞掉，表现就是「统计正常、表格空白、控制台干净」，只能靠反推。改成异常一律
+`console.error` 留痕，非轮询仍 toast。
+
+不取上游 PR #246/#250/#251 的其余部分：两张表各自包 try 会让「账号池渲染失败」与
+「模型锁池渲染失败」变成两个互不相干的静默失败，反而更难发现。
+
+### 顺手修的一个既有用例（与本批无关）
+
+`TestRunCatchesUpMissedSlots` 用 `time.Now().Hour()-1` 取「今天已过去的整点」，而
+排程时点一律按 CST 解释。本机 TZ 未设置时 Go 的 local 是 UTC —— UTC 22 点取到
+hour=21，配上 CST 早上 6 点，「今天 21:00」还没过，补跑不触发。实测 13:30 CST 通过、
+06:52 CST 必挂，即**每天约 9 小时必然失败**。改用 `cst.Now()`，仍与线上行为无关。
+
+### 未合
+
+`4662949`（面板资源占用：后台暂停轮询 / 增量拉日志 / 跳过无变化重绘）、
+`865c95e`（裸模型名落错域的 hint —— 本仓已有更强的 `realm_required` 400 指引）、
+`79897f3`（版本检测与自动更新，1730 行：它是**原生二进制**自更新，本仓服务端是 APK
+里的 `.so`，要做得改走 PackageInstaller）、`8d5e931`（开发机器人的仓清单，无关）。
+
+前两条按需再取：`4662949` 里「后台暂停轮询」对手机宿主有实际意义（WebView 切后台后
+仍每 5 秒打本地服务），但它为上游分叉改过 `renderAccounts`/`logsHandler`，而我们分叉
+更远（七槽位、可用 N/M、error_summary），需要逐个对。
+
+### 测试
+
+**新增 19 个用例**：`TestSessionDeadButUsable`（4 分支）、
+`TestRunKeepaliveRefreshDeadButAccessTokenAlive`、
+`TestChatRefreshDeadButAccessTokenAliveStillServes`（含「不该换号重试」断言）、
+`TestChatRefreshDeadAndAccessTokenExpiredStillFails`（反向保护）、
+`TestChatModelQuotaLockedReturns429`（6004 + 不发 Retry-After + 数字码）、
+`TestChatModelQuota6000ReportsOwnCode`（6000 不能标成 6004）、
+`TestChatModelQuotaMixedWithBusyKeepsRetryable`、`TestChatModelBusyRetryAfterCapped`、
+`TestModelBlockedReasonsAndReasonBinding`（Reason 绑定最早解封）、
+`TestModelBlockedReasonFallbackWithoutUntil`、
+`TestJitterFracStableAndBounded` / `TestPeriodicJitter` / `TestBalanceRefreshStagger` /
+`TestStaggerZeroWhenDisabled`、`TestCapByCredits` / `TestCapByCreditsUnknownCredits` /
+`TestNightAccountCapSetter`、`TestScheduleHumanizeConfig`（含越界拒绝与 env 覆盖）、
+`TestAppJSLoadOverviewNeverSwallowsError`（轮询留痕但不 toast / 手动留痕 + toast /
+正常路径不误报且仍返回响应体）。
+
+**970 通过 / 0 失败**（server 150 / upstream 269 / panel 77 / pool 205 / scheduler 93 /
+auth 33 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 62 /
+cmd-login 7 / loginsite 9）。
+
+
+## v1.35.3
 
 **本版 = 上游 13 条移植（10-23 批 9 条 + 10-24 批 4 条），其中 3 条修的是线上正在踩的坑。**
 

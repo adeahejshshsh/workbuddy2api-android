@@ -686,7 +686,12 @@ async function loadOverview(quiet) {
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的到期快照，不额外发请求）。
     // 已有逐包明细缓存时不再覆盖——明细信息量更大，别把它降级成快照。
     if ($('expBox') && !lastPackages) renderExpirySnapshot(d);
-  } catch (e) { if (!quiet) toast(e.message, 'err'); }
+  } catch (e) {
+    // 轮询（quiet）时也留痕：渲染异常被静默吞掉的表现就是「统计正常、表格空白、
+    // 控制台干净」—— 只能靠反推，排查代价极高（上游 issue #241 的实际经历）。
+    console.error('[panel] 首页刷新失败', e);
+    if (!quiet) toast(e.message, 'err');
+  }
   // 必须返回响应体（报告 #1）：调用方 `const ov = await loadOverview(true)` 拿返回值
   // 判断 balance_refreshing —— 此前没有 return，恒为 undefined，于是每点一次刷新都
   // 白等满 20×1.5s 并必定误报「仍在后台」。
@@ -1246,6 +1251,8 @@ const CFG_MAP = {
   keepalive_hours: ['schedule', 'keepalive_hours'], keepalive_enabled: ['schedule', 'keepalive_enabled'],
   keepalive_refresh_window: ['schedule', 'keepalive_refresh_window'],
   balance_refresh_enabled: ['schedule', 'balance_refresh_enabled'], balance_refresh_minutes: ['schedule', 'balance_refresh_minutes'],
+  balance_refresh_jitter_permill: ['schedule', 'balance_refresh_jitter_permill'],
+  night_account_cap: ['schedule', 'night_account_cap'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
   // 补齐缺失键（报告 #20）：这些字段此前在配置页既回显不了也改不了。
   blackcat_hours: ['schedule', 'blackcat_hours'], blackcat_enabled: ['schedule', 'blackcat_enabled'],
@@ -1342,6 +1349,7 @@ const NUMERIC_CFG = new Set([
   'request_retention_days', 'request_archive_max_mb', 'package_detail_limit',
   'max_in_flight', 'max_in_flight_global', 'breaker_threshold', 'degrade_threshold',
   'credit_floor', 'balance_refresh_minutes', 'account_spread_seconds',
+  'balance_refresh_jitter_permill', 'night_account_cap',
   'timeout_seconds', 'header_timeout_seconds', 'idle_timeout_seconds',
   'idle_weight_per_hour', 'idle_weight_max',
 ]);

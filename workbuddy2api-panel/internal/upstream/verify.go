@@ -39,6 +39,24 @@ func (v VerifyVerdict) String() string {
 	}
 }
 
+// SessionDeadButUsable 报告「refresh 判死，但账号此刻仍能用」。
+//
+// refresh token 失效与账号不可用是两件事：AT 未过期时上游 chat 仍正常。2026-10-25
+// 生产实测（issue #83）：29 个账号里 4 个 refresh 恒回 12153，AT 却还有 26~333 天，
+// /v2/chat/completions 全 200。把这种号计 session dead 会在连续 3 次保活后永久禁用
+// 一个完全健康的账号，正是「面板一片橙色、对话却秒回」的成因。
+//
+// 注意判据不是上游文案（"Session doesn't have required client" 只是同一次失败的措辞，
+// 同一账号重试就变成 "Invalid refresh token"），也不是 JWT 的 azp：实测 29 个账号
+// azp 全是 console，其中 25 个 plugin 源 refresh 正常。唯一稳定判据是 AT 是否还能用。
+//
+// 只适用于「AT 尚未被上游拒绝」的路径（保活 / 发请求前的预刷新）：那些地方 refresh
+// 失败只说明 RT 死了，AT 还能干活。chat 路径拿到网关 401 时 AT 已被上游拒过，那里
+// refresh 判死就该计死，不适用本函数。
+func SessionDeadButUsable(a *auth.Auth) bool {
+	return a != nil && !a.NeedsRefresh(0)
+}
+
 // VerifySessionByRefresh 用 refresh 求证会话是否仍有效（网关 401 的唯一可靠判据）。
 //
 // 判据：

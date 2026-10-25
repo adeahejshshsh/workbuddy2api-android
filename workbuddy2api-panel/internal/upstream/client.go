@@ -291,6 +291,17 @@ func IsModelRateLimit(body string) bool {
 	return reModelUsageLimit.MatchString(body) && strings.Contains(body, modelSwitchModelHint)
 }
 
+// IsModelBusy 报告 body 是否是 14003「模型繁忙」（模型级、间歇信号：同一分钟既有
+// 14003 也有成功）。与 IsModelRateLimit 并列使用：两者都命中时按「瞬时忙」处置
+// （等一等会好），不是用量配额（等到重置前都无效）。
+func IsModelBusy(body string) bool {
+	return hasBusinessCode(body, "14003") || strings.Contains(strings.ToLower(body), "model busy")
+}
+
+// HasCodeMarker 报告 body 是否带指定业务 code（结构化解析 + 纯文本兜底，
+// 与 hasBusinessCode 同口径）。给「从冷却 reason 原文里认业务码」的调用方用。
+func HasCodeMarker(body, want string) bool { return hasBusinessCode(body, want) }
+
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
 const modelBlockCode = "11102"
 

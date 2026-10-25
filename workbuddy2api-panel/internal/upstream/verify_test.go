@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -102,5 +103,24 @@ func TestVerifyNilSafe(t *testing.T) {
 	}
 	if got := (&Client{}).VerifySessionByRefresh(nil); got != VerifyInconclusive {
 		t.Fatalf("got %v want VerifyInconclusive", got)
+	}
+}
+
+// TestSessionDeadButUsable 判据只看 AT 是否还有效，不看上游文案/azp（issue #83）。
+func TestSessionDeadButUsable(t *testing.T) {
+	future := &auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: time.Now().Add(26 * 24 * time.Hour).Unix()}
+	if !SessionDeadButUsable(future) {
+		t.Error("AT 还剩 26 天 → 应判定仍可用")
+	}
+	expired := &auth.Auth{UID: "u2", AccessToken: "at", ExpiresAt: 1}
+	if SessionDeadButUsable(expired) {
+		t.Error("AT 已过期 → 不可用，应计 session dead")
+	}
+	noExpiry := &auth.Auth{UID: "u3", AccessToken: "at"} // ExpiresAt=0：NeedsRefresh 为 true
+	if SessionDeadButUsable(noExpiry) {
+		t.Error("无过期时间 → 按需刷新语义视为不可用")
+	}
+	if SessionDeadButUsable(nil) {
+		t.Error("nil 应判 false")
 	}
 }

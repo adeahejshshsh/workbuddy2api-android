@@ -136,6 +136,20 @@ type Config struct {
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
+
+		// BalanceRefreshJitterPermill 余额刷新周期抖动（千分比，0-500 = 0-50%；缺省 0 = 关闭）。
+		//
+		// 为什么需要：2026-10-24 上游 11140 集中封禁复盘发现，池内 6 个号在同一出口 IP
+		// 上以「每 5 分钟整点一次余额刷新、全账号并发齐射」的完全一致节拍活动 —— 这是
+		// 最好认的机器人形状。>0 时下一轮间隔在该比例内稳定抖动，账号遍历同时摊开到
+		// 同量级窗口（见 internal/scheduler/humanize.go）。
+		BalanceRefreshJitterPermill int `json:"balance_refresh_jitter_permill"`
+
+		// NightAccountCap 夜间任务（夜猫子）参与账号上限：>0 时只让积分最高的前 N 个
+		// 号参加，其余号夜里静默。夜猫子是整个任务体系里唯一「整任务都是真实模型
+		// 对话」的，指纹最重 —— 深夜全池同 IP 齐做真实对话最像机器人。缺省 0 = 不限
+		// （旧行为）。白天任务（签到/旅行/成长）仍全池保号，不受本项影响。
+		NightAccountCap int `json:"night_account_cap"`
 	} `json:"schedule"`
 
 	Global struct {
@@ -363,6 +377,9 @@ func Default() *Config {
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
+	// 人味化开关缺省关闭：旧部署行为逐字不变，要开的人显式配。
+	c.Schedule.BalanceRefreshJitterPermill = 0
+	c.Schedule.NightAccountCap = 0
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -590,6 +607,16 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_STATE_FILE"); v != "" {
 		c.StateFile = v
+	}
+	if v := os.Getenv("WB2A_SCHEDULE_BALANCE_REFRESH_JITTER_PERMILL"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			c.Schedule.BalanceRefreshJitterPermill = n
+		}
+	}
+	if v := os.Getenv("WB2A_SCHEDULE_NIGHT_ACCOUNT_CAP"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			c.Schedule.NightAccountCap = n
+		}
 	}
 	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
@@ -927,6 +954,11 @@ func (c *Config) normalize() error {
 		}
 		c.BalanceRefreshInterval = time.Duration(c.Schedule.BalanceRefreshMinutes) * time.Minute
 	}
+	// 人味化参数：越界 fail-fast（与 validateScheduleHours 同口径 —— 静默夹紧会把
+	// 一个配错的数字藏起来，用户以为开了抖动其实配的是 5000‰）。
+	if err := c.validateScheduleHumanize(); err != nil {
+		return err
+	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err
 	}
@@ -965,6 +997,19 @@ func (c *Config) normalizePrompt() error {
 // 为什么不用 `[-1]` 之类的哨兵值表意"禁用"：非法小时被静默吞掉时，用户以为关掉了签到，
 // 实际可能被当成另一个整点照常执行；这里直接快速失败，并在错误信息里指向正确的开关
 // （checkin_enabled / keepalive_enabled），避免用户靠猜哨兵值来配。
+// validateScheduleHumanize 校验人味化参数（抖动千分比 / 夜间参与上限）。
+// 越界直接报错而不是夹紧：静默夹紧会把配错的数字藏起来（配 5000‰ 以为开了强抖动，
+// 实际被夹到 500 也仍然是 50%，用户永远发现不了自己写错）。
+func (c *Config) validateScheduleHumanize() error {
+	if v := c.Schedule.BalanceRefreshJitterPermill; v < 0 || v > 500 {
+		return fmt.Errorf("schedule.balance_refresh_jitter_permill 必须在 0-500（千分比，500 = ±50%%），当前 %d", v)
+	}
+	if v := c.Schedule.NightAccountCap; v < 0 {
+		return fmt.Errorf("schedule.night_account_cap 不能为负（0 = 不限），当前 %d", v)
+	}
+	return nil
+}
+
 func (c *Config) validateScheduleHours() error {
 	// 任务已显式禁用时不再校验它的小时（BUG-7）：错误文案自己写着「如要关闭该任务
 	// 请设 schedule.X_enabled=false」，用户照做之后如果 hours 里还留着哨兵值，

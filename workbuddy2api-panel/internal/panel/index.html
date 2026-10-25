@@ -1075,6 +1075,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">账号级摊开（秒）</span>
                 <input name="account_spread_seconds" type="number" min="0" placeholder="0">
                 <span class="hint">0 = 关闭；账号遍历型任务按此间隔逐个打，避免同一秒打全池</span></label>
+              <label class="fld"><span class="lb">刷新间隔抖动（‰）</span>
+                <input name="balance_refresh_jitter_permill" type="number" min="0" max="500" placeholder="0">
+                <span class="hint">0 = 关闭（精确固定间隔）。100 = 间隔在 ±10% 内随机抖动、账号遍历摊开到同量级窗口 —— 消除「每 5 分钟整点全池齐射」这种最好认的机器人节拍</span></label>
+              <label class="fld"><span class="lb">夜间参与上限（个）</span>
+                <input name="night_account_cap" type="number" min="0" placeholder="0">
+                <span class="hint">0 = 不限（全池参加夜猫子）。夜猫子是唯一「整任务都是真实模型对话」的，指纹最重；设 N 后只让积分最高的前 N 个号参加，其余号夜里静默。白天任务不受影响</span></label>
             </div>
             <div class="hr"></div>
             <div class="switch"><span class="lb">保号任务覆盖已禁用账号</span>

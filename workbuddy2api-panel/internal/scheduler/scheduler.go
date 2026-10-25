@@ -108,6 +108,14 @@ type Scheduler struct {
 	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读当前值，
 	// SetBalanceInterval 可任意时刻热改（面板保存配置）。
 	balanceInterval atomic.Int64
+	// balanceJitter 余额刷新周期抖动比例（千分比 0-500 = 0-50%，atomic 读写）。
+	// >0 时下一轮间隔在 ±frac×interval 内稳定偏移（见 humanize.go），不再精确固定
+	// 间隔打卡；账号遍历同时摊开到同量级窗口。0 = 旧行为（精确间隔 + 全并发）。
+	balanceJitter atomic.Int64
+
+	// nightAccountCap 夜间任务参与上限（>0 = 只让积分最高的前 N 个号参加夜猫子）。
+	// atomic 读写，Reconfigure 可热改。0 = 不限（旧行为）。
+	nightAccountCap atomic.Int64
 }
 
 // New 构建。
@@ -886,8 +894,16 @@ func (s *Scheduler) runKeepalive(ctx context.Context, spread, selective bool) {
 			return // 停机/取消：立刻退出
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
-			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
+			// refresh token 失效 ≠ 账号不可用：AT 还没过期时 chat 仍正常（issue #83）。
+			// 这种号既不计 session dead（连续 3 次保活就会禁用掉健康号），也不打 WARN——
+			// 面板的错误汇总按 WARN 聚合，打 WARN 会让「保活失败」一直挂在页面上。
+			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && upstream.SessionDeadButUsable(a) {
+				log.Printf("INFO: keepalive %s: refresh token 已失效但 access token 仍有效，本轮跳过（对话仍可用）",
+					logfmt.Label(st.UID, st.Nickname))
+				continue
+			}
+			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && !st.Disabled {
 				if s.cfg.Pool.NoteSessionDead(st.UID) {
 					log.Printf("keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
@@ -925,6 +941,8 @@ func (s *Scheduler) RunBalanceRefreshNowCtx(ctx context.Context) {
 	sem := make(chan struct{}, 3)
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+	// 账号遍历错峰窗口：量级 = frac×interval，抖动未启用时为 0（全并发 = 旧行为）。
+	stagger := spreadIntervalStagger(time.Duration(s.balanceInterval.Load()), s.balanceJitterFrac())
 dispatch:
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
@@ -937,6 +955,14 @@ dispatch:
 		// 取消时不要提前 return（bug #10）：已经起飞的 goroutine 还在跑并占着 sem，
 		// 提前返回会让下一轮再建一个新 sem，老一批与新一批并发叠加 = 闸门失效。
 		// 这里只跳出派发循环，末尾统一 wg.Wait()。
+		// 账号级起跑错峰（人味化，humanize.go）：并发齐射改为窗口内逐号错开，消除
+		// 「同一秒全池同动作」的时间指纹。窗口 = frac×interval（抖动关闭时为 0，
+		// 行为与旧版逐字一致）。在抢 sem **之前**等：抢到再睡会占着并发槽空转。
+		if wait := spreadStaggerDelay(stagger, st.UID); wait > 0 {
+			if !sleepCtx(ctx, wait) {
+				break dispatch // 取消：剩余账号下一轮再刷
+			}
+		}
 		select {
 		case sem <- struct{}{}: // 限并发：满 3 路就等，不堆 goroutine
 		case <-ctx.Done():
@@ -992,6 +1018,12 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 		logged := time.Duration(-1)
 		for {
 			cur := time.Duration(s.balanceInterval.Load())
+			// 人味化抖动：间隔在 ±frac×interval 内偏移（每轮重取，进程种子稳定），
+			// 不再精确固定间隔打卡。基准间隔不变（热改/暂停语义不受影响）。
+			delay := cur + periodicJitter(cur, s.balanceJitterFrac(), "bal")
+			if delay < 0 {
+				delay = 0
+			}
 			if cur != logged {
 				log.Printf("scheduler: 余额后台刷新每 %s（暂停中显示 0s）", cur)
 				logged = cur
@@ -1005,7 +1037,7 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 					continue
 				}
 			}
-			timer := time.NewTimer(cur)
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -1045,6 +1077,51 @@ func (s *Scheduler) SetBalanceInterval(d time.Duration) {
 	}
 	s.balanceInterval.Store(int64(d))
 	poke(s.rearmBalance)
+}
+
+// SetBalanceJitter 热改余额刷新的周期抖动比例（千分比；<0 或 >500 归一到边界）。
+func (s *Scheduler) SetBalanceJitter(permill int) {
+	if permill < 0 {
+		permill = 0
+	}
+	if permill > 500 {
+		permill = 500
+	}
+	s.balanceJitter.Store(int64(permill))
+}
+
+// balanceJitterFrac 当前生效的抖动比例（千分比 → 比例）。
+func (s *Scheduler) balanceJitterFrac() float64 {
+	return float64(s.balanceJitter.Load()) / 1000
+}
+
+// SetNightAccountCap 热改夜间参与上限；<0 视为 0（不限）。
+func (s *Scheduler) SetNightAccountCap(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.nightAccountCap.Store(int64(n))
+}
+
+// NightAccountCap 当前夜间参与上限（0 = 不限）。
+func (s *Scheduler) NightAccountCap() int { return int(s.nightAccountCap.Load()) }
+
+// capByCredits 夜间任务候选收窄：按积分降序取前 cap 个。cap<=0 或候选不超上限时
+// 原样返回（不改序 —— 调用方要拿原顺序做摊开）。
+//
+// 为什么按积分：夜间流量集中到少数号、其余号夜里静默 —— 真人不会全部账号都在夜里
+// 有活动。选积分高的那些是好钢用在刀刃上（它们本来也最可能被选中）。
+func capByCredits(list []pool.Status, cap int) []pool.Status {
+	if cap <= 0 || len(list) <= cap {
+		return list
+	}
+	sorted := append([]pool.Status(nil), list...)
+	for i := 1; i < len(sorted); i++ {
+		for j := i; j > 0 && sorted[j].Credits > sorted[j-1].Credits; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+		}
+	}
+	return sorted[:cap]
 }
 
 // skipBehaviorTask 企业上下文（企业版 / 企业切换会话）不做**行为类**任务
