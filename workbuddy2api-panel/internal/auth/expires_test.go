@@ -61,3 +61,18 @@ func TestIsGlobalDomainRecognizesCodebuddyAI(t *testing.T) {
 		}
 	}
 }
+
+// 行为层面的钉子：走 Realm()/IsGlobal() 的真实入口，而不只测 isGlobalDomain。
+// 函数被内联后，单看二进制里的字符串常量无法反推判据是否生效 —— 只有走真实入口
+// 才能确认「国际站账号不会被判成 cn」。
+func TestRealmCodebuddyAIIsGlobal(t *testing.T) {
+	for _, d := range []string{"www.codebuddy.ai", "codebuddy.ai", "api.codebuddy.ai"} {
+		a := &Auth{Domain: d}
+		if got := a.Realm(); got != "global" {
+			t.Errorf("Auth{Domain:%q}.Realm()=%q want global", d, got)
+		}
+		if !a.IsGlobal() {
+			t.Errorf("Auth{Domain:%q}.IsGlobal()=false want true", d)
+		}
+	}
+}
