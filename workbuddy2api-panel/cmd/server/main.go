@@ -71,9 +71,47 @@ func stateSibling(stateFile, name string) string {
 	return filepath.Join(dir, name)
 }
 
+// maskSecret 日志里展示密钥时只留首尾各两位：既能核对「是不是这把」，又不泄露。
+func maskSecret(s string) string {
+	if s == "" {
+		return "(未设置)"
+	}
+	r := []rune(s)
+	if len(r) < 8 {
+		return strings.Repeat("*", len(r))
+	}
+	return string(r[:2]) + strings.Repeat("*", len(r)-4) + string(r[len(r)-2:])
+}
+
+// apiKeySource 说明这把密钥是从哪儿来的。
+//
+// 为什么需要（issue #155）：启动日志此前只打 api_key=true/false，运维分不清
+// 「文件里的还是我设的 WB2A_API_KEY 生效了」—— 而这两种情况下改配置文件都不会
+// 生效，排查方向完全不同。path 为空表示既没读到文件、也不是 env，走的是内置默认。
+func apiKeySource(path string) string {
+	if os.Getenv("WB2A_API_KEY") != "" {
+		return "环境变量 WB2A_API_KEY"
+	}
+	if path == "" {
+		return "内置默认值"
+	}
+	return "配置文件 " + path
+}
+
+// listenBanner 启动横幅：监听地址 + 密钥掩码 + 密钥来源 + 面板地址。
+// 纯函数，便于用测试钉住「密钥不泄露」与「来源如实」。
+func listenBanner(listen, path, key string) string {
+	return fmt.Sprintf("workbuddy2api listening on %s (api_key=%s, 来源 %s)，管理面板 http://127.0.0.1%s/panel/",
+		listen, maskSecret(key), apiKeySource(path), panelListenPath(listen))
+}
+
 func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
 	flag.Parse()
+	// 实际生效的配置路径。必须在 flag.Parse() **之后**取值：flag.String 返回的指针在
+	// Parse 时才写入命令行值，此前取到的是默认值拷贝 —— 用 -config 自定义路径启动时，
+	// 横幅会报一份根本没读的 config.json（issue #155 的诉求在自定义路径场景下失效）。
+	loadedFrom := *cfgPath
 
 	cfg, err := Load(*cfgPath)
 	if err != nil {
@@ -96,6 +134,7 @@ func main() {
 				}
 				log.Printf("config %s 自动生成失败（改用默认值+环境变量）: %v", *cfgPath, why)
 				cfg, err = Load("")
+				loadedFrom = "" // 实际没读到任何文件：横幅别报一份没读的路径（issue #155）
 			}
 		}
 		if err != nil {
@@ -475,7 +514,7 @@ func main() {
 		}
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
+	log.Print(listenBanner(cfg.Listen, loadedFrom, cfg.APIKey))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		p.Flush() // Fatal 绕过所有 defer：至少把池状态落盘再退，否则丢整轮运行状态
 		log.Fatalf("http: %v", err)

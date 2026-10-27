@@ -2284,6 +2284,47 @@ function renderUsage(d) {
   renderUsageDim();
   renderCreditDim();
   renderUsageChart(usageData.series || []);
+  renderUsageHours(usageData.series || []);
+}
+
+/* renderUsageHours 填「积分与 token 按小时」表：直接消费 series 时序点（hour 点
+   一小时一行、day 点一行代表当天聚合），最新时段排在最上面。此前这张表只有静态
+   表头、没有任何渲染代码，用户永远看到一张空表。token/积分 = 合计 Token ÷ 该时段
+   实测扣除积分（兑换率），没有积分样本的时段留 —，不拿 0 顶替。 */
+function renderUsageHours(series) {
+  const body = $('usHourBody');
+  if (!body) return;
+  const rows = [];
+  for (const p of (series || [])) {
+    if (parsePointTime(p) !== null) rows.push(p);
+  }
+  // 最新时段排最上面。后端 series 是「日桶升序 + 小时桶升序」两段拼接，简单 reverse
+  // 对混合窗口会错序，直接按时间戳降序排，与输入顺序解耦。
+  rows.sort((a, b) => parsePointTime(b) - parsePointTime(a));
+  body.innerHTML = rows.map(p => {
+    const tt = Number(p.total_tokens || 0);
+    const cr = Number(p.credits || 0);
+    return '<tr>' +
+      '<td class="mark" aria-hidden="true"></td>' +
+      '<td>' + esc(usHourLabel(p)) + '</td>' +
+      '<td class="num">' + fmtTok(p.requests) + '</td>' +
+      '<td class="num">' + fmtTok(p.prompt_tokens) + '</td>' +
+      '<td class="num">' + fmtTok(p.completion_tokens) + '</td>' +
+      '<td class="num">' + fmtTok(p.total_tokens) + '</td>' +
+      '<td class="num">' + (cr ? fmtCredit(p.credits) : '—') + '</td>' +
+      '<td class="num">' + (cr > 0 && tt > 0 ? fmtTok(tt / cr) : '—') + '</td>' +
+      '</tr>';
+  }).join('') || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
+}
+
+/* usHourLabel 时段列的完整标签：小时桶「MM-DD HH:00」（跨天窗口下只有 HH:00 分不清
+   是哪天），日桶「MM-DD」。t 的形态判别与 parsePointTime 同口径（长度 13 = 小时桶）。 */
+function usHourLabel(p) {
+  const s = p.t.length === 13 ? p.t + ':00:00' : p.t + 'T00:00:00';
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return p.t;
+  const day = (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0');
+  return p.scope === 'day' ? day : day + ' ' + String(d.getHours()).padStart(2, '0') + ':00';
 }
 
 // 维度切换 / 排序控件。
