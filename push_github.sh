@@ -49,6 +49,14 @@ fi
 # 管道的退出码取 sed，所以 grep 找不到不会让脚本退出 —— 实测会带着空版本号一路跑
 # 下去，最后打出 `版本: v` 并用空 tag 建 Release）。这里补显式判空。
 VER=$(grep -o 'android:versionName="[^"]*"' "$WS/apk-src/AndroidManifest.xml" | head -1 | sed 's/.*="//; s/"//' || true)
+
+# Release 附件统一用**带时间后缀**的产物（2026-10-27 起）：同名稳定副本
+# WorkBuddy2API.apk 留在工作区供本地安装，但上传用 WorkBuddy2API-v<ver>-<ts>.apk ——
+# 事后能一眼核对「这个 release 到底是哪次构建」。找不到带时间戳的就退回稳定名。
+for cand in "$WS/WorkBuddy2API-v$VER"-*.apk; do
+  [ -f "$cand" ] || continue
+  APK="$cand"   # glob 按字典序展开，时间戳定长(YYYYMMDDHHMM) → 最后一个即最新
+done
 [ -n "$VER" ] || { echo "❌ apk-src/AndroidManifest.xml 里没找到 versionName"; exit 1; }
 echo "== 目标仓库: $OWNER/$NAME    版本: v$VER"
 
@@ -274,7 +282,7 @@ body = (changes or f"APK v{ver}") + """
 ---
 
 ### 安装
-1. 下载下方 `WorkBuddy2API.apk` 覆盖安装即升级（账号与 api_key 保留）
+1. 下载下方 `WorkBuddy2API-v<版本>-<构建时间>.apk` 覆盖安装即升级（账号与 api_key 保留）
 2. 打开 App → 顶栏点「省电白名单」允许
 3. 国产 ROM 再放行：自启动 / 省电策略无限制 / 任务列表锁定后台
 4. 客户端接入：Base URL `http://<手机IP>:7863/v1`，Key 用面板里的（点「复制密钥」）
@@ -300,12 +308,14 @@ else:
         print("  ❌ 建 Release 失败:", st, b[:300]); raise SystemExit(1)
     rel = json.loads(b); print(f"  已建 Release {tag}")
 
-# 已有同名 asset 先删（幂等）
+# 旧附件先清（幂等）：附件名带构建时间戳，每次都不一样，只按同名删会让重发
+# 累积出多个 APK。按前缀清掉本仓所有 WorkBuddy2API*.apk 附件。
 name = apk.name
 st, b, _ = call(api + f"/releases/{rel['id']}/assets")
 for a in json.loads(b) if st == 200 else []:
-    if a["name"] == name:
-        call(api + f"/releases/assets/{a['id']}", "DELETE"); print("  删掉旧 asset，准备重传")
+    if a["name"].startswith("WorkBuddy2API") and a["name"].endswith(".apk"):
+        call(api + f"/releases/assets/{a['id']}", "DELETE")
+        print(f"  删掉旧 asset {a['name']}，准备重传")
 url = rel["upload_url"].split("{")[0] + "?name=" + name
 data = apk.read_bytes()
 st, b, _ = call(url, "POST", data, ctype="application/vnd.android.package-archive")

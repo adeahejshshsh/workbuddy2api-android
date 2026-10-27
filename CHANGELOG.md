@@ -1,6 +1,10 @@
 # 变更记录
 
-## v1.35.4（当前）
+## v1.35.4
+
+> **已发布：2026-10-27。此后任何改动都归 `v1.35.5`** —— 不要再往本节追加。
+> 另：Release 附件从本版起统一用**带时间后缀**的产物
+> （`WorkBuddy2API-v<版本>-<YYYYMMDDHHMM>.apk`），工作区里的同名稳定副本仅供本地安装。
 
 **本版 = 上游 10-25/10-26 增量 4 条**（`d30f7fd..4662949` 里挑的），其中两条修的是
 正在发生的事：把健康号误判成死号、以及让客户端按 `Retry-After` 静默挂起。
@@ -154,6 +158,43 @@ hour=21，配上 CST 早上 6 点，「今天 21:00」还没过，补跑不触�
   全仓另有 4 处 `time.Local` 在 panel/timerange_test 与 scheduler/activity_test，
   但生产代码与断言同用本地时区、不构成缺陷）、`7f44d06` 的 reqlog 部分
   （本仓 `read()` 早已按文件名倒序 + 凑够即停 + 只读尾部）。
+
+### 六、代码审查：1 处修复 + 2 处误判撤回
+
+全仓 38.6k 行 Go + 5.5k 行前端，走「机械模式扫描 + 高风险路径精读」两条线。**没有
+发现现在就会出错的 P0/P1**。
+
+**修了 1 处**：`taskgate.go` 跳过名单排序里的单值类型断言
+（`out[i]["code"].(string)`）—— 今天不可触发，但它在 `sort.Slice` 比较器里，一次
+panic 就是整个 `/panel/api/tasks/skip` 500。改成带 `ok` 的断言，行为逐字不变。
+
+**撤回了 2 处我自己报错的问题**（写测试时发现的，都回滚了）：
+
+1. 「选号路径的惰性清理不置脏」—— 前提不成立。`stateOverviewLocked` 在**序列化时
+   就已经过滤过期条目**（persist.go 的 `if mc.Until.IsZero() || !now.Before(mc.Until)
+   { continue }`），磁盘上根本不会有过期项，所以「内存删了磁盘留着」这个后果不存在。
+   回滚了那版改动（否则只是给每次 pick 加一次无意义的落盘）。
+2. 「4 处 `time.Local` 是隐患」—— 那 4 处是正确的。`parseTimeParam` 用
+   `time.ParseInLocation(..., time.Local)`、`nextWake` 用传入 `now` 的时区，测试与
+   生产**同口径、构造上就一致**；钉成 `+08:00` 反而会在 UTC 主机上弄红。真正踩坑的
+   `TestRunCatchesUpMissedSlots` 是「host 的 `time.Now()` 比 CST 排程」，两个时区
+   混用，性质不同。
+
+**机械审计（9 项全通过）**：auth 的 RWMutex 重入、前端 XSS 转义、任务族锁配对、
+pool 的 dirty 记账（139 个赋值点）、单值类型断言、`auth.Auth` 按值拷贝、
+`context` 未 cancel、`resp.Body` 未关闭 / 循环内 `defer`、路由鉴权覆盖。
+
+**精读通过**：`reqlog.go`（入队丢弃三种口径、轮转、prune 按文件名日期且跳过当前
+文件、`w.path` 只在写协程访问）、`taskcenter.go`（6 acquire / 6 release 全 defer）、
+`autotask.go` 的锁路径与跳过门控（`skipNote`/`skipReset` 对称、`skipBlocked` 在 4 个
+执行点都真的被查）。
+
+**观察到但未修（P2）**：`autotask.go:1995→2014`，账号锁拿到后有 9 行窗口才把释放
+挂进 goroutine；若 `watchAbort` 等中途 panic，锁会泄漏到进程重启，该账号任务动作恒
+409。窗口里都是不会 panic 的操作，属理论风险。
+
+**这轮做不到的**：`go test -race` 报 `not supported on android/arm64`、`go vet` 的
+工具链二进制在这个 noexec 文件系统上跑不起来 —— 并发 bug 的两个最强检测手段缺席。
 
 ### 未合
 
