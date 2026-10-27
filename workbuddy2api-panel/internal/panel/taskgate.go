@@ -242,12 +242,18 @@ func (p *Panel) skipRows() []map[string]any {
 			"blocked": e.Fails >= skipFailLimit && !e.Until.IsZero() && now.Before(e.Until),
 		})
 	}
+	// 断言一律带 ok：这两个键目前必存在且是 string（out 是本函数刚建的），但单值
+	// 断言等于把「键一定在」这个隐含约定写成 panic —— 以后给 entries 加一种来源、
+	// 或改了 splitSkipKey 的返回类型，整个 /panel/api/tasks/skip 直接 500。
 	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i]["code"].(string), out[j]["code"].(string)
+		a, _ := out[i]["code"].(string)
+		b, _ := out[j]["code"].(string)
 		if a != b {
 			return a < b
 		}
-		return out[i]["uid"].(string) < out[j]["uid"].(string)
+		ua, _ := out[i]["uid"].(string)
+		ub, _ := out[j]["uid"].(string)
+		return ua < ub
 	})
 	return out
 }
