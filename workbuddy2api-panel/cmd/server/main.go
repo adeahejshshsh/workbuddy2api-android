@@ -460,14 +460,18 @@ func main() {
 		p.Flush() // 信号触发：先落盘再做优雅停机
 		// 在途请求排干窗口可配（server.shutdown_timeout，缺省 30s）：长流式 SSE 的
 		// 合法时长可达分钟级，固定 5s 必然把在途对话掐成连接重置；超时也不再静默。
-		shutdownTimeout := cfg.ShutdownTimeoutDur
-		if shutdownTimeout <= 0 {
-			shutdownTimeout = 5 * time.Second
-		}
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("WARN: 优雅关停未在 %s 内完成，在途请求被放弃: %v", shutdownTimeout, err)
+		//
+		// "0" 必须是「不等待直接退」而不是回落到某个默认值：配置文档这么写，代码就得
+		// 这么做，否则「我配了 0 怎么还等了 5 秒」。用 srv.Close() —— 立刻断监听与全部
+		// 在途连接。（负值在 config.normalize 已 fail fast，这里不会出现。）
+		if shutdownTimeout := cfg.ShutdownTimeoutDur; shutdownTimeout <= 0 {
+			_ = srv.Close()
+		} else {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				log.Printf("WARN: 优雅关停未在 %s 内完成，在途请求被放弃: %v", shutdownTimeout, err)
+			}
 		}
 	}()
 
