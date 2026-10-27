@@ -141,10 +141,18 @@ hour=21，配上 CST 早上 6 点，「今天 21:00」还没过，补跑不触�
   `6fd528f`（signin 已签判定本仓早委托 `upstream.IsAlreadyCheckin`，判据本就窄）、
   `3e2d8a9`（缓存命中率卡本仓已有）、`a0395a8`+`e175dfb`（面板抖动/夜猫子上限正是
   上一版做的，键名一致）、`f3207bf`（本仓 `checkListenKey` 直接拒绝启动，比告警更严）。
-- **无落点**：`687278c`（本仓 reqlog 用例不依赖 `time.Local`）、`297c78a`（本仓没有
-  banner 的 `loadedFrom`）、`3922e41`（本仓没有 renderUsage 切片测试）、
-  `e3ec2f4`（本仓 index.html 没有「按小时」表）、`b689cd0`/`0ec2de5`/`a1d3be9`
-  （上游开发机器人用的仓清单与 gofmt，本仓无对应文件）、`7f44d06` 的 reqlog 部分
+- **补上落点后再合的 3 笔**（原本的「无落点」= 它们修的东西本仓根本没有，合它就得
+  先补上游那块功能，属新增功能而非修 bug。这轮把三块都补了）：
+  - `297c78a` ← 先补**启动横幅**（`maskSecret` / `apiKeySource` / `listenBanner` +
+    测试）。顺带把那笔的前提也修对：`loadedFrom` 在 `flag.Parse()` **之后**取值，
+    否则 `-config` 自定义路径时横幅报一份没读的文件。
+  - `e3ec2f4`+`3922e41` ← 先补**「积分与 token 按小时」表**（表头 + `renderUsageHours`
+    + `usHourLabel` + node 切片测试）。顺带给切片测试补上桩，否则它永远在跳过。
+- **纯上游内部事务 / 真无对应物**：`b689cd0`/`0ec2de5`（他们开发机器人用的参考仓
+  YAML，不是网关代码）、`a1d3be9`（给上游那 4 个新测试文件补 gofmt，本仓
+  `gofmt -l` 为 **0**）、`687278c`（本仓 reqlog 用例不依赖 `time.Local`；
+  全仓另有 4 处 `time.Local` 在 panel/timerange_test 与 scheduler/activity_test，
+  但生产代码与断言同用本地时区、不构成缺陷）、`7f44d06` 的 reqlog 部分
   （本仓 `read()` 早已按文件名倒序 + 凑够即停 + 只读尾部）。
 
 ### 未合
@@ -187,8 +195,11 @@ hour=21，配上 CST 早上 6 点，「今天 21:00」还没过，补跑不触�
 `TestChatRejectsModelOutsideAllowlist`（含「文案不得泄露白名单存在」）、
 `TestModelsListFiltersByAllowlist`。
 
-**985 通过 / 0 失败**（server 154 / upstream 273 / panel 77 / pool 206 / scheduler 95 /
-auth 33 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 62 /
+补落点时又加 4 条：`TestMaskSecret` / `TestAPIKeySource` / `TestListenBanner`
+（横幅不泄露密钥、来源如实）与 `TestAppJSRenderUsageHours`（按小时表的顺序/空态/脏值）。
+
+**989 通过 / 0 失败**（server 154 / upstream 273 / panel 78 / pool 206 / scheduler 95 /
+auth 33 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 65 /
 cmd-login 7 / loginsite 9 / httpauth 4）。
 
 
