@@ -71,7 +71,34 @@ type chatStat struct {
 	clientIP  string
 	userAgent string
 
+	// 工具面观测量（issue #44）：声明数与实际调用数。前者 >0 且后者 ==0 即
+	// 「零工具调用收尾」，归档里可据此按模型/账号聚合出发生率。
+	toolsDeclared int
+	toolCalls     int
+
 	logged bool
+}
+
+// toolCallCount 非流式聚合响应里的工具调用个数（issue #44 观测用）。
+// 只计数，不解析名字与参数。
+//
+// 两种组包形态都要认：直解上游 JSON 是 []any，而 upstream.Aggregate 自己组包用的是
+// []map[string]any。只认前者会让非流式这一半永远记 0，而 issue #44 的停摆率分子正是
+// tool_calls==0 —— 比率会被算高一倍。
+func toolCallCount(resp map[string]any) int {
+	choices, _ := resp["choices"].([]any)
+	if len(choices) == 0 {
+		return 0
+	}
+	ch, _ := choices[0].(map[string]any)
+	msg, _ := ch["message"].(map[string]any)
+	if tcs, ok := msg["tool_calls"].([]any); ok {
+		return len(tcs)
+	}
+	if tcs, ok := msg["tool_calls"].([]map[string]any); ok {
+		return len(tcs)
+	}
+	return 0
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
@@ -542,6 +569,8 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.HasCredit = s.hasCredit
 		e.CacheHitTokens = s.cacheHit
 		e.CacheMissTokens = s.cacheMiss
+		e.ToolsDeclared = s.toolsDeclared
+		e.ToolCalls = s.toolCalls
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent

@@ -54,6 +54,10 @@ type Config struct {
 		// 400 "read body: ... i/o timeout"。缺省 "300s"；"0" = 不限制
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+		// ShutdownTimeout 优雅关停窗口（收到 SIGTERM / 更新重启时，等在途请求排干的
+		// 时限）。长流式 SSE 的合法时长可达分钟级，固定 5s 必然把在途对话掐成连接
+		// 重置。缺省 "30s"；"0" = 不等待直接退。改动需重启进程。
+		ShutdownTimeout string `json:"shutdown_timeout"`
 		// MaxBodyMB /v1/chat/completions 请求体上限（MB，review P1-10）。
 		// 三态（issue ISSUE-07）：null/缺省 = 默认 64（远超真实长上下文，只挡内存炸弹）；
 		// 0 = **不限制**（保留历史上「对齐上游不设限」的语义）；负值 = 报错。
@@ -180,6 +184,12 @@ type Config struct {
 		// Hidden 不对外暴露的模型黑名单：裸名=两域都藏；"cn:x"/"global:x"=只藏该域。
 		// 生效点：/v1/models 列表过滤 + chat 点名拒绝（400 model_unavailable）。改动需重启。
 		Hidden []string `json:"hidden"`
+		// Allowed 模型白名单（issue #68）：与 hidden 对称的「可能可见」集合。
+		// 条目语法一致（裸名=两域；"cn:x"/"global:x"=单域），大小写不敏感（与 hidden
+		// 同口径）。空/全空条目 = 不启用（默认放行所有模型，向后兼容）。
+		// 生效点与 hidden 共用同一批判据（列表过滤 / capacity 归零 / 点名拒绝）——
+		// 漏一处就等于白名单可被绕过。改动需重启。
+		Allowed []string `json:"allowed"`
 		// Aliases 模型名映射（issue #30）："客户端名=真实模型名"。
 		// 客户端只能填固定模型名的 agent 靠它落到真实模型。
 		// 键大小写不敏感；裸名键两域生效，cn:/global: 前缀键只在该域生效。
@@ -333,6 +343,8 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// ShutdownTimeoutDur 解析后的优雅关停窗口；<=0 = 不等待在途请求直接退。
+	ShutdownTimeoutDur time.Duration `json:"-"`
 	// ServerMaxBodyMB /v1/chat/completions 请求体上限（MB）；0 = 不限制。
 	ServerMaxBodyMB int `json:"-"`
 }
@@ -375,6 +387,7 @@ func Default() *Config {
 	c.Schedule.ActivityEnabled = true
 	c.Schedule.KeepaliveEnabled = true
 	c.Schedule.BlackcatEnabled = true
+	c.Server.ShutdownTimeout = "30s"
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
 	// 人味化开关缺省关闭：旧部署行为逐字不变，要开的人显式配。
@@ -750,6 +763,17 @@ func (c *Config) normalize() error {
 	}
 	if c.ServerReadTimeoutDur, err = time.ParseDuration(c.Server.ReadTimeout); err != nil {
 		return fmt.Errorf("server.read_timeout: %w", err)
+	}
+	// 优雅关停窗口：空回落 30s（分钟级在途 SSE 远比旧的固定 5s 常见）；"0" 合法
+	// （立即退）；负值 fail fast。
+	if c.Server.ShutdownTimeout == "" {
+		c.Server.ShutdownTimeout = "30s"
+	}
+	if c.ShutdownTimeoutDur, err = time.ParseDuration(c.Server.ShutdownTimeout); err != nil {
+		return fmt.Errorf("server.shutdown_timeout: %w", err)
+	}
+	if c.ShutdownTimeoutDur < 0 {
+		return fmt.Errorf("server.shutdown_timeout: 负时长 %q 无意义（0 = 不等待）", c.Server.ShutdownTimeout)
 	}
 	switch {
 	case c.Server.MaxBodyMB == nil:

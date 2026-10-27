@@ -296,14 +296,40 @@ func (u *Upstash) LoadBinds() map[string]string {
 	out := map[string]string{}
 	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
 	defer cancel()
+	// 先收键、再按批 MGET（上游 2026-10-27 `7f44d06`）：逐键 GET 是 N+1 次公网
+	// 往返，Upstash 单次 RTT 50-300ms，几百条绑定必然撞上 3s 总超时 —— 而 iterator
+	// 超时只是安静地停下来，冷启动恢复多少全凭运气，日志里一个字都没有。
+	keys := make([]string, 0, 256)
 	iter := u.client.Scan(ctx, 0, bindPrefix+"*", 200).Iterator()
 	for iter.Next(ctx) {
-		key := iter.Val()
-		v, err := u.client.Get(ctx, key).Result()
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		// 扫描失败/超时：恢复不完整必须说出来（否则「粘性全丢」只能靠用户体感发现）。
+		log.Printf("WARN: [redisstore] 粘性绑定 SCAN 失败，本次恢复不完整: %v", err)
+	}
+	const batch = 100
+	for start := 0; start < len(keys); start += batch {
+		end := start + batch
+		if end > len(keys) {
+			end = len(keys)
+		}
+		chunk := keys[start:end]
+		vals, err := u.client.MGet(ctx, chunk...).Result()
 		if err != nil {
+			log.Printf("WARN: [redisstore] 粘性绑定 MGET 失败（第 %d-%d 条），本次恢复不完整: %v", start, end, err)
 			continue
 		}
-		out[strings.TrimPrefix(key, bindPrefix)] = v
+		for i, key := range chunk {
+			if i >= len(vals) || vals[i] == nil {
+				continue
+			}
+			v, ok := vals[i].(string)
+			if !ok || v == "" {
+				continue
+			}
+			out[strings.TrimPrefix(key, bindPrefix)] = v
+		}
 	}
 	return out
 }

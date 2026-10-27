@@ -6,6 +6,7 @@ package pool
 // （后者往往意味着没人看面板）。所以禁用时记时刻、解冻时清掉、落盘要能带过去。
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -75,5 +76,34 @@ func TestDisabledAtPersists(t *testing.T) {
 	st, _ := p2.Status("u1")
 	if st.DisabledAt == "" {
 		t.Fatal("重启后 disabled_at 丢了")
+	}
+}
+
+// 12153 中间计数与清零点都要落盘（上游 2026-10-27 `7d5cbf4`）。
+//
+// 清零不落盘的后果不是「少一次计数」：state.json 残留旧计数 2 → 重启后一次失败即达
+// 阈值 3 → **刚被 refresh 证明存活的账号被禁用**。本机（Android）进程被回收很常见，
+// 重启频繁，这条比上游更容易踩到。
+func TestSessionDeadCountPersists(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.NoteSessionDead("u1")
+	p.NoteSessionDead("u1")
+	p.Flush()
+
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	if st, _ := p2.Status("u1"); st.SessionDeadFails != 2 {
+		t.Fatalf("重启后应保留中间计数 2, got %d", st.SessionDeadFails)
+	}
+	p2.ClearSessionDead("u1")
+	p2.Flush()
+
+	p3 := New(fp)
+	p3.Add(&auth.Auth{UID: "u1"})
+	if st, _ := p3.Status("u1"); st.SessionDeadFails != 0 {
+		t.Fatalf("清零应落盘（否则重启复活旧计数→误杀刚自证的号）, got %d", st.SessionDeadFails)
 	}
 }

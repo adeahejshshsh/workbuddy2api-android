@@ -59,3 +59,40 @@ func TestDigestIsFixedLength(t *testing.T) {
 		t.Errorf("sha256 digest length = %d, want 32", len(digest("x")))
 	}
 }
+
+// VerifyDual：Bearer 与 x-api-key 都认，且 Authorization 存在时只认 Bearer
+// （否则「带了错 Bearer 又塞对 x-api-key」会绕过本该失败的鉴权）。
+func TestVerifyDual(t *testing.T) {
+	const key = "k-abc"
+	mk := func(authz, xkey string) *http.Request {
+		r := httptest.NewRequest("GET", "/v1/models", nil)
+		if authz != "" {
+			r.Header.Set("Authorization", authz)
+		}
+		if xkey != "" {
+			r.Header.Set("x-api-key", xkey)
+		}
+		return r
+	}
+	cases := []struct {
+		name, authz, xkey string
+		want              bool
+	}{
+		{"Bearer 正确", "Bearer " + key, "", true},
+		{"Bearer 错误", "Bearer nope", "", false},
+		{"x-api-key 正确", "", key, true},
+		{"x-api-key 错误", "", "nope", false},
+		{"两边都给且都对", "Bearer " + key, key, true},
+		{"错 Bearer + 对 x-api-key（不得绕过）", "Bearer nope", key, false},
+		{"都没有", "", "", false},
+	}
+	for _, c := range cases {
+		if got := VerifyDual(mk(c.authz, c.xkey), key); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+	// 空 key = 未启用鉴权：恒放行（与 VerifyBearer 同口径）。
+	if !VerifyDual(mk("", ""), "") {
+		t.Error("空 key 应恒放行")
+	}
+}

@@ -386,6 +386,7 @@ func main() {
 		RedisMode:                     redisMode,
 		SoftCooldown:                  cfg.SoftRateDur,
 		MaxBodyMB:                     cfg.ServerMaxBodyMB,
+		ModelsAllowed:                 cfg.Models.Allowed, // 模型白名单（issue #68）
 		ModelsHidden:                  cfg.Models.Hidden,  // 模型黑名单（上游 PR #225）
 		ModelsAliases:                 cfg.Models.Aliases, // 模型名映射（issue #30）
 		Panel:                         pn,
@@ -457,13 +458,22 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 在途请求排干窗口可配（server.shutdown_timeout，缺省 30s）：长流式 SSE 的
+		// 合法时长可达分钟级，固定 5s 必然把在途对话掐成连接重置；超时也不再静默。
+		shutdownTimeout := cfg.ShutdownTimeoutDur
+		if shutdownTimeout <= 0 {
+			shutdownTimeout = 5 * time.Second
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("WARN: 优雅关停未在 %s 内完成，在途请求被放弃: %v", shutdownTimeout, err)
+		}
 	}()
 
 	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		p.Flush() // Fatal 绕过所有 defer：至少把池状态落盘再退，否则丢整轮运行状态
 		log.Fatalf("http: %v", err)
 	}
 	log.Printf("bye")
@@ -719,6 +729,7 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		"global.enabled", "global.chat_base", "global.billing_base",
 		"cn.chat_base", "cn.billing_base", // base 在启动时注入（上游 PR #220）
 		"models.hidden",        // 列表过滤与点名拒绝在 Handler 构造时快照（上游 PR #225）
+		"models.allowed",       // 同上（issue #68）
 		"upstream.dns_servers", // Dialer 在启动时构造（上游 PR #144）
 		"prompt.mode", "prompt.file",
 		"server.max_body_mb",
@@ -727,7 +738,7 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		// 漏了它会让面板提示「已保存并立即生效」，实际要重启（BUG-4）。
 		"session_sticky.enabled", "session_sticky.ttl", "session_sticky.gc_interval",
 		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
-		"server.read_timeout",
+		"server.read_timeout", "server.shutdown_timeout",
 		// account_spread_seconds 在 Scheduler 构造时读入 cfg（报告 #5）：保存路径没有
 		// 对应 setter，不列进来就会提示「已保存并立即生效」，实际要重启才生效。
 		"schedule.account_spread_seconds",

@@ -21,7 +21,7 @@ import (
 //
 // 对齐 2026-10-24 的 @tencent-ai/codebuddy-code@2.174.0（npm latest）。上游目前不
 // 校验 UA 版本，但登录页会按 version 做灰度与埋点，写旧版本可能拿到旧登录页。
-const ClientVersion = "2.174.0"
+const ClientVersion = "2.176.0"
 
 // ClientUA 设备授权链路的 User-Agent（与官方 CLI 同形）。
 const ClientUA = "CLI/" + ClientVersion + " CodeBuddy/" + ClientVersion

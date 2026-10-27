@@ -93,6 +93,60 @@ azp 全是 console，其中 25 个 plugin 源 refresh 正常）。唯一稳定�
 hour=21，配上 CST 早上 6 点，「今天 21:00」还没过，补跑不触发。实测 13:30 CST 通过、
 06:52 CST 必挂，即**每天约 9 小时必然失败**。改用 `cst.Now()`，仍与线上行为无关。
 
+### 五、上游 10-27 增量（33 条里合 9 条 + 3 处本仓补齐）
+
+| 提交 | 内容 | 合并要点 |
+|---|---|---|
+| `7d5cbf4` | 12153 中间计数与清零点置脏落盘 | 清零不落盘不是「少一次计数」：磁盘残留旧计数 → 重启后一次失败即达阈值 → **刚被 refresh 证明存活的号被禁用**。本机进程被回收很常见，比上游更容易踩 |
+| `09f82b1` | int 转换前用 float 判越界 | arm64 的 float→int 越界**饱和成 MaxInt64**，x86 会绕回负数被拦住 → 只有 arm64 中招。本仓就跑在 arm64 上 |
+| `ef646b8` | 池状态迁移留痕 + usage 落盘失败透出 | 禁用/熔断/连败降权三类此前零日志，运维只能靠「面板上号变灰了」发现。usage 的 dirty 恢复本仓早有，只补观测字段 |
+| `bf5945b` | 模型锁池域列统一纯文本 | 同列里「国内版」纯文本、「国际版」套蓝框，像两种性质不同的东西 |
+| `8550aac` | HTTP 200 内嵌 `{code,msg}` 失败帧 | 详见下方「本仓额外补齐」——上游只修了流式 |
+| `ce6e753`+`37b3f4c` | 归档记 tools 声明数 / 调用数 | 直接对应你 10-25 那个「82 个工具、零 tool_calls」：发生率之前不可测，现在可按模型/账号聚合 |
+| `1e7a693` | 关停窗口可配（缺省 30s）+ Fatal 前落盘 | 固定 5s 必然把在途 SSE 掐成连接重置；「重启网关」是面板常用按钮 |
+| `dc75c04` | `/v1/models` 兼容 `x-api-key` | 双协议共用端点却只认 Bearer，官方 Anthropic SDK 列不出模型 |
+| `244d4e6` | CLI 版本 2.174.0 → 2.176.0 + 轮询结果落日志 | 版本串进 risk-context，会进风控判定；轮询日志只在结果变化时记一行 |
+| `bd6f6cb` | `models.allowed` 白名单（issue #68） | 与 `models.hidden` 对称；三个生效点共用一个谓词，漏一处即可绕过 |
+| `7f44d06` | 粘性恢复改批量 MGET | 逐键 GET 是 N+1 次公网往返，Upstash 下几百条必撞 3s 超时且**静默截断** |
+
+**本仓额外补齐的两处（上游这版没覆盖）**：
+
+1. **非流式路径的内嵌失败帧**。`8550aac` 只改了流式 `writeFrame`；非流式 `Aggregate`
+   遇到 `{"code":11140,...}` 时没有 choices 所以不并入内容，但 `validEvents` 已自增
+   → 合成 **`content=""` + `finish_reason:"length"` 的假 200**，handler 还会
+   `NoteSuccess` 把被封号洗成健康号、粘性把会话钉死在它身上。已补同口径判定，
+   升级成 `*ErrorFrame` 交回调用方走既有错误策略（用例实测：旧代码返回真·假成功）。
+2. **中文封禁标记**。上游 11140 的**中文-only** 文案是「账号存在异常行为」，不含
+   `request illegal`，此前落 `ErrClient`（只换号不罚号）—— 该号被反复选中、每次吃
+   一次轮转预算却永不冷却。按上游用例夹具用的这条文案补进 `accountFaultMarkers`。
+
+**没合的（逐条理由，不是漏）**：
+
+- `741cf59` CN 对话主域改 `www.workbuddy.cn` —— 改的是**全部 CN 对话**的出口域名，
+  而上游的验证只到「空体打三条只读/错误路径」，**没有一条真实对话**。我们这边
+  copilot 一直正常，换域名的收益是「形态更像官方」，代价是新 host 的 WAF 口径/TLS/
+  路径全套重踩。要试请用 `cn.chat_base` 覆盖单实例观察，别改默认值。
+- `afbcbea` updater 健壮性（417 行）—— 本仓没有 updater（原生二进制自更新不适用于
+  APK；要做得改走 PackageInstaller）。
+- `717be2c`+`86275df` 请求事件日志大屏（521 行 + reqlog 新字段）—— **全新面板视图**，
+  且 `86275df` 是在修它自己那版的三处伪造数据。属新功能，建议单独一轮做。
+- `16fc348`+`ff8d0fc` 登录授权链接二维码 —— 属新功能。本仓已有券码用的 QR 编码器
+  （v1-5），但 CN 站链接 105 字节距 v5 上限 106 只剩 1 字节，要接就得同时做 v6；
+  且手机端加账号时链接本来就开在本机，二维码主要给跨设备场景。
+- `5367e78` 三块：`/v1/embeddings`（新端点）、`补签卡每轮上限`（本仓只补「昨天」
+  一天，没有「补到卡用完」的循环，无落点）、`下线官方补偿`（约 2000 行删除，
+  风险大于收益——活动虽已结束，留着只是每天一条失败日志）。
+- `a24c10a` 之外的**已覆盖项**：`394c749`（touch CAS，本仓早按 bug 8 做过）、
+  `7f2a8de` 防重入（五个手动全量端点早已各自 `TryBeginTask` + 409）、
+  `6fd528f`（signin 已签判定本仓早委托 `upstream.IsAlreadyCheckin`，判据本就窄）、
+  `3e2d8a9`（缓存命中率卡本仓已有）、`a0395a8`+`e175dfb`（面板抖动/夜猫子上限正是
+  上一版做的，键名一致）、`f3207bf`（本仓 `checkListenKey` 直接拒绝启动，比告警更严）。
+- **无落点**：`687278c`（本仓 reqlog 用例不依赖 `time.Local`）、`297c78a`（本仓没有
+  banner 的 `loadedFrom`）、`3922e41`（本仓没有 renderUsage 切片测试）、
+  `e3ec2f4`（本仓 index.html 没有「按小时」表）、`b689cd0`/`0ec2de5`/`a1d3be9`
+  （上游开发机器人用的仓清单与 gofmt，本仓无对应文件）、`7f44d06` 的 reqlog 部分
+  （本仓 `read()` 早已按文件名倒序 + 凑够即停 + 只读尾部）。
+
 ### 未合
 
 `4662949`（面板资源占用：后台暂停轮询 / 增量拉日志 / 跳过无变化重绘）、
@@ -124,9 +178,18 @@ hour=21，配上 CST 早上 6 点，「今天 21:00」还没过，补跑不触�
 自查另补 2 条：`TestRunBalanceRefreshStaggerTotalBounded`（错峰总耗时有界 + 手动路径
 不等）、`TestNightCandidatesFiltersBeforeCapping`（先剔禁用/暂停再取 Top-N）。
 
-**972 通过 / 0 失败**（server 150 / upstream 269 / panel 77 / pool 205 / scheduler 95 /
+**五（上游 10-27 增量）新增 13 个用例**：`TestSessionDeadCountPersists`（计数与清零
+都落盘，旧写法实测 got 0）、`TestStreamEmbeddedErrorFrameSurfaced`、
+`TestStreamErrorFrameNegative`（四组反向）、`TestAggregateEmbeddedErrorIsNotFakeSuccess`、
+`TestEmbeddedErrorFrameClassifiesAsAccountFault`、`TestRequestMetricsToolsSurface`
+（四个子用例，非流式那条去掉 `[]map[string]any` 分支立刻红）、`TestVerifyDual`（七组，
+含「错 Bearer + 对 x-api-key 不得绕过」）、`TestModelAllowed`（十组）、
+`TestChatRejectsModelOutsideAllowlist`（含「文案不得泄露白名单存在」）、
+`TestModelsListFiltersByAllowlist`。
+
+**985 通过 / 0 失败**（server 154 / upstream 273 / panel 77 / pool 206 / scheduler 95 /
 auth 33 / session 24 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-server 62 /
-cmd-login 7 / loginsite 9）。
+cmd-login 7 / loginsite 9 / httpauth 4）。
 
 
 ## v1.35.3

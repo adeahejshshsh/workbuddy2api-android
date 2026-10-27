@@ -4,10 +4,12 @@
 package pool
 
 import (
-	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"log"
 	"strings"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
 // SetCredits 直接写余额（不做到期快照）。生产代码无调用点，仅测试与未来扩展使用；
@@ -671,6 +673,10 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.fails = 0
 	e.retryCount++
 	e.breakerUntil = time.Now().Add(d)
+	// 熔断让账号临时出池：此前零日志，运维只能靠「面板上号变灰了」发现，
+	// 事后连触发时刻与退避档位都查不到。
+	log.Printf("WARN: [pool] 熔断触发 acct=%s until=%s（退避 %s，第 %d 轮）——账号临时出池，期间不参与选号",
+		logfmt.Label(e.a.UID, e.a.NicknameValue()), e.breakerUntil.Format(time.RFC3339), d, e.retryCount)
 }
 
 // CooldownUntilTomorrow4AM 硬冷却截止时刻。**名不副实**（BUG-18）：实际是

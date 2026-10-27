@@ -91,6 +91,12 @@ type Recorder struct {
 	// 折叠按「每小时最多一次」触发，避免小时桶无限增长把 flush 的 O(n) 放大。
 	lastRollup time.Time
 
+	// 落盘失败观测：次数 + 最近一次错误（进 Snapshot，面板/脚本能看出「用量文件
+	// 已经 N 轮没写成功」）。失败时 dirty 会置回 true 等下轮重试，这条只是把
+	// 「一直在重试但一直失败」这件事显形——否则它只活在日志里。
+	lastErr       string
+	failedFlushes int
+
 	stopOnce    sync.Once
 	startedFlag atomic.Bool // Start 是否跑过（Stop 据此判断要不要等 done，bug B8）
 	stop        chan struct{}
@@ -451,6 +457,8 @@ func (r *Recorder) flush(force bool) {
 		log.Printf("[usage] %s: %v（下一轮重试）", what, err)
 		r.mu.Lock()
 		r.dirty = true
+		r.lastErr = what + ": " + err.Error()
+		r.failedFlushes++
 		r.mu.Unlock()
 	}
 
@@ -605,7 +613,10 @@ type Snapshot struct {
 	CreditByModel   []CreditAgg `json:"credit_by_model"`
 	Buckets         int         `json:"buckets"`
 	FileBytes       int64       `json:"file_bytes"`
-	Since           string      `json:"since,omitempty"`
+	// 落盘健康观测：失败次数与最近一次错误（零值省略，健康时不出现）。
+	LastError     string `json:"last_error,omitempty"`
+	FailedFlushes int    `json:"failed_flushes,omitempty"`
+	Since         string `json:"since,omitempty"`
 	// WindowFrom/WindowTo 本次实际生效的统计区间（本地时间，RFC3339），供面板
 	// 回显口径——「自定义」区间下用户必须能确认服务端到底按哪段算的。
 	// 空串 = 该侧不设界（全部历史 / 到今天为止）。
@@ -700,6 +711,8 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	for _, b := range r.buckets {
 		bs = append(bs, *b)
 	}
+	// 落盘失败观测必须在锁内取值：下面马上 Unlock，解锁后再读这两个字段就是竞争。
+	lastErr, failedFlushes := r.lastErr, r.failedFlushes
 	r.mu.Unlock()
 
 	var total aggAcc
@@ -817,6 +830,8 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 		CreditByModel:   creditKeyed(creditModelAgg),
 		Buckets:         matched,
 		Generated:       time.Now().Format(time.RFC3339),
+		LastError:       lastErr,
+		FailedFlushes:   failedFlushes,
 	}
 	for i := range snap.ByAccount {
 		snap.ByAccount[i].Realm = acctRealm[snap.ByAccount[i].Key]

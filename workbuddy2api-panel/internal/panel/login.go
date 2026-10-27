@@ -125,7 +125,25 @@ type loginEnvelopeError struct {
 
 func (e *loginEnvelopeError) Error() string { return fmt.Sprintf("code=%d msg=%s", e.Code, e.Msg) }
 
-// loginStart 发起设备授权：POST auth/state 拿授权 URL。
+// logPollPending pending 轮询的**变化**日志：只在结果与上次不同时写一行。
+//
+// 逐轮记会淹掉日志（3s 一轮、15 分钟 TTL = 300 行），完全不记则「登录卡住」时
+// 没有任何证据可查。只记 state 前缀，不记完整 state（它等价于一次性的凭证）。
+func (p *Panel) logPollPending(state string, sess *loginSession, result string) {
+	if sess == nil {
+		return
+	}
+	p.loginMu.Lock()
+	changed := sess.lastPollResult != result
+	sess.lastPollResult = result
+	p.loginMu.Unlock()
+	if !changed {
+		return
+	}
+	log.Printf("panel: 登录轮询仍未完成 state=%s...: %s", state[:min(8, len(state))], result)
+}
+
+// loginStart 发起设备授权：POST auth/state 拿授权 URL。// loginStart 发起设备授权：POST auth/state 拿授权 URL。
 // body 可带 {"realm":"global"}（缺省 cn）；state 会话记 realm，poll 同 realm 落盘。
 func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	realm := "cn"
@@ -241,6 +259,12 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// pending / 未完成 / 未知码：面板前端继续轮询。
+		//
+		// 逐轮记日志不行（3s 一轮、最长 15 分钟 = 300 行）；只在**结果变化**时记一行。
+		// 没有这一行，用户报「浏览器打开授权链接后登录失败」时面板侧只有一条「发起
+		// OAuth」，完全分不清是浏览器没授权成功、还是取 token 被上游拒了 ——
+		// 这正是上游 issue #93 的排查困境。
+		p.logPollPending(state, sess, err.Error())
 		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": err.Error()})
 		return
 	}

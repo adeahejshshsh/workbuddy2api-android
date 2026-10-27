@@ -163,6 +163,10 @@ type loginSession struct {
 	// 两个都通过「state 还在」的检查 → Pool.Add / SaveAtomic / 签到 / 余额刷新
 	// 各跑两遍。认领标记让第二路直接退出，完成（delete）或失败时复位。
 	consumed bool
+	// lastPollResult 上一次 pending 轮询的结果串，用于「只在变化时记一行」。
+	// 逐轮记会淹掉日志（3s 一轮、15 分钟 TTL = 300 行）；完全不记则「登录卡住」
+	// 时没有任何证据可查（上游 issue #93）。只在 loginMu 内读写。
+	lastPollResult string
 }
 
 // New 构建面板。

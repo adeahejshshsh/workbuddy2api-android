@@ -36,6 +36,30 @@ func VerifyBearer(r *http.Request, key string) bool {
 	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
 }
 
+// VerifyDual 同时接受 `Authorization: Bearer <key>` 与 Anthropic 的
+// `x-api-key: <key>` 两种携带方式。
+//
+// 为什么需要：GET /v1/models 是双协议共用端点，官方 Anthropic SDK 列模型走 x-api-key
+// —— 同一份密钥能调通对话却列不出模型，用户只会以为网关坏了。
+//
+// 向后兼容：Authorization 存在时**只**按 Bearer 判（既有的错误密钥也照旧被拒），
+// 仅当它为空时才提升 x-api-key；两条路的比较都走同一个常量时间摘要，没有第二条
+// 比较路径，也就没有引入新的侧信道。
+func VerifyDual(r *http.Request, key string) bool {
+	if key == "" {
+		return true
+	}
+	if strings.HasPrefix(r.Header.Get("Authorization"), bearerPrefix) {
+		return VerifyBearer(r, key)
+	}
+	alt := strings.TrimSpace(r.Header.Get("x-api-key"))
+	if alt == "" {
+		// 两种都没带：仍走一次摘要比较，保持耗时形状一致。
+		return VerifyBearer(r, key)
+	}
+	return subtle.ConstantTimeCompare(digest(alt), digest(key)) == 1
+}
+
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。
 func digest(s string) []byte {
 	sum := sha256.Sum256([]byte(s))

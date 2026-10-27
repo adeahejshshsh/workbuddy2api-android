@@ -157,6 +157,11 @@ var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 // 后判定）。故此处只收 msg 关键词 "request illegal"（auth_forbidden 的真实文案）。
 // 14017 文案唯一（无软限流歧义），可安全收录。
 var accountFaultMarkers = []string{
+	// 11140 的中文形态：上游对风控封禁的**中文文案**只给「账号存在异常行为」，
+	// 不含 "request illegal"。少了这一条，中文-only 的封禁答复会落到 ErrClient
+	// （只换号不罚号）—— 该号被反复选中、每次都把轮转预算吃一次，却永远不会
+	// 冷却或下线。上游 4606d17 的用例夹具正是这条中文文案，按它补齐。
+	"账号存在异常行为",
 	"request illegal",
 	"trial not activated",
 	"trial version is not yet activated",

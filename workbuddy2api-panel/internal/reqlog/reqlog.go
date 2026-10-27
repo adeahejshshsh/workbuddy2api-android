@@ -79,6 +79,12 @@ type Event struct {
 	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64     `json:"completion_tokens,omitempty"`
 	TotalTokens      int64     `json:"total_tokens,omitempty"`
+	// ToolsDeclared / ToolCalls 本轮的「工具面」观测量（issue #44）：声明了几个工具、
+	// 实际拿到几个工具调用。ToolsDeclared>0 且 ToolCalls==0 就是一次「零工具调用
+	// 收尾」—— 上游把本该调工具的回合当成正常完成，客户端据此认为任务做完、工具一次
+	// 没跑。只记数量，不记工具名与参数。
+	ToolsDeclared int `json:"tools_declared,omitempty"`
+	ToolCalls     int `json:"tool_calls,omitempty"`
 	// Credit 不能 omitempty（报告 #16）：上游回 credit=0（免费模型/限免时段）时
 	// 键会消失，前端 Number(undefined) → NaN → 渲染成「—」（未观测），
 	// 把「实测 0 credit」显示成「没观测到」。存在性由 HasCredit 表达。

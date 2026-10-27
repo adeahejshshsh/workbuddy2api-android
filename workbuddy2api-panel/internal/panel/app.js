@@ -637,7 +637,9 @@ function renderModelLocks(rows) {
     const realm = r.realm === 'global' ? '国际版' : '国内版';
     return '<tr>' +
       '<td>' + esc(r.model) + '</td>' +
-      '<td><span class="realm-tag">' + realm + '</span></td>' +
+      // 域就只是文字：同一列里「国内版」是纯文本、「国际版」套了蓝框，看起来像
+      // 两种性质不同的东西。状态已有颜色（全池锁定红 / 部分限流绿），域不必再抢。
+      '<td>' + realm + '</td>' +
       '<td><span class="tag ' + st[0] + '">' + st[1] + '</span></td>' +
       '<td class="num">' + (r.servable || 0) + ' / ' + (r.total || 0) + '</td>' +
       '<td class="num">' + (r.locked || 0) + '</td>' +

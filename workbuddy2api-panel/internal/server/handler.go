@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -38,7 +39,10 @@ type Config struct {
 	MaxRotate int    // 单请求最多换号次数，默认 3
 	// ModelsHidden 模型黑名单（上游 PR #225）：裸名=两域都藏；"cn:x"/"global:x"=只藏该域。
 	// 生效点：/v1/models 列表过滤 + chat 点名拒绝（400 model_unavailable）。
-	ModelsHidden []string
+	// ModelsAllowed 模型白名单（issue #68）：与 ModelsHidden 对称的「可能可见」集合。
+	// 空/全空条目 = 不启用（默认放行所有模型）。
+	ModelsAllowed []string
+	ModelsHidden  []string
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -189,7 +193,9 @@ func NewHandler(cfg Config) *Handler {
 	// POST /v2/chat/busy：官方客户端的「模型忙」预检（国区上游 200、国际版上游 404，
 	// 见 busy.go 文件头）。本地按池台账算，不打上游。
 	h.mux.HandleFunc("POST /v2/chat/busy", h.withAuth(h.chatBusy))
-	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	// 双协议共用端点：官方 Anthropic SDK 列模型走 x-api-key（与 messages 同一套），
+	// 只挂 Bearer 会让同一份密钥「能对话、列不出模型」。
+	h.mux.HandleFunc("GET /v1/models", h.withDualAuth(h.models))
 	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -227,6 +233,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mux.ServeHTTP(w, r)
+}
+
+// withDualAuth 鉴权同时接受 Bearer 与 Anthropic 的 x-api-key，并按请求方协议回错误
+// 形状：Anthropic SDK 会把 OpenAI 的 {"error":{"code":"invalid_api_key"}} 解析成
+// 「网关坏了」，而 OpenAI 客户端反过来也认不出 Anthropic 的 {"type":"error"}。
+//
+// 401 的形状按「带没带 anthropic 侧的头」选，不猜客户端身份——猜错比不猜更糟。
+func (h *Handler) withDualAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !httpauth.VerifyDual(r, h.loadLive().APIKey) {
+			if r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != "" {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{
+					"type": "error",
+					"error": map[string]any{
+						"type":    "authentication_error",
+						"message": "invalid x-api-key",
+					},
+				})
+				return
+			}
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -294,7 +325,7 @@ func (h *Handler) capacity(w http.ResponseWriter, r *http.Request) {
 		realm, bareModel = resolveModel(target)
 	}
 	modelAvailable, poolAvailable := h.cfg.Pool.CapacityForModel(bareModel, realm)
-	if h.modelHidden(realm, bareModel) {
+	if h.modelUnavailable(realm, bareModel) {
 		modelAvailable = 0
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -509,6 +540,40 @@ func (h *Handler) modelAlias(realm, bare string) (string, bool) {
 	return target, ok
 }
 
+// modelAllowed 报告 (realm, 裸模型名) 是否被 config models.allowed 白名单放行
+// （issue #68）。语义是「不在白名单 = 对本网关不存在」：未启用（空配置 / 全空条目）
+// 恒 true（向后兼容）；启用时非白名单条目一律 false。
+//
+// 解析口径与 modelHidden 完全一致（显式前缀 + 大小写不敏感）：两处若不一致，
+// 「CN:glm-5.2 能被 hidden 拦住、却拦不住白名单」这种不对称会让配置行为无法预测。
+func (h *Handler) modelAllowed(realm, bare string) bool {
+	enabled := false
+	for _, raw := range h.cfg.ModelsAllowed {
+		e := strings.TrimSpace(raw)
+		if e == "" {
+			continue
+		}
+		enabled = true
+		if r, b, ok := splitRealmPrefixFold(e); ok {
+			if r == realm && strings.EqualFold(b, bare) {
+				return true
+			}
+			continue
+		}
+		if strings.EqualFold(e, bare) {
+			return true // 裸名：两域都放行
+		}
+	}
+	// 白名单未启用（或全是空条目）→ 默认放行所有模型。
+	return !enabled
+}
+
+// modelUnavailable 报告该模型是否「对本网关不可见」：黑名单命中，或白名单启用且
+// 未列出。生效点一律走这一个谓词（与 hidden 同一单点收敛教训：漏一处就被绕过）。
+func (h *Handler) modelUnavailable(realm, bare string) bool {
+	return h.modelHidden(realm, bare) || !h.modelAllowed(realm, bare)
+}
+
 func (h *Handler) modelHidden(realm, bare string) bool {
 	for _, raw := range h.cfg.ModelsHidden {
 		e := strings.TrimSpace(raw)
@@ -539,8 +604,8 @@ func (h *Handler) modelList() []map[string]any {
 	for _, mi := range h.fetchDynamicModels() {
 		// 账号等级闸门：该域**每个**号都已知用不了该模型 → 不列出（避免客户端挑中必失败）。
 		// 必须分域：CN 条目只会派给 CN 号，拿全池判定会被"另一个域等级未知的号"放过。
-		if h.modelHidden("cn", mi.ID) {
-			continue // 黑名单（上游 PR #225）
+		if h.modelUnavailable("cn", mi.ID) {
+			continue // 黑名单 / 不在白名单（上游 PR #225、issue #68）
 		}
 		if h.cfg.Pool.ModelDeniedForAllAccountsInRealm(mi.ID, "cn") {
 			continue
@@ -589,8 +654,8 @@ func (h *Handler) modelList() []map[string]any {
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
 			// 同上，且按 global 域判定（global 条目只会派给 global 号）。
-			if h.modelHidden("global", id) {
-				continue // 黑名单（上游 PR #225）
+			if h.modelUnavailable("global", id) {
+				continue // 黑名单 / 不在白名单（上游 PR #225、issue #68）
 			}
 			if h.cfg.Pool.ModelDeniedForAllAccountsInRealm(id, "global") {
 				continue
@@ -840,6 +905,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.modelHidden(realm, bareModel) {
 		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
 			"model is hidden by gateway config (models.hidden); pick another model")
+		return
+	}
+	// 白名单检查在别名映射之后、黑名单之后：别名解析出的真实目标同样受检，不能
+	// 绕过白名单（与 hidden 同一条不变量）。文案不区分「不存在」与「未在白名单」，
+	// 避免把白名单当成模型枚举的探测口。
+	if !h.modelAllowed(realm, bareModel) {
+		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
+			"model is not available on this gateway; pick another model")
 		return
 	}
 	// 同上（报告 #7）：大小写敏感的前缀判定会让 `CN:x` 被当成裸名。
@@ -1695,6 +1768,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					level, logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools),
 					stats.ContentBytes(), clientToolChoice, note)
 			}
+			// 工具面观测量（issue #44）：归档里能按模型/账号聚合出「零工具收尾」的
+			// 真实发生率。日志那一行翻不出来，也不该靠人肉统计。
+			// 流式只知道「有没有」调用过，记 1 即可（数量对发生率无意义）。
+			st.toolsDeclared = len(declaredTools)
+			if stats.SawToolCalls() {
+				st.toolCalls = 1
+			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
 			// 不写入零值——否则「没观测到 usage」被伪造成「测得 0 token」，
@@ -1822,6 +1902,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			log.Printf("WARN: [server] non-stream model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
 				bareModel, m, len(declaredTools))
 		}
+		// 工具面观测量（非流式，issue #44）：与流式同口径记声明数与实际调用数。
+		st.toolsDeclared = len(declaredTools)
+		st.toolCalls = toolCallCount(resp)
 		credit, total, hasCredit := usageCreditTotal(resp)
 		if usage, ok := resp["usage"].(map[string]any); ok {
 			// 对称口径（上游 issue #170）：hit 不可得但 miss 可信时按 prompt-miss 反推
@@ -2293,6 +2376,13 @@ func usageCreditTotal(resp map[string]any) (credit float64, total int, ok bool) 
 		t = pt + ct
 	}
 	if t <= 0 {
+		return 0, 0, false
+	}
+	// 越界判定必须在 int 转换之前用 float 比较：arm64 的 float→int 越界转换饱和
+	// （2^63 变成 MaxInt64），反向校验会被舍入等价骗过、越界入参被放行（x86 上
+	// 绕回负数能被上面的 t<=0 拦住，所以只有 arm64 会中）。token 数永远不会逼近
+	// 2^63，前置拒绝零误伤。本仓就跑在 arm64 上，不是理论问题。
+	if t >= float64(math.MaxInt64) {
 		return 0, 0, false
 	}
 	return c, int(t), true

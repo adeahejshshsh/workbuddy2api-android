@@ -96,6 +96,51 @@ func IsSilentEmptyTurn(err error) bool { return errors.Is(err, errSilentEmptyTur
 // 形态救不回来。所以思维链一律直写，扣帧只覆盖 role / finish_reason 这类空壳帧。
 //
 // 换句话说：只有 role、只有 finish_reason 的帧才扣；一帧里但凡有实质载荷就放行。
+// StreamErrorFrame 识别「HTTP 200 内嵌 {code,msg,displayMsg}」的流内失败帧。
+//
+// 上游在账号被判风控（11140「账号存在异常行为」）或渠道排队满（6021）时，会先回
+// 200、再在 SSE 流里塞一帧顶层 `{"code":<非0>,"msg":"…"}`（无 choices、无 error）。
+// 这类帧如果当普通 chunk 走白名单重建，code/msg 会被剥掉 —— 客户端只看到「干净地
+// 停止、没有任何失败」，网关这边也不分类：不冷却、不禁用、不打日志。一个真被封的
+// 账号就这么静默地继续参与选号。
+//
+// 判据刻意窄：必须**没有** choices、**没有** error（那是标准 error 帧，走既有
+// error-passthrough）、且 code>0。任何一项不满足就交回原路径，行为与之前逐字一致。
+func StreamErrorFrame(obj map[string]any) (code int, msg string, ok bool) {
+	if _, has := obj["choices"]; has {
+		return 0, "", false
+	}
+	if _, has := obj["error"]; has {
+		return 0, "", false
+	}
+	c, _ := obj["code"].(float64)
+	if c <= 0 {
+		return 0, "", false
+	}
+	m, _ := obj["msg"].(string)
+	if m == "" {
+		m, _ = obj["displayMsg"].(string)
+	}
+	return int(c), m, true
+}
+
+// streamErrorPayload 把内嵌失败帧改写成标准 error 帧（保留 requestId，供客户端与
+// 运维向上游反馈）。marshal 失败时退回原文——宁可形状不标准，也不要吞掉失败。
+func streamErrorPayload(code int, msg, payload string) string {
+	e := map[string]any{"message": msg, "code": code}
+	var obj map[string]any
+	if json.Unmarshal([]byte(payload), &obj) == nil {
+		if rid, ok := obj["requestId"].(string); ok && rid != "" {
+			e["requestId"] = rid
+		}
+	}
+	raw, err := json.Marshal(map[string]any{"error": e})
+	if err != nil {
+		return payload
+	}
+	return string(raw)
+}
+
 func frameHasContent(obj map[string]any) bool {
 	chs, ok := obj["choices"].([]any)
 	if !ok {
@@ -285,6 +330,17 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 					// 判 ErrNone → handler default 只换号 → 每个号失败一次 → 503。
 					if e, hasErr := chunk["error"]; hasErr && e != nil {
 						return nil, &ErrorFrame{Payload: payload}
+					}
+					// 同类的第二种形态：HTTP 200 内嵌 {code,msg}（无 choices 无 error），
+					// 上游在账号被判风控（11140）或渠道排队满（6021）时这么报。
+					// 不认它 → 没有 choices 所以不并入内容，但 validEvents 已自增 →
+					// 不触发 errEmptyStream → 合成 content="" + finish_reason:"length"
+					// 的假 200，handler 还会 NoteSuccess 把被封号洗成健康号。
+					// 流式路径已由 writeFrame 识别（StreamErrorFrame）；非流式这条是
+					// 同一口径的补齐，否则「同一件事两套纪律」。
+					if code, msg, ok := StreamErrorFrame(chunk); ok {
+						log.Printf("WARN: [upstream] 流内失败帧（HTTP 200 内嵌，非流式）code=%d msg=%q", code, msg)
+						return nil, &ErrorFrame{Payload: streamErrorPayload(code, msg, payload)}
 					}
 					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
 					validEvents++
@@ -1003,6 +1059,20 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 				o.onErrorFrame(payload)
 			}
 			if werr := writeRaw(payload); werr != nil {
+				return 0, werr
+			}
+			return 1, nil
+		}
+		// 流内失败帧（HTTP 200 内嵌 {code,msg}，无 choices 无 error）：如实透出为
+		// error 帧并走观察者，别让策略拦截被记成「上游干净地结束了」。
+		// writeRaw → emitForce：先刷出已扣的前导帧（保序）、并把本轮标记为「有内容」，
+		// 否则收尾的静默回合判定会把这个失败当成「模型没说话」再重发一遍。
+		if code, msg, ok := StreamErrorFrame(obj); ok {
+			log.Printf("WARN: [upstream] 流内失败帧（HTTP 200 内嵌）code=%d msg=%q → 如实透出为 error 帧", code, msg)
+			if o.onErrorFrame != nil {
+				o.onErrorFrame(payload)
+			}
+			if werr := writeRaw(streamErrorPayload(code, msg, payload)); werr != nil {
 				return 0, werr
 			}
 			return 1, nil
