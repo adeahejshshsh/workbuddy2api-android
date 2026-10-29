@@ -1752,6 +1752,17 @@ func mergeModelInfos(primary, secondary []ModelInfo) []ModelInfo {
 
 // fetchEnterpriseModels 单路探测企业模型端点（/console/enterprises/personal/models）。
 // 解析口径：agents[cli].models 过滤 + nonChatModel 剔除 + disabled 剔除。
+// autoModeIDs 客户端「自动模式」开关，不是可选模型：CN 的 agents[cli].models 里
+// 带着 auto，但菜单上它是个路由模式切换项，不是菜单项。企业端点探测与未来的
+// picker 口径共用这一份判据 —— 两边各写字符串常量，上游加 auto-lite 之类必然漏一处。
+var autoModeIDs = map[string]bool{
+	"auto":      true,
+	"auto-chat": true,
+}
+
+// isAutoModeID 报告 id 是否是客户端的自动模式开关（不是可选模型）。
+func isAutoModeID(id string) bool { return autoModeIDs[id] }
+
 func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	// 局部变量名避开 url（本包已 import net/url，同名会造成阅读混淆）。
 	endpoint := c.chatBase(a) + "/console/enterprises/personal/models"
@@ -1813,6 +1824,11 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	out := make([]ModelInfo, 0, len(cliIDs))
 	for _, id := range cliIDs {
+		// auto / auto-chat 是「自动模式」开关：不过滤就会让 /v1/models 多出一条
+		// 客户端根本不显示的 auto（CN 实测 17 项菜单变 18 条）。
+		if isAutoModeID(id) {
+			continue
+		}
 		if m, ok := dynMap[id]; ok && !m.Disabled {
 			out = append(out, m.modelInfo())
 		}
