@@ -210,7 +210,7 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		ch := make(chan probeResult, 1)
 		go func() {
 			// chatBase 已按 realm 切 global base。
-			byID, perr := c.fetchV3ConfigModelMap(a, ua)
+			byID, _, perr := c.fetchV3ConfigModelMap(a, ua)
 			if perr != nil {
 				ch <- probeResult{err: perr}
 				return

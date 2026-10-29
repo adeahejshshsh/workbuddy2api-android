@@ -1910,18 +1910,26 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 // nonChatModel 规则剔除非对话条目（selected 会选模型报 code=11102）。
 // 失败返回错误（调用方降级为仅企业端点）。
 func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
-	byID, err := c.fetchV3ConfigModelMap(a, codeBuddyIDEUA)
+	byID, pick, err := c.fetchV3ConfigModelMap(a, codeBuddyIDEUA)
 	if err != nil {
 		return nil, err
 	}
 	// 按 id 排序后再输出（bug #8）：byID 是 map，迭代序随机 —— 于是 /v1/models 与
 	// 面板「模型与档位」的顺序每 10 分钟缓存过期就重排一次，mergeModelInfos 承诺的
 	// 「输出顺序 = primary 原序在前」不成立，前端按顺序做的对比/截图也无法复现。
-	ids := make([]string, 0, len(byID))
-	for id := range byID {
-		ids = append(ids, id)
+	// 菜单口径（2026-10-29 上游 c5ac20f）：客户端菜单 = 默认 agent 的 models 原序
+	// − paidId + 三个速度预设；data.models 是平台全量目录（CN 实测 58 条 vs 菜单 17 项），
+	// 照单全列会把客户端根本显示、点了还 11102 的内部 id 暴露给下游。
+	ids := pick.ordered(byID)
+	if ids == nil {
+		// 上游没下发 agents（老版本/私有化）：回落全量并按 id 排序（bug #8：map 迭代序随机，
+		// 会让 /v1/models 每次缓存过期就重排一次）。
+		ids = make([]string, 0, len(byID))
+		for id := range byID {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
 	}
-	sort.Strings(ids)
 	out := make([]ModelInfo, 0, len(ids))
 	for _, id := range ids {
 		mi := byID[id]
@@ -2242,17 +2250,17 @@ func v3ConfigDomain(a *auth.Auth, chatBase string) string {
 // 该端点对 UA 敏感：必须带 CodeBuddy/CodeBuddyIDE 版本，否则 400 code=12403。
 // ua 为该次请求的 User-Agent；空串等价 codeBuddyIDEUA。该端点对 UA 敏感且**不同 UA 下发
 // 不同模型集合**（见 codeBuddyCLIUA 注释），global 探测据此并发两路取并集。
-func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]ModelInfo, error) {
+func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]ModelInfo, *clientPick, error) {
 	req, err := http.NewRequest(http.MethodGet, c.chatBase(a)+"/v3/config", nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	// 先判空再解引用（BUG-05）：上一行直接调 a.AccessTokenValue()，下一行才判 a != nil，
 	// 真传 nil 就是 panic —— 防御代码自相矛盾。同函数里的 v3ConfigDomain 是按可空处理的。
 	if a == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// AccessToken 加锁快照（同 fetchEnterpriseModels）。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
@@ -2268,21 +2276,24 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	c.injectCodeBuddyRequest(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
 		// 读失败 → 传输层错误：半截 body 不进解析（不罚号）。
-		return nil, fmt.Errorf("read body: %w", err)
+		return nil, nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("v3/config status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		return nil, nil, fmt.Errorf("v3/config status %d: %s", resp.StatusCode, truncate(string(raw), 120))
 	}
 	var env struct {
 		Code int `json:"code"`
 		Data struct {
 			Models []dynModelEntry `json:"models"`
+			// Agents 客户端 picker 的数据源：默认 agent 的 models 才是菜单项，
+			// data.models 是平台全量目录（CN 实测 58 条 vs 菜单 17 项）。
+			Agents []v3ConfigAgent `json:"agents"`
 			// 试用模型横幅：上游把「N 天免费试用」的模型放在这里，**不在 data.models 里**。
 			// 实测 global 侧 hy4-preview-f 只出现在此（modelId=hy4-preview-f、
 			// targetModelId=hy4-preview、trialDays=14），纯 data.models 解析会漏掉它。
@@ -2293,6 +2304,11 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 						TargetModelID string `json:"targetModelId"`
 					} `json:"banners"`
 				} `json:"ModelTrialBanner"`
+				// ModelRateLimitCap 免费额度撞顶后客户端从 freeId 切到 paidId，
+				// 两个 id 在菜单里只占一行（paidId 不单列）。
+				ModelRateLimitCap struct {
+					Lines []v3RateLimitLine `json:"lines"`
+				} `json:"ModelRateLimitCap"`
 			} `json:"productFeaturesConfig"`
 			ModelPromotions []v3ModelPromotion `json:"modelPromotions"`
 			// ModelTiers 付费层级表（issue #235）：海外「Pro Only」= 专业版专属
@@ -2302,10 +2318,10 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("v3/config parse: %w", err)
+		return nil, nil, fmt.Errorf("v3/config parse: %w", err)
 	}
 	if env.Code != 0 {
-		return nil, fmt.Errorf("v3/config code=%d", env.Code)
+		return nil, nil, fmt.Errorf("v3/config code=%d", env.Code)
 	}
 	out := make(map[string]ModelInfo, len(env.Data.Models))
 	for _, m := range env.Data.Models {
@@ -2350,9 +2366,9 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	applyModelTiers(out, env.Data.ModelTiers)
 
 	if len(out) == 0 {
-		return nil, fmt.Errorf("v3/config returned empty models")
+		return nil, nil, fmt.Errorf("v3/config returned empty models")
 	}
-	return out, nil
+	return out, newClientPick(env.Data.Agents, env.Data.ProductFeaturesConfig.ModelRateLimitCap.Lines), nil
 }
 
 // UserResource 查询账号积分余额与总额度（所有套餐聚合）。remain 负值钳 0；
