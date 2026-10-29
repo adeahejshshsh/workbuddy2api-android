@@ -1,44 +1,33 @@
-# 上游 2026-10-29 批次合并台账
+# 上游 2026-10-29 批次合并台账（已完结）
 
-区间 `5367e78..854e74c`（25 条）。本文件是**权威进度**：下轮从这里接着做，不要重新分析。
+区间 `5367e78..854e74c`（25 条）。**九组全部落地，16 包 / 1086 用例全绿。**
 
-## 已合（已推送）
+## 已合
 
-| 上游 | 内容 | 我们的提交 |
+| 组 | 上游 | 落地内容 |
 |---|---|---|
-| `db31fc2` | DSH `@` 路径段同义改写（否则 400 11140） | `922dd77` |
-| `4f79fc8` | 身份句式拍平 + 11102 TTL 6h/24h→2m/10m | `922dd77` |
-| `3fbb934`+`9ca34c2` | `.gitattributes` 钉 LF | `922dd77` |
-| `f07eba5` | 6020/6021 终态 429+Retry-After、恢复请求内轮转 | 见 `git log --grep=6020` |
-| `ee1c80d`+`8ecf115`+`47f1ed6` | 指纹 9 处里的 7 处 | 见 `git log --grep=5.9.3` |
+| 指纹 9/9 | `ee1c80d`+`8ecf115`+`47f1ed6` | 版本 5.9.3 / `X-Private-Data:false` / `X-Agent-Runtime` / `baggage` 六键 / 删自造 `X-Machine-ID`+`X-Session-ID` / chat 剥 `Origin`+`Referer`+`Accept-Language` / body gzip / `/v2/report` 四元组 |
+| 11‑-128 全套 | `49f9db4`+`e4dd458`+`db31fc2` | `@` 段同义改写、身份句式拍平、enum 缺 type 推断、抢救次序「拆句 → 搬家 → 中性替换」 |
+| 思考档位 | `1792ef1`+`b3623b5`+`e3a6f7a` | 策略引擎（客户端优先/网关优先+作用域）、config 节 + 热更新、`/v1/models` 声明档位、面板行内下拉 + 下游可见开关 + 配置页三选一 |
+| 国际版活跃链 | `bb6d581` | 签到「先查 status 再 claim」+ 网页通道每日活跃（`webagent.go` 431 行） |
+| 国际版 busy | `09f2eeb` | `/v2/chat/busy` 404 记忆化、`contextWindow` 档位、档位静态表对齐 5.9.3 |
+| models 菜单 | `c5ac20f` | 按客户端 picker 口径裁剪（CN 58 → 17 项）+ `auto`/`auto-chat` 过滤 |
+| 软限流 + Kimi | `e8eca81`（含 `854e74c` 终态） | `$ref` 展开（只展开不裁剪）；软限流按模型本仓早已具备 |
+| 任务 429 | `4d643b1` | 按窗口等待重试 + 账号级快失败 |
+| 面板 3 笔 | `6cdc6fb`+`9232c89`+`4850b45` | 域分类切换、账号备注（本机 localStorage）、备注存储契约用例 |
+| 其它 | `4f79fc8`+`f07eba5`+`3fbb934`+`9ca34c2` | 11102 TTL 2m/10m、6020/6021 改 429+Retry-After、`.gitattributes` 钉 LF |
 
-## 未合（每组都缺「基础功能」，不是照搬 diff 就能落）
+## 不做的
 
-我方是精简分支：上游这批提交大量是**在它自己后加的功能上做增量**，而本仓没有那些功能。
-下表「缺的基座」是 grep 实测（`internal/` 全仓搜符号，0 命中即缺）。
-
-| 组 | 上游 | 缺的基座（实测） | 落地第一步 |
-|---|---|---|---|
-| 指纹 #8 | `ee1c80d` | **已落地** | chat 出站 body ≥1024 字节时 gzip + `Content-Encoding: gzip`；BestSpeed；小 body 不压 |
-| 指纹 #9 | `ee1c80d` | **已落地** | base 早已是 chatBase（无需改）；补 `X-Requested-With: XMLHttpRequest`，版本四元组 5.5.6→5.9.3（commit/releaseDate 换真机值） |
-| 软限流按模型 + Kimi 工具 | `e8eca81`（含 `854e74c` 终态） | **已全部落地** | Kimi 一半本轮合入（`kimi_tools.go`）；软限流一半经核查**本仓早已具备**：`CooldownSoftForModel` 内部处理空模型（review P2-13）、并发失败不延长生效冷却（cooldown.go:266）、`pickEarliestExpiryLocked` 已查 `modelCooled`（BUG-14）。无需重复搬 |
-| models 只列官方菜单 | `c5ac20f` | **已全部落地** | `clientpick.go` + 5 条用例已搬；`fetchV3ConfigModelMap` 返回 `*clientPick`；`fetchV3Models` 按菜单序输出，无 agents 时回落全量。删掉一条引用 `GenerationModels`（本仓无出图暂存）的用例 |
-| 国际版 busy 不阻断目录 | `09f2eeb` | **已全部落地**（ModelBusy 404 + contextWindow + effort_catalog 数据表） | 无 |
-| 国际版每日活跃网页链 | `bb6d581` | 新增 `webactivity.go`、`webagent.go`、`checkin_global.go` | 三个新文件可直接搬；`scheduler.go` 的接线要按本仓排程结构改写（不是同一套） |
-| 11‑-128「搬家」层 | `49f9db4`+`e4dd458` | **已全部落地** | enum 推断 + 搬家层 + 拆句优先次序（拆句 → 搬家 → 中性替换）；4 条 split 用例 |
-| 思考档位策略 | `1792ef1`+`b3623b5`+`e3a6f7a` | **已全部落地** | 策略引擎 + config 节 + 热更新 + `/v1/models` 声明 + 面板行内下拉/可见开关/配置页三选一 |
-| 任务 429 等待重试 | `4d643b1` | **已落地** | `autotask.go` 新增 5 个助手 + 包装，三个任务扫描调用点改走 `listTasksSoftRate`；4 条用例 |
-| 面板 3 笔 | `6cdc6fb`+`9232c89`+`4850b45` | **域分类切换已合**（`6cdc6fb` 主体）；备注按钮与它的桩依赖「备注」功能（上游更早的提交），本仓没有 | 剩：先补「备注」UI（localStorage 名映射 + 行内编辑弹窗），再套 `9232c89`/`4850b45` |
-
-## 不做
-
-- `a25192e` updater（本仓无 updater）
+- `a25192e` updater（本仓无 updater，APK 不能自替换二进制）
 - embeddings 相关（`6d595fa`、`5ad7b35` 的 embedding 部分）：本仓无 `/v1/embeddings`
 - `4a577fc`：修的是 `prepareBodyOpt` 测试签名，本仓无该函数
-- `854e74c` 不单独搬 —— 合 `e8eca81` 时直接取终态
+- `854e74c` 未单独搬（按约定直接取 `e8eca81` 终态）
 
-## 已知缺口（记录过的不再重复讨论）
+## 已知缺口（不是遗漏，是明确取舍）
 
 - 身份句式正则不覆盖 `You are Kimi, an assistant developed by X.`（「名字, 同位语」形态），
   刻意不扩面。
-- 6020/6021 只认 `Retry-After` 头，未解析 body 的 `data.retry_after`（代码里有 `shortcut:` 注释）。
+- 6020/6021 只认 `Retry-After` 头，未解析 body 的 `data.retry_after`（代码有 `shortcut:` 注释）。
+- `/v1/models` 第二个 `context_length` 写入点（远端回退值路径）不带 `context_window`。
+- 面板前端只做了 node 切片用例，**未在设备上实机点过**。
