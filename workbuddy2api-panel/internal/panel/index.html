@@ -275,6 +275,11 @@ td.acts { display: table-cell; vertical-align: middle; text-align: right; }
 .rm-who { flex: 0 0 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .rm-row input { flex: 1 1 auto; min-width: 0; }
 
+/* 模型行内：网关档位下拉与下游可见开关；被隐藏的行整体降透明，开关仍可点。 */
+.gw select { height: 24px; font-size: 12px; padding: 0 4px; background: var(--bg-2); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; }
+.vis label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.md-off { opacity: .5; }
+
 .acts-inner button { width: 100%; height: 26px; box-sizing: border-box; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 
 .empty { padding: 40px 20px; text-align: center; color: var(--ink-3); }
@@ -815,7 +820,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
         <div class="tbl-wrap">
         <table class="acc md">
-          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
+          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>网关档位</th><th>下游可见</th><th>上下文长度</th><th>最大输出</th></tr></thead>
           <tbody id="mdBody"></tbody>
         </table>
         </div>
@@ -1143,6 +1148,28 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="soft_rate_max" placeholder="2h"></label>
               <label class="fld"><span class="lb">熔断基础时长</span>
                 <input name="breaker_cooldown" placeholder="30m"></label>
+            </div>
+            <div class="sec"><h3>思考档位</h3>
+              <div class="grid3">
+                <label class="fld"><span class="lb">启用网关档位策略</span>
+                  <label class="chk"><input type="checkbox" name="thinking_enabled"> 缺档时补默认档；关闭则完全不碰档位</label></label>
+                <label class="fld"><span class="lb">网关目标档</span>
+                  <select name="thinking_default_effort">
+                    <option value="max">max（模型支持的最高档）</option>
+                    <option value="xhigh">xhigh</option>
+                    <option value="high">high</option>
+                    <option value="medium">medium</option>
+                    <option value="low">low</option>
+                  </select></label>
+                <label class="fld"><span class="lb">档位优先级</span>
+                  <label class="chk"><input type="checkbox" name="thinking_client_priority"> 客户端优先（不勾 = 网关优先改写客户端档位）</label></label>
+                <label class="fld"><span class="lb">网关优先作用域</span>
+                  <select name="thinking_override_scope">
+                    <option value="level">只覆盖档位（尊重客户端「关闭思考」）</option>
+                    <option value="all">连关闭意图一起覆盖</option>
+                  </select></label>
+              </div>
+              <div class="hint">行内「网关档位」改动写入 model_defaults；这里的默认档是全局兜底。策略关闭时行内下拉置灰。</div>
             </div>
             <div class="grid3">
               <label class="fld"><span class="lb">熔断退避上限</span>

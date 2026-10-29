@@ -26,6 +26,17 @@ type Snapshot struct {
 	// ModelAliases 客户端名 → 真实模型名（键已归一化为小写 "realm:裸名"；
 	// 裸名配置同时登记 cn/global 两个域）。nil = 不映射。issue #30。
 	ModelAliases map[string]string
+	// HiddenModels models.hidden 的归一化集合（键 "realm:裸名"）。面板「下游可见」
+	// 开关据此显示当前状态；nil = 不隐藏任何模型。
+	HiddenModels map[string]struct{}
+	// Thinking* 网关思考档位策略（config thinking 节）的只读镜像。出站改写由
+	// upstream.Client 自己持有 EffortPolicy；这里只给面板「网关档位」列算**当前生效值**，
+	// 让模型列表与真实注入口径一致（含按模型覆盖 model_defaults 的域精确键）。
+	ThinkingEnabled        bool
+	ThinkingDefaultEffort  string
+	ThinkingClientPriority bool
+	ThinkingOverrideScope  string
+	ThinkingModelDefaults  map[string]string
 }
 
 // Holder 原子持有当前快照。
@@ -49,6 +60,33 @@ func (h *Holder) Load() Snapshot {
 		return *s
 	}
 	return Snapshot{}
+}
+
+// NormalizeHiddenModels 把用户配置的 hidden 条目归一化为精确 id 集合。
+//
+// 条目带合法 "cn:"/"global:" 前缀 → 只隐藏该域；裸名 → 两域都隐藏。
+// 返回的 map 只读共享，调用方不得修改。
+func NormalizeHiddenModels(hidden []string) map[string]struct{} {
+	if len(hidden) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(hidden)*2)
+	for _, m := range hidden {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		if prefix, bare, ok := strings.Cut(m, ":"); ok && (prefix == "cn" || prefix == "global") {
+			out[prefix+":"+bare] = struct{}{}
+		} else {
+			out["cn:"+m] = struct{}{}
+			out["global:"+m] = struct{}{}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Store 整体替换快照。

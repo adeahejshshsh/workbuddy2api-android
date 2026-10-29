@@ -192,10 +192,60 @@ func New(cfg Config) *Panel {
 }
 
 // Logs 返回日志环形缓冲（main 经 MultiWriter 镜像 log 与 chat 表格日志进来）。
+// withLiveFlags 给模型条目补运行期标记（每次响应按 live 快照现算，不写进 60s
+// 缓存：面板里切换「下游可见」或改思考档位策略后，同一缓存周期内也要立刻看到变化）。
+//
+//   - hidden：是否对下游暴露（models.hidden）；
+//   - gateway_policy_enabled：思考档位策略是否开启（关闭时行内「网关档位」下拉置灰）；
+//   - gateway_effort：按当前策略算出的**实际会注入的档位**——先按
+//     model_defaults → 全局 default_effort 求目标档，再由模型真实支持的档位解析
+//     （与出站 applyEffortPolicy 同一套 ResolveGatewayEffort，列表与注入不再漂移）。
+//
+// 返回浅拷贝切片，缓存条目本身不被改写——并发请求共享同一份缓存。
+func (p *Panel) withLiveFlags(entries []map[string]any) []map[string]any {
+	var hidden map[string]struct{}
+	policy := upstream.EffortPolicy{}
+	if p.cfg.Live != nil {
+		s := p.cfg.Live.Load()
+		hidden = s.HiddenModels
+		policy = upstream.EffortPolicy{
+			Enabled:        s.ThinkingEnabled,
+			DefaultEffort:  s.ThinkingDefaultEffort,
+			ClientPriority: s.ThinkingClientPriority,
+			OverrideScope:  s.ThinkingOverrideScope,
+			ModelDefaults:  s.ThinkingModelDefaults,
+		}.Normalized()
+	}
+	out := make([]map[string]any, len(entries))
+	for i, e := range entries {
+		cp := make(map[string]any, len(e)+3)
+		for k, v := range e {
+			cp[k] = v
+		}
+		if id, ok := e["id"].(string); ok {
+			_, hide := hidden[id]
+			cp["hidden"] = hide
+			cp["gateway_policy_enabled"] = policy.Enabled
+			realm, bare, hasRealm := strings.Cut(id, ":")
+			if !hasRealm {
+				realm, bare = "", id
+			}
+			supported, _ := e["supported_efforts"].([]string)
+			if eff := upstream.ResolveGatewayEffort(policy.DefaultEffortFor(realm, bare), supported); eff != "" {
+				cp["gateway_effort"] = eff
+			}
+		}
+		out[i] = cp
+	}
+	return out
+}
+
 func (p *Panel) Logs() *Ring { return p.logs }
 
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
+	p.mux.HandleFunc("POST /panel/api/model_hidden", p.withAuth(p.setModelHidden))
+	p.mux.HandleFunc("POST /panel/api/model_effort", p.withAuth(p.setModelEffort))
 	p.mux.HandleFunc("GET /panel/theme.js", p.themeScript)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
@@ -560,7 +610,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		if hiddenTier > 0 {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"ok":          true,
-				"models":      out,
+				"models":      p.withLiveFlags(out),
 				"hidden_tier": hiddenTier,
 				"note":        "所有模型都被账号等级闸门隐藏（上游 11158：当前账号类型不支持）；勾选「显示等级不支持的模型」可查看",
 			})
@@ -572,7 +622,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// 单域失败时也要把原因带回去（BUG-5）：此前 fetchErrs 只在 out 为空时才用，
 	// CN 失败 / global 成功时 out 非空 → 直接 200，列表少了一半却没有任何提示，
 	// 面板与 /v1/models 的差异无从解释。
-	resp := map[string]any{"ok": true, "models": out, "hidden_tier": hiddenTier}
+	resp := map[string]any{"ok": true, "models": p.withLiveFlags(out), "hidden_tier": hiddenTier}
 	if len(fetchErrs) > 0 {
 		resp["errors"] = fetchErrs
 		resp["note"] = "部分域查询失败（列表可能不完整）：" + strings.Join(fetchErrs, "；")

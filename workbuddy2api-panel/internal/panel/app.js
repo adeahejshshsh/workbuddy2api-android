@@ -866,7 +866,7 @@ let mdLoaded = false;
 
 async function loadModels() {
   const tb = $('mdBody');
-  tb.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
+  tb.innerHTML = '<tr><td colspan="9"><div class="empty">正在向上游查询…</div></td></tr>';
   try {
     // 探测数据是可选增强：拉取失败不影响模型列表本身
       const showTier = !!($('mdTier') && $('mdTier').checked);
@@ -881,7 +881,7 @@ async function loadModels() {
       // 11158 隐藏」时返回 200 + models:[] + hidden_tier + note，正是为了避免
       // 把「你这批号等级不够」误报成「上游没给目录」。有 note 就用 note。
       const msg = d.note || '上游未返回模型';
-      tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(msg) + '</div></td></tr>';
+      tb.innerHTML = '<tr><td colspan="9"><div class="empty">' + esc(msg) + '</div></td></tr>';
       $('mdCount').textContent = '';
       $('mdNote').textContent = d.hidden_tier
         ? ('已按账号等级隐藏 ' + d.hidden_tier + ' 个模型')
@@ -898,7 +898,7 @@ async function loadModels() {
   } catch (e) {
     mdLoaded = false;
     mdAll = [];
-    tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(e.message) + '</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">' + esc(e.message) + '</div></td></tr>';
     $('mdCount').textContent = '';
   }
 }
@@ -1003,10 +1003,46 @@ function mdRowHtml(m, pr) {
   }
   const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
   const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
-  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
+  // 网关档位：选项原样取该模型「支持的思考档位」（可关思考的模型再补 off），不合成
+  // "最高档（x）"之类的文案；默认选中支持的最高档（= 缺省 default_effort=max 的语义）。
+  // 上游固定档模型（没有 supported_efforts）也给单选项，表示网关只会跟随该档；
+  // 出图模型与完全没有档位声明的模型渲染 —。
+  const EFFORT_RANK = { off: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6 };
+  const gwOpts = [];
+  for (const e of (m.supported_efforts || [])) {
+    const v = String(e).trim().toLowerCase();
+    if (v && !gwOpts.includes(v)) gwOpts.push(v);
+  }
+  const fixedTier = !gwOpts.length && m.supports_reasoning && m.default_effort
+    ? String(m.default_effort).trim().toLowerCase() : '';
+  if (fixedTier) gwOpts.push(fixedTier);
+  if (m.can_disable_thinking && gwOpts.length && !gwOpts.includes('off')) gwOpts.push('off');
+  const gwTop = gwOpts.filter(t => t !== 'off')
+    .sort((a, b) => (EFFORT_RANK[b] || 0) - (EFFORT_RANK[a] || 0))[0] || '';
+  const gwPicked = gwOpts.includes(m.gateway_effort) ? m.gateway_effort : gwTop;
+  let gw;
+  if (m.image_generation || !gwOpts.length) {
+    gw = '<td class="gw"><span style="color:var(--ink-3)">—</span></td>';
+  } else {
+    const gwFixed = !!fixedTier && !m.can_disable_thinking;
+    const gwDisabled = m.gateway_policy_enabled === false || gwFixed;
+    const gwTitle = m.gateway_policy_enabled === false
+      ? ' title="思考档位策略已关闭，网关不会注入档位；到「配置 → 思考档位」打开"'
+      : (gwFixed ? ' title="上游固定档，网关只需跟随，不可调"' : '');
+    gw = '<td class="gw"><select data-effort-id="' + esc(m.id) + '"' +
+      (gwDisabled ? ' disabled' : '') + gwTitle + '>' +
+      gwOpts.map(t => '<option value="' + esc(t) + '"' + (t === gwPicked ? ' selected' : '') + '>' + esc(t) + '</option>').join('') +
+      '</select></td>';
+  }
+  // 下游可见：关掉 = 进 models.hidden（/v1/models 不列、点名调用直接拒绝），保存即热生效。
+  const vis = '<td class="vis"><label title="' + (m.hidden
+      ? '当前不对下游暴露：客户端列表里看不到且点名调用会被拒绝；打开即恢复'
+      : '当前对下游暴露：关闭后 /v1/models 不再列出该模型，点名调用直接拒绝') + '">' +
+    '<input type="checkbox" data-model-id="' + esc(m.id) + '"' + (m.hidden ? '' : ' checked') + '>可见</label></td>';
+  return '<tr' + (m.hidden ? ' class="md-off"' : '') + '><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
     '<td class="num">' + rateCell(m) + '</td>' +
     '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
-    '<td class="efs" style="white-space:normal">' + effs + '</td>' +
+    '<td class="efs" style="white-space:normal">' + effs + '</td>' + gw + vis +
     '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
     outCell(m, pr) + '</tr>';
 }
@@ -1015,7 +1051,7 @@ function renderModels() {
   const tb = $('mdBody');
   const list = mdSortList(mdAll.filter(m => mdMatch(m)));
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="7"><div class="empty">没有符合当前筛选条件的模型</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">没有符合当前筛选条件的模型</div></td></tr>';
   } else {
     tb.innerHTML = list.map(m => mdRowHtml(m, mdProbeOf(m.id))).join('');
   }
@@ -1310,6 +1346,10 @@ const CFG_MAP = {
   credit_floor: ['pool', 'credit_floor'],
   prefer_expiring: ['pool', 'prefer_expiring'], expiring_soon: ['pool', 'expiring_soon'],
   soft_rate: ['cooldown', 'soft_rate'], soft_rate_max: ['cooldown', 'soft_rate_max'],
+  thinking_enabled: ['thinking', 'enabled'],
+  thinking_default_effort: ['thinking', 'default_effort'],
+  thinking_client_priority: ['thinking', 'client_priority'],
+  thinking_override_scope: ['thinking', 'override_scope'],
   breaker_cooldown: ['pool', 'breaker_cooldown'], breaker_cooldown_max: ['pool', 'breaker_cooldown_max'],
   idle_weight_per_hour: ['pool', 'idle_weight_per_hour'], idle_weight_max: ['pool', 'idle_weight_max'],
   ttl: ['session_sticky', 'ttl'],
@@ -2253,7 +2293,7 @@ function renderCreditDim() {
         '<td class="num">' + fmtCreditRatio(row.credits_per_1m_tokens, row.credit_samples, row.credit_tokens) + '</td>' +
         '<td class="num">' + cacheRateCell(row.cache_hit_tokens, row.cache_miss_tokens) + '</td>' +
         '</tr>';
-    }).join('') || '<tr><td colspan="7" class="empty">' + empty + '</td></tr>';
+    }).join('') || '<tr><td colspan="9" class="empty">' + empty + '</td></tr>';
   }
   $('usCreditTabs').innerHTML = usTabsHtml([['account', '按账号'], ['model', '按模型']], usCreditDim, {
     account: (d.credit_by_account || []).length,
@@ -2361,6 +2401,32 @@ function usHourLabel(p) {
   if (isNaN(d.getTime())) return p.t;
   const day = (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0');
   return p.scope === 'day' ? day : day + ' ' + String(d.getHours()).padStart(2, '0') + ':00';
+}
+
+// 模型行内两处即时改写：网关档位（写 config thinking.model_defaults）与下游可见
+// （写 config models.hidden）。两者都走 POST，保存即热生效，成功后重渲染一次让行态跟上。
+if ($('mdBody')) {
+  $('mdBody').addEventListener('change', async ev => {
+    const sel = ev.target.closest('select[data-effort-id]');
+    if (sel) {
+      sel.disabled = true;
+      try {
+        await api('model_effort', { method: 'POST', body: JSON.stringify({ id: sel.dataset.effortId, effort: sel.value }) });
+        toast('网关档位已更新：' + sel.dataset.effortId + ' → ' + sel.value, 'ok');
+        await loadModels();
+      } catch (e) { toast('网关档位保存失败：' + e.message, 'err'); sel.disabled = false; }
+      return;
+    }
+    const box = ev.target.closest('input[data-model-id]');
+    if (box) {
+      box.disabled = true;
+      try {
+        await api('model_hidden', { method: 'POST', body: JSON.stringify({ id: box.dataset.modelId, hidden: !box.checked }) });
+        toast((box.checked ? '已对下游可见：' : '已从下游隐藏：') + box.dataset.modelId, 'ok');
+        await loadModels();
+      } catch (e) { toast('可见性保存失败：' + e.message, 'err'); box.disabled = false; box.checked = !box.checked; }
+    }
+  });
 }
 
 // 账号池域分类切换：只重渲染本地副本（不重新拉 /panel/api/accounts）。
@@ -2665,7 +2731,7 @@ async function loadUsage() {
     if ($('chBody')) $('chBody').innerHTML = '<tr><td colspan="5" class="us-empty">读取失败</td></tr>';
     $('usCreditTabs').innerHTML = usTabsHtml([['account', '按账号'], ['model', '按模型']], usCreditDim, null);
     $('usDimBody').innerHTML = '<tr><td colspan="10" class="empty">读取用量失败</td></tr>';
-    $('usCreditBody').innerHTML = '<tr><td colspan="7" class="empty">读取用量失败</td></tr>';
+    $('usCreditBody').innerHTML = '<tr><td colspan="9" class="empty">读取用量失败</td></tr>';
   }
 }
 
@@ -3013,7 +3079,7 @@ function renderPackages(d, detailLimit) {
       '</tr>';
     };
     const groupSummary = (group, label, count, size, remain) =>
-      '<tr class="pk-group-summary"><td colspan="7"><button type="button" class="pk-group-toggle"' +
+      '<tr class="pk-group-summary"><td colspan="9"><button type="button" class="pk-group-toggle"' +
       ' data-pk-group="' + group + '" data-count="' + count + '" data-size="' + size +
       '" data-remain="' + remain + '" aria-expanded="false">' + label + '，展开</button></td></tr>';
     const rows = groups.visible.map(p => rowOf(p, '')).join('');

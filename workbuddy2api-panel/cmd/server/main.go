@@ -351,12 +351,18 @@ func main() {
 	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
-		APIKey:               cfg.APIKey,
-		SoftCooldown:         cfg.SoftRateDur,
-		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
-		RecordClientInfo:     cfg.Logging.RequestClientInfo,
-		ModelFallback:        cfg.Pool.ModelFallback,
-		ModelAliases:         livecfg.NormalizeModelAliases(cfg.Models.Aliases),
+		APIKey:                 cfg.APIKey,
+		SoftCooldown:           cfg.SoftRateDur,
+		SanitizeFingerprints:   cfg.Features.SanitizeBlacklistFingerprints,
+		RecordClientInfo:       cfg.Logging.RequestClientInfo,
+		ModelFallback:          cfg.Pool.ModelFallback,
+		ModelAliases:           livecfg.NormalizeModelAliases(cfg.Models.Aliases),
+		HiddenModels:           livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
+		ThinkingEnabled:        cfg.Thinking.Enabled,
+		ThinkingDefaultEffort:  cfg.Thinking.DefaultEffort,
+		ThinkingClientPriority: cfg.Thinking.ClientPriority,
+		ThinkingOverrideScope:  cfg.Thinking.OverrideScope,
+		ThinkingModelDefaults:  cfg.Thinking.ModelDefaults,
 	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
@@ -713,6 +719,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		// 配置 → 运行时降级表/别名表被清空」，直到进程重启才恢复。
 		ModelFallback: newCfg.Pool.ModelFallback,
 		ModelAliases:  livecfg.NormalizeModelAliases(newCfg.Models.Aliases),
+		HiddenModels:  livecfg.NormalizeHiddenModels(newCfg.Models.Hidden),
+		// 思考档位策略镜像：与 up.SetEffortPolicy 同批热更新，面板立即回显新生效值。
+		ThinkingEnabled:        newCfg.Thinking.Enabled,
+		ThinkingDefaultEffort:  newCfg.Thinking.DefaultEffort,
+		ThinkingClientPriority: newCfg.Thinking.ClientPriority,
+		ThinkingOverrideScope:  newCfg.Thinking.OverrideScope,
+		ThinkingModelDefaults:  newCfg.Thinking.ModelDefaults,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	// 思考档位策略热生效：改默认档 / 切换客户端优先或作用域后，下一次 chat 即按新策略。
