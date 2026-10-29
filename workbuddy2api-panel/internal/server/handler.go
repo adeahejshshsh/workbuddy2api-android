@@ -623,6 +623,16 @@ func (h *Handler) modelList() []map[string]any {
 		// 上游零值不再透出假 131072（误导 Codex/ZCode 等按 context_length 提前
 		// 截断、白白丢上下文）。
 		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP)
+		// context_window：上游 5.9.3 的**可切换档位**（与 context_length 不是同一口径——
+		// 后者是当前生效上限）。只在至少有一个正值时输出，避免 {"default":0,"supported":[]}
+		// 让下游以为「只有 0 token」。
+		if len(mi.ContextWindowSupported) > 0 {
+			cw := map[string]any{"supported": mi.ContextWindowSupported}
+			if mi.ContextWindowDefault > 0 {
+				cw["default"] = mi.ContextWindowDefault
+			}
+			entry["context_window"] = cw
+		}
 		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
 			entry["max_output_tokens"] = mo
 		}

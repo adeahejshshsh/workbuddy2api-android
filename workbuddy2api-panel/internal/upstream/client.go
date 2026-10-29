@@ -1557,10 +1557,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 type ModelInfo struct {
 	ID            string
 	Name          string
-	ContextWindow int64    // = maxInputTokens
-	MaxTokens     int64    // = maxOutputTokens（思考与最终回答共享此预算，上游无独立思考上限字段）
-	Efforts       []string // reasoning.supportedEfforts（空=未知/固定档）
-	DefaultEffort string   // reasoning.defaultEffort（新模型键）或 reasoning.effort（老模型键）；空=未返回
+	ContextWindow int64 // = maxInputTokens（当前生效上限）
+	// ContextWindowDefault / ContextWindowSupported 上游 5.9.3 的 contextWindow 段：
+	// defaultLength 是默认档，supportedLengths 是**用户可切换**的档位（如 [400000,1000000]）。
+	// 与 ContextWindow 不是同一口径——后者是当前生效上限，前者是可选档；丢掉它客户端
+	// 就发现不了 1M 档。
+	ContextWindowDefault   int64
+	ContextWindowSupported []int64
+	MaxTokens              int64    // = maxOutputTokens（思考与最终回答共享此预算，上游无独立思考上限字段）
+	Efforts                []string // reasoning.supportedEfforts（空=未知/固定档）
+	DefaultEffort          string   // reasoning.defaultEffort（新模型键）或 reasoning.effort（老模型键）；空=未返回
 
 	// 模型目录全字段（models-full-fields）：
 	Description string   // descriptionZh 中文描述
@@ -1611,12 +1617,18 @@ type dynModelEntry struct {
 	MaxInputTokens  int64    `json:"maxInputTokens"`
 	MaxOutputTokens int64    `json:"maxOutputTokens"`
 	MaxAllowedSize  int64    `json:"maxAllowedSize"`
-	Disabled        bool     `json:"disabled"`
-	SupportsImages  bool     `json:"supportsImages"`
-	SupportsReason  bool     `json:"supportsReasoning"`
-	SupportsTool    bool     `json:"supportsToolCall"`
-	OnlyReasoning   bool     `json:"onlyReasoning"`
-	Reasoning       struct {
+	// ContextWindow 5.9.3 新增：defaultLength + supportedLengths（指针形态区分
+	// 「上游没给」与「给了空数组」，后者同样不该编造档位）。
+	ContextWindow *struct {
+		DefaultLength    int64   `json:"defaultLength"`
+		SupportedLengths []int64 `json:"supportedLengths"`
+	} `json:"contextWindow"`
+	Disabled       bool `json:"disabled"`
+	SupportsImages bool `json:"supportsImages"`
+	SupportsReason bool `json:"supportsReasoning"`
+	SupportsTool   bool `json:"supportsToolCall"`
+	OnlyReasoning  bool `json:"onlyReasoning"`
+	Reasoning      struct {
 		Effort             string   `json:"effort"`
 		Summary            string   `json:"summary"`
 		DefaultEffort      string   `json:"defaultEffort"`
@@ -1632,26 +1644,40 @@ func (m dynModelEntry) modelInfo() ModelInfo {
 	if def == "" {
 		def = m.Reasoning.Effort
 	}
+	var cwDefault int64
+	var cwSupported []int64
+	if m.ContextWindow != nil {
+		if m.ContextWindow.DefaultLength > 0 {
+			cwDefault = m.ContextWindow.DefaultLength
+		}
+		for _, n := range m.ContextWindow.SupportedLengths {
+			if n > 0 {
+				cwSupported = append(cwSupported, n)
+			}
+		}
+	}
 	return ModelInfo{
-		ID:                 m.ID,
-		Name:               m.Name,
-		ContextWindow:      m.MaxInputTokens,
-		MaxTokens:          m.MaxOutputTokens,
-		Efforts:            m.Reasoning.SupportedEfforts,
-		DefaultEffort:      def,
-		SupportsImages:     m.SupportsImages,
-		Description:        m.Description,
-		Credits:            m.Credits,
-		Tags:               m.Tags,
-		Vendor:             m.Vendor,
-		IsDefault:          m.IsDefault,
-		SupportsReasoning:  m.SupportsReason,
-		SupportsToolCall:   m.SupportsTool,
-		OnlyReasoning:      m.OnlyReasoning,
-		MaxAllowedSize:     m.MaxAllowedSize,
-		CanDisableThinking: m.Reasoning.CanDisableThinking,
-		ReasoningEffort:    m.Reasoning.Effort,
-		ReasoningSummary:   m.Reasoning.Summary,
+		ID:                     m.ID,
+		Name:                   m.Name,
+		ContextWindowDefault:   cwDefault,
+		ContextWindowSupported: cwSupported,
+		ContextWindow:          m.MaxInputTokens,
+		MaxTokens:              m.MaxOutputTokens,
+		Efforts:                m.Reasoning.SupportedEfforts,
+		DefaultEffort:          def,
+		SupportsImages:         m.SupportsImages,
+		Description:            m.Description,
+		Credits:                m.Credits,
+		Tags:                   m.Tags,
+		Vendor:                 m.Vendor,
+		IsDefault:              m.IsDefault,
+		SupportsReasoning:      m.SupportsReason,
+		SupportsToolCall:       m.SupportsTool,
+		OnlyReasoning:          m.OnlyReasoning,
+		MaxAllowedSize:         m.MaxAllowedSize,
+		CanDisableThinking:     m.Reasoning.CanDisableThinking,
+		ReasoningEffort:        m.Reasoning.Effort,
+		ReasoningSummary:       m.Reasoning.Summary,
 	}
 }
 
