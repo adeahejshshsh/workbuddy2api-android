@@ -196,6 +196,28 @@ type Config struct {
 		Aliases []string `json:"aliases"`
 	} `json:"models"`
 
+	// Thinking 网关思考档位策略（issue #18 / #21）。网关按模型声明的
+	// supportedEfforts 解析目标档：缺档时补默认档，可按开关以网关优先改写客户端档位；
+	// 面板保存后经 upstream.Client.SetEffortPolicy 热生效，无需重启。
+	Thinking struct {
+		// Enabled 策略总开关。false = 网关完全不碰档位（只剩既有 injectThinking 与降级管线）。
+		Enabled bool `json:"enabled"`
+		// DefaultEffort 网关目标档："max"（默认，取模型支持的最高档）或
+		// low/medium/high/xhigh 等具体档位（模型不支持时落到 ≤ 该档的最高支持档）。
+		DefaultEffort string `json:"default_effort"`
+		// ClientPriority true = 客户端优先：客户端发了档位就照单全收（含 off），
+		// 只在客户端没发时补 DefaultEffort；false = 网关优先，按 OverrideScope 改写。
+		ClientPriority bool `json:"client_priority"`
+		// OverrideScope 网关优先的作用域（ClientPriority=false 时生效）：
+		//   "level"（默认）= 只覆盖档位，客户端「关闭思考」一律尊重；
+		//   "all" = 档位与开关一起覆盖：客户端的关闭意图也被改写成开启 + 目标档。
+		OverrideScope string `json:"override_scope"`
+		// ModelDefaults 按模型覆盖 DefaultEffort：键 "cn:model" / "global:model"
+		// （精确到域）或裸 "model"（两域共用）；值 "max"/"high"/…，或 "inherit"
+		// 表示不覆盖。
+		ModelDefaults map[string]string `json:"model_defaults,omitempty"`
+	} `json:"thinking"`
+
 	// Cn 国内版上游 base 覆盖（上游 PR #220）：空 = 回落内置默认
 	// https://copilot.tencent.com。base 在启动时注入，改动需重启。
 	Cn struct {
@@ -363,6 +385,12 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Cooldown.SoftResetMax = "24h"
+	// 思考档位策略缺省：按模型最高档补缺档请求，但客户端显式档位优先，
+	// 且不覆盖客户端的关闭思考意图。
+	c.Thinking.Enabled = true
+	c.Thinking.DefaultEffort = "max"
+	c.Thinking.ClientPriority = true
+	c.Thinking.OverrideScope = "level"
 	c.Server.ReadTimeout = "300s"
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
@@ -654,6 +682,22 @@ func applyEnv(c *Config) {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.IdleTimeoutSeconds = n
 		}
+	}
+	if v := os.Getenv("WB2A_THINKING_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Thinking.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_THINKING_DEFAULT_EFFORT"); v != "" {
+		c.Thinking.DefaultEffort = v
+	}
+	if v := os.Getenv("WB2A_THINKING_CLIENT_PRIORITY"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Thinking.ClientPriority = b
+		}
+	}
+	if v := os.Getenv("WB2A_THINKING_OVERRIDE_SCOPE"); v != "" {
+		c.Thinking.OverrideScope = v
 	}
 	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
 		c.Upstream.UserAgent = v

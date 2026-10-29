@@ -881,6 +881,9 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	// 面板保存配置热改 + chat 热路径并发读写，用 atomic.Bool 消除数据竞争。
 	SanitizeFingerprints atomic.Bool
+	// effortPolicy 网关思考档位策略（config thinking 节，热更新用 atomic.Pointer）。
+	effortPolicy atomic.Pointer[EffortPolicy]
+
 	// modelBusyUnsupported 上游 /v2/chat/busy 在该域不存在（国际版实测 404）。
 	// 探到一次即置位，本进程后续跳过探测。atomic：并发调用只读 + 一次性写。
 	modelBusyUnsupported atomic.Bool
@@ -1054,7 +1057,7 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID, cacheKeyID
 	// CN Kimi 不接受 parameters 里的 $ref/#/$defs：出站前把本地 $ref 展开成内联定义。
 	// 只展开、不裁剪任何工具（裁剪某部署的工具名会让其它用户的 MCP 工具静默消失）。
 	body = prepareKimiTools(body, realm)
-	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
+	body = PrepareBodyOptWithEffortPolicy(body, c.SanitizeFingerprints.Load(), efforts, defs, realm, c.effortPolicy.Load())
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	// 缓存槽会话段：优先网关派生的 CacheKeyID（sessKey 或内容派生键），

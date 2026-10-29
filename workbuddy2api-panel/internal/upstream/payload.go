@@ -30,6 +30,19 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 // defaultEfforts（模型声明默认档）补档。defaultEfforts 为 nil 时与旧行为一致
 // （deepseek 缺档回退硬编码 high）。
 func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) []byte {
+	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, "", nil)
+}
+
+// PrepareBodyOptWithEffortPolicy 在 …AndDefault 之上接入网关思考档位策略
+// （config thinking 节）：客户端缺档时补网关默认档；client_priority=false 时按网关
+// 档位改写客户端显式档（override_scope 控制是否连「关闭思考」一起改写）。
+// realm 用于 thinking.model_defaults 的 "realm:model" 精确匹配；policy 为 nil
+// 或未启用时与 …AndDefault 完全一致。
+func PrepareBodyOptWithEffortPolicy(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, realm string, policy *EffortPolicy) []byte {
+	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, realm, policy)
+}
+
+func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, realm string, policy *EffortPolicy) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -91,6 +104,11 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// 先于 normalizeReasoningEffort 执行：补入的默认档也要走既有降级管线，
 	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
 	modelName, _ := obj["model"].(string)
+	// 网关思考档位策略（见 effort_policy.go）**先于** injectThinking：override_scope=all
+	// 要把客户端的 off/disabled 改写成「开启 + 目标档」，晚一步就会被 injectThinking
+	// 写成 thinking.type=disabled 并删掉档位。client_priority=true 时这里只在客户端
+	// 没发档位时补默认档。
+	applyEffortPolicy(obj, modelName, efforts[modelName], policy, realm)
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
 	normalizeReasoningEffort(obj, efforts)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content

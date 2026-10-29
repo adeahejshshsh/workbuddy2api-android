@@ -21,13 +21,27 @@
     "soft_reset_max": "24h"
   },
   "schedule": {
-    "checkin_hours": [9, 21],
-    "growth_hours": [1],
-    "travel_hours": [9, 21],
-    "activity_hours": [10],
-    "keepalive_hours": [22],
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "growth_hours": [
+      1
+    ],
+    "travel_hours": [
+      9,
+      21
+    ],
+    "activity_hours": [
+      10
+    ],
+    "keepalive_hours": [
+      22
+    ],
     "keepalive_refresh_window": "168h",
-    "blackcat_hours": [23],
+    "blackcat_hours": [
+      23
+    ],
     "checkin_enabled": true,
     "growth_enabled": true,
     "travel_enabled": true,
@@ -91,5 +105,14 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "thinking": {
+    "enabled": true,
+    "default_effort": "max",
+    "client_priority": true,
+    "override_scope": "level",
+    "model_defaults": {
+      "cn:deepseek-v4.1-flash": "high"
+    }
   }
 }

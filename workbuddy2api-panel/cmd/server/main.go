@@ -207,6 +207,20 @@ func main() {
 	// upstream.New() 里构造，晚于它调用等于永不生效。
 	upstream.SetDNSServers(cfg.Upstream.DNSServers)
 	up := upstream.New()
+	// 思考档位策略（thinking 节）：启动装载，面板保存配置时热更新。
+	up.SetEffortPolicy(effortPolicyOf(cfg))
+	if cfg.Thinking.Enabled {
+		priority := "客户端优先（只在缺档时补默认档）"
+		if !cfg.Thinking.ClientPriority {
+			priority = "网关优先（改写客户端档位）"
+			if cfg.Thinking.OverrideScope == "all" {
+				priority = "网关优先（档位与关闭意图一起覆盖）"
+			}
+		}
+		log.Printf("思考档位策略：默认档 %s；%s", cfg.Thinking.DefaultEffort, priority)
+	} else {
+		log.Printf("思考档位策略已关闭（不补档、不改写客户端档位）")
+	}
 
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
@@ -701,6 +715,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		ModelAliases:  livecfg.NormalizeModelAliases(newCfg.Models.Aliases),
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	// 思考档位策略热生效：改默认档 / 切换客户端优先或作用域后，下一次 chat 即按新策略。
+	up.SetEffortPolicy(effortPolicyOf(newCfg))
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
@@ -730,6 +746,21 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// DeepEqual(nil, "120") 直接不等 → 用户什么都没改也会被告知"这些项需重启"。
 	// 触发面：手写的最小配置（只写 listen/api_key/auth_dir）必误报。
 	return restartRequiredFields(normalizeForCompare(oldRaw, prev), merged), nil
+}
+
+// effortPolicyOf 把 config thinking 节转成 upstream 运行时策略。
+// 未启用时 Enabled=false，管线行为与未接入策略时完全一致。
+func effortPolicyOf(cfg *Config) *upstream.EffortPolicy {
+	if cfg == nil {
+		return nil
+	}
+	return &upstream.EffortPolicy{
+		Enabled:        cfg.Thinking.Enabled,
+		DefaultEffort:  cfg.Thinking.DefaultEffort,
+		ClientPriority: cfg.Thinking.ClientPriority,
+		OverrideScope:  cfg.Thinking.OverrideScope,
+		ModelDefaults:  cfg.Thinking.ModelDefaults,
+	}
 }
 
 // restartRequiredFields 返回本次改动中**真的变了**、且无法热生效需要重启的字段名。
