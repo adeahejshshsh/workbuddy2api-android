@@ -16,10 +16,10 @@ const (
 	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
 	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.5.4）。
 	// config upstream.client_version 可覆盖（空 = 内置默认）。
-	defaultClientVersion = "5.8.3"
+	defaultClientVersion = "5.9.3"
 	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.137.1）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.161.0"
+	defaultCliVersion = "2.165.0"
 
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -194,8 +194,12 @@ func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
 }
 
 // CommonHeaders 设置所有 API 共享的请求头。
+// agentRuntimeLocal 出站 X-Agent-Runtime 取值（桌面端本地 agent）。
+const agentRuntimeLocal = "local-agent"
+
 func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Runtime", agentRuntimeLocal)
 	// Accept 非流式默认 application/json（D6：去掉宽松的 text/plain, */*）。
 	// chat 流式路径在 ChatHeaders 覆盖为 event-stream。
 	req.Header.Set("Accept", "application/json")
@@ -212,7 +216,11 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	// X-Machine-ID / X-Session-ID：按 uid 稳定派生的账号级设备头（见
 	// injectAccountStableHeaders）。注入在 CommonHeaders——chat 经 ChatHeaders
 	// 叠加 CommonHeaders 天然继承；billing 域另行注入，全出站覆盖。
-	c.injectAccountStableHeaders(req, a)
+	// X-Machine-ID / X-Session-ID 已移除（2026-10-28 上游 5.9.3 真机 + 静态反编译
+	// 双重确认）：客户端**从不发这两个头**——app.asar 与内置 cli 全量字符串里
+	// X-Machine-ID 命中 0 次，X-Session-ID 只作为常量表条目存在；真机 40 个出站头
+	// 逐一比对也没有它们。设备标识在 /v2/report 的 **body** 里，不在头上。
+	// 旧实现按 uid 派生两个 36 hex 塞进头里，是纯粹的网关自造指纹。
 }
 
 // acceptLanguageFor 按账号 realm 返回 Accept-Language：global → en-US，cn → zh-CN。
@@ -252,6 +260,11 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.CommonHeaders(req, a)
 	// chat 流式 Accept 覆盖 CommonHeaders 的非流式默认（D6）。
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	// CLI 客户端没有浏览器语义：chat 路径从不发 Origin / Referer / Accept-Language
+	// （两版客户端真机逐头对照）。CommonHeaders 为其它路径设了它们，这里剥掉。
+	req.Header.Del("Origin")
+	req.Header.Del("Referer")
+	req.Header.Del("Accept-Language")
 	// 官方桌面端 chat 头组（2026-10 解包 app.asar 实测）：X-Product 恒为 SaaS
 	// （deploymentType || "SaaS"），IDE 名单独走 X-IDE-Name=WorkBuddy，并带
 	// X-Private-Data: true。此前主 chat 路径只发了 UA，缺这四项 —— 与官方客户端
@@ -317,6 +330,7 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.injectDeviceToken(req, a)
 	// 会话头族（对话/请求/消息/B3 链路），见 injectConversationHeaders。
 	c.injectConversationHeaders(req, meta)
+	c.injectBaggage(req, meta)
 }
 
 // injectGlobalChatHeaders global 账号（无企业 ID）的 chat 专属声明头，对齐 intl 项目
@@ -345,6 +359,33 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 //   - X-B3-TraceId / X-B3-SpanId / X-B3-Sampled：链路族。B3 规范只认 16/32 hex
 //     TraceId 与 16 hex SpanId；入站 conversationRequestID 非法时 TraceId 回落
 //     messageID（恒 32 hex），SpanId 取 messageID[:16]（每消息新）。
+//
+// injectBaggage 注入 W3C `baggage` 头，对齐客户端 chat 出站形态（5.9.3 真机逐字）：
+//
+//	baggage: buddyId=,buddyName=,codebuddy.session_id=<X-Conversation-ID 同值>,
+//	         codebuddy.conversation_request_id=<X-Conversation-Request-ID 同值>,
+//	         x-agent-runtime=<X-Agent-Runtime 同值>,x-agent-intent=<X-Agent-Intent 同值>
+//
+// 客户端由 OTel W3CBaggagePropagator 序列化，空值保留 `k=` 形态，所以 buddyId /
+// buddyName 恒为空串但仍列在表里（不是漏填）。两个 codebuddy.* 键取本次出站真实值，
+// 与同名头保持一致 —— 头体不一致本身就是可判别形态。
+// x-agent-runtime / x-agent-intent 也承载在 baggage 里：客户端解析场景时从 baggage
+// 读这两项，不发等于告诉上游「这个运行时不知道自己是谁」。
+func (c *Client) injectBaggage(req *http.Request, meta ChatMeta) {
+	conv := meta.ConversationID
+	if conv == "" {
+		conv = req.Header.Get("X-Conversation-ID")
+	}
+	reqID := meta.ConversationRequestID
+	if reqID == "" {
+		reqID = req.Header.Get("X-Conversation-Request-ID")
+	}
+	req.Header.Set("baggage", "buddyId=,buddyName=,codebuddy.session_id="+conv+
+		",codebuddy.conversation_request_id="+reqID+
+		",x-agent-runtime="+req.Header.Get("X-Agent-Runtime")+
+		",x-agent-intent="+req.Header.Get("X-Agent-Intent"))
+}
+
 func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	convReqID := meta.ConversationRequestID
 	if convReqID == "" {

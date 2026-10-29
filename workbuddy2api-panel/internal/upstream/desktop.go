@@ -495,7 +495,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-IDE-Type", "WorkBuddy")
 	h.Set("X-IDE-Version", c.clientVersionFor(a))
 	// 官方桌面端还带这一项（解包实测），此前漏发。
-	h.Set("X-Private-Data", "true")
+	h.Set("X-Private-Data", "false") // 5.9.3 真机真值是 false（此前为 true）
 	// 必须用与 headers.go 完全相同的拼写（bug #9）：Go 会把头名规范化成
 	// X-Codebuddy-Request，而全仓其它地方是 X-CodeBuddy-Request —— 同一个风控闸门头
 	// 以两种拼写出站，按字面匹配头的上游实现会漏，排障时也容易误以为没加。
