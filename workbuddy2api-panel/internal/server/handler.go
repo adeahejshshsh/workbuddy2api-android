@@ -1553,13 +1553,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
 				break
 			}
-			// 换号无用的两类（review #5）：6021 渠道容量满载与 11‑-128 通道校验，
-			// applyErrorPolicy 对它们都是零动作（不冷却/不罚号），策略注释也写明
-			// 「换号不改变结果」。此前只有 WAF 会 break，这两类仍会 rotateBackoff
-			// 换号 —— 一次请求被放大成最多 MaxRotate 次上游调用 + 退避等待。
-			if kind == upstream.ErrUpstreamBusy || kind == upstream.ErrChannelRefused {
+			// 换号无用：11‑-128 通道校验（账号健康，换号不改变通道指纹）。
+			if kind == upstream.ErrChannelRefused {
 				break
 			}
+			// 6020/6021 排队**继续轮转**（上游 2026-10-28 f07eba5 翻案）：队列可用性是
+			// 间歇的 —— 生产实案同一分钟内既有 6021 也有成功（两号连续 6021 后 33s 内
+			// 同模型恢复）。一次性 fail-fast 把几秒抖动直接交给客户端。队列全局共享，
+			// 换号通常只是多撞一次，价值在于「间歇空窗不再逐请求致命」，代价是
+			// 最多 MaxRotate 次上游调用（有界）。
 			if !rotateBackoff(i, r.Context()) {
 				break // ctx 取消：终止轮转（分类错误换号退避）
 			}
@@ -2088,11 +2090,27 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			code = "channel_refused"
 			msg = "upstream rejected the request as non-official client (channel verification failed, 11‑-128); resend from the official client or check the channel fingerprint"
 		case upstream.ErrUpstreamBusy:
-			// 6021 queue.full 渠道级容量满载（上游 PR #185）：503 + 可重试语义。
-			// 上游原文（下方统一透传）含 requestId，客户端按 SDK 退避重试即可。
-			status = http.StatusServiceUnavailable
+			// 6020/6021 渠道排队/容量满载：**429 + Retry-After**，不是 503。
+			// 上游对这两个形态本身回的就是 429（6020 还带 data.retry_after=40），网关
+			// 改写成 503 等于把「稍后再试」翻译成「服务不可用」—— WorkBuddy CLI 对 429
+			// 按 Retry-After 自动重试，对 503 **直接中断任务**（2026-10-28 实案：任务在
+			// 两次 503 后死亡）。透传上游原状态，让下游用自己的重试策略消化排队。
+			// shortcut: 只认 Retry-After 头，未解析 body 的 data.retry_after（上游
+			// 把它放在 body 而非头里）；缺头时按 5s 兜底，需要精确等待时长时再补解析。
+			status = http.StatusTooManyRequests
 			code = "upstream_busy"
-			msg = "upstream capacity is full (queue.full); retry after a short wait"
+			msg = "upstream is queueing (queue.waiting/queue.full); retry after a short wait"
+			if ue != nil && ue.RetryAfter > 0 {
+				secs := int(ue.RetryAfter.Seconds())
+				if secs > maxRetryAfterSec {
+					secs = maxRetryAfterSec
+				}
+				if secs > 0 {
+					w.Header().Set("Retry-After", strconv.Itoa(secs))
+				}
+			} else {
+				w.Header().Set("Retry-After", "5")
+			}
 		case upstream.ErrModelBusy:
 			// 14003 模型繁忙（review #22）：请求内每个号都撞上时 lastErr 是它，
 			// 此前末端没有这个分支 → 落默认的 503 no_healthy_account，客户端看到

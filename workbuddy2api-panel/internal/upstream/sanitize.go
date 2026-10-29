@@ -23,9 +23,39 @@ var sanitizeFeatures = []string{
 	"cc_entrypoint",                                   // 同族：只带这一项时也必须进净化
 	"11-128",                                          // 上游反探测：裸数字错误码
 	"11" + "128",                                      // 同一指纹的 5 字节形态（拼接构造，不手打）
+	"Tokens prefixed with @",                          // DSH 0.3.x 的 @ 路径说明段（段内不含任何品牌词）
 }
 
-// sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
+// sanitizeDshPathsRe DSH 系统提示里「@ 开头的路径怎么解析」整段说明。
+//
+// 这一段是本仓唯一漏掉的 DSH 指纹：段内**不含任何品牌词**，所以身份改写（品牌词表）
+// 的预检根本不会命中，原文原样发出即 400 11‑-128 Illegal API invocation from an
+// unapproved channel。
+//
+// 上游按「连续原文」匹配（逐段二分实测：只发首句放行，前两句连排即拦），所以必须整段
+// 一起改。这里做同义改写而不是删除：@ 路径、相对路径基准、结尾斜杠表示目录、其余按
+// 文件读、@"..." 用于含空格的路径——语义全部保留，只换措辞让连续特征失配。
+//
+// 两种线上见过的结尾措辞都要覆盖（(?is) 让 .*? 跨行且大小写不敏感）：
+//
+//	... quotes a path containing spaces.               （0.3.x 当前写法）
+//	... form only quotes a path that contains spaces.   （更早的写法）
+//
+// 段外的 @ 不受影响：邮箱、包名、含 @ 的绝对路径都不匹配。
+var sanitizeDshPathsRe = regexp.MustCompile(
+	`(?is)Tokens prefixed with @ are paths the user explicitly referenced\..*?path (?:containing|that contains) spaces\.`)
+
+const sanitizeDshPathsProbe = "Tokens prefixed with @"
+
+// sanitizeDshPathsReplacement 逐句同义改写（上游已验证：修复前 400 / 修复后 200）。
+const sanitizeDshPathsReplacement = "Paths beginning with @ refer to files the user explicitly mentioned. " +
+	"Relative paths are resolved against the workspace root; absolute paths point " +
+	"to files or directories on the host. A trailing slash marks a directory, so " +
+	"list it when its contents matter. Anything else is a file: open it with the " +
+	"read tool when its contents are needed, and never claim to have inspected it " +
+	"before reading. The @\"...\" form only quotes a path that contains spaces."
+
+// sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。// sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
 var sanitizeHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-(?:hdr|header)[ \t]*:[^\n;]*;?[ \t]*`)
 
 // sanitizeBareHdrRe 兜底层：裸键名（无冒号无值）同样是指纹——2026-09-13 实验 F4
@@ -46,7 +76,28 @@ var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 // 长度 +1、内容被篡改。这里用边界断言限定为独立 token。
 var sanitizeCodeRe = regexp.MustCompile(`(^|[^0-9A-Za-z_\-])11-?128([^0-9A-Za-z_\-]|$)`)
 
-// sanitizeRewrites 改写层：全模板句逐字替换（每句只改一个词，语义不变）。
+// sanitizeIdentitySentenceRe 身份**句式**：`You are … powered by …`。
+//
+// 此前只把品牌词换掉，句子骨架原样留着 —— 骨架本身也是特征，品牌换了照样 400。
+// 这里把整句拍平成中性句：You are + ≤3 修饰词 + 可选名词 + 七种被动搭配 →
+// "You are a helpful AI assistant."，句尾空白用捕获组回填（RE2 无 (?=)）。
+//
+// 必须**先于**品牌词替换执行：正则要匹配原文里的品牌全名，先换品牌会让规则失配。
+var sanitizeIdentitySentenceRe = regexp.MustCompile(
+	`(?i)You are\s+` +
+		`(?:an?\s+|the\s+)?(?:[\w.-]+\s+){0,3}?` +
+		`(?:agent|assistant|model|AI|LLM)?[\s,]*` +
+		`(?:powered by|built on|built by|created by|developed by|made by|trained by)` +
+		`[^\n]*?\.(\s|$)`)
+
+const sanitizeIdentitySentenceReplacement = "You are a helpful AI assistant.${1}"
+
+// sanitizeIdentityVerbs 身份句式的字面量快路（与上面正则的动词表同步维护）。
+var sanitizeIdentityVerbs = []string{
+	"powered by", "built on", "built by", "created by", "developed by", "made by", "trained by",
+}
+
+// sanitizeRewrites 改写层：全模板句逐字替换（每句只改一个词，语义不变）。// sanitizeRewrites 改写层：全模板句逐字替换（每句只改一个词，语义不变）。
 //
 // 身份句的匹配串**不带结尾标点**（只到 "…for Claude" 为止）：
 // CLI 版这句以句号收尾（"…for Claude."），桌面版（claude-desktop-3p / Agent SDK）
@@ -97,6 +148,8 @@ func sanitizeText(text string) string {
 	if !hasFingerprint(text) {
 		return text
 	}
+	// 身份句式先于品牌词替换：正则要匹配原文里的品牌全名。
+	text = sanitizeIdentitySentenceRe.ReplaceAllString(text, sanitizeIdentitySentenceReplacement)
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
@@ -114,6 +167,10 @@ func sanitizeText(text string) string {
 	}
 	// 兜底：键值形态已在上面整段删除，这里只剩裸键名（引用/示例文本形态）。
 	text = sanitizeBareHdrRe.ReplaceAllString(text, "x-anthropic-hdr")
+	// @ 路径说明段：整段同义改写（段内无品牌词，前面所有规则都碰不到它）。
+	if strings.Contains(text, sanitizeDshPathsProbe) {
+		text = sanitizeDshPathsRe.ReplaceAllString(text, sanitizeDshPathsReplacement)
+	}
 	// 不能 TrimSpace（BUG-02）：只要某条消息命中任一指纹，整段正文的缩进、行首空格、
 	// 行尾空白都会被删掉，代码块/缩进结构被静默破坏，而且 sanitizeContent 因
 	// s != c 判成「已改写」，没有任何日志。剥离留下的空白留着即可。
@@ -131,7 +188,17 @@ func hasFingerprint(text string) bool {
 			return true
 		}
 	}
-	return sanitizeBareHdrRe.MatchString(text)
+	if sanitizeBareHdrRe.MatchString(text) {
+		return true
+	}
+	// 身份句式：品牌词表命不中（骨架相同、品牌已换），必须单独判。
+	low := strings.ToLower(text)
+	for _, v := range sanitizeIdentityVerbs {
+		if strings.Contains(low, v) {
+			return sanitizeIdentitySentenceRe.MatchString(text)
+		}
+	}
+	return false
 }
 
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。

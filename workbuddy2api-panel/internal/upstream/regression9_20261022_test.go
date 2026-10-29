@@ -24,14 +24,16 @@ func TestDeepSeekHarnessBrandRewritten(t *testing.T) {
 		t.Fatal("只带品牌词的文本没进净化（特征表缺原串）")
 	}
 	out := sanitizeText(in)
+	// 这句是**身份句式**（You are … powered by …），新增的句式规则会整句拍平
+	// （骨架本身也是特征），所以此时不该再出现品牌替代词 —— 只要求原串与旧词都消失。
 	if strings.Contains(out, blockedBrand) {
 		t.Fatalf("原串没被改写: %q", out)
 	}
-	if !strings.Contains(out, rewrittenBrand) {
-		t.Fatalf("改写结果不含替代词: %q", out)
-	}
 	if strings.Contains(out, legacyBrand) {
 		t.Fatalf("仍在下发旧替代词: %q", out)
+	}
+	if !strings.Contains(out, "You are a helpful AI assistant.") {
+		t.Fatalf("身份句式未被拍平: %q", out)
 	}
 	// 幂等：再跑一次不再变化（替代词不含原串，不会二次命中特征表）
 	if again := sanitizeText(out); again != out {

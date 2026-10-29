@@ -1,0 +1,12 @@
+# Go 源码与脚本一律 LF。
+#
+# 起因：internal/panel 的前端测试用 node 跑 app.js 里的真实函数，靠
+# src.indexOf('\n}\n') 定位代码块边界。Windows 上 core.autocrlf=true 会把检出
+# 写成 CRLF，这些匹配全部落空，本地必红而 Linux CI 常绿
+# （TestAppJSEventsView / TestAppJSStoreRemarksReportsFailure）。
+# 属性一旦写死，检出与规范化就与各人的 autocrlf 设置无关。
+*.js   text eol=lf
+
+# 本文件自身也钉成 LF：否则 core.autocrlf=true 的机器下次检出会把它写成 CRLF，
+# 提交时反复刷出 "LF will be replaced by CRLF" 警告（规则本身不受影响，只是噪音）。
+.gitattributes text eol=lf
