@@ -499,15 +499,48 @@ function disabledAge(iso) {
   return Math.floor(sec / 86400) + ' 天前';
 }
 
+// 账号池「国内版 / 国际版」分类：模块级状态（切换时只重渲染本地副本，不再拉接口）。
+let accRealmFilter = 'all';
+let lastAccountsList = [];
+
 function renderAccounts(list) {
   const tb = $('accBody');
-  if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+  lastAccountsList = Array.isArray(list) ? list : [];
+  const total = lastAccountsList.length;
+  const globalCnt = lastAccountsList.filter(s => s.realm === 'global').length;
+  const cnCnt = total - globalCnt;
+
+  const elTabs = $('accRealmTabs');
+  if (elTabs) {
+    const cAll = $('accCntAll'), cCn = $('accCntCn'), cGl = $('accCntGlobal');
+    if (cAll) cAll.textContent = total;
+    if (cCn) cCn.textContent = cnCnt;
+    if (cGl) cGl.textContent = globalCnt;
+    elTabs.querySelectorAll('button[data-realm]').forEach(b => {
+      b.classList.toggle('on', b.dataset.realm === accRealmFilter);
+    });
+  }
+
+  let filtered = lastAccountsList;
+  if (accRealmFilter === 'cn') {
+    filtered = lastAccountsList.filter(s => s.realm !== 'global');
+  } else if (accRealmFilter === 'global') {
+    filtered = lastAccountsList.filter(s => s.realm === 'global');
+  }
+
+  if (!filtered.length) {
+    if (!total) {
+      tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    } else if (accRealmFilter === 'cn') {
+      tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>';
+    } else {
+      tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">暂无国际版账号</div>当前账号池内均为国内版账号（共 ' + cnCnt + ' 个）</div></td></tr>';
+    }
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
-  const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
-  tb.innerHTML = list.map(s => {
+  const maxCred = Math.max(1, ...filtered.map(s => s.credits || 0));
+  tb.innerHTML = filtered.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
@@ -2326,6 +2359,14 @@ function usHourLabel(p) {
   const day = (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0');
   return p.scope === 'day' ? day : day + ' ' + String(d.getHours()).padStart(2, '0') + ':00';
 }
+
+// 账号池域分类切换：只重渲染本地副本（不重新拉 /panel/api/accounts）。
+if ($('accRealmTabs')) $('accRealmTabs').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-realm]');
+  if (!b) return;
+  accRealmFilter = b.dataset.realm;
+  renderAccounts(lastAccountsList);
+});
 
 // 维度切换 / 排序控件。
 if ($('usDimTabs')) $('usDimTabs').addEventListener('click', ev => {
