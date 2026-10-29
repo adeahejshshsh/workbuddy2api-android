@@ -20,7 +20,7 @@
 | 组 | 上游 | 缺的基座（实测） | 落地第一步 |
 |---|---|---|---|
 | 指纹 #8 | `ee1c80d` | **已落地** | chat 出站 body ≥1024 字节时 gzip + `Content-Encoding: gzip`；BestSpeed；小 body 不压 |
-| 指纹 #9 | `ee1c80d` | 无 | 先核 `/v2/report` 现状（base + UA 三段式），再对齐 |
+| 指纹 #9 | `ee1c80d` | **已落地** | base 早已是 chatBase（无需改）；补 `X-Requested-With: XMLHttpRequest`，版本四元组 5.5.6→5.9.3（commit/releaseDate 换真机值） |
 | 软限流按模型 + Kimi 工具 | `e8eca81`（含 `854e74c` 终态） | **已全部落地** | Kimi 一半本轮合入（`kimi_tools.go`）；软限流一半经核查**本仓早已具备**：`CooldownSoftForModel` 内部处理空模型（review P2-13）、并发失败不延长生效冷却（cooldown.go:266）、`pickEarliestExpiryLocked` 已查 `modelCooled`（BUG-14）。无需重复搬 |
 | models 只列官方菜单 | `c5ac20f` | **auto/auto-chat 已过滤（企业端点路径）**；picker 口径未做 —— `clientpick.go` 依赖 `v3ConfigAgent`/`v3RateLimitLine` 两个本仓没有的类型 | 剩：搬 `clientpick.go` 并补两个类型 → 改 `fetchV3ConfigModelMap` 返回 `*clientPick` → 两个调用点；风险：动的是 models 目录主链路 |
 | 国际版 busy 不阻断目录 | `09f2eeb` | **ModelBusy 404 已记忆（核心）**；contextWindow 段与 effort_catalog 调整未做 | 剩：`contextWindow`（defaultLength/supportedLengths）解析与输出、effort_catalog 分域、global_models 缓存判定 |

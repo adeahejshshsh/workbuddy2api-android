@@ -87,22 +87,25 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 		"username":     nick,
 		"userNickname": nick,
 		"product":      "SaaS",
-		"releaseDate":  int64(1789036585355),
-		"commit":       "5f9692923c93033111c51ad7b003eb80204a9b75",
-		"ideName":      "WorkBuddy",
-		"ideType":      "WorkBuddy",
-		"ideVersion":   "5.5.6",
-		"machineId":    deriveID(a, "machine"),
-		"sessionId":    deriveID(a, "session"),
-		"extName":      "workbuddy-desktop",
-		"extVersion":   "5.5.6",
-		"os":           "win32",
-		"arch":         "x64",
-		"osVersion":    "10.0.26220",
-		"cpuCores":     20,
-		"memorySize":   24,
-		"timestamp":    now,
-		"presentAt":    now,
+		// 5.9.3 真机 /v2/report 重新采集（2026-10-28，commit / releaseDate /
+		// ideVersion / extVersion 逐字取自 7 条上报事件，并与分发包 cli/product.json
+		// 的 commit + date 交叉一致）。旧值 5.5.6 / 5f9692… 与当前客户端差一个大版本。
+		"releaseDate": int64(1793093056315),
+		"commit":      "d46924219e79332f49c37ccebf27292f87001b19",
+		"ideName":     "WorkBuddy",
+		"ideType":     "WorkBuddy",
+		"ideVersion":  "5.9.3",
+		"machineId":   deriveID(a, "machine"),
+		"sessionId":   deriveID(a, "session"),
+		"extName":     "workbuddy-desktop",
+		"extVersion":  "5.9.3",
+		"os":          "win32",
+		"arch":        "x64",
+		"osVersion":   "10.0.26220",
+		"cpuCores":    20,
+		"memorySize":  24,
+		"timestamp":   now,
+		"presentAt":   now,
 	}
 }
 
@@ -130,6 +133,8 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 		return err
 	}
 	req, err := http.NewRequest(http.MethodPost, c.desktopBase(a)+desktopReportPath, bytes.NewReader(raw))
+	// X-Requested-With：5.9.3 真机 /v2/report 必带（旧实现漏了，缺头即「非客户端形态」）。
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	if err != nil {
 		return err
 	}
