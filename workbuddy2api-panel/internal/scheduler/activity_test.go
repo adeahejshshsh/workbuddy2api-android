@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -580,14 +582,27 @@ func TestRunActivityNowGlobalErrorDoesNotSkipCN(t *testing.T) {
 	}
 }
 
-// TestCheckinStillSkipsGlobal 回归护栏：本次只放开活跃上报，签到仍跳过 global
-// （上游 a190252 明确「checkin/travel 门控不动」）。误删该 gate 会让国际版去打
-// CN 专属签到端点。
-func TestCheckinStillSkipsGlobal(t *testing.T) {
+// TestCheckinGlobalInactiveMakesNoWrite 国际号在「活动未开启」时不得发签到写请求。
+//
+// 口径变更（2026-10-29 复验）：国际版**有**签到端点，也有客户端方法
+// （main/account.js 的 checkinStatus / claimDailyCheckin），此前「global 无签到体系」
+// 的说法是错的。真实状态是「端点存在、活动长期未配置」——所以正确做法不是整段跳过，
+// 而是先读 checkin-activity-status，active=false 就到此为止，不发 daily-checkin。
+//
+// 反向代价：这条断言松掉，国际号每天会稳定撞一次 400 code=10001（多一次风控面、
+// 日志噪音），而收益为零。
+func TestCheckinGlobalInactiveMakesNoWrite(t *testing.T) {
 	withGlobalSwitch(t)
-	var hits atomic.Int32
+	var mu sync.Mutex
+	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		if strings.Contains(r.URL.Path, "checkin-activity-status") {
+			w.Write([]byte(`{"code":0,"data":{"active":false,"daily_credit":100}}`))
+			return
+		}
 		w.Write([]byte(`{"code":0,"data":{}}`))
 	}))
 	defer srv.Close()
@@ -606,7 +621,103 @@ func TestCheckinStillSkipsGlobal(t *testing.T) {
 
 	s.RunCheckinNow()
 
-	if n := hits.Load(); n != 0 {
-		t.Errorf("checkin global 上游调用=%d want 0（签到仍应跳过 global）", n)
+	mu.Lock()
+	defer mu.Unlock()
+	sawStatus := false
+	for _, path := range paths {
+		if strings.Contains(path, "checkin-activity-status") {
+			sawStatus = true
+		}
+		if strings.Contains(path, "daily-checkin") {
+			t.Errorf("活动未开启时不该发签到写请求: %v", paths)
+		}
+	}
+	if !sawStatus {
+		t.Errorf("国际号必须查一次活动状态（否则永远不知道活动何时开放）: %v", paths)
+	}
+}
+
+// TestCheckinGlobalClaimsWhenActive 国际号在「活动开启且当日未签」时必须发一次 claim。
+//
+// 这是本次改动**新增的能力**：此前 global 账号整段跳过，活动一旦开放，国际版也
+// 永远签不上。反向代价：这条断言松掉，等于把国际版签到重新锁死成只读。
+func TestCheckinGlobalClaimsWhenActive(t *testing.T) {
+	withGlobalSwitch(t)
+	var mu sync.Mutex
+	var writes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(r.URL.Path, "checkin-activity-status") {
+			w.Write([]byte(`{"code":0,"data":{"active":true,"today_checked_in":false,"daily_credit":100}}`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "daily-checkin") {
+			writes++
+			w.Write([]byte(`{"code":0,"data":{}}`))
+			return
+		}
+		w.Write([]byte(`{"code":0,"data":{}}`))
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(globalAccount(t, "g1"))
+	up := &upstream.Client{
+		HTTP:              srv.Client(),
+		GlobalEnabled:     true,
+		ChatBaseCN:        srv.URL,
+		BillingBaseCN:     srv.URL,
+		ChatBaseGlobal:    srv.URL,
+		BillingBaseGlobal: srv.URL,
+	}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.RunCheckinNow()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if writes != 1 {
+		t.Fatalf("daily-checkin 调用次数=%d want 1（活动开启且未签）", writes)
+	}
+}
+
+// TestCheckinGlobalSkipsWriteWhenAlreadyChecked 上游说今天已签时不发写请求（幂等省一次调用）。
+func TestCheckinGlobalSkipsWriteWhenAlreadyChecked(t *testing.T) {
+	withGlobalSwitch(t)
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		if strings.Contains(r.URL.Path, "checkin-activity-status") {
+			w.Write([]byte(`{"code":0,"data":{"active":true,"today_checked_in":true,"streak_days":3}}`))
+			return
+		}
+		w.Write([]byte(`{"code":0,"data":{}}`))
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(globalAccount(t, "g1"))
+	up := &upstream.Client{
+		HTTP:              srv.Client(),
+		GlobalEnabled:     true,
+		ChatBaseCN:        srv.URL,
+		BillingBaseCN:     srv.URL,
+		ChatBaseGlobal:    srv.URL,
+		BillingBaseGlobal: srv.URL,
+	}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.RunCheckinNow()
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range paths {
+		if strings.Contains(path, "daily-checkin") {
+			t.Errorf("上游显示今天已签，不该再发写请求: %v", paths)
+		}
 	}
 }
