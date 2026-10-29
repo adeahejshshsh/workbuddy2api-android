@@ -256,3 +256,6 @@ func stripEffort(obj map[string]any) {
 // SetEffortPolicy 热更新网关思考档位策略（config thinking 节保存后调用）。
 // nil 表示关闭：管线退回 injectThinking + 降级，行为与未接入策略时完全一致。
 func (c *Client) SetEffortPolicy(p *EffortPolicy) { c.effortPolicy.Store(p) }
+
+// EffortPolicy 返回当前生效的策略快照（nil = 未接入/已关闭）。
+func (c *Client) EffortPolicy() *EffortPolicy { return c.effortPolicy.Load() }
