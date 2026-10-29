@@ -1,0 +1,44 @@
+# 上游 2026-10-29 批次合并台账
+
+区间 `5367e78..854e74c`（25 条）。本文件是**权威进度**：下轮从这里接着做，不要重新分析。
+
+## 已合（已推送）
+
+| 上游 | 内容 | 我们的提交 |
+|---|---|---|
+| `db31fc2` | DSH `@` 路径段同义改写（否则 400 11140） | `922dd77` |
+| `4f79fc8` | 身份句式拍平 + 11102 TTL 6h/24h→2m/10m | `922dd77` |
+| `3fbb934`+`9ca34c2` | `.gitattributes` 钉 LF | `922dd77` |
+| `f07eba5` | 6020/6021 终态 429+Retry-After、恢复请求内轮转 | 见 `git log --grep=6020` |
+| `ee1c80d`+`8ecf115`+`47f1ed6` | 指纹 9 处里的 7 处 | 见 `git log --grep=5.9.3` |
+
+## 未合（每组都缺「基础功能」，不是照搬 diff 就能落）
+
+我方是精简分支：上游这批提交大量是**在它自己后加的功能上做增量**，而本仓没有那些功能。
+下表「缺的基座」是 grep 实测（`internal/` 全仓搜符号，0 命中即缺）。
+
+| 组 | 上游 | 缺的基座（实测） | 落地第一步 |
+|---|---|---|---|
+| 指纹 #8 | `ee1c80d` | 无（只是改出站 body 构造） | 在 chat 请求构造处 marshal→gzip→`Content-Encoding: gzip`；风险高，单独一轮 + 实测 |
+| 指纹 #9 | `ee1c80d` | 无 | 先核 `/v2/report` 现状（base + UA 三段式），再对齐 |
+| 软限流按模型 + Kimi 工具 | `e8eca81`（含 `854e74c` 终态） | `prepareKimiTools` 无；`kimi_tools.go` 是新文件 | 先搬 `kimi_tools.go`（新文件，改 module path 即可），再接 `ModelRate` 到 `pool/cooldown.go`+`pick.go`，最后 `client.go` 接一行 |
+| models 只列官方菜单 | `c5ac20f` | 新增 `clientpick.go` | 搬 `clientpick.go` + `client.go`/`global_models.go` 的筛选接点 |
+| 国际版 busy 不阻断目录 | `09f2eeb` | 新增 `modelbusy.go`、`effort_catalog.go` | 搬两个新文件，再接 `global_models.go` 的缓存判定 |
+| 国际版每日活跃网页链 | `bb6d581` | 新增 `webactivity.go`、`webagent.go`、`checkin_global.go` | 三个新文件可直接搬；`scheduler.go` 的接线要按本仓排程结构改写（不是同一套） |
+| 11‑-128「搬家」层 | `49f9db4`+`e4dd458` | `relocateOffending` 无；新增 `probe_channel.go` | 搬 `probe_channel.go` + `prompt.go` 搬家逻辑；`payload.go` 接点按本仓改写 |
+| 思考档位策略 | `1792ef1`+`b3623b5`+`e3a6f7a` | `effort_policy.go`、`effort_catalog.go`、`listing.go`、`model_effort.go` 全无 | 四新文件 + `handler.go` 声明档位 + 面板三处；最大一组，建议最后做 |
+| 任务 429 等待重试 | `4d643b1` | 上游 `listTasks` 在 `autotask.go`，本仓任务列表走 `taskcenter.go` 另一套 | 把 `isSoftRateErr`/`softRateWait`/`softRateGate`/`noteSoftRate` 抽成本仓版本，套在 `taskcenter.go` 的查询点 |
+| 面板 3 笔 | `6cdc6fb`+`9232c89`+`4850b45` | `openRemarks`/`remarkFormRows`/`remarkKey`/`accRealmFilter`/`accRealmTabs` 全无 | 先补「备注」与「域标签页」两套 UI（上游更早的提交），再套这三笔增量 |
+
+## 不做
+
+- `a25192e` updater（本仓无 updater）
+- embeddings 相关（`6d595fa`、`5ad7b35` 的 embedding 部分）：本仓无 `/v1/embeddings`
+- `4a577fc`：修的是 `prepareBodyOpt` 测试签名，本仓无该函数
+- `854e74c` 不单独搬 —— 合 `e8eca81` 时直接取终态
+
+## 已知缺口（记录过的不再重复讨论）
+
+- 身份句式正则不覆盖 `You are Kimi, an assistant developed by X.`（「名字, 同位语」形态），
+  刻意不扩面。
+- 6020/6021 只认 `Retry-After` 头，未解析 body 的 `data.retry_after`（代码里有 `shortcut:` 注释）。
