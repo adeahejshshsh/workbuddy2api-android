@@ -266,9 +266,15 @@ td.acts { display: table-cell; vertical-align: middle; text-align: right; }
    按钮个数随行变化，整列左右错位。
    分列放在内层 div：td 保持 table-cell，vertical-align:middle 才继续生效
    （直接给 td 设 display:grid 会退出表格布局，按钮变顶对齐）。 */
-.acts-inner { display: grid; grid-template-columns: repeat(3, 54px) 50px 68px repeat(2, 54px); gap: 5px; justify-content: end; align-items: center; }
+.acts-inner { display: grid; grid-template-columns: repeat(3, 54px) 50px 68px repeat(3, 54px); gap: 5px; justify-content: end; align-items: center; }
 /* 统一盒模型：primary 与 ghost 的边框/行高不同会让「解冻」行比「暂停选号」行高 2~3px，
    行线因此参差。固定高度 + border-box 后每行等高、按钮底边对齐。 */
+/* 账号备注：有备注时原标识降为浅色虚体，备注本身用正文色。 */
+.rm-ghost { color: var(--ink-3); font-size: .92em; margin-left: 6px; }
+.rm-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+.rm-who { flex: 0 0 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.rm-row input { flex: 1 1 auto; min-width: 0; }
+
 .acts-inner button { width: 100%; height: 26px; box-sizing: border-box; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 
 .empty { padding: 40px 20px; text-align: center; color: var(--ink-3); }
@@ -1405,6 +1411,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <footer>
       <span class="grow"></span>
       <button class="primary" id="btnKey">进入</button>
+    </footer>
+  </div>
+</div>
+
+<div class="veil" id="remarkVeil">
+  <div class="dlg" style="width:460px">
+    <header>
+      <h3>账号备注</h3>
+      <div class="hint">只存在这台设备的浏览器里（localStorage），不会写回服务端，也不参与选号。</div>
+    </header>
+    <div class="body">
+      <div id="remarkBody"></div>
+    </div>
+    <footer>
+      <button class="xs ghost" id="btnRemarkClear">清空全部</button>
+      <span class="grow"></span>
+      <button class="xs ghost" id="btnRemarkClose">取消</button>
+      <button class="primary" id="btnRemarkSave">保存</button>
     </footer>
   </div>
 </div>
