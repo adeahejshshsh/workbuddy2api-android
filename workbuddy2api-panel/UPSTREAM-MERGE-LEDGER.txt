@@ -28,7 +28,7 @@
 | 11‑-128「搬家」层 | `49f9db4`+`e4dd458` | **已全部落地** | enum 推断 + 搬家层 + 拆句优先次序（拆句 → 搬家 → 中性替换）；4 条 split 用例 |
 | 思考档位策略 | `1792ef1`+`b3623b5`+`e3a6f7a` | `effort_policy.go`、`effort_catalog.go`、`listing.go`、`model_effort.go` 全无 | 四新文件 + `handler.go` 声明档位 + 面板三处；最大一组，建议最后做 |
 | 任务 429 等待重试 | `4d643b1` | **已落地** | `autotask.go` 新增 5 个助手 + 包装，三个任务扫描调用点改走 `listTasksSoftRate`；4 条用例 |
-| 面板 3 笔 | `6cdc6fb`+`9232c89`+`4850b45` | `openRemarks`/`remarkFormRows`/`remarkKey`/`accRealmFilter`/`accRealmTabs` 全无 | 先补「备注」与「域标签页」两套 UI（上游更早的提交），再套这三笔增量 |
+| 面板 3 笔 | `6cdc6fb`+`9232c89`+`4850b45` | **域分类切换已合**（`6cdc6fb` 主体）；备注按钮与它的桩依赖「备注」功能（上游更早的提交），本仓没有 | 剩：先补「备注」UI（localStorage 名映射 + 行内编辑弹窗），再套 `9232c89`/`4850b45` |
 
 ## 不做
 
