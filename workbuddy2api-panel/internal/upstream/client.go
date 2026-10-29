@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1432,6 +1433,29 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string, meta Cha
 // 全局脚本：首条消息非 system 时前置兜底 system（防 console 域上游 code 11-128；
 // #119 后 global 出站固定 /v2，该兜底保留——上游对 /v2 是否需要 system 无实测
 // 反证，删了无回滚路径）。
+// gzipMinChatBody 出站 chat body 触发 gzip 压缩的最小字节数。
+// 真机 body（~51 KB）带 Content-Encoding: gzip；极小 body 压了反而更长，客户端对小请求
+// 同样不压，故设阈值而非无条件压缩。
+const gzipMinChatBody = 1024
+
+// gzipBody 用标准库 gzip 压缩出站 body（BestSpeed：上游只解码、不校验压缩率，
+// BestSpeed 省 CPU 且不改变可解性）。
+func gzipBody(src []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := zw.Write(src); err != nil {
+		zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byte, clientIP string, meta ChatMeta) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1446,13 +1470,26 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
+	// 请求体编码：5.9.3 真机 chat body 是 **gzip 压缩**的（头 `Content-Encoding: gzip`
+	// + body 以 1f 8b 开头）。旧实现发明文 JSON，body 字节与编码头两处都与客户端不同
+	// —— 是 11140 指纹面之一。小 body 不压（收益为负，客户端亦非一律压）。
+	outBody := prepared
+	gzipped := false
+	if len(outBody) >= gzipMinChatBody {
+		if z, zerr := gzipBody(outBody); zerr == nil {
+			outBody, gzipped = z, true
+		}
+	}
 	for _, path := range c.chatPaths(a) {
 		endpoint := c.chatBase(a) + path
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
+		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(outBody))
 		if err != nil {
 			return nil, 0, nil, err
 		}
 		c.ChatHeaders(req, a, clientIP, meta)
+		if gzipped {
+			req.Header.Set("Content-Encoding", "gzip")
+		}
 		// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
