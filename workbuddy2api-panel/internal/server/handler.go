@@ -1167,10 +1167,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active(degradeKey) {
 		body = prompt.Append(body, h.cfg.PromptText)
 	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active(degradeKey) {
-		// 先试「搬家」：只换承载通道（system → 首条 user），客户端的人设/项目约定
-		// 一个字符都不丢；搬不动（无 system 文本 / 首条 user 是多模态）再退回中性替换。
-		// 上游判据是「system 内容命中特征」，同一段文本进 user 即通过（上游 49f9db4 实机）。
-		if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
+		// 抢救次序（上游 e4dd458 真机实测 A–G）：
+		//   1. **先按句界拆**成多条 system（F/F2 均 200）—— 文本一个字不改、承载通道
+		//      仍是 system，模型的指令优先级不变，是代价最小的抢救；
+		//   2. 拆不动（单句 system）再**搬家**（system → 首条 user，C 也 200），
+		//      只换通道、客户端人设不丢；
+		//   3. 都不可行才替换成中性提示词（丢原文，最后手段）。
+		// 注意不能把短的人格句拆成两条（实测 G：ARRR 0/3，短句拆开会废掉指令）——
+		// 由 SplitSystemMessages 自己按「能否切出 ≥2 段」判定。
+		if split, ok := prompt.SplitSystemMessages(body); ok {
+			body = split
+		} else if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
 			body = moved
 		} else {
 			body = prompt.Rewrite(body, prompt.Degraded)

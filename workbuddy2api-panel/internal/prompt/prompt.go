@@ -350,3 +350,86 @@ func jsonMarshalNoEscape(v any) ([]byte, error) {
 	}
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
+
+// SplitSystemMessages 把最长的那条 system/developer 消息按句子边界拆成多条 system 消息，
+// 用于 11-128 的**首选**抢救：上游按「连续原文」匹配指纹，句界一断就失配，而文本一个字都
+// 不改、承载通道仍是 system（模型的指令优先级不变）。
+//
+// 实测（2026-10-28，CN 账号 deepseek-v4.1-flash，internal/probe/probe_channel.go）：
+//   - 原始 DSH @ 路径段整段在 system        → 400 11-128
+//   - 同一段同义改写后仍在 system           → 200（sanitize 层已覆盖这种情况）
+//   - 同一段按句界拆成两条 system           → 200
+//   - 每句一条 system                       → 200
+//
+// 返回 false 的两种情况：没有任何一条 system 能切出 ≥2 段（单句 system 没法拆，交给
+// 调用方走后面的补救层）。
+func SplitSystemMessages(body []byte) ([]byte, bool) {
+	if len(body) == 0 {
+		return body, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body, false
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body, false
+	}
+	// 只拆最长的一条：短 system 拆开反而是把一句指令切成两半（实测人格句拆两条就失效）。
+	best, bestLen := -1, 0
+	for i, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := mm["role"].(string)
+		if role != "system" && role != "developer" {
+			continue
+		}
+		txt, ok := mm["content"].(string)
+		if !ok || len(txt) <= bestLen {
+			continue
+		}
+		best, bestLen = i, len(txt)
+	}
+	if best < 0 {
+		return body, false
+	}
+	parts := splitSentences(msgs[best].(map[string]any)["content"].(string))
+	if len(parts) < 2 {
+		return body, false
+	}
+	rebuilt := make([]any, 0, len(msgs)+len(parts)-1)
+	rebuilt = append(rebuilt, msgs[:best]...)
+	for _, p := range parts {
+		rebuilt = append(rebuilt, map[string]any{"role": "system", "content": p})
+	}
+	rebuilt = append(rebuilt, msgs[best+1:]...)
+	obj["messages"] = rebuilt
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
+func splitSentences(text string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '.', '!', '?':
+			// 后面紧跟空白才算句界（"3.5" / "v1.2.3" / "example.com" 不切）。
+			if i+1 < len(text) && (text[i+1] == ' ' || text[i+1] == '\n' || text[i+1] == '\t') {
+				if seg := strings.TrimSpace(text[start : i+1]); seg != "" {
+					out = append(out, seg)
+				}
+				start = i + 1
+			}
+		}
+	}
+	if seg := strings.TrimSpace(text[start:]); seg != "" {
+		out = append(out, seg)
+	}
+	return out
+}
