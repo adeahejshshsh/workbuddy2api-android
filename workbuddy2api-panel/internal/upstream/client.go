@@ -1047,6 +1047,9 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID, cacheKeyID
 		// 时档位原样出站 → 上游 400 + 11101 → 网关当 ErrBadParams 终结请求。
 		efforts, defs = cnEffortMap(efforts, defs)
 	}
+	// CN Kimi 不接受 parameters 里的 $ref/#/$defs：出站前把本地 $ref 展开成内联定义。
+	// 只展开、不裁剪任何工具（裁剪某部署的工具名会让其它用户的 MCP 工具静默消失）。
+	body = prepareKimiTools(body, realm)
 	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
