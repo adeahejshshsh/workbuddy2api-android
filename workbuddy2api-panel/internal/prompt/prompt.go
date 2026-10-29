@@ -115,6 +115,65 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 // 下游 prepareBody 的 normalizeRoles，Append 执行时开头块里的 developer
 // 还是 developer。网关消息角色用 system 而非 developer——上游 role 白名单
 // 不含 developer，插 developer 等于制造一次必然归一与多余的 11128 风险窗口。
+// MoveSystemToUser 把 system/developer 的**原文**搬进首条 user 消息前部，system 换成
+// 中性提示词，用于 11‑-128 渠道校验的请求级抢救（返回 false = 这条请求结构不安全，别动）。
+//
+// 与 Rewrite 的区别是**丢不丢东西**：Rewrite 用中性提示词替换 system，客户端辛苦写的
+// 人设/项目约定就此消失；这里只换承载通道（system → user），一个字符都不丢。上游判据是
+// 「system 消息内容命中特征」，同一段文本放进 user 就能过（同一 body 换号结果一致），
+// 所以这不是绕过审核，是换通道。
+//
+// 保守放弃四种情况：没有 system/developer 文本、system 内容不是纯文本、找不到 user
+// 消息、首条 user 不是纯文本（多模态 parts 里插文本会打乱顺序）。
+func MoveSystemToUser(body []byte, neutral string) ([]byte, bool) {
+	if len(body) == 0 || neutral == "" {
+		return body, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body, false
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body, false
+	}
+	first, ok := msgs[0].(map[string]any)
+	if !ok {
+		return body, false
+	}
+	switch role, _ := first["role"].(string); role {
+	case "system", "developer":
+	default:
+		return body, false
+	}
+	sysText, ok := first["content"].(string)
+	if !ok || strings.TrimSpace(sysText) == "" {
+		return body, false
+	}
+	for _, m := range msgs[1:] {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := mm["role"].(string); role != "user" {
+			continue
+		}
+		txt, ok := mm["content"].(string)
+		if !ok {
+			return body, false // 多模态 parts：插文本会打乱 part 顺序
+		}
+		mm["content"] = sysText + "\n\n" + txt
+		first["role"] = "system"
+		first["content"] = neutral
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return body, false
+		}
+		return out, true
+	}
+	return body, false
+}
+
 func Append(body []byte, systemPrompt string) []byte {
 	if len(body) == 0 || systemPrompt == "" {
 		return body

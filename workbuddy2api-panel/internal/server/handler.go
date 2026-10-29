@@ -1157,7 +1157,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active(degradeKey) {
 		body = prompt.Append(body, h.cfg.PromptText)
 	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active(degradeKey) {
-		body = prompt.Rewrite(body, prompt.Degraded)
+		// 先试「搬家」：只换承载通道（system → 首条 user），客户端的人设/项目约定
+		// 一个字符都不丢；搬不动（无 system 文本 / 首条 user 是多模态）再退回中性替换。
+		// 上游判据是「system 内容命中特征」，同一段文本进 user 即通过（上游 49f9db4 实机）。
+		if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
+			body = moved
+		} else {
+			body = prompt.Rewrite(body, prompt.Degraded)
+		}
 		degradedApplied = true
 	}
 

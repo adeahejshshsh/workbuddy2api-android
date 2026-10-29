@@ -25,7 +25,7 @@
 | models 只列官方菜单 | `c5ac20f` | **auto/auto-chat 已过滤（企业端点路径）**；picker 口径未做 —— `clientpick.go` 依赖 `v3ConfigAgent`/`v3RateLimitLine` 两个本仓没有的类型 | 剩：搬 `clientpick.go` 并补两个类型 → 改 `fetchV3ConfigModelMap` 返回 `*clientPick` → 两个调用点；风险：动的是 models 目录主链路 |
 | 国际版 busy 不阻断目录 | `09f2eeb` | **ModelBusy 404 已记忆（核心）**；contextWindow 段与 effort_catalog 调整未做 | 剩：`contextWindow`（defaultLength/supportedLengths）解析与输出、effort_catalog 分域、global_models 缓存判定 |
 | 国际版每日活跃网页链 | `bb6d581` | 新增 `webactivity.go`、`webagent.go`、`checkin_global.go` | 三个新文件可直接搬；`scheduler.go` 的接线要按本仓排程结构改写（不是同一套） |
-| 11‑-128「搬家」层 | `49f9db4`+`e4dd458` | **enum 缺 type 推断已合**；搬家层（`prompt.MoveSystemToUser` + 拆句优先）未做，`probe_channel.go` 未搬 | 剩：`prompt.MoveSystemToUser` + handler 里「先拆句留在 system、搬家降为第二层」的次序；`e4dd458` 的真机结论 A–G 是次序依据 |
+| 11‑-128「搬家」层 | `49f9db4`+`e4dd458` | **enum 推断 + 搬家层已合**；拆句优先次序未做 | 剩：`e4dd458` 的「先按句界拆成两条 system（实测 F/F2 均 200），搬家降为第二层」次序 —— 需 `probe_channel.go` 同款验证手段 |
 | 思考档位策略 | `1792ef1`+`b3623b5`+`e3a6f7a` | `effort_policy.go`、`effort_catalog.go`、`listing.go`、`model_effort.go` 全无 | 四新文件 + `handler.go` 声明档位 + 面板三处；最大一组，建议最后做 |
 | 任务 429 等待重试 | `4d643b1` | **已落地** | `autotask.go` 新增 5 个助手 + 包装，三个任务扫描调用点改走 `listTasksSoftRate`；4 条用例 |
 | 面板 3 笔 | `6cdc6fb`+`9232c89`+`4850b45` | `openRemarks`/`remarkFormRows`/`remarkKey`/`accRealmFilter`/`accRealmTabs` 全无 | 先补「备注」与「域标签页」两套 UI（上游更早的提交），再套这三笔增量 |
