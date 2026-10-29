@@ -880,6 +880,9 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	// 面板保存配置热改 + chat 热路径并发读写，用 atomic.Bool 消除数据竞争。
 	SanitizeFingerprints atomic.Bool
+	// modelBusyUnsupported 上游 /v2/chat/busy 在该域不存在（国际版实测 404）。
+	// 探到一次即置位，本进程后续跳过探测。atomic：并发调用只读 + 一次性写。
+	modelBusyUnsupported atomic.Bool
 
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
 	// 空 = 默认官方形态：chat/refresh/FetchModels 走

@@ -17,6 +17,8 @@ package upstream
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -32,6 +34,17 @@ const (
 // 只读、无副作用；失败原样返回错误（调用方不填即可，不得据此改变选号）。
 func (c *Client) ModelBusy(a *auth.Auth, models []string) (map[string]string, error) {
 	out := map[string]string{}
+	// 国际版没有这条端点：2026-10-29 5.9.3 真机抓包（www.workbuddy.ai）10 次
+	// POST /v2/chat/busy 全部 404，同一 token 直连复验也是 404，而国内版同路径 200。
+	// 官方客户端自己也在打这条不存在的路径（服务端没部署，不是我们路径写错）。
+	//
+	// 探到 404 就记住，本进程后续直接返回空表：繁忙度是**纯观测**数据，拿到 404
+	// 既不值得每轮刷新重试、也不该让上层把「观测失败」记成错误（面板会把 busy 失败
+	// 并进目录错误列表，进而拒绝写目录缓存）。
+	// 自愈口子：上游若补上该端点，重启进程即重新探测（不做持久化）。
+	if c.globalOn(a) && c.modelBusyUnsupported.Load() {
+		return out, nil
+	}
 	for i := 0; i < len(models); i += modelBusyBatch {
 		end := i + modelBusyBatch
 		if end > len(models) {
@@ -49,6 +62,12 @@ func (c *Client) ModelBusy(a *auth.Auth, models []string) (map[string]string, er
 		c.ChatHeaders(req, a, "", ChatMeta{})
 		data, err := c.doJSON(req)
 		if err != nil {
+			var ue *Error
+			if c.globalOn(a) && errors.As(err, &ue) && ue.Kind == ErrNotFound {
+				c.modelBusyUnsupported.Store(true)
+				log.Printf("model busy: global realm 无 /v2/chat/busy（404），本进程后续跳过繁忙度探测")
+				return out, nil
+			}
 			return out, err
 		}
 		var rows []struct {
