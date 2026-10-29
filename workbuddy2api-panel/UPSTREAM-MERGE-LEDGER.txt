@@ -21,7 +21,7 @@
 |---|---|---|---|
 | 指纹 #8 | `ee1c80d` | 无（只是改出站 body 构造） | 在 chat 请求构造处 marshal→gzip→`Content-Encoding: gzip`；风险高，单独一轮 + 实测 |
 | 指纹 #9 | `ee1c80d` | 无 | 先核 `/v2/report` 现状（base + UA 三段式），再对齐 |
-| 软限流按模型 + Kimi 工具 | `e8eca81`（含 `854e74c` 终态） | **Kimi 一半已合完**；软限流一半缺 `CooldownSoftForModel` 的 model 入参与 pick 兜底判据 | 剩：`CooldownSoftForModel` 加 `model==""` 回落 → `CooldownSoftRate`、并发失败不延长生效冷却；`pickEarliestExpiryLocked` 加 `e.modelCooled(now, model)` 跳过；handler/client 传 model |
+| 软限流按模型 + Kimi 工具 | `e8eca81`（含 `854e74c` 终态） | **已全部落地** | Kimi 一半本轮合入（`kimi_tools.go`）；软限流一半经核查**本仓早已具备**：`CooldownSoftForModel` 内部处理空模型（review P2-13）、并发失败不延长生效冷却（cooldown.go:266）、`pickEarliestExpiryLocked` 已查 `modelCooled`（BUG-14）。无需重复搬 |
 | models 只列官方菜单 | `c5ac20f` | 新增 `clientpick.go` | 搬 `clientpick.go` + `client.go`/`global_models.go` 的筛选接点 |
 | 国际版 busy 不阻断目录 | `09f2eeb` | 新增 `modelbusy.go`、`effort_catalog.go` | 搬两个新文件，再接 `global_models.go` 的缓存判定 |
 | 国际版每日活跃网页链 | `bb6d581` | 新增 `webactivity.go`、`webagent.go`、`checkin_global.go` | 三个新文件可直接搬；`scheduler.go` 的接线要按本仓排程结构改写（不是同一套） |
