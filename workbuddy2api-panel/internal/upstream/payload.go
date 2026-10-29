@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log"
+	"math"
 	"strings"
 )
 
@@ -582,6 +583,18 @@ func unescapePatternLiteralEscapes(node any) {
 				n["patternProperties"] = fixed
 			}
 		}
+		// enum 缺 type：Kimi 系对参数 schema 严格校验，只写 enum 不写 type 直接
+		// 400 11133「Invalid request parameters」——同一个模型对带这类 schema 的客户端
+		// 等于全废（DSH 等客户端的整套工具定义里就有这种写法）。类型能无损推断就补上，
+		// 推断不出唯一类型（混合标量/含 null）保持原样让上游按原语义报错，不猜。
+		// enum 取值一字不改；response_format 不走这条（那是输出约束，补错类型会改语义）。
+		if _, hasType := n["type"]; !hasType {
+			if e, ok := n["enum"].([]any); ok && len(e) > 0 {
+				if t := inferEnumType(e); t != "" {
+					n["type"] = t
+				}
+			}
+		}
 		for _, v := range n {
 			unescapePatternLiteralEscapes(v)
 		}
@@ -592,7 +605,38 @@ func unescapePatternLiteralEscapes(node any) {
 	}
 }
 
-// marshalNoEscape 序列化但不做 HTML 转义（保持与客户端原文一致）。
+// inferEnumType 从 enum 取值推断 JSON Schema 类型；推不出唯一类型时返回空（不改写）。
+// 数字经 encoding/json 解出来一律是 float64，故按「全为整数值」区分 integer / number。
+func inferEnumType(values []any) string {
+	var strs, nums, ints, bools int
+	for _, v := range values {
+		switch x := v.(type) {
+		case string:
+			strs++
+		case bool:
+			bools++
+		case float64:
+			nums++
+			if x == math.Trunc(x) {
+				ints++
+			}
+		}
+	}
+	n := len(values)
+	switch {
+	case strs == n:
+		return "string"
+	case bools == n:
+		return "boolean"
+	case nums == n && ints == n:
+		return "integer"
+	case nums == n:
+		return "number"
+	}
+	return ""
+}
+
+// marshalNoEscape 序列化但不做 HTML 转义（保持与客户端原文一致）。// marshalNoEscape 序列化但不做 HTML 转义（保持与客户端原文一致）。
 func marshalNoEscape(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
