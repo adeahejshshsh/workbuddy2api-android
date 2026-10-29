@@ -246,6 +246,91 @@ func (p *Panel) effectiveTaskCode(a *auth.Auth, code string) string {
 // loadTaskMap 一次拉齐任务列表（默认口径 + mp 合并）并建 code → Task 映射（bug-2）。
 //
 // 为什么需要：runAutoAll 有 19 个动作，每个动作都会调 effectiveTaskCode ——
+// 上游软限流（429 soft_rate）重试预算：growth 域频控是分钟级窗口，而一轮全量任务
+// 要连打几十次 ListTasks/accept/claim —— 撞上一次就把整条链断在「查询任务失败」，
+// 用户只看到失败，实际等一会儿就能过去（任务动作都是幂等读/写）。
+var (
+	softRateRetries = 2
+	softRateGap     = 15 * time.Second
+	softRateGapMax  = 60 * time.Second
+)
+
+// isSoftRateErr 是否上游软限流（429）。只对这一类重试 —— 其它错误等不来。
+func isSoftRateErr(err error) bool {
+	var ue *upstream.Error
+	return errors.As(err, &ue) && ue.Kind == upstream.ErrSoftRate
+}
+
+// softRateWait 本次重试前应等待的时长：上游 Retry-After 优先，缺省按次数递增并封顶。
+func softRateWait(err error, attempt int) time.Duration {
+	d := time.Duration(attempt) * softRateGap
+	var ue *upstream.Error
+	if errors.As(err, &ue) && ue.RetryAfter > d {
+		d = ue.RetryAfter
+	}
+	if d > softRateGapMax {
+		d = softRateGapMax
+	}
+	return d
+}
+
+// softRateGate 该账号距限流窗口结束还剩多久（0 = 未限流，过期自动清）。
+func (p *Panel) softRateGate(uid string) time.Duration {
+	p.softRateMu.Lock()
+	defer p.softRateMu.Unlock()
+	until, ok := p.softRateUntil[uid]
+	if !ok {
+		return 0
+	}
+	d := time.Until(until)
+	if d <= 0 {
+		delete(p.softRateUntil, uid)
+		return 0
+	}
+	return d
+}
+
+func (p *Panel) noteSoftRate(uid string, d time.Duration) {
+	p.softRateMu.Lock()
+	defer p.softRateMu.Unlock()
+	if p.softRateUntil == nil {
+		p.softRateUntil = make(map[string]time.Time)
+	}
+	p.softRateUntil[uid] = time.Now().Add(d)
+}
+
+// listTasksSoftRate 拉任务列表，软限流时按窗口等待重试（mp 走小程序口径）。
+// 冷却窗口内不重试直接快失败：此时上游还没放开，再打只会把窗口续得更长。
+func (p *Panel) listTasksSoftRate(a *auth.Auth, mp bool) ([]upstream.Task, error) {
+	if d := p.softRateGate(a.UID); d > 0 {
+		return nil, fmt.Errorf("上游限流（429），约 %s 后恢复，请稍后重跑该任务", d.Round(time.Second))
+	}
+	for attempt := 0; ; attempt++ {
+		var tasks []upstream.Task
+		var err error
+		if mp {
+			tasks, err = p.cfg.Upstream.ListTasksMP(a)
+		} else {
+			tasks, err = p.cfg.Upstream.ListTasks(a)
+		}
+		if err == nil {
+			return tasks, nil
+		}
+		if !isSoftRateErr(err) {
+			return nil, err
+		}
+		if attempt >= softRateRetries {
+			p.noteSoftRate(a.UID, softRateGapMax)
+			return nil, fmt.Errorf("上游限流（429），已重试 %d 次仍未恢复，约 %s 后再试：%w",
+				softRateRetries, softRateGapMax.Round(time.Second), err)
+		}
+		d := softRateWait(err, attempt+1)
+		log.Printf("autotask %s: 上游软限流，等 %s 后重试（第 %d/%d 次）",
+			logfmt.Label(a.UID, a.Nickname), d.Round(time.Second), attempt+1, softRateRetries)
+		time.Sleep(d)
+	}
+}
+
 // 而它内部先 taskByCode（1 次 ListTasks）再 ListTasks（第 2 次），主流程又
 // taskByCode 一次，单账号一轮 ≈ 38~57 次 GET /v2/activity/growth/tasks。
 // 一次拉齐后每个动作只查本地 map。
@@ -253,7 +338,7 @@ func (p *Panel) loadTaskMap(a *auth.Auth) (map[string]*upstream.Task, error) {
 	if a == nil || p.cfg.Upstream == nil {
 		return nil, nil
 	}
-	tasks, err := p.cfg.Upstream.ListTasks(a)
+	tasks, err := p.listTasksSoftRate(a, false)
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +477,7 @@ func (p *Panel) refreshCreditsAsync(a *auth.Auth) {
 var errTaskAborted = errors.New("task aborted: client gone or request timed out")
 
 func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
-	tasks, err := p.cfg.Upstream.ListTasks(a)
+	tasks, err := p.listTasksSoftRate(a, false)
 	if err != nil {
 		return nil, err
 	}
@@ -463,7 +548,7 @@ func (p *Panel) taskByCodeWaitingWith(a *auth.Auth, code string, fetch func(*aut
 // taskByCodeMP 以小程序口径拉取任务列表并定位单个任务；未找到返回 nil。
 // 小程序限定任务（school_season / Sequential_Tasks_1）在默认口径列表不出现。
 func (p *Panel) taskByCodeMP(a *auth.Auth, code string) (*upstream.Task, error) {
-	tasks, err := p.cfg.Upstream.ListTasksMP(a)
+	tasks, err := p.listTasksSoftRate(a, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1751,7 +1836,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	}
 
 	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
-	if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
+	if tasks, err := p.listTasksSoftRate(a, false); err == nil {
 		var codes []string
 		for _, t := range tasks {
 			if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
