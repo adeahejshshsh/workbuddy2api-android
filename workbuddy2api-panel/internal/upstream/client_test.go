@@ -547,8 +547,8 @@ func TestFetchModelsDefaultEffortDualKeyAndSizes(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(200, `{"code":0,"data":{"models":[
 			{"id":"glm-5.3","maxInputTokens":1000000,"maxOutputTokens":48000,"maxAllowedSize":1000000,"credits":"x0.79","supportsReasoning":true,"reasoning":{"defaultEffort":"high","canDisableThinking":true,"supportedEfforts":["low","high","max"]}},
-			{"id":"auto","maxInputTokens":168000,"maxOutputTokens":32000,"supportsReasoning":true,"reasoning":{"effort":"high"}}
-		],"agents":[{"name":"cli","models":["glm-5.3","auto"]}]}}`), nil
+			{"id":"hy3","maxInputTokens":192000,"maxOutputTokens":64000,"supportsReasoning":true,"reasoning":{"effort":"high"}}
+		],"agents":[{"name":"cli","models":["glm-5.3","hy3"]}]}}`), nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	infos, err := c.FetchModels(a)
@@ -572,8 +572,10 @@ func TestFetchModelsDefaultEffortDualKeyAndSizes(t *testing.T) {
 	if got := c.ModelRate("cn", "glm-5.3"); got != "0.79" {
 		t.Errorf("glm-5.3 ModelRate=%q want 0.79", got)
 	}
-	if au := byID["auto"]; au.DefaultEffort != "high" {
-		t.Errorf("auto DefaultEffort=%q want high (from legacy effort key)", au.DefaultEffort)
+	// 注：原先拿 auto 当「老键模型」，但 auto 是客户端自动模式开关、已从名单剔掉
+	// （见 clientpick.go 的 autoModeIDs），故换 hy3 —— 它同样只带老键。
+	if au := byID["hy3"]; au.DefaultEffort != "high" {
+		t.Errorf("hy3 DefaultEffort=%q want high (from legacy effort key)", au.DefaultEffort)
 	}
 }
 
