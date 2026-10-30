@@ -1020,6 +1020,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	// slotWaited 本次请求是否已经为「号都在途占满」等过一轮名额（issue #117）。
+	slotWaited := false
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
 	var modelBlock pool.ModelBlockStatus
@@ -1290,6 +1292,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickExcludingForRealm(tried, curModel, realm)
 		}
 		if acct == nil {
+			// issue #117：全池该模型没号，但原因不是冷却而是**在途占满**时，等一个
+			// 名额再试一次。此前直接 503「all accounts are temporarily unavailable」，
+			// 而真实情况是并发把剩下的号打满了 max_in_flight：两号池里一号撞 6004 锁
+			// 模型后只剩 3 个名额，第 4 个并发请求必然 503，其实几十毫秒后就有名额。
+			// 只等一次、不占在途名额；上限 busyWaitCap（与其它等待同预算）。
+			// 放在模型降级之前：名额马上就有，没有理由先降级到更差的模型。
+			if !slotWaited && h.cfg.Pool.SlotWaitForRealm(curModel, realm) {
+				slotWaited = true
+				log.Printf("slot-wait: model=%s realm=%q all healthy accounts at in-flight cap, waiting up to %s then retry once (issue #117)",
+					bareModel, realm, busyWaitCap)
+				if !waitForSlot(r.Context(), h.cfg.Pool, curModel, realm) {
+					break // 客户端已断连：不必再等
+				}
+				i-- // 等待不算一次换号：槽位留给真正的尝试
+				continue
+			}
 			// ⭐ 模型降级兜底（20261021 补的真实缺口）：全池该模型都处于 6004 冷却时，
 			// PickExcludingForRealm 直接返回 nil —— 若只在上游返回 6004 后降级，这里会
 			// **先报 503、根本走不到降级**，恰好在最需要降级的场景（全池被限流）失效。

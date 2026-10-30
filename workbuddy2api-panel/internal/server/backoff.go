@@ -7,6 +7,8 @@ import (
 	"context"
 	"math/rand/v2"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // rotateBackoffBase 轮转退避基数（对齐官方 intl CLI computeRequestRetryDelayMs
@@ -72,4 +74,26 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// busyWaitCap 「等一个名额 / 等模型解封」这类等待的硬上限。
+var busyWaitCap = 10 * time.Second
+
+// slotPoll 等在途名额的轮询间隔：名额是按请求收尾释放的，几十毫秒内必有一次，不必更密。
+const slotPoll = 50 * time.Millisecond
+
+// waitForSlot 在「号都在途占满」时等一个空名额：轮询 slotPoll，上限 busyWaitCap。
+// 返回 false = 客户端断连。等到名额、或池况变成别的原因（冷却/停牌）都提前收手 ——
+// 由调用方重选一次定论。
+func waitForSlot(ctx context.Context, p *pool.Pool, model, realm string) bool {
+	deadline := time.Now().Add(busyWaitCap)
+	for time.Now().Before(deadline) {
+		if !sleepCtx(ctx, slotPoll) {
+			return false
+		}
+		if !p.SlotWaitForRealm(model, realm) {
+			return true
+		}
+	}
+	return true
 }

@@ -816,3 +816,29 @@ func (p *Pool) SetRemark(uid, text string) bool {
 	p.dirty.Store(true)
 	return true
 }
+
+// SlotWaitForRealm 报告「此刻选不到号**只是**因为号都在途占满」：本域存在对该模型
+// 健康（未冷却/未停牌/未手动关闭）的账号，只是名额已满。这与「号在冷却」不同 ——
+// 后者要等到已知的解封时刻，前者只要有一个在途请求收尾就好，通常几十毫秒到几秒。
+// 调用方据此决定「等一个名额」还是直接 503（issue #117：两号池里一号撞 6004 锁模型后
+// 只剩 3 个名额，第 4 个并发请求必然 503，而它只差几百毫秒就有名额）。
+//
+// 只看 in-flight：健康与否由 healthyForModel 判（已含 disabled/paused/手动停牌/模型
+// 冷却）。积分保底挡住的号返回 false —— 等下去不会变好，不该让请求干耗。
+func (p *Pool) SlotWaitForRealm(model, realm string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	for _, e := range p.byUID {
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthyForModel(now, model) {
+			continue
+		}
+		if p.inFlightFull(e) && !p.floorBlockedForRealmModel(e, model, realm, now) {
+			return true
+		}
+	}
+	return false
+}
