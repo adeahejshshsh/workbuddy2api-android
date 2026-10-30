@@ -291,7 +291,6 @@ func main() {
 		TravelHours:                cfg.Schedule.TravelHours,
 		ActivityHours:              cfg.Schedule.ActivityHours,
 		KeepaliveHours:             cfg.Schedule.KeepaliveHours,
-		BlackcatHours:              cfg.Schedule.BlackcatHours,
 		GrowthHours:                cfg.Schedule.GrowthHours,
 		// 快过期积分优先消耗：签到/余额刷新按此窗口分桶（issue:积分过期）。
 		ExpiringSoonWindow: cfg.ExpiringSoonDur,
@@ -299,7 +298,6 @@ func main() {
 		TravelDisabled:     !cfg.Schedule.TravelEnabled,
 		ActivityDisabled:   !cfg.Schedule.ActivityEnabled,
 		KeepaliveDisabled:  !cfg.Schedule.KeepaliveEnabled,
-		BlackcatDisabled:   !cfg.Schedule.BlackcatEnabled,
 		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
 		// 周期保活只刷新临期凭证（默认 7 天窗口）；面板手动全量保活不受影响。
 		KeepaliveRefreshWindow: cfg.KeepaliveRefreshWindowDur,
@@ -330,12 +328,6 @@ func main() {
 		log.Printf("token 保活已禁用（schedule.keepalive_enabled=false）")
 	} else {
 		log.Printf("token 保活已启用：%v 点", cfg.Schedule.KeepaliveHours)
-	}
-	switch {
-	case !cfg.Schedule.BlackcatEnabled:
-		log.Printf("夜猫子已禁用（schedule.blackcat_enabled=false）")
-	default:
-		log.Printf("夜猫子已启用：%v 点（23:00–08:00 窗口 glm-5.2 对话补足）", cfg.Schedule.BlackcatHours)
 	}
 	switch {
 	case !cfg.Schedule.BalanceRefreshEnabled:
@@ -487,7 +479,6 @@ func main() {
 	go sch.Run(ctx)
 	// 人味化参数（缺省 0 = 旧行为）：抖动比例先设，StartBalanceRefresh 每轮现读。
 	sch.SetBalanceJitter(cfg.Schedule.BalanceRefreshJitterPermill)
-	sch.SetNightAccountCap(cfg.Schedule.NightAccountCap)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
@@ -744,14 +735,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetKeepaliveRefreshWindow(newCfg.KeepaliveRefreshWindowDur) // 临期窗口热生效
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
-		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours, newCfg.Schedule.BlackcatHours,
+		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours,
 		newCfg.Schedule.GrowthHours,
 		!newCfg.Schedule.CheckinEnabled, !newCfg.Schedule.TravelEnabled,
-		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled,
+		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled,
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetBalanceJitter(newCfg.Schedule.BalanceRefreshJitterPermill) // 人味化抖动热生效
-	sch.SetNightAccountCap(newCfg.Schedule.NightAccountCap)           // 夜间参与上限热生效
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
 	// 比对前把 prev 也规范化（bug #12）：prev 是**原始文件**反序列化结果，而 merged

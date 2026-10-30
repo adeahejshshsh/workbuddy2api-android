@@ -32,9 +32,6 @@ func schedFor(cfg Config) *Scheduler {
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveDisabled = true
 	}
-	if len(cfg.BlackcatHours) == 0 {
-		cfg.BlackcatDisabled = true
-	}
 	if len(cfg.GrowthHours) == 0 {
 		cfg.GrowthDisabled = true
 	}
@@ -84,13 +81,13 @@ func TestEnabledSlotsSingleSourceOfTruth(t *testing.T) {
 	now := time.Date(2026, 10, 15, 10, 0, 0, 0, time.Local)
 	all := Config{
 		CheckinHours: []int{9}, TravelHours: []int{8}, ActivityHours: []int{7},
-		KeepaliveHours: []int{6}, BlackcatHours: []int{5}, GrowthHours: []int{4},
+		KeepaliveHours: []int{6}, GrowthHours: []int{4},
 	}
-	if got := New(all).enabledSlots(now); len(got) != 6 {
-		t.Fatalf("启用任务族应为 6 类，got %d: %v", len(got), got)
+	if got := New(all).enabledSlots(now); len(got) != 5 {
+		t.Fatalf("启用任务族应为 5 类，got %d: %v", len(got), got)
 	}
-	if got := New(all).missedToday(now); len(got) != 6 {
-		t.Fatalf("时点全过时 6 类都应补跑，got %v", got)
+	if got := New(all).missedToday(now); len(got) != 5 {
+		t.Fatalf("时点全过时 5 类都应补跑，got %v", got)
 	}
 }
 
@@ -117,7 +114,7 @@ func TestRunCatchesUpMissedSlots(t *testing.T) {
 	s := New(Config{
 		Pool: p, Upstream: up, CheckinHours: []int{past},
 		TravelDisabled: true, ActivityDisabled: true, KeepaliveDisabled: true,
-		BlackcatDisabled: true, GrowthDisabled: true,
+		GrowthDisabled: true,
 	})
 	old := wakeupGraceDelay
 	wakeupGraceDelay = 0 // 测试不等启动宽限
@@ -188,7 +185,6 @@ func TestNextWakeSameInstantFiresAll(t *testing.T) {
 		KeepaliveHours:   []int{22},
 		TravelDisabled:   true,
 		ActivityDisabled: true,
-		BlackcatDisabled: true,
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
@@ -251,7 +247,6 @@ func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 		TravelDisabled:    true,
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
-		BlackcatDisabled:  true,
 		CheckinHours:      []int{9, 21},
 		KeepaliveHours:    []int{22},
 	})

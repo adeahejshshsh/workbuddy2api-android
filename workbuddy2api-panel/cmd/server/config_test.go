@@ -956,16 +956,13 @@ func TestScheduleHumanizeConfig(t *testing.T) {
 		}
 	}
 
-	write(`{"listen":":9999","api_key":"k","schedule":{"balance_refresh_jitter_permill":200,"night_account_cap":4}}`)
+	write(`{"listen":":9999","api_key":"k","schedule":{"balance_refresh_jitter_permill":200}}`)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.Schedule.BalanceRefreshJitterPermill != 200 {
 		t.Fatalf("jitter_permill=%d want 200", c.Schedule.BalanceRefreshJitterPermill)
-	}
-	if c.Schedule.NightAccountCap != 4 {
-		t.Fatalf("night_account_cap=%d want 4", c.Schedule.NightAccountCap)
 	}
 
 	// 缺省 0 = 关闭（旧行为逐字不变）。
@@ -974,7 +971,7 @@ func TestScheduleHumanizeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Schedule.BalanceRefreshJitterPermill != 0 || c.Schedule.NightAccountCap != 0 {
+	if c.Schedule.BalanceRefreshJitterPermill != 0 {
 		t.Fatalf("缺省应为 0（关闭）：%+v", c.Schedule)
 	}
 
@@ -983,20 +980,15 @@ func TestScheduleHumanizeConfig(t *testing.T) {
 	if _, err := Load(fp); err == nil {
 		t.Fatal("jitter_permill > 500 应报错")
 	}
-	write(`{"listen":":9999","api_key":"k","schedule":{"night_account_cap":-1}}`)
-	if _, err := Load(fp); err == nil {
-		t.Fatal("night_account_cap < 0 应报错")
-	}
 
 	// env 覆盖（与其它 WB2A_SCHEDULE_* 同口径）。
 	write(`{"listen":":9999","api_key":"k"}`)
 	t.Setenv("WB2A_SCHEDULE_BALANCE_REFRESH_JITTER_PERMILL", "150")
-	t.Setenv("WB2A_SCHEDULE_NIGHT_ACCOUNT_CAP", "2")
 	c, err = Load(fp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Schedule.BalanceRefreshJitterPermill != 150 || c.Schedule.NightAccountCap != 2 {
+	if c.Schedule.BalanceRefreshJitterPermill != 150 {
 		t.Fatalf("env 未生效：%+v", c.Schedule)
 	}
 }

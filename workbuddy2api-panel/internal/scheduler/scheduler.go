@@ -39,7 +39,6 @@ type Config struct {
 	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
 	ActivityHours  []int // 默认 [10]
 	KeepaliveHours []int // 默认 [22]
-	BlackcatHours  []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
 	GrowthHours    []int // 默认 [1]：成长任务队列（Sequential 族每日零点解锁一环，
 	// 01:00 自动扫描+执行；避开零点整防解锁竞态）
 
@@ -63,8 +62,6 @@ type Config struct {
 	ActivityDisabled bool
 	// KeepaliveDisabled 显式关闭 token 保活排程（schedule.keepalive_enabled=false）。
 	KeepaliveDisabled bool
-	// BlackcatDisabled 显式关闭夜猫子排程（schedule.blackcat_enabled=false）。
-	BlackcatDisabled bool
 	// GrowthDisabled 显式关闭成长任务自动排程（schedule.growth_enabled=false）。
 	GrowthDisabled bool
 
@@ -113,10 +110,6 @@ type Scheduler struct {
 	// 间隔打卡；账号遍历同时摊开到同量级窗口。0 = 旧行为（精确间隔 + 全并发）。
 	balanceJitter atomic.Int64
 
-	// nightAccountCap 夜间任务参与上限（>0 = 只让积分最高的前 N 个号参加夜猫子）。
-	// atomic 读写，Reconfigure 可热改。0 = 不限（旧行为）。
-	nightAccountCap atomic.Int64
-
 	// webLeg 网页通道每日活跃的当日去重表（仅国际版，见 webactivity.go）。
 	// 放 Scheduler 上而不是包级变量：多实例/测试各自独立，互不污染。
 	webLeg webLegDay
@@ -135,9 +128,6 @@ func New(cfg Config) *Scheduler {
 	}
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{22}
-	}
-	if len(cfg.BlackcatHours) == 0 {
-		cfg.BlackcatHours = []int{23}
 	}
 	// GrowthHours 也必须给默认值（bug #6）：其余五个槽位都有，唯独它没有 ——
 	// 空值时 nextFire(now, nil) 返回零时间，被 `if sl.at.IsZero() { continue }`
@@ -221,8 +211,8 @@ func (s *Scheduler) SetIncludeDisabledInTasks(v bool) {
 	s.schedMu.Unlock()
 }
 
-func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepaliveHours, blackcatHours, growthHours []int,
-	checkinDisabled, travelDisabled, activityDisabled, keepaliveDisabled, blackcatDisabled, growthDisabled bool) {
+func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepaliveHours, growthHours []int,
+	checkinDisabled, travelDisabled, activityDisabled, keepaliveDisabled, growthDisabled bool) {
 	s.schedMu.Lock()
 	if len(checkinHours) > 0 {
 		s.cfg.CheckinHours = checkinHours
@@ -236,9 +226,6 @@ func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepal
 	if len(keepaliveHours) > 0 {
 		s.cfg.KeepaliveHours = keepaliveHours
 	}
-	if len(blackcatHours) > 0 {
-		s.cfg.BlackcatHours = blackcatHours
-	}
 	if len(growthHours) > 0 {
 		s.cfg.GrowthHours = growthHours
 	}
@@ -246,11 +233,23 @@ func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepal
 	s.cfg.TravelDisabled = travelDisabled
 	s.cfg.ActivityDisabled = activityDisabled
 	s.cfg.KeepaliveDisabled = keepaliveDisabled
-	s.cfg.BlackcatDisabled = blackcatDisabled
 	s.cfg.GrowthDisabled = growthDisabled
 	s.schedMu.Unlock()
 	poke(s.rearmSchedule)
 	poke(s.rearmBalance)
+}
+
+// skipBehaviorTask 企业上下文（企业版 / 企业切换会话）不做**行为类**任务
+// （上游 PR #162）：上游 /v2/report 对这类会话返回 200 却**静默丢弃**，
+// 任务进度永不跳动、连登/签到无效，跑了纯粹白烧配额且没有任何报错。
+// 额度查询、保活、签到照常（它们有显式错误或读端点可用）。
+func (s *Scheduler) skipBehaviorTask(a *auth.Auth) bool {
+	if a == nil || !a.IsEnterpriseSession() {
+		return false
+	}
+	log.Printf("scheduler: %s 处于企业上下文（token_source=enterprise_switch），跳过行为类任务",
+		logfmt.Label(a.UID, a.NicknameValue()))
+	return true
 }
 
 // poke 非阻塞发一次唤醒信号（已有待处理信号则忽略，语义等价）。
@@ -291,7 +290,6 @@ const (
 	taskTravel
 	taskActivity
 	taskKeepalive
-	taskBlackcat
 	taskGrowth
 )
 
@@ -306,8 +304,6 @@ func (k taskKind) String() string {
 		return "activity"
 	case taskKeepalive:
 		return "keepalive"
-	case taskBlackcat:
-		return "blackcat"
 	case taskGrowth:
 		return "growth"
 	default:
@@ -321,7 +317,6 @@ const (
 	TaskTravel    = "travel"
 	TaskActivity  = "activity"
 	TaskKeepalive = "keepalive"
-	TaskBlackcat  = "blackcat"
 	TaskGrowth    = "growth"
 	TaskBalance   = "balance"
 )
@@ -337,8 +332,6 @@ func taskKindKey(k taskKind) string {
 		return TaskActivity
 	case taskKeepalive:
 		return TaskKeepalive
-	case taskBlackcat:
-		return TaskBlackcat
 	case taskGrowth:
 		return TaskGrowth
 	}
@@ -407,7 +400,6 @@ func (s *Scheduler) enabledSlots(now time.Time) []plannedSlot {
 		{s.cfg.TravelDisabled, s.cfg.TravelHours, taskTravel},
 		{s.cfg.ActivityDisabled, s.cfg.ActivityHours, taskActivity},
 		{s.cfg.KeepaliveDisabled, s.cfg.KeepaliveHours, taskKeepalive},
-		{s.cfg.BlackcatDisabled, s.cfg.BlackcatHours, taskBlackcat},
 		{s.cfg.GrowthDisabled, s.cfg.GrowthHours, taskGrowth},
 	}
 	s.schedMu.Unlock()
@@ -642,8 +634,6 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 				s.runActivity(ctx, true)
 			case taskKeepalive:
 				s.RunKeepaliveNowCtx(ctx, true)
-			case taskBlackcat:
-				s.RunBlackcatNowCtx(ctx, true)
 			case taskGrowth:
 				// 成长任务队列：回调在 panel 侧异步启动（返回不等执行完），nil 未挂载则跳过。
 				s.schedMu.Lock()
@@ -1128,66 +1118,4 @@ func (s *Scheduler) SetBalanceJitter(permill int) {
 // balanceJitterFrac 当前生效的抖动比例（千分比 → 比例）。
 func (s *Scheduler) balanceJitterFrac() float64 {
 	return float64(s.balanceJitter.Load()) / 1000
-}
-
-// SetNightAccountCap 热改夜间参与上限；<0 视为 0（不限）。
-func (s *Scheduler) SetNightAccountCap(n int) {
-	if n < 0 {
-		n = 0
-	}
-	s.nightAccountCap.Store(int64(n))
-}
-
-// NightAccountCap 当前夜间参与上限（0 = 不限）。
-func (s *Scheduler) NightAccountCap() int { return int(s.nightAccountCap.Load()) }
-
-// nightCandidates 夜间任务候选：**先**剔掉本轮不参与的号（禁用 / 暂停），再按积分
-// 取前 cap。
-//
-// 顺序不能反：先按积分截断再过滤的话，「被禁用的高积分老号」会占满名额 —— 夜猫子
-// 整晚一个对话都不发，而且没有任何日志（禁用门控只是 continue）。这种事只能靠
-// 「为什么昨晚什么都没跑」去反查，代价极高。
-func nightCandidates(list []pool.Status, includeDisabled bool, cap int) []pool.Status {
-	elig := make([]pool.Status, 0, len(list))
-	for _, st := range list {
-		if st.Disabled && !includeDisabled {
-			continue
-		}
-		if st.Paused {
-			continue
-		}
-		elig = append(elig, st)
-	}
-	return capByCredits(elig, cap)
-}
-
-// capByCredits 夜间任务候选收窄：按积分降序取前 cap 个。cap<=0 或候选不超上限时
-// 原样返回（不改序 —— 调用方要拿原顺序做摊开）。
-//
-// 为什么按积分：夜间流量集中到少数号、其余号夜里静默 —— 真人不会全部账号都在夜里
-// 有活动。选积分高的那些是好钢用在刀刃上（它们本来也最可能被选中）。
-func capByCredits(list []pool.Status, cap int) []pool.Status {
-	if cap <= 0 || len(list) <= cap {
-		return list
-	}
-	sorted := append([]pool.Status(nil), list...)
-	for i := 1; i < len(sorted); i++ {
-		for j := i; j > 0 && sorted[j].Credits > sorted[j-1].Credits; j-- {
-			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-		}
-	}
-	return sorted[:cap]
-}
-
-// skipBehaviorTask 企业上下文（企业版 / 企业切换会话）不做**行为类**任务
-// （上游 PR #162）：上游 /v2/report 对这类会话返回 200 却**静默丢弃**，
-// 任务进度永不跳动、连登/签到无效，跑了纯粹白烧配额且没有任何报错。
-// 额度查询、保活、签到照常（它们有显式错误或读端点可用）。
-func (s *Scheduler) skipBehaviorTask(a *auth.Auth) bool {
-	if a == nil || !a.IsEnterpriseSession() {
-		return false
-	}
-	log.Printf("scheduler: %s 处于企业上下文（token_source=enterprise_switch），跳过行为类任务",
-		logfmt.Label(a.UID, a.NicknameValue()))
-	return true
 }

@@ -1326,10 +1326,8 @@ const CFG_MAP = {
   keepalive_refresh_window: ['schedule', 'keepalive_refresh_window'],
   balance_refresh_enabled: ['schedule', 'balance_refresh_enabled'], balance_refresh_minutes: ['schedule', 'balance_refresh_minutes'],
   balance_refresh_jitter_permill: ['schedule', 'balance_refresh_jitter_permill'],
-  night_account_cap: ['schedule', 'night_account_cap'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
   // 补齐缺失键（报告 #20）：这些字段此前在配置页既回显不了也改不了。
-  blackcat_hours: ['schedule', 'blackcat_hours'], blackcat_enabled: ['schedule', 'blackcat_enabled'],
   growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   // 连登管家没有独立排程（它在签到末尾自动跑，见 scheduler.runStreakBonus），
   // 所以这里**不能**加 streak_enabled/streak_hours（报告 #18）——
@@ -1427,7 +1425,7 @@ const NUMERIC_CFG = new Set([
   'request_retention_days', 'request_archive_max_mb', 'package_detail_limit',
   'max_in_flight', 'max_in_flight_global', 'breaker_threshold', 'degrade_threshold',
   'credit_floor', 'balance_refresh_minutes', 'account_spread_seconds',
-  'balance_refresh_jitter_permill', 'night_account_cap',
+  'balance_refresh_jitter_permill',
   'timeout_seconds', 'header_timeout_seconds', 'idle_timeout_seconds',
   'idle_weight_per_hour', 'idle_weight_max',
 ]);
@@ -1704,23 +1702,19 @@ let taskUID = null;
 
 // 可自动完成的任务（与后端 autoActions 表一致）：判据为行为事件、可经网关复现。
 // 其余任务需在官方客户端内交互，面板只展示指引（行 title 提示）。
-// 注意：键含点号（Model_chat_GLM5.2）必须加引号，否则会被解析成属性访问 + 数字字面量。
+// 注意：键含点号的必须加引号，否则会被解析成属性访问 + 数字字面量。
 const AUTO_TASKS = {
   'chat_5': '上报 5 条对话活跃事件（自动补足差额）',
   'first_buddy': '上报解锁 → 同意协议 → 领取第一只 Buddy',
-  'Model_chat_GLM5.2': '接受任务 → glm-5.2 真实对话一次 → 对齐模型上报',
   'RichMeow_Chat': '桌面指纹事件链上报（已验证可点亮）',
   'Buddy_App': '上报「进入 Buddy 应用」事件链（已验证可点亮）',
-  'Buddy_App_QQ': '上报「进入企鹅教师助手」事件链（已验证可点亮）',
   'automation_1': '上报「定时任务创建」事件（已验证可点亮）',
   'Library_read': '上报「读资料库介绍」事件（已验证可点亮）',
   'template_5': '上报「使用模板创建任务」事件组 ×5（三账号实测点亮）',
   'playbook_prompt': '上报「灵感案例做同款发送 Prompt」事件组（三账号实测点亮）',
-  'create_canvas': '上报「设计创意画布创建」事件组（三账号实测点亮，+300 分）',
   'expert_5': '真实专家召唤+使用链 ×5（专家市场+真实 chat，三账号实测点亮）',
   'Expert_team_use_3': '真实专家团召唤+使用链 ×3（三账号实测点亮）',
   'Hp_Appearance': '设置主题 API + 皮肤生效事件（两账号实测点亮）',
-  'black_cat': '夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示等 23 点排程）',
   'Expert_lighthouse': '真实轻量云专家召唤+使用链（真实对话 requestId，两账号实测点亮）',
   'WorkBuddy_Valorant': '真实「无畏契约拼豆专家」召唤+使用链（真实对话 requestId，截止 11-15）',
   'expert_use_maidehao': '「中国电商运营专家」召唤+使用链（专家页搜索口径，截止 11-20，+50 分）',

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -88,17 +87,10 @@ func enterpriseTestScheduler(t *testing.T, enterprise bool) (*Scheduler, *record
 	return s, r
 }
 
-// TestEnterpriseGateSkipsGrowthTasks 企业版无个人成长体系：五类任务必须一个上游调用都不发。
+// TestEnterpriseGateSkipsGrowthTasks 企业版无个人成长体系：四类任务必须一个上游调用都不发。
 // 每个子用例都配一组个人号对照（同构造、只差 enterpriseId），证明"没发请求"是门控
 // 生效而不是构造有误——企业版门控与既有 IsGlobal/D4 门控同源。
 func TestEnterpriseGateSkipsGrowthTasks(t *testing.T) {
-	// 把夜猫子的窗口判定钉在窗口内：守卫先于账号循环，不钉住时钟则该用例的
-	// 判别力取决于运行环境的墙钟（本机白天跑 = 什么都没测）。钉住后五个用例
-	// 在任何环境、任何时刻都真正执行。
-	restoreClock := nowForNightWindow
-	nowForNightWindow = func() time.Time { return time.Date(2026, 10, 7, 23, 30, 0, 0, time.Local) }
-	t.Cleanup(func() { nowForNightWindow = restoreClock })
-
 	cases := []struct {
 		name string
 		run  func(*Scheduler)
@@ -109,10 +101,6 @@ func TestEnterpriseGateSkipsGrowthTasks(t *testing.T) {
 		{"签到", func(s *Scheduler) { s.RunCheckinNow() }, "/daily-checkin"},
 		{"活跃上报", func(s *Scheduler) { s.RunActivityNow() }, "/v2/report"},
 		{"猫猫旅行", func(s *Scheduler) { s.RunTravelNow() }, "/activity/growth/buddy/info"},
-		// 夜猫子第一跳不是 heatmap：RunBlackcatNow → BlackcatNeed → ListTasks，
-		// 即 /v2/activity/growth/tasks（问"还差几次"）。mock 返回空任务表 ⇒ need=0
-		// ⇒ 个人号到此为止，只发这一条。
-		{"夜猫子", func(s *Scheduler) { s.RunBlackcatNow() }, "/v2/activity/growth/tasks"},
 		{"连登管家", func(s *Scheduler) { s.RunStreakBonusNow() }, "/activity/growth/streak"},
 	}
 	for _, c := range cases {

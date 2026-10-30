@@ -98,7 +98,7 @@ func TestAttemptGate(t *testing.T) {
 	}
 	// 这些是"判据未验证/预留"的：必须标 Attempt，否则会天天进待办白跑
 	for _, code := range []string{
-		"black_cat", "Sequential_Tasks_4", "Sequential_Tasks_5",
+		"Sequential_Tasks_4", "Sequential_Tasks_5",
 		"Sequential_Tasks_6", "Sequential_Tasks_7",
 	} {
 		act := autoActionFor(code)

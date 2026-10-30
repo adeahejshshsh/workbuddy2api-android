@@ -39,19 +39,14 @@
       22
     ],
     "keepalive_refresh_window": "168h",
-    "blackcat_hours": [
-      23
-    ],
     "checkin_enabled": true,
     "growth_enabled": true,
     "travel_enabled": true,
     "activity_enabled": true,
     "keepalive_enabled": true,
-    "blackcat_enabled": true,
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5,
     "balance_refresh_jitter_permill": 0,
-    "night_account_cap": 0,
     "include_disabled_in_tasks": false
   },
   "global": {
