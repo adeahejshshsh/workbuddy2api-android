@@ -1926,6 +1926,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
+			// 调用方先走了（前置 CDN 回源超时、AsyncOpenAI 类客户端 timeout、用户点停止）：
+			// 上游当时还在正常输出，网关也没出错。此前一律记 502 upstream_parse，等于把
+			// 「别人掐断」报成上游故障 —— 上游实测一天 11 次，全部恰好 total=15.0s、
+			// tok=-、do=1~3s（上游头已回、正文还在流），来源全是 EdgeOne 回源节点；
+			// EdgeOne 默认 15s 回源超时，同请求直连 39.4s / 非 EdgeOne 入口 16.8s 均 200。
+			// 499 = nginx 的 client closed request，与真 5xx 一眼可分；连接已关，不写响应体。
+			if cerr := r.Context().Err(); cerr != nil {
+				log.Printf("WARN: [server] sync acct=%s model=%s: 调用方断开（%v），上游输出已丢弃（CDN 回源超时常见于 EdgeOne 默认 15s）",
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, cerr)
+				st.status = 499
+				st.outcome = reqlog.OutcomeInterrupted
+				return
+			}
 			// 其余解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
