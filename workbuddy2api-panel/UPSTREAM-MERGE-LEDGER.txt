@@ -31,3 +31,35 @@
 - 6020/6021 只认 `Retry-After` 头，未解析 body 的 `data.retry_after`（代码有 `shortcut:` 注释）。
 - `/v1/models` 第二个 `context_length` 写入点（远端回退值路径）不带 `context_window`。
 - 面板前端只做了 node 切片用例，**未在设备上实机点过**。
+
+---
+
+# 上游 2026-10-30 批次（7 条，已全部处理）
+
+区间 `854e74c..5caddab`。**16 包 / 1085 用例全绿。**
+
+| 上游 | 内容 | 处理 |
+|---|---|---|
+| `7d43b96` | 非流式「调用方断开」记 499 而非 502 upstream_parse | **已合**（`808087a`），+1 用例 |
+| `046b1fd` | 账号任务列表里没有的 code 不再白打上游 | **无需改** —— 我们 `loadTaskMap` 已合并 mp 口径（超集），`before == nil` 直接记 skipped、不发动作请求，且列表只拉一次 |
+| `96a33f1` | 删掉 4 个下架任务 + 整个夜猫子排程 | **已合**（`dbe10fb`），净删 652 行 |
+| `9f70e00` | 号都在途占满时等一个名额（issue #117） | **已合**（`88b236c`），+2 用例 |
+| `5373578`/`cbc8aaa`/`5caddab` | 注释/配置页提示不点名已删任务 | 随 `96a33f1` 一起处理 |
+
+## 关键事实（下轮别再重新论证）
+
+- `Model_chat_GLM5.2` / `Buddy_App_QQ` / `create_canvas` / `black_cat` 在任何账号的
+  任务列表里都**不存在**（29 账号 × 2 口径 1018 行实测）：不是过期，是下架。
+- 夜猫子是任务体系里唯一「整个任务都是模型对话」的（`RunNightChats` 逐条真发
+  glm-5.2 对话 + 事件链），指纹最重、买不到任何东西 —— 删掉是纯收益。
+- 我们**没有**上游的 `busyWaitCap` / 14003 busy-wait 基座，`9f70e00` 是把它一起补出来的；
+  积分保底判据用我们的 `floorBlockedForRealmModel` 顶替上游的 `reserveBlocked`。
+
+## 环境事故（2026-10-30）
+
+Go 工具链被重置（`$PREFIX/lib/go` 整个消失）。**正确修法在 `AGENT.md` §1.3**，
+本次一开始漏读，白花了很多轮：`dpkg-deb -x` 解包 → `cp -a` 覆盖进 `$PREFIX`
+→ **`python3 patches/patch_rt0.py`（关键，修 argv 错位）** → `bash patches/patch_source.sh`。
+
+症状识别：任何 Go 二进制都报 `go <自己的路径>: unknown command`，或
+`echo 'package main' | gofmt` 去解析 gofmt 自己 —— 都是 argv 被 linker 顶掉一格。
