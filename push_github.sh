@@ -62,6 +62,21 @@ echo "== 目标仓库: $OWNER/$NAME    版本: v$VER"
 
 echo "== 1/5 暂存到 $STAGE（排除密钥/运行数据/日志/成品 APK）"
 mkdir -p "$STAGE"
+# 分支模式先把暂存库钉到 origin/main（PR 的 base），再 tar 覆盖工作树。
+#
+# 为什么必须在 tar 之前：下面分支模式会 `git checkout -B "$BRANCH"`，起点是暂存库
+# 当前 HEAD —— 那里还留着上一轮在 main 分支上提交的那一笔，新 PR 的 diff 就会把它
+# 一起带进来（2026-10-31 踩过：PR #5 混进了已合并的 PR #4 提交，评审看不出这次改了什么，
+# PR #3 的 merge conflicts 也是同一个根因）。reset 会把工作树恢复成 main 的内容，
+# 所以必须发生在 tar 覆盖之前。
+if [ "$BRANCH" != "main" ] && [ -d "$STAGE/.git" ]; then
+  _B64=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+  if git -c http.extraHeader="Authorization: Basic $_B64" -C "$STAGE" \
+       fetch -q "https://github.com/$OWNER/$NAME.git" main 2>/dev/null; then
+    git -C "$STAGE" reset --hard -q FETCH_HEAD
+    echo "  分支模式：暂存库已重置到 origin/main（PR 只含本轮改动）"
+  fi
+fi
 # 清掉上一轮的普通文件，但**必须留住 .git**（留住才能累加历史、不用每次强推）
 [ -d "$STAGE/.git" ] && find "$STAGE" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 # 用 tar 拷（--exclude 排除工作区里可能存在的 .git，别把暂存库的 .git 冲掉）
