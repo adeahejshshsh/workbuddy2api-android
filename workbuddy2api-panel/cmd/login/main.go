@@ -63,15 +63,19 @@ func realmConfig(realm string) (base, origin string) {
 }
 
 // commonHeaders 按 origin 设置通用请求头（Origin/Referer 随 realm 变化）。
-// 返回 func(*http.Request)，由调用方按 realm 选定的 origin 构造一次后复用。
-func commonHeaders(origin string) func(*http.Request) {
+// 返回 func(*http.Request)，由调用方按 realm 选定的站点构造一次后复用。
+//
+// 2026-10-30 真机抓包：三端点恒无 Origin / Referer / X-Requested-With（node fetch，
+// 浏览器同源语义只属于打开授权页那一步）；UA 是该站点的桌面端 RPC 族。
+func commonHeaders(site loginsite.Site) func(*http.Request) {
 	return func(req *http.Request) {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/plain, */*")
-		req.Header.Set("X-Requested-With", "XMLHttpRequest")
-		req.Header.Set("Origin", origin)
-		req.Header.Set("Referer", origin+"/")
-		req.Header.Set("User-Agent", clientUA)
+		ua := site.UserAgent
+		if ua == "" {
+			ua = clientUA
+		}
+		req.Header.Set("User-Agent", ua)
 	}
 }
 
@@ -91,8 +95,8 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 	if headers != nil {
 		headers(req)
 	} else {
-		// 缺省头：CN origin（与原 commonHeaders() 行为一致，零回归）
-		commonHeaders(loginsite.ForRealm(realmCN).Origin)(req)
+		// 缺省头：CN 站点头族（零回归）
+		commonHeaders(loginsite.ForRealm(realmCN))(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -224,8 +228,8 @@ func validateRealmMatch(stateRealm, cliRealm string) error {
 // state 落盘（带 realm），stdout 打印 authURL。out 接 stdout；stateFile 为落盘路径
 // （可注入临时文件便于测试）。空 realm 视为缺省（调用方已归一）。
 func runURL(base, origin, realm, statePath string, client *http.Client, out io.Writer) {
-	headers := commonHeaders(origin)
-	data, _, err := doJSON(client, http.MethodPost, base+"/v2/plugin/auth/state?platform=CLI", headers, bytes.NewReader([]byte("{}")))
+	headers := commonHeaders(loginsite.ForRealm(realm))
+	data, _, err := doJSON(client, http.MethodPost, base+"/v2/plugin/auth/state?platform="+loginsite.ForRealm(realm).Platform, headers, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		fatal("auth state failed: %v", err)
 	}
@@ -265,7 +269,7 @@ func runPoll(base, origin, realm, statePath string, client *http.Client, out io.
 	if err := validateRealmMatch(ls.Realm, realm); err != nil {
 		fatal("%v", err)
 	}
-	headers := commonHeaders(origin)
+	headers := commonHeaders(loginsite.ForRealm(realm))
 	// handlePollLogin (oauth.go:108-162)：auth/token 是权威登录状态端点，
 	// pending 时业务 code 非 0（"login ing"），完成时 code=0 + token bundle
 	tokRaw, status, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+ls.State, headers, nil)

@@ -52,13 +52,19 @@ func loginDeviceNonce() string {
 // loginHTTP 设备授权专用 client：短超时、无 cookie（每请求携带 state，无会话态）。
 var loginHTTP = &http.Client{Timeout: 30 * time.Second}
 
-func commonHeaders(req *http.Request, origin string) {
+// commonHeaders 设备授权三端点的公共头。
+//
+// 2026-10-30 双版本真机抓包：三端点**恒无** Origin / Referer / X-Requested-With ——
+// 客户端是 node fetch，浏览器同源语义只属于「打开授权页」那一步，不属于 API 调用。
+// UA 是该站点的桌面端 RPC 族（见 loginsite.Site.UserAgent）。
+func commonHeaders(req *http.Request, site loginsite.Site) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", clientUA)
+	ua := site.UserAgent
+	if ua == "" {
+		ua = clientUA
+	}
+	req.Header.Set("User-Agent", ua)
 }
 
 // validUID 校验上游返回的 uid 是否可安全用于拼文件名。
@@ -86,12 +92,12 @@ type apiEnvelope struct {
 }
 
 // doJSON 发一次 JSON 请求并解信封。origin 为 Origin/Referer 基础域（随 realm 切）。
-func doJSON(method, fullURL, bearer string, body io.Reader, origin string) (json.RawMessage, int, error) {
+func doJSON(method, fullURL, bearer string, body io.Reader, site loginsite.Site) (json.RawMessage, int, error) {
 	req, err := http.NewRequest(method, fullURL, body)
 	if err != nil {
 		return nil, 0, err
 	}
-	commonHeaders(req, origin)
+	commonHeaders(req, site)
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
@@ -157,8 +163,9 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	epState, _, _, origin := loginEndpointsFn(realm)
-	data, status, err := doJSON(http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), origin)
+	epState, _, _, _ := loginEndpointsFn(realm)
+	site := loginsite.ForRealm(realm)
+	data, status, err := doJSON(http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), site)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("auth state (upstream %d): %v", status, err))
 		return
@@ -233,12 +240,13 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		}
 		p.loginMu.Unlock()
 	}()
-	_, epToken, epAcct, origin := loginEndpointsFn(sess.realm)
+	_, epToken, epAcct, _ := loginEndpointsFn(sess.realm)
+	site := loginsite.ForRealm(sess.realm)
 
 	// auth/token 是权威登录状态端点：pending 时业务 code 非 0（"login ing"）。
 	// state 来自上游回调的 query 参数，必须转义（报告 #12）：含 & / # / 空格时
 	// 直接拼接会让请求目标被截断或串到别的参数上。
-	tokRaw, _, err := doJSON(http.MethodGet, epToken+url.QueryEscape(state), "", nil, origin)
+	tokRaw, _, err := doJSON(http.MethodGet, epToken+url.QueryEscape(state), "", nil, site)
 	if err != nil {
 		// 官方登录码分两类（对齐 CLI 2.174.0 的 SignLicenseError），混为一谈会让用户
 		// 在本该立刻报错的场景白等满 15 分钟 TTL：
@@ -285,7 +293,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		EnterpriseID string `json:"enterpriseId"`
 		Nickname     string `json:"nickname"`
 	}
-	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+url.QueryEscape(state), tok.AccessToken, nil, origin); err == nil {
+	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+url.QueryEscape(state), tok.AccessToken, nil, site); err == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 	if acct.UID == "" {

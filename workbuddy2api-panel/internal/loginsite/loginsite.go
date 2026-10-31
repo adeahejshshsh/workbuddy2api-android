@@ -23,8 +23,23 @@ import (
 // 校验 UA 版本，但登录页会按 version 做灰度与埋点，写旧版本可能拿到旧登录页。
 const ClientVersion = "2.176.0"
 
-// ClientUA 设备授权链路的 User-Agent（与官方 CLI 同形）。
-const ClientUA = "CLI/" + ClientVersion + " CodeBuddy/" + ClientVersion
+// ClientUA 兜底 UA（未抓包的站点用）。
+//
+// 2026-10-30 双版本真机抓包：登录三端点发的是**桌面端 RPC 族**，不是 CodeBuddy 家族串：
+//
+//	CN 5.9.3     → WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+//	GL 5.9.4     → workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
+//
+// 本仓别处注释早就写过「CodeBuddy 家族串在 WorkBuddy 分发包里根本不存在，是最显眼的
+// 非官方指纹」，结果登录链路一直在发它。
+const ClientUA = ClientVersionWorkBuddyCN + " " + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLI
+
+// 出站客户端版本段（与 upstream 的 chat/RPC 族同源，三处抓包一致）。
+const (
+	ClientVersionWorkBuddyCN = "WorkBuddy/5.9.3"
+	ClientVersionWorkBuddyGL = "workbuddy-ai/5.9.4"
+	ClientVersionBuiltinCLI  = "2.165.0"
+)
 
 // Realm 取值（池内分域标识，与 auth.Realm() 输出一致）。
 const (
@@ -38,9 +53,16 @@ type Site struct {
 	Realm  string // 落盘 realm：cn / global
 	API    string // 上游 API base（三端点同域）
 	Origin string // Origin/Referer
-	// Platform 授权页 platform 口径。官方只对 platform=workbuddy 追加
-	// ww_device_nonce（桌面端设备绑定），其余站点只追加 version。
+	// Platform 授权页 `?platform=` 口径，取自 product.json →
+	// authentication.attributes.platform（**不是**顶层 platform 字段，那是 "CLI"，
+	// 两个同名字段取错层是旧实现的 bug，两版都不符）：
+	//
+	//	CN 5.9.3 → workbuddy     GL 5.9.4 → workbuddy-ai
+	//
+	// 官方只对 platform=workbuddy 追加 ww_device_nonce（桌面端设备绑定）。
 	Platform string
+	// UserAgent 该站点登录三端点出站的桌面端 RPC 族 UA（空 = 回落 ClientUA）。
+	UserAgent string
 }
 
 var (
@@ -48,13 +70,15 @@ var (
 	siteCN = Site{
 		ID: "cn", Realm: RealmCN,
 		API: "https://copilot.tencent.com", Origin: "https://www.codebuddy.cn",
-		Platform: "CLI",
+		Platform:  "workbuddy",
+		UserAgent: ClientVersionWorkBuddyCN + " " + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLI,
 	}
 	// 旧桌面端国际版：base 与 Origin 同域。
 	siteWorkBuddy = Site{
 		ID: "workbuddy", Realm: RealmGlobal,
 		API: "https://www.workbuddy.ai", Origin: "https://www.workbuddy.ai",
-		Platform: "workbuddy",
+		Platform:  "workbuddy-ai",
+		UserAgent: ClientVersionWorkBuddyGL + " " + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLI,
 	}
 )
 
@@ -69,7 +93,7 @@ func ForRealm(realm string) Site {
 
 // Endpoints 返回设备授权三端点（auth/state、token、account）与 Origin。
 func (s Site) Endpoints() (state, token, account, origin string) {
-	return s.API + "/v2/plugin/auth/state?platform=CLI",
+	return s.API + "/v2/plugin/auth/state?platform=" + s.Platform,
 		s.API + "/v2/plugin/auth/token?state=",
 		s.API + "/v2/plugin/login/account?state=",
 		s.Origin
