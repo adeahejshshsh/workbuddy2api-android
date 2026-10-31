@@ -47,3 +47,8 @@ docs/*.tmp
 # Python 字节码（tools/ patches/ 里的 __pycache__）
 __pycache__/
 *.pyc
+
+# go:embed 的静态资源必须进库：上面 *.md 全挡会把 internal/prompt/defaultprompt.md
+# 一起挡掉，而 prompt.go 有 //go:embed defaultprompt.md —— 缺了它 go build 直接失败
+# （2026-10-31 CI 第一次跑就是这么红的：pattern defaultprompt.md: no matching files found）。
+!workbuddy2api-panel/internal/prompt/defaultprompt.md
