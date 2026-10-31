@@ -1163,6 +1163,10 @@ const ctx = {
   esc: (s) => String(s == null ? '' : s),
   rateCell: () => '<td></td>',
   outCell: () => '<td></td>',
+  // mdRowHtml 里还会调这两个（1017 版本徽标、上游可用性标签），定义在切片区间之外。
+  // 本机 node 跑不起来时这些用例会 skip，于是缺桩一直没暴露 —— 2026-10-31 CI 首跑抓到。
+  is1017Model: () => false,
+  mdAvailabilityTag: () => '',
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + '\nthis.rowHtml = mdRowHtml;', ctx);
