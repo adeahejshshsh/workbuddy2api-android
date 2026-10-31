@@ -48,10 +48,15 @@ func TestChatHeadersMatch593(t *testing.T) {
 		"buddyId=,buddyName=,",
 		"codebuddy.session_id=conv-1",
 		"codebuddy.conversation_request_id=req-1",
-		"x-agent-runtime=local-agent",
 	} {
 		if !strings.Contains(bg, want) {
 			t.Errorf("baggage 缺 %q: %q", want, bg)
+		}
+	}
+	// 真机恒 4 键（2026-10-30 双版本抓包）：多出来的 agent 归因键会被当成另一种形态。
+	for _, bad := range []string{"x-agent-runtime", "x-agent-intent"} {
+		if strings.Contains(bg, bad) {
+			t.Errorf("baggage 不该含 %q（真机恒 4 键）: %q", bad, bg)
 		}
 	}
 }

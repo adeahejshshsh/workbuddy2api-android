@@ -66,7 +66,7 @@ func (c *Client) cliVersion() string {
 // CN 与 intl 是两条独立发版线：2026-10 实测 CN WorkBuddy 5.8.3（内嵌 CLI 2.161.0）、
 // intl 5.8.4（同属 CLI 2.161.0 系列），故按账号 realm 分档。
 const (
-	defaultClientVersionGlobal = "5.8.4"
+	defaultClientVersionGlobal = "5.9.4"
 	defaultCliVersionGlobal    = "2.161.0"
 )
 
@@ -98,6 +98,16 @@ func (c *Client) cliVersionFor(a *auth.Auth) string {
 	return defaultCliVersion
 }
 
+// uaBrandFor 出站 UA 的**第二段**品牌：国际版 productName「WorkBuddy AI」在打包期被
+// Electron 的 asciiSlug 改写成 `workbuddy-ai`（非字母数字换 `-` 并转小写），国内版
+// 直接沿用驼峰 `WorkBuddy`。2026-10-30 双版本真机逐路径比对确认两版并存。
+func uaBrandFor(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		return "workbuddy-ai"
+	}
+	return "WorkBuddy"
+}
+
 // defaultWorkBuddyUAFor 组装默认客户端出站 UA（官方桌面端 RestOperations 层形状）：
 // `WorkBuddy/<clientVersion> <platform>/<clientVersion> CLI/<cliVersion>`。
 // 平台段（第二段）品牌按 realm 切换——CN 用 applicationName 同值 `WorkBuddy`，
@@ -111,8 +121,12 @@ func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
 	// 第二段仍是 `WorkBuddy`。此前我们按 realm 切成 `WorkBuddy AI` 的结论是错的
 	// （依据是第三方逆向笔记，不是安装包本体）—— 送错平台段正是 11140 风控的诱因之一。
 	// 版本段按 realm 分档（CN 5.8.3 / intl 5.8.4）。
+	// 2026-10-30 双版本抓包：chat 族 = `WorkBuddy/<ver> <brand>/<ver> CLI/<cli>`，
+	// 首段恒驼峰 WorkBuddy（SDK buildUserAgent），第二段才是品牌 slug。
+	// 此前两段都写死驼峰：CN 恰好对，**global 少了 workbuddy-ai 那段**。
 	ver := c.clientVersionFor(a)
-	return "WorkBuddy/" + ver + " WorkBuddy/" + ver + " CLI/" + c.cliVersionFor(a)
+	brand := uaBrandFor(a)
+	return "WorkBuddy/" + ver + " " + brand + "/" + ver + " CLI/" + c.cliVersionFor(a)
 }
 
 // defaultWorkBuddyUA 返回 CN 形态的默认 UA（默认账号形态即 CN，零回归兼容既有调用/测试）。
@@ -129,6 +143,48 @@ func (c *Client) userAgent(a *auth.Auth) string {
 		return c.UserAgent
 	}
 	return c.defaultWorkBuddyUAFor(a)
+}
+
+// rpcUAFor 桌面端 **RPC/REST 层**出站 UA（不是 chat 那条 SDK 链）。
+//
+// 2026-10-30 双版本真机抓包（同一台机器、同一会话）实测两族并存：
+//
+//	chat → WorkBuddy/<ver> <brand>/<ver> CLI/<cli>   （SDK buildUserAgent，首段恒驼峰）
+//	RPC  → <brand>/<ver> <brand>/<ver> CLI/<cli>     （首段即品牌 slug）
+//
+// 覆盖 /v2/report、/v2/chat/busy、/console/as/*、auth/token/refresh、scheduler/tasks、
+// user-asset、portal：
+//
+//	CN 5.9.3     → WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+//	global 5.9.4 → workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
+//
+// CN 下与 userAgent() 同值（品牌段本来就驼峰），只有 global 分叉 —— 此前 global 的
+// RPC 请求也发 `WorkBuddy/…` 首段，与真机不符。
+func (c *Client) rpcUAFor(a *auth.Auth) string {
+	if c != nil && c.UserAgent != "" {
+		return c.UserAgent
+	}
+	ver := c.clientVersionFor(a)
+	brand := uaBrandFor(a)
+	return brand + "/" + ver + " " + brand + "/" + ver + " CLI/" + c.cliVersionFor(a)
+}
+
+// privateDataFor X-Private-Data 取值：判定维度是**发行版**，不是账号形态。
+//
+// 反编译 applyPrivateDataHeaderPolicy：A = resolveModelOptimizationEnabled(...)
+// = (t,i,n) => typeof t=="boolean" ? t : !n && (i ?? true)，其中
+// productDefault = !productFeatures.DefaultModelOptimizationOff；
+// p[PRIVATE_DATA] = A ? "false" : "true"。
+//
+//	国际 5.9.4 product.json → DefaultModelOptimizationOff=false → 个人号发 "true"
+//	国内 5.9.3 product.json → true                              → 发 "false"
+//
+// 旧实现恒发 "false"：国内对，国际个人号方向正好相反。
+func privateDataFor(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		return "true"
+	}
+	return "false"
 }
 
 // billingUA 白名单类（billing/checkin/banner）出站 UA：单段 `WorkBuddy/<clientVersion>`
@@ -202,12 +258,17 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-Agent-Runtime", agentRuntimeLocal)
 	// Accept 非流式默认 application/json（D6：去掉宽松的 text/plain, */*）。
 	// chat 流式路径在 ChatHeaders 覆盖为 event-stream。
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// REST/RPC 族的 Accept 是宽松值（真机逐头）；chat 那条链收窄为 event-stream，
+	// 由 ChatHeaders 覆盖。
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	// X-Requested-With **只属 chat 族**（RPC 族 56/56 无、渲染器族 10/10 有、chat 5/5 有）。
+	// 此前放在 CommonHeaders 全局注入，等于给 refresh / report / busy / console-as 全多
+	// 盖一个客户端不发的头。
+	req.Header.Set("X-Product", "SaaS")
 	origin := originRefererFor(a)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", c.userAgent(a))
+	req.Header.Set("User-Agent", c.rpcUAFor(a))
 	// X-CodeBuddy-Request: 1（官方客户端风控闸门头，所有 API 请求必带，D1）。
 	req.Header.Set("X-CodeBuddy-Request", "1")
 	// Accept-Language 按 realm 切（D5）：CN zh-CN，global en-US。官方客户端按账号域
@@ -260,6 +321,11 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.CommonHeaders(req, a)
 	// chat 流式 Accept 覆盖 CommonHeaders 的非流式默认（D6）。
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	// X-Requested-With 只属 chat 族（2026-10-30 真机逐头）。
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// chat 族 UA 首段恒驼峰 WorkBuddy（SDK buildUserAgent）——CommonHeaders 给的是
+	// RPC 族形态，这里改回来。
+	req.Header.Set("User-Agent", c.userAgent(a))
 	// CLI 客户端没有浏览器语义：chat 路径从不发 Origin / Referer / Accept-Language
 	// （两版客户端真机逐头对照）。CommonHeaders 为其它路径设了它们，这里剥掉。
 	req.Header.Del("Origin")
@@ -289,19 +355,19 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 		req.Header.Set("X-IDE-Name", "WorkBuddy")
 		req.Header.Set("X-IDE-Type", "WorkBuddy")
 		req.Header.Set("X-IDE-Version", c.clientVersionFor(a))
-		req.Header.Set("X-Private-Data", "true")
+		req.Header.Set("X-Private-Data", privateDataFor(a))
 	}
 	// AccessToken 加锁快照：keepalive 定时刷新会在 a.mu 内改写它，锁外直读构成数据竞争
 	// （见 auth.AccessTokenValue 注释）。
 	if at := a.AccessTokenValue(); at != "" {
 		req.Header.Set("Authorization", "Bearer "+at)
 	} else {
-		req.Header.Set("X-No-Authorization", "1")
+		req.Header.Set("X-No-Authorization", "true")
 	}
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	} else {
-		req.Header.Set("X-No-User-Id", "1")
+		req.Header.Set("X-No-User-Id", "true")
 	}
 	// 安全红线：绝不在 chat 请求里携带 X-Refresh-Token。
 	// 企业与域头按 realm 分发：CN 走既有分支（EnterpriseID/Domain 原样透传，缺省 X-No-*）；
@@ -380,10 +446,12 @@ func (c *Client) injectBaggage(req *http.Request, meta ChatMeta) {
 	if reqID == "" {
 		reqID = req.Header.Get("X-Conversation-Request-ID")
 	}
+	// 真机恒 4 键（2026-10-30 国际 5.9.4 / 国内 5.9.3 双版本抓包）：buddyId / buddyName /
+	// codebuddy.session_id / codebuddy.conversation_request_id。此前多塞的
+	// x-agent-runtime / x-agent-intent 客户端从不发 —— baggage 是 OTel 传播器序列化的
+	// 整体串，成员集合本身可比对，多一个就是另一种形态。
 	req.Header.Set("baggage", "buddyId=,buddyName=,codebuddy.session_id="+conv+
-		",codebuddy.conversation_request_id="+reqID+
-		",x-agent-runtime="+req.Header.Get("X-Agent-Runtime")+
-		",x-agent-intent="+req.Header.Get("X-Agent-Intent"))
+		",codebuddy.conversation_request_id="+reqID)
 }
 
 func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {

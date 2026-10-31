@@ -2259,7 +2259,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 		return nil, nil, err
 	}
 	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// X-Requested-With 只属 chat 族，/v3/config 属 RPC 族（2026-10-30 双版本抓包）。
 	// 先判空再解引用（BUG-05）：上一行直接调 a.AccessTokenValue()，下一行才判 a != nil，
 	// 真传 nil 就是 panic —— 防御代码自相矛盾。同函数里的 v3ConfigDomain 是按可空处理的。
 	if a == nil {
