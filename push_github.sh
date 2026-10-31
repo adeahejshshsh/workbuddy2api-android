@@ -195,6 +195,12 @@ fi
 # 普通推送先重试 3 次：TLS 层偶发 "unexpected eof while reading" 是网络抖动，
 # 重试就能过。强推会覆盖远端历史（误用一次不可恢复），所以只在「重试仍失败
 # 且确认是快进关系」时才用——不是快进关系就停下让人看。
+# PR 流程：`BRANCH=feat/x bash push_github.sh "msg"` 把本轮提交挂到同名分支上推，
+# 不动 main —— 之后的合并走 PR（CI 绿了再合）。main 保持原来的行为：直接在 main 上提交推送。
+if [ "$BRANCH" != "main" ]; then
+  git checkout -q -B "$BRANCH" 2>/dev/null || true
+  echo "  分支模式：推到 $BRANCH（不碰 main，合并走 PR）"
+fi
 push_ok=0
 for attempt in 1 2 3; do
   set +e

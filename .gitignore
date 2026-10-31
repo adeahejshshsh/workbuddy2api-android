@@ -47,3 +47,8 @@ docs/*.tmp
 # Python 字节码（tools/ patches/ 里的 __pycache__）
 __pycache__/
 *.pyc
+
+# 注意：go:embed 的静态资源（如 internal/prompt/defaultprompt.md）由
+# workbuddy2api-panel/.gitignore 白名单放行 —— 子目录的 .gitignore 优先级更高，
+# 在这里写 !xxx 是无效的（2026-10-31 踩过：CI 的 go build 报
+# pattern defaultprompt.md: no matching files found）。
