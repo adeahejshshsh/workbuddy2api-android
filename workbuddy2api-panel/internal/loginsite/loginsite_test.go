@@ -58,7 +58,7 @@ func TestForRealm(t *testing.T) {
 
 func TestEndpoints(t *testing.T) {
 	state, token, account, origin := ForRealm("cn").Endpoints()
-	for _, want := range []string{"/v2/plugin/auth/state?platform=CLI", "/v2/plugin/auth/token?state=", "/v2/plugin/login/account?state="} {
+	for _, want := range []string{"/v2/plugin/auth/state?platform=workbuddy", "/v2/plugin/auth/token?state=", "/v2/plugin/login/account?state="} {
 		if !strings.Contains(state+token+account, want) {
 			t.Errorf("缺端点 %q", want)
 		}
@@ -93,16 +93,19 @@ func TestDecorateAuthURLKeepsExistingVersion(t *testing.T) {
 	}
 }
 
-// ww_device_nonce 只对 workbuddy 站加，且必须由部署侧提供 —— 不伪造设备指纹。
+// ww_device_nonce 只对 platform=workbuddy 的站点加，且必须由部署侧提供 —— 不伪造设备指纹。
+//
+// 2026-10-30 抓包修正 `?platform=` 口径后，**CN 站才是 platform=workbuddy**
+// （旧实现硬编码 "CLI"）；GL 站是 workbuddy-ai，官方对它不加 nonce。
 func TestDecorateAuthURLNonce(t *testing.T) {
 	base := "https://example.test/login?state=abc"
-	// cn 站即使给了 nonce 也不加
-	if got := DecorateAuthURL(base, ForRealm("cn"), "n-123"); strings.Contains(got, "ww_device_nonce") {
-		t.Fatalf("cn 站不该带 ww_device_nonce: %s", got)
+	// CN 站 = platform=workbuddy → 给了 nonce 就加
+	if got := DecorateAuthURL(base, ForRealm("cn"), "n-123"); !strings.Contains(got, "ww_device_nonce=n-123") {
+		t.Fatalf("cn 站（platform=workbuddy）应带 nonce: %s", got)
 	}
-	// workbuddy 站给了 nonce 才加
-	if got := DecorateAuthURL(base, ForRealm("global"), "n-123"); !strings.Contains(got, "ww_device_nonce=n-123") {
-		t.Fatalf("workbuddy 站应带 nonce: %s", got)
+	// GL 站 = platform=workbuddy-ai → 不加
+	if got := DecorateAuthURL(base, ForRealm("global"), "n-123"); strings.Contains(got, "ww_device_nonce") {
+		t.Fatalf("global 站（platform=workbuddy-ai）不该带 ww_device_nonce: %s", got)
 	}
 	// 没给就不加（不伪造）
 	if got := DecorateAuthURL(base, ForRealm("global"), ""); strings.Contains(got, "ww_device_nonce") {
