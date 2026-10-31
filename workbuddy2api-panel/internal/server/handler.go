@@ -638,6 +638,10 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		// 上游模型对象全字段透出（name/描述/标签/倍率/能力旗标等，空值省略）。
 		entry = applyModelInfoFields(entry, mi)
+		// models.dev 形状的能力声明（modalities/limit/tool_call/reasoning/
+		// reasoning_options）：纯追加，原有字段一个不动；给只认 models.dev 词表的
+		// 下游（magpie 等）一份读得懂的声明。派生逻辑见 applyModelsDevShape。
+		applyModelsDevShape(entry, mi, mi.Efforts, false)
 		// effort 能力透出——远端 supportedEfforts 权威，缺失落到 CN 静态兜底表
 		// （客户端可发现档位，不再盲传）。无档位 → 省略字段。
 		efforts, def := upstream.EffortListing("cn", mi.ID, mi.Efforts, mi.DefaultEffort)
@@ -689,6 +693,9 @@ func (h *Handler) modelList() []map[string]any {
 			var remoteCtx, remoteOut int64
 			if mi, ok := globalInfos[id]; ok {
 				entry = applyModelInfoFields(entry, mi)
+				// models.dev 形状与 CN 分支同口径（hasInfo=false 时不追加，按裸 ID
+				// 输出，不编造能力）。
+				applyModelsDevShape(entry, mi, mi.Efforts, false)
 				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
 			}
 			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.HTTP)
