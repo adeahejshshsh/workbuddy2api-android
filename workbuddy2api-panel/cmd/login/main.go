@@ -67,15 +67,11 @@ func realmConfig(realm string) (base, origin string) {
 //
 // 2026-10-30 真机抓包：三端点恒无 Origin / Referer / X-Requested-With（node fetch，
 // 浏览器同源语义只属于打开授权页那一步）；UA 是该站点的桌面端 RPC 族。
-func commonHeaders(site loginsite.Site) func(*http.Request) {
+func applyHeaders(hdr map[string]string) func(*http.Request) {
 	return func(req *http.Request) {
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/plain, */*")
-		ua := site.UserAgent
-		if ua == "" {
-			ua = clientUA
+		for k, v := range hdr {
+			req.Header.Set(k, v)
 		}
-		req.Header.Set("User-Agent", ua)
 	}
 }
 
@@ -96,7 +92,7 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 		headers(req)
 	} else {
 		// 缺省头：CN 站点头族（零回归）
-		commonHeaders(loginsite.ForRealm(realmCN))(req)
+		applyHeaders(loginsite.ForRealm(realmCN).HeadersForState(loginDeviceToken()))(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -228,7 +224,7 @@ func validateRealmMatch(stateRealm, cliRealm string) error {
 // state 落盘（带 realm），stdout 打印 authURL。out 接 stdout；stateFile 为落盘路径
 // （可注入临时文件便于测试）。空 realm 视为缺省（调用方已归一）。
 func runURL(base, origin, realm, statePath string, client *http.Client, out io.Writer) {
-	headers := commonHeaders(loginsite.ForRealm(realm))
+	headers := applyHeaders(loginsite.ForRealm(realm).HeadersForState(loginDeviceToken()))
 	data, _, err := doJSON(client, http.MethodPost, base+"/v2/plugin/auth/state?platform="+loginsite.ForRealm(realm).Platform, headers, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		fatal("auth state failed: %v", err)
@@ -269,7 +265,7 @@ func runPoll(base, origin, realm, statePath string, client *http.Client, out io.
 	if err := validateRealmMatch(ls.Realm, realm); err != nil {
 		fatal("%v", err)
 	}
-	headers := commonHeaders(loginsite.ForRealm(realm))
+	headers := applyHeaders(loginsite.ForRealm(realm).HeadersForToken())
 	// handlePollLogin (oauth.go:108-162)：auth/token 是权威登录状态端点，
 	// pending 时业务 code 非 0（"login ing"），完成时 code=0 + token bundle
 	tokRaw, status, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+ls.State, headers, nil)
@@ -374,6 +370,19 @@ func main() {
 func realmIfExplicit(realm string) string {
 	if realmExplicit {
 		return realm
+	}
+	return ""
+}
+
+// loginDeviceToken 部署侧提供的桌面端设备 token（可选）。
+//
+// 真值只存在于官方客户端的安装产物里，算不出来 —— 拿不到就不发（伪造比缺失更可疑，
+// 且在设备维度风控下等于主动制造一个不存在的设备）。
+func loginDeviceToken() string {
+	for _, k := range []string{"WB2A_DEVICE_TOKEN"} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return v
+		}
 	}
 	return ""
 }

@@ -13,8 +13,12 @@
 package loginsite
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ClientVersion 官方 CLI 版本。UA 与授权链接的 version 参数同源。
@@ -63,6 +67,10 @@ type Site struct {
 	Platform string
 	// UserAgent 该站点登录三端点出站的桌面端 RPC 族 UA（空 = 回落 ClientUA）。
 	UserAgent string
+	// Domain 设备码端点的 X-Domain 取值（**不是 API base 主机名**）：真机 CN
+	// auth/state 打 copilot.tencent.com，但 `x-domain: www.workbuddy.cn` ——
+	// 该头声明「哪个前端在调用」。空则回落 Origin 主机名。
+	Domain string
 }
 
 var (
@@ -155,4 +163,105 @@ func DecorateAuthURL(raw string, s Site, nonce string) string {
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// EndpointHeaders 设备码三端点的**公共**头。
+//
+// 2026-10-30 双版本真机抓包：三端点都是 node fetch，**不发** Origin / Referer /
+// X-Requested-With（浏览器同源语义只属于「打开授权页」那一步）。
+// 三端点的差异（Content-Type / X-Domain / x-no-* 哨兵 / x-device-token）见
+// HeadersForState / HeadersForToken / HeadersForAccount，不要在这里抹平。
+func (s Site) EndpointHeaders() map[string]string {
+	return map[string]string{
+		"Accept":       "application/json, text/plain, */*",
+		"User-Agent":   s.userAgent(),
+		"X-Product":    "SaaS",
+		"X-Request-ID": newTraceID(),
+	}
+}
+
+// userAgent 站点 UA：真机口径优先，未复核站点回落 ClientUA。
+func (s Site) userAgent() string {
+	if s.UserAgent != "" {
+		return s.UserAgent
+	}
+	return ClientUA
+}
+
+// host 设备码端点的 X-Domain 取值：站点显式 Domain 优先，否则回落 Origin 主机名。
+func (s Site) host() string {
+	if s.Domain != "" {
+		return s.Domain
+	}
+	h := strings.TrimPrefix(strings.TrimPrefix(s.Origin, "https://"), "http://")
+	return strings.TrimSuffix(h, "/")
+}
+
+// sentinelNo 未鉴权/未落库端点的 x-no-* 哨兵头。
+//
+// 真机值是字符串 "true"（不是 "1"）。auth/state 与 auth/token 四个全发；
+// login/account 只发后三个 —— 它已带 Bearer，唯一缺的是「账号信息还没落库」。
+func sentinelNo(noAuth bool) map[string]string {
+	out := map[string]string{
+		"X-No-User-Id":         "true",
+		"X-No-Enterprise-Id":   "true",
+		"X-No-Department-Info": "true",
+	}
+	if noAuth {
+		out["X-No-Authorization"] = "true"
+	}
+	return out
+}
+
+// HeadersForState POST /v2/plugin/auth/state 的出站头：
+// 公共头 + X-Domain + 四个 x-no-* + X-Custom-Channel-Id: unknown
+// + X-Device-Token（取到才发；空则不伪造）。
+func (s Site) HeadersForState(deviceToken string) map[string]string {
+	h := s.EndpointHeaders()
+	h["Content-Type"] = "application/json" // 只有 POST 带，两条 GET 都没有
+	h["X-Domain"] = s.host()
+	h["X-Custom-Channel-Id"] = "unknown" // 真机恒为字面量（渠道号未知的分发包）
+	for k, v := range sentinelNo(true) {
+		h[k] = v
+	}
+	if deviceToken != "" {
+		h["X-Device-Token"] = deviceToken
+	}
+	return h
+}
+
+// HeadersForToken GET /v2/plugin/auth/token 的出站头：
+// 公共头 + 四个 x-no-*。**唯一没有 X-Domain 的端点**，也没有 x-custom-channel-id
+// 与 x-device-token。
+func (s Site) HeadersForToken() map[string]string {
+	h := s.EndpointHeaders()
+	for k, v := range sentinelNo(true) {
+		h[k] = v
+	}
+	return h
+}
+
+// HeadersForAccount GET /v2/plugin/login/account 的出站头：
+// 公共头 + X-Domain + Authorization + 三个 x-no-*（无 x-no-authorization）。
+func (s Site) HeadersForAccount(accessToken string) map[string]string {
+	h := s.EndpointHeaders()
+	h["X-Domain"] = s.host()
+	for k, v := range sentinelNo(false) {
+		h[k] = v
+	}
+	if accessToken != "" {
+		h["Authorization"] = "Bearer " + accessToken
+	}
+	return h
+}
+
+// newTraceID 生成 32 hex 纯随机请求 ID（真机 X-Request-ID 形态：无毫秒前缀）。
+// 熵源故障时回落时间派生，仍恒 32 hex，不 panic、不空串。
+func newTraceID() string {
+	var b [16]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		ms := time.Now().UnixMilli()
+		return fmt.Sprintf("%012x%020x", ms, uint64(ms))
+	}
+	return hex.EncodeToString(b[:])
 }
