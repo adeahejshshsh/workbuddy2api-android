@@ -1,11 +1,19 @@
 name: ci
 
-# PR 阶段就把编译和用例跑起来（本仓的合并门禁）：main 上的直接推送不再依赖人肉
-# 记住「本地绿了才推」，每次改动都在 PR 上留一份可查的测试结果。
+# 门禁跟随上游 `binaries.yml` 的口径（2026-10-30 上游 `b2df95d`）：
+#   - 触发面：pull_request + push(main, v*) + workflow_dispatch
+#     （上游原话：「此前只有 push/tag 触发，等于合并前零门禁，坏代码合进 main 才第一次跑 go test」）
+#   - 唯一门禁步骤就是 `go test ./...`，Go 版本跟 go.mod（不发散成自定义矩阵）
+#
+# 与上游的两处差异，都是本仓形态决定的：
+#   - 模块根在 workbuddy2api-panel/（仓库根是 APK 打包工作区）→ working-directory
+#   - 不发版：我们的产物是本地签名 APK（走 Release 手工发），上游那套
+#     windows/linux/darwin × amd64/arm64 交叉编译 + gh release create 在这里没有对应物。
 on:
   pull_request:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -13,7 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        # 模块根在子目录：仓库根是「APK 打包工作区」，Go module 在 workbuddy2api-panel/。
         working-directory: workbuddy2api-panel
     steps:
       - uses: actions/checkout@v4
@@ -23,8 +30,5 @@ jobs:
           go-version-file: workbuddy2api-panel/go.mod
           cache-dependency-path: workbuddy2api-panel/go.sum
 
-      - name: go build
-        run: go build ./...
-
-      - name: go test
+      - name: test
         run: go test ./...
