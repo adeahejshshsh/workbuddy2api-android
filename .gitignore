@@ -48,7 +48,7 @@ docs/*.tmp
 __pycache__/
 *.pyc
 
-# go:embed 的静态资源必须进库：上面 *.md 全挡会把 internal/prompt/defaultprompt.md
-# 一起挡掉，而 prompt.go 有 //go:embed defaultprompt.md —— 缺了它 go build 直接失败
-# （2026-10-31 CI 第一次跑就是这么红的：pattern defaultprompt.md: no matching files found）。
-!workbuddy2api-panel/internal/prompt/defaultprompt.md
+# 注意：go:embed 的静态资源（如 internal/prompt/defaultprompt.md）由
+# workbuddy2api-panel/.gitignore 白名单放行 —— 子目录的 .gitignore 优先级更高，
+# 在这里写 !xxx 是无效的（2026-10-31 踩过：CI 的 go build 报
+# pattern defaultprompt.md: no matching files found）。

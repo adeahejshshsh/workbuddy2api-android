@@ -54,3 +54,7 @@ gotest.log
 # 编译产物（16MB 误提交过一次，20261021）
 /server
 /app.toml
+
+# go:embed 的必需资源：prompt.go 有 //go:embed defaultprompt.md，缺了它 go build 直接
+# 失败（2026-10-31 CI 首跑：pattern defaultprompt.md: no matching files found）。
+!internal/prompt/defaultprompt.md
