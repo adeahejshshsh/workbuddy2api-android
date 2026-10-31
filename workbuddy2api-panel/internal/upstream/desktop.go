@@ -133,8 +133,9 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 		return err
 	}
 	req, err := http.NewRequest(http.MethodPost, c.desktopBase(a)+desktopReportPath, bytes.NewReader(raw))
-	// X-Requested-With：5.9.3 真机 /v2/report 必带（旧实现漏了，缺头即「非客户端形态」）。
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	// X-Requested-With 不在这里：2026-10-30 双版本逐头统计（国内 729 条 + 国际 190 条）
+	// 显示该头只属 chat 族 —— RPC 族 56/56 无、渲染器族 10/10 有、chat 5/5 有。
+	// 5.9.3 时代「/v2/report 必带」的结论来自样本不足，已被推翻。
 	if err != nil {
 		return err
 	}

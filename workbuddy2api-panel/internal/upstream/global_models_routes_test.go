@@ -154,7 +154,8 @@ func TestDesktopUAForGlobalAccount(t *testing.T) {
 	if contains(ua, "WorkBuddy AI") {
 		t.Errorf("global desktop UA = %q，平台段必须是字面量 WorkBuddy（不得出现 WorkBuddy AI）", ua)
 	}
-	if want := "WorkBuddy/" + defaultClientVersionGlobal + " WorkBuddy/" + defaultClientVersionGlobal; !contains(ua, want) {
+	// chat 族 = WorkBuddy/<ver> <brand>/<ver> CLI/<cli>，global 的第二段是 slug。
+	if want := "WorkBuddy/" + defaultClientVersionGlobal + " workbuddy-ai/" + defaultClientVersionGlobal; !contains(ua, want) {
 		t.Errorf("global desktop UA = %q, want it to contain %q", ua, want)
 	}
 	if !contains(ua, "CLI/"+defaultCliVersionGlobal) {
