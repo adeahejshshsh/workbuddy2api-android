@@ -319,9 +319,23 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 			CostPer1k: prev.CostPer1k*(1-alpha) + per1k*alpha,
 			LastSeen:  time.Now(),
 			Samples:   prev.Samples + 1,
+			// 窗口字段必须带上：这里是整体重写结构体，漏了会把本窗口累计用量清零
+			// （实测症状：同一窗口内第二次记账后 windowTokens 从 1000 掉回 500）。
+			WinStart:  prev.WinStart,
+			WinTokens: prev.WinTokens,
 		}
 	}
 	p.dirty.Store(true) // 账本已持久化：写入口统一置脏
+	// 窗口用量累加（issue #112）：跨窗口整体翻篇，不做逐次衰减。
+	if p.balanceWindow > 0 {
+		mc := e.modelCost[model]
+		if mc.WinStart.IsZero() || time.Since(mc.WinStart) >= p.balanceWindow {
+			mc.WinStart = time.Now()
+			mc.WinTokens = 0
+		}
+		mc.WinTokens += int64(tokens)
+		e.modelCost[model] = mc
+	}
 }
 
 // RecordTokenUsage 记录一次实际发起的聊天账号尝试及上游返回的 usage 增量。

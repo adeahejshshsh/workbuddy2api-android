@@ -194,6 +194,12 @@ type modelCostEntry struct {
 	CostPer1k float64
 	LastSeen  time.Time
 	Samples   int
+	// WinStart/WinTokens 用量窗口起点与该窗口内累计消费的 token（issue #112 窗口用量
+	// 调度）。**不持久化**（持久化走 stateModelCost，字段不镜像过来）：重启后窗口
+	// 重新起算，与 lastUsed/usedSeq 同口径 —— 路由运行态不跨进程，避免拿旧窗口
+	// 惩罚一个刚重启的池子。
+	WinStart  time.Time
+	WinTokens int64
 }
 type entry struct {
 	a            *auth.Auth
@@ -576,6 +582,19 @@ type stateModelCost struct {
 	CostPer1k float64   `json:"cost_per_1k"`
 	LastSeen  time.Time `json:"last_seen"`
 	Samples   int       `json:"samples,omitempty"`
+}
+
+// windowTokens 该 (账号, 模型) 在窗口内已消费的 token；窗口过期或未开调度返回 0。
+// 调用方必须持有 p.mu。
+func (e *entry) windowTokens(model string, window time.Duration, now time.Time) int64 {
+	if window <= 0 || model == "" {
+		return 0
+	}
+	mc, ok := e.modelCost[model]
+	if !ok || mc.WinStart.IsZero() || now.Sub(mc.WinStart) >= window {
+		return 0
+	}
+	return mc.WinTokens
 }
 
 // stateFile 持久化格式。

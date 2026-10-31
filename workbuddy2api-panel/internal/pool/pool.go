@@ -56,6 +56,9 @@ type Pool struct {
 	// 收费与否的判据见 floorBlockedForModel：本地实测台账优先，缺失时用上游目录
 	// 倍率（modelRateOf 注入）兜底，避免「无观测的高价新模型」绕过保底。
 	creditFloor int64
+	// balanceWindow 窗口用量调度的窗口长度（issue #112）：>0 时按 (账号, 模型) 本窗口
+	// 已花的 token 反比降权；0 = 关停（行为与旧版逐字节一致）。
+	balanceWindow time.Duration
 	// modelRateOf 按 (realm, 模型) 查上游目录积分倍率（"0.79" / "" = 未知）。
 	// 由 main 用 upstream.Client.ModelRate 注入——pool 不依赖 upstream 包（避免
 	// 循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
@@ -426,3 +429,23 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 }
 
 // Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
+
+// defaultBalanceWindow 窗口用量调度的缺省窗口（1h）。
+const defaultBalanceWindow = time.Hour
+
+// DefaultBalanceWindow 缺省窗口（1h）。main 侧给「配置没写」用。
+func DefaultBalanceWindow() time.Duration { return defaultBalanceWindow }
+
+// SetBalanceWindow 热改用量窗口；<=0 关停（缺省 1h，见 defaultBalanceWindow）。
+func (p *Pool) SetBalanceWindow(d time.Duration) {
+	p.mu.Lock()
+	p.balanceWindow = d
+	p.mu.Unlock()
+}
+
+// BalanceWindow 当前用量窗口（0 = 关停）。
+func (p *Pool) BalanceWindow() time.Duration {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.balanceWindow
+}
