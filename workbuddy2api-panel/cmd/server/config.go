@@ -323,6 +323,9 @@ type Config struct {
 		// tier 0（免费）/ tier 1（无观测）不受限；签到回血越过 floor 自动恢复。
 		// 默认 0 = 关闭；负值钳 0。
 		CreditFloor int64 `json:"credit_floor"`
+		// BalanceWindow 窗口用量调度窗口（issue #112）：>0 时按 (账号, 模型) 本窗口
+		// 已花的 token 反比降权，把热点号打散；"0" 关停（行为同旧版）。缺省 1h。
+		BalanceWindow string `json:"balance_window"`
 		// ModelFallback 模型降级路由表：key = 客户端请求的模型（裸名），
 		// value = 该模型被 6004 模型级限流时改用的等价模型。
 		// 例：{"deepseek-v4.1-flash": "deepseek-v4-flash"}。
@@ -516,6 +519,7 @@ var numericStringFields = [][2]string{
 	{"pool", "breaker_threshold"},
 	{"pool", "degrade_threshold"},
 	{"pool", "credit_floor"},
+	{"pool", "balance_window"},
 	{"schedule", "balance_refresh_minutes"},
 	{"schedule", "account_spread_seconds"},
 	{"upstream", "timeout_seconds"},

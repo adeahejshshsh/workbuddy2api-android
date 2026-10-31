@@ -161,6 +161,20 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
 		}
 	}
+	// 窗口用量降权（issue #112）：短名单排序与下面抽签用的是同一份权重，两处都套，
+	// 否则 penalty 只影响谁进 top5、不影响抽签概率。
+	var uctx usageCtx
+	if p.balanceWindow > 0 && reqModel != "" {
+		uctx = usageCtx{model: reqModel, n: len(ws)}
+		for _, w := range ws {
+			uctx.sum += w.e.windowTokens(reqModel, p.balanceWindow, now)
+		}
+	}
+	if uctx.n > 0 {
+		for i := range ws {
+			ws[i].w /= p.usageDiv(ws[i].e, uctx, now)
+		}
+	}
 	// 等权重洗牌：仅当存在权重相等且候选数超过 top5 时，才对 ws 做 Fisher-Yates
 	// 洗牌（且**不消耗 p.randInt64N 注入源**，避免改变 pickWeighted 的确定性语义，
 	// 见 TestPickDeterministicViaSetRandomSource）。权重全等或存在并列时，按字典序
@@ -252,7 +266,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			}
 		}
 	} else {
-		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
+		e = p.pickWeighted(eligible, reqModel) // eligible 保序 = top5 降序子集
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -424,14 +438,15 @@ var minPickGap = 100 * time.Millisecond
 // 截断排序与抽签权重共享同一基准，两阶段权重可比（issue B13）。此前本函数在传入的
 // eligible 子集上重新算 max —— 子集里最高 credits 的号若刚好被 minPickGap 排除，
 // 基准就变小、credits 权重被相对放大，与注释承诺不符。
-func (p *Pool) pickWeighted(cands []*entry) *entry {
+func (p *Pool) pickWeighted(cands []*entry, model string) *entry {
 	now := time.Now()
 	maxCredits := secondCredits(cands)
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
 	var total int64
+	uctx := p.usageCtxForEntries(cands, model, now)
 	for i, e := range cands {
-		w := p.routingWeightOf(e, maxCredits, now)
+		w := p.routingWeightOf(e, maxCredits, now) / p.usageDiv(e, uctx, now)
 		weights[i] = int64(w * scale)
 		total += weights[i]
 	}
@@ -522,6 +537,49 @@ func expiringNow(e *entry, now time.Time) bool {
 		e.creditsEarliestRemaining > 0 &&
 		!e.creditsEarliestExpiry.IsZero() &&
 		e.creditsEarliestExpiry.After(now)
+}
+
+// usageCtx 窗口用量调度的分母上下文（issue #112）：同一成本层内所有候选的本窗口
+// 用量之和与候选数，用来算均值。，量纲自洽 —— 换池子规模、换模型倍率都不用调参。
+type usageCtx struct {
+	model string
+	n     int
+	sum   int64
+}
+
+// usageDiv 窗口用量降权因子：权重 /= 1 + used/mean。
+//
+// 只按 credits 加权时，「烧掉一百万 token」与「余额掉几分」在权重上几乎无差别，
+// 热点号会一路烧到 6004 限额、同期其他号闲置。分母取**同层均值**而不是固定阈值：
+// 全员 0 用量时除数恒 1，行为与旧版逐字节一致。
+//
+// shortcut: 翻滚窗口（从窗口内首次记账起算），不是滑动窗口 —— 跨窗口边界的最初
+// 一段会短暂少算用量；要精确滑窗得存每秒桶，收益不值得这份复杂度。
+func (p *Pool) usageDiv(e *entry, u usageCtx, now time.Time) float64 {
+	if u.model == "" || p.balanceWindow <= 0 || u.n <= 0 || u.sum <= 0 {
+		return 1
+	}
+	used := e.windowTokens(u.model, p.balanceWindow, now)
+	if used <= 0 {
+		return 1
+	}
+	mean := float64(u.sum) / float64(u.n)
+	if mean <= 0 {
+		return 1
+	}
+	return 1 + float64(used)/mean
+}
+
+// usageCtxForEntries 同上，入参是候选切片（pickWeighted 用）。
+func (p *Pool) usageCtxForEntries(cands []*entry, model string, now time.Time) usageCtx {
+	u := usageCtx{model: model, n: len(cands)}
+	if p.balanceWindow <= 0 || model == "" {
+		return usageCtx{}
+	}
+	for _, e := range cands {
+		u.sum += e.windowTokens(model, p.balanceWindow, now)
+	}
+	return u
 }
 
 // routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false

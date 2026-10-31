@@ -172,6 +172,7 @@ func main() {
 	p.SetSoftResetMax(cfg.SoftResetMaxDur)               // 权威重置墙钟上限（soft_reset_max，默认 24h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetCreditFloor(cfg.Pool.CreditFloor)               // 积分保底（默认 0 = 关闭）
+	p.SetBalanceWindow(balanceWindowOf(cfg))             // 窗口用量调度（默认 1h，"0" 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
 
@@ -729,6 +730,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetSoftResetMax(newCfg.SoftResetMaxDur)               // 权威重置墙钟上限热生效
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetCreditFloor(newCfg.Pool.CreditFloor)               // 积分保底热生效（0 = 关闭）
+	p.SetBalanceWindow(balanceWindowOf(newCfg))             // 窗口用量调度热生效
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
@@ -892,4 +894,20 @@ func mergedJSON(m map[string]any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// balanceWindowOf 解析 pool.balance_window：缺省 1h，"0"/空串之外的非正值一律关停。
+func balanceWindowOf(cfg *Config) time.Duration {
+	raw := strings.TrimSpace(cfg.Pool.BalanceWindow)
+	if raw == "" {
+		return pool.DefaultBalanceWindow()
+	}
+	if raw == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
 }
