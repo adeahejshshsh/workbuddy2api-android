@@ -79,6 +79,7 @@ var (
 		ID: "cn", Realm: RealmCN,
 		API: "https://copilot.tencent.com", Origin: "https://www.codebuddy.cn",
 		Platform:  "workbuddy",
+		Domain:    "www.workbuddy.cn",
 		UserAgent: ClientVersionWorkBuddyCN + " " + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLI,
 	}
 	// 旧桌面端国际版：base 与 Origin 同域。
@@ -86,6 +87,7 @@ var (
 		ID: "workbuddy", Realm: RealmGlobal,
 		API: "https://www.workbuddy.ai", Origin: "https://www.workbuddy.ai",
 		Platform:  "workbuddy-ai",
+		Domain:    "www.workbuddy.ai",
 		UserAgent: ClientVersionWorkBuddyGL + " " + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLI,
 	}
 )
