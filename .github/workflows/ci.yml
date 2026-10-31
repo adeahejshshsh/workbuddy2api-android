@@ -1,0 +1,30 @@
+name: ci
+
+# PR 阶段就把编译和用例跑起来（本仓的合并门禁）：main 上的直接推送不再依赖人肉
+# 记住「本地绿了才推」，每次改动都在 PR 上留一份可查的测试结果。
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # 模块根在子目录：仓库根是「APK 打包工作区」，Go module 在 workbuddy2api-panel/。
+        working-directory: workbuddy2api-panel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: workbuddy2api-panel/go.mod
+          cache-dependency-path: workbuddy2api-panel/go.sum
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test ./...
