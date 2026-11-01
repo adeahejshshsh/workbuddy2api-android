@@ -233,6 +233,13 @@ cp base.apk wb2api-unsigned.apk
 ( cd dex && zip -q -X ../wb2api-unsigned.apk classes.dex )
 ( cd jni && zip -q -X ../wb2api-unsigned.apk lib/arm64-v8a/libwb2api.so )
 
+# resources.arsc 必须是 **STORED + 4 字节对齐**，否则 Android R+ 直接拒装：
+#   -124 Failed parse during installPackageLl: Targeting R+ requires the
+#   resources.arsc of installed APKs to be stored uncompressed and aligned
+# zipfile / zip 都会把它压掉，而且各自算偏移、没有「对齐写入」能力 —— 单独补一道。
+python3 "$SCRIPT_DIR/zip_align.py" wb2api-unsigned.apk wb2api-aligned.apk
+mv -f wb2api-aligned.apk wb2api-unsigned.apk
+
 echo "== 6/6 签名 =="
 KS="$KS_TARGET"
 if [ ! -f "$KS" ]; then
