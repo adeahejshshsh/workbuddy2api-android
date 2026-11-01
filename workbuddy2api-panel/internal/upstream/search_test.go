@@ -63,7 +63,8 @@ func TestAgentToolSearchShape(t *testing.T) {
 	// 只断言**必发**的两个：RequestID（轮级）+ MessageID（消息级）。
 	// X-Conversation-ID 按本仓口径「body 提取，空则不发（不伪造）」，零值下确实为空。
 	for _, k := range []string{"X-Conversation-Request-ID", "X-Conversation-Message-ID"} {
-		if s.header.Get(k) == "" {
+		// 头名是官方拼写（...-ID），Get 会把它 canonicalize 成 ...-Id 取不到 → 用 headerFold
+		if headerFold(s.header, k) == "" {
 			t.Fatalf("缺会话头 %s（零值 ChatMeta 必须自造，不得留空）", k)
 		}
 	}
