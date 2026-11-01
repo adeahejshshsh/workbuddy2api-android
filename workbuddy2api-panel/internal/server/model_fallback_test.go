@@ -261,3 +261,45 @@ func TestModelFallbackWhenNoAccountForModel(t *testing.T) {
 		t.Fatalf("应直接改用等价模型，实际上游收到 %v", got)
 	}
 }
+
+// TestModelFallbackRealmPrefixedKey 带域前缀的键只在该域生效（合 9b9174b / #127）。
+//
+// 配置端原样透传、不做归一化，所以前缀必须由**查找端**解析 —— 只查裸名会让整张
+// 前缀表静默失效（实案：配了 {"global:x": "..."}，global 域 6004 后完全不降级，
+// 而注释与面板都承诺「裸名或带域前缀均可」）。
+func TestModelFallbackRealmPrefixedKey(t *testing.T) {
+	// ① cn: 前缀在 CN 域生效
+	up := &modelAwareUpstream{}
+	up.reply = append(up.reply, struct {
+		status int
+		body   string
+	}{429, rateLimit6004Body})
+	up.reply = append(up.reply, struct {
+		status int
+		body   string
+	}{200, okChatSSE})
+	h := newFallbackHandler(map[string]string{"cn:deepseek-v4.1-flash": "deepseek-v4-flash"}, up.client())
+	rec := doFallbackChat(h, "deepseek-v4.1-flash")
+	if rec.Code != 200 {
+		t.Fatalf("cn: 前缀应生效（降级后 200），得到 %d body=%s", rec.Code, rec.Body)
+	}
+	got := up.seen()
+	if len(got) != 2 || got[1] != "deepseek-v4-flash" {
+		t.Fatalf("上游序列 = %v，want [deepseek-v4.1-flash deepseek-v4-flash]", got)
+	}
+
+	// ② global: 前缀在 CN 域**不该**生效（跨域串味会让 cn 号的 6004 降级到只对
+	// global 配的模型上，等于凭空多出一个没验证过的降级路径）
+	up2 := &modelAwareUpstream{}
+	up2.reply = append(up2.reply, struct {
+		status int
+		body   string
+	}{429, rateLimit6004Body})
+	h2 := newFallbackHandler(map[string]string{"global:deepseek-v4.1-flash": "deepseek-v4-flash"}, up2.client())
+	doFallbackChat(h2, "deepseek-v4.1-flash")
+	for _, m := range up2.seen() {
+		if m == "deepseek-v4-flash" {
+			t.Fatalf("global: 前缀不该在 CN 域生效，上游序列 = %v", up2.seen())
+		}
+	}
+}
