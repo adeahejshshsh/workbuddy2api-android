@@ -974,7 +974,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if m == nil {
 			return ""
 		}
-		to := m[curModel]
+		// 键查找：先试当前域前缀键（"cn:x"/"global:x"，只在该域生效），再回退裸名键
+		// （两域共用）。配置端原样透传不做归一化（与 models.aliases 不同），带前缀的
+		// 键必须由**查找端**解析 —— 只查裸名会让前缀键整表失效，而 Config.ModelFallback
+		// 的注释与面板都承诺「裸名或带域前缀均可」（实案：config.json 写
+		// {"global:deepseek-v4.1-flash": "..."}，global 域 6004 后完全没有降级）。
+		to := m[realm+":"+curModel]
+		if to == "" {
+			to = m[curModel]
+		}
 		if to == "" || to == curModel || fallbackTried[to] {
 			return ""
 		}
