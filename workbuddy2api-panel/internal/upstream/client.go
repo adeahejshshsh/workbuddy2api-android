@@ -12,6 +12,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -907,6 +908,11 @@ type Client struct {
 	SanitizeFingerprints atomic.Bool
 	// effortPolicy 网关思考档位策略（config thinking 节，热更新用 atomic.Pointer）。
 	effortPolicy atomic.Pointer[EffortPolicy]
+	// TLSFingerprint 出站 TLS ClientHello 指纹档位（node = 复刻官方 Node/OpenSSL，
+	// go = crypto/tls 原生，排障/回滚用）。见 tlsfingerprint.go。
+	TLSFingerprint string
+	// dialer 出站拨号器（建立 transport 时留存，热切指纹时要用同一份）。
+	dialer *net.Dialer
 	// KeepRecentRounds prompt.keep_recent_rounds：出站前只保留最近 N 轮历史（0 = 关）。
 	KeepRecentRounds atomic.Int64
 
@@ -973,11 +979,14 @@ type Client struct {
 func New() *Client {
 	tr := newTransport()
 	c := &Client{
-		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP:      &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
-		ChatBaseCN:    "https://copilot.tencent.com",
-		BillingBaseCN: "https://www.codebuddy.cn",
-		WebBaseCN:     "https://www.workbuddy.cn",
+		HTTP:     &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		ChatHTTP: &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		// TLS 指纹默认复刻官方 Node/OpenSSL（JA3/JA4 双对齐）。热切换走
+		// SetTLSFingerprint（config 保存时调用），它重建 transport 的 dialTLS。
+		TLSFingerprint: TLSFingerprintNode,
+		ChatBaseCN:     "https://copilot.tencent.com",
+		BillingBaseCN:  "https://www.codebuddy.cn",
+		WebBaseCN:      "https://www.workbuddy.cn",
 		// GlobalEnabled 缺省 true（与 config global.enabled 缺省 true 一致；纯 CN 部署行为不变：
 		// CN 账号恒判 cn，global base 只在 realm=global 的账号上被使用）。
 		GlobalEnabled: true,

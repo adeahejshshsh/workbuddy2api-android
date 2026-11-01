@@ -91,7 +91,7 @@ func TestTransportUsesHeadOrderConn(t *testing.T) {
 	}()
 
 	tr := &http.Transport{
-		DialTLSContext: newTLSDialer(newDialer(), &tls.Config{InsecureSkipVerify: true}),
+		DialTLSContext: newTLSDialer(newDialer(), &tls.Config{InsecureSkipVerify: true}, TLSFingerprintGo),
 	}
 	httpClient := &http.Client{Transport: tr}
 	c := &Client{HTTP: httpClient, ChatHTTP: httpClient, ChatBaseCN: "https://" + ln.Addr().String()}
