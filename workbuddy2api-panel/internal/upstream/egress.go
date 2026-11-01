@@ -19,6 +19,11 @@ import (
 // 本文件的职责边界：**只做出站前的统一改写**，不改变请求内容、不做重试、不改超时。
 // 谁需要按路径区分行为，在调用方决定，不在这里加分支。
 func (c *Client) do(req *http.Request) (*http.Response, error) {
+	// 头名大小写对齐官方真机（Go 的 CanonicalMIMEHeaderKey 会把
+	// acp-connection-id 归一成 Acp-Connection-Id、X-B3-ParentSpanId 拍成
+	// X-B3-Parentspanid —— 头集合与取值全对，逐字节看仍是另一族包）。
+	// 逐名映射而非无差别小写化：后者会把 User-Agent 打回 Go-http-client/1.1。
+	req = normalizeHeaderSpelling(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return resp, err
