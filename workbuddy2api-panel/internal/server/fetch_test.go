@@ -2,12 +2,14 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // TestFetchEndpoint POST /v1/fetch：DSH 的 DeepSeek Fetch API 形状——
@@ -103,5 +105,53 @@ func TestFetchRequestLevelFailFast(t *testing.T) {
 	}
 	if len(f.paths) != 1 {
 		t.Fatalf("请求级错误应 fail-fast 不轮转，实际打了 %d 次", len(f.paths))
+	}
+}
+
+// TestFetchCrossRealm15021 域名被 CN 域路由策略拒绝（code 15021）时跨域兜底（合 4b7a805）。
+//
+// 域名级判定：CN 域 edgebrowser 对 Google 系域名一律 403 15021，换遍全池 CN 号都是
+// 同一个 403，而 global 域同域名正常。DSh 这类客户端不传 realm、缺省走 CN，于是
+// 「抓 Google 文档」在默认配置下必失败；旧实现还会把整池 CN 号逐个喂到出池。
+func TestFetchCrossRealm15021(t *testing.T) {
+	const okBody = `{"url":"https://docs.google.com/x","title":"G","content":"正文"}`
+	var cnHits, glHits int
+	up := &upstream.Client{
+		// GlobalEnabled 必须显式打开：chatBase 走的是 globalOn() = 开关 && realm，
+		// 只给 global 账号不给开关，所有请求仍然打到 CN base（本用例一开始就是这么红的）。
+		GlobalEnabled:  true,
+		ChatBaseCN:     "https://cn.example",
+		ChatBaseGlobal: "https://gl.example",
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			status, body := 200, okBody
+			if strings.HasPrefix(r.URL.String(), "https://cn.example") {
+				cnHits++
+				status, body = 403, `{"code":15021,"msg":"domain not allowed by routing policy"}`
+			} else {
+				glHits++
+			}
+			return &http.Response{
+				StatusCode: status,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    r,
+			}, nil
+		})},
+	}
+	cn := &auth.Auth{UID: "c1", AccessToken: "at1", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"}
+	gl := &auth.Auth{UID: "g1", AccessToken: "at2", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"}
+	cn.BackfillRealm()
+	gl.BackfillRealm()
+	h := NewHandler(Config{Pool: testPoolWith(cn, gl), Upstream: up})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/fetch",
+		strings.NewReader(`{"url":"https://docs.google.com/x"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d cn=%d gl=%d body=%s（CN 域 15021 后应改试 global 域）",
+			rec.Code, cnHits, glHits, rec.Body.String())
+	}
+	if cnHits == 0 || glHits == 0 {
+		t.Fatalf("应先在 CN 域试过、再跨到 global 域：cn=%d gl=%d", cnHits, glHits)
 	}
 }

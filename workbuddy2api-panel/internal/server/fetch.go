@@ -69,6 +69,49 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tried := map[string]bool{}
+	lastErr, handled := h.fetchInRealm(w, r, target, realm, tried)
+	if handled {
+		return
+	}
+	// 域名被上游路由策略拒绝（code 15021）时**跨域兜底**：CN 域 edgebrowser 对 Google
+	// 系域名一律 403 15021，这是**域名级**判定 —— 换遍全池 CN 号都是同一个 403，而
+	// global 域同域名正常。DSh 这类客户端不传 realm、缺省走 CN，于是「抓 Google 文档」
+	// 在默认配置下必失败。
+	//
+	// 只对 15021 跨域：两域积分/账号互不相通，5xx / 限流跨域没有意义。
+	if fetchDomainRejected(lastErr) {
+		alt := "global"
+		if realm == "global" {
+			alt = "cn"
+		}
+		if h.cfg.Pool.ServableForRealm(alt) {
+			log.Printf("fetch realm=%s: 域名被上游路由策略拒绝（15021），改试 %s 域", realm, alt)
+			lastErr, handled = h.fetchInRealm(w, r, target, alt, tried)
+			if handled {
+				return
+			}
+			realm = alt // 日志/错误口径按最终尝试的域
+		}
+	}
+
+	status, code := http.StatusBadGateway, "upstream_error"
+	var ue *upstream.Error
+	switch {
+	case len(tried) == 0:
+		status, code = http.StatusServiceUnavailable, "no_account"
+		lastErr = fmt.Errorf("没有可用的 %s 账号", realm)
+	case errors.As(lastErr, &ue) && ue.Status >= 400:
+		status = ue.Status
+	}
+	log.Printf("fetch realm=%s: 全部尝试失败（%d 个账号）：%v", realm, len(tried), lastErr)
+	writeOpenAIError(w, status, code, lastErr.Error())
+}
+
+// fetchInRealm 在**单域**内跑完选号/抓取/错误处置。
+//
+// 返回 (lastErr, handled)：handled=true 表示响应已经写出（成功 / 请求级错误透传），
+// 调用方直接 return；否则把 lastErr 交给跨域兜底判断。
+func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, realm string, tried map[string]bool) (error, bool) {
 	var lastErr error
 	for attempt := 0; attempt < searchAttempts; attempt++ {
 		a := h.cfg.Pool.PickExcludingForRealm(tried, "", realm)
@@ -90,13 +133,21 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 				// 上游 200 但形状不对：改写成 502，别把半成品当成功透传。
 				log.Printf("fetch %s realm=%s: 上游响应不可用: %v", logfmt.Label(a.UID, a.Nickname), realm, perr)
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_error", perr.Error())
-				return
+				return lastErr, true
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(out)
-			return
+			return nil, true
 		}
 		lastErr = ferr
+		// 15021 判定放在**任何类型分支之前**：它不是账号的错（域名级判定），既不该
+		// 换号重试，也不该喂连败计数 —— 「连抓几个 Google 文档把单域池逐个降到出池」
+		// 就是上游 #130 的实案。用字符串判据（不依赖 error 类型的 Kind 归类），
+		// 因为 15021 会以 Kind=client + 403 的形态出现，走的是请求级 fail-fast 那条路。
+		if fetchDomainRejected(ferr) {
+			log.Printf("fetch realm=%s: 域名被路由策略拒绝（15021），不记账号失败、不换号", realm)
+			continue
+		}
 		var ue *upstream.Error
 		if errors.As(ferr, &ue) {
 			// 与 search/images 同一套失败处置（冷却/熔断/模型负缓存/12153 计数）。
@@ -111,23 +162,24 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("fetch realm=%s: 请求级错误 kind=%v，不再换号", realm, ue.Kind)
 				writeOpenAIError(w, status, "upstream_error", ue.Msg)
-				return
+				return lastErr, true
 			}
 		}
 		log.Printf("fetch %s realm=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), realm, attempt+1, ferr)
 	}
 
-	status, code := http.StatusBadGateway, "upstream_error"
-	var ue *upstream.Error
-	switch {
-	case len(tried) == 0:
-		status, code = http.StatusServiceUnavailable, "no_account"
-		lastErr = fmt.Errorf("没有可用的 %s 账号", realm)
-	case errors.As(lastErr, &ue) && ue.Status >= 400:
-		status = ue.Status
-	}
-	log.Printf("fetch realm=%s: 全部尝试失败（%d 个账号）：%v", realm, len(tried), lastErr)
-	writeOpenAIError(w, status, code, lastErr.Error())
+	return lastErr, false
+}
+
+// fetchDomainRejected 判定「域名被上游路由策略拒绝」（code 15021）。
+//
+// 这是**域名级**判定而不是账号级：同一个 URL 换遍全池的 CN 号都是同一个 403，
+// 所以既不该换号重试（白烧），也不该喂连败计数。
+//
+// 用错误串判断而不是 error 类型：15021 以 Kind=client + status 403 的形态出现，
+// 走的是「请求级 fail-fast」那条路 —— 按 Kind 判会把它和普通的 url 校验失败混在一起。
+func fetchDomainRejected(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "15021")
 }
 
 // normalizeFetchResponse 确保响应是 DSH 需要的 {"content": "<markdown>"} 形状。
