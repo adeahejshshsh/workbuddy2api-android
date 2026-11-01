@@ -261,6 +261,13 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	// REST/RPC 族的 Accept 是宽松值（真机逐头）；chat 那条链收窄为 event-stream，
 	// 由 ChatHeaders 覆盖。
 	req.Header.Set("Accept", "application/json, text/plain, */*")
+	// 真机全链路同值 `gzip, compress, deflate, br`（billing 21/21、report 1/1 逐条统计）。
+	// 本仓只声明 **gzip, deflate**：brotli 需要额外依赖，本机离线装不上，而「声明了却
+	// 解不了」比不声明更糟（上游会真的回 br，我们直接解析失败）。这是已知偏离。
+	// 显式声明会关闭 net/http 透明解压 → 解码统一在 do() 里做（decode_body.go）。
+	// chat 链路例外：ChatHeaders 会 Del 掉这个头，交回 net/http 自动 gzip（SSE 长流的
+	// 解码要同时动 monitorBody / idle 监控 / 首包计时三处，风险远大于一个头的收益）。
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	// X-Requested-With **只属 chat 族**（RPC 族 56/56 无、渲染器族 10/10 有、chat 5/5 有）。
 	// 此前放在 CommonHeaders 全局注入，等于给 refresh / report / busy / console-as 全多
 	// 盖一个客户端不发的头。
@@ -321,6 +328,10 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.CommonHeaders(req, a)
 	// chat 流式 Accept 覆盖 CommonHeaders 的非流式默认（D6）。
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	// chat 链路交回 net/http 自动 gzip：SSE 长流要走 monitorBody / idle 监控 / 首包计时，
+	// 在 do() 里再套一层解码会把三处的时序全打乱。删掉头 = 让 Transport 自己加 gzip 并
+	// 透明解压（那时 resp.Header 里不会有 Content-Encoding，do() 的解码分支自然跳过）。
+	req.Header.Del("Accept-Encoding")
 	// X-Requested-With 只属 chat 族（2026-10-30 真机逐头）。
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	// chat 族 UA 首段恒驼峰 WorkBuddy（SDK buildUserAgent）——CommonHeaders 给的是
