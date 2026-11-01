@@ -32,3 +32,12 @@ jobs:
 
       - name: test
         run: go test ./...
+
+      # 出站头与官方真机夹具对拍（默认跳过，这里显式开启作门禁）。
+      # 夹具是 WorkBuddy 桌面端真机抓包原文；任何头名/值/大小写/顺序漂移都会红。
+      # 改夹具必须同时说明抓包依据，否则等于自己给自己放水。
+      #
+      # 2026-11-01 接进来之前先清了 7 处差异（chat）与 34→8（/v2/chat/busy）——
+      # 先落量具、再清差异、最后才上门禁。红门禁进 main 只会逼着以后绕开 CI。
+      - name: official-head parity
+        run: WB2A_PARITY=1 go test ./internal/upstream -run TestOfficialParity -v
