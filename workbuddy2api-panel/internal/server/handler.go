@@ -1624,6 +1624,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrChannelRefused {
 				break
 			}
+			// 6020 **带 `data.retry_after`** 时不再换号（上游 2026-11-01 #125）：上游给的是
+			// 通道级口径 —— 队列按 `client_user_type` 全局共享，实测 position 2502→2648
+			// 只见随时间上涨、retry_after=40。在那 40 秒里换号必然撞同一堵墙，只是把
+			// **同一份排队请求**多发 MaxRotate 次（embeddings 链路早已 fail-fast 同口径）。
+			// 6021（队列满、**无** retry_after）保留下面的轮转：那是间歇空窗，换号有机会碰上。
+			if uerr.RetryAfter > 0 {
+				break
+			}
 			// 6020/6021 排队**继续轮转**（上游 2026-10-28 f07eba5 翻案）：队列可用性是
 			// 间歇的 —— 生产实案同一分钟内既有 6021 也有成功（两号连续 6021 后 33s 内
 			// 同模型恢复）。一次性 fail-fast 把几秒抖动直接交给客户端。队列全局共享，

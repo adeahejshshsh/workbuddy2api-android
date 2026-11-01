@@ -507,6 +507,30 @@ func ParseRetryAfter(h http.Header) (time.Duration, bool) {
 	return 0, false
 }
 
+// parseQueueRetryAfter 从 6020/6021 排队响应的 body 抽上游明示的重试等待
+// （data.retry_after，整数秒）。上游把排队口径放在 **body** 而不是 Retry-After 头
+// （真机：429 + code 6020，data 含 queue_position/queue_size/retry_after/
+// estimated_wait，头侧无任何等待信息），只认头的 ParseRetryAfter 拿不到。
+//
+// 只认结构化 data 字段：msg 是 i18n 键（queue.waiting.title）无数值可解析，
+// requestId 之类恰好含数字的字段也不会误伤。超过 retryAfterSanity 按异常值封顶。
+// 解析不到返回 false，调用方回落本地兜底。
+func parseQueueRetryAfter(body []byte) (time.Duration, bool) {
+	var env struct {
+		Data struct {
+			RetryAfter int64 `json:"retry_after"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || env.Data.RetryAfter <= 0 {
+		return 0, false
+	}
+	d := time.Duration(env.Data.RetryAfter) * time.Second
+	if d > retryAfterSanity {
+		d = retryAfterSanity
+	}
+	return d, true
+}
+
 // isAllDigits 报告 s 是否为纯数字（前置快筛，免 strconv 之后再判语义）。
 func isAllDigits(s string) bool {
 	if s == "" {
@@ -1539,6 +1563,13 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
 			if d, ok := ParseRetryAfter(resp.Header); ok {
 				ue.RetryAfter = d
+			} else if kind == ErrUpstreamBusy {
+				// 6020 排队信封的等待口径在 body（data.retry_after），头侧没有。
+				// 不抽它的话 handler 末端只能回落本地兜底，且「带 retry_after 就别换号
+				// 重打」那条判据永远不成立（uerr.RetryAfter 恒 0）。
+				if d, ok := parseQueueRetryAfter(raw); ok {
+					ue.RetryAfter = d
+				}
 			}
 			return nil, resp.StatusCode, raw, ue
 		}
