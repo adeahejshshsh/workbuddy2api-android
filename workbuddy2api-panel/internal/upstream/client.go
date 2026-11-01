@@ -907,6 +907,8 @@ type Client struct {
 	SanitizeFingerprints atomic.Bool
 	// effortPolicy 网关思考档位策略（config thinking 节，热更新用 atomic.Pointer）。
 	effortPolicy atomic.Pointer[EffortPolicy]
+	// KeepRecentRounds prompt.keep_recent_rounds：出站前只保留最近 N 轮历史（0 = 关）。
+	KeepRecentRounds atomic.Int64
 
 	// modelBusyUnsupported 上游 /v2/chat/busy 在该域不存在（国际版实测 404）。
 	// 探到一次即置位，本进程后续跳过探测。atomic：并发调用只读 + 一次性写。
@@ -1067,6 +1069,9 @@ func (c *Client) chatBase(a *auth.Auth) string {
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
 func (c *Client) prepareBody(body []byte, realm, uid, conversationID, cacheKeyID string) []byte {
+	// 按轮裁剪（prompt.keep_recent_rounds，0 = 关）：放在一切改写之前 —— 后面几条
+	// 规则（Kimi $ref、档位注入、人格改写）都只看当前 messages，先裁能少做无用功。
+	body = TrimRounds(body, int(c.KeepRecentRounds.Load()))
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
 		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如

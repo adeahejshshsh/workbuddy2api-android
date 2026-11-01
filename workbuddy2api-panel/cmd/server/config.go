@@ -270,6 +270,11 @@ type Config struct {
 		// custom = 网关用自有系统提示词替换客户端 system/developer；
 		// append = 两者并用：开头连续 system/developer 块后插网关 system，既有消息逐字不动（issue #129）。
 		Mode string `json:"mode"` // "passthrough" / "custom" / "append"
+		// KeepRecentRounds 出站前只保留最近 N 轮历史（0 = 关，缺省）。
+		// 一轮 = 一条 user 消息及其后的 assistant/tool 回复；裁剪点落在整轮边界，
+		// 不会切开 tool_calls 与配对 tool 结果（切开上游直接 400）；system 全留。
+		// 上游实测同一条 4 轮请求 prompt_tokens 958 → 38。
+		KeepRecentRounds int `json:"keep_recent_rounds"`
 		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
 		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
 		File string `json:"file"`

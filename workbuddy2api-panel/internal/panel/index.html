@@ -1230,6 +1230,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">提示词文件路径</span>
                 <input name="prompt_file" placeholder="留空 = 内置默认提示词">
                 <span class="hint">需重启</span></label>
+              <label class="fld"><span class="lb">只保留最近 N 轮历史</span>
+                <input name="prompt_keep_recent_rounds" type="number" min="0" placeholder="0">
+                <span class="hint">0 = 不裁（缺省）。一轮 = 一条 user 消息及其后的 assistant/tool 回复；裁剪点落在整轮边界，不会切开 tool_calls 与配对结果；system 全留。实测同一条 4 轮请求 prompt_tokens 958 → 38，保存即热生效</span></label>
             </div>
             <div class="grid2">
               <div>
