@@ -31,6 +31,9 @@ type officialCase struct {
 	path    string // 对照的请求路径（夹具第一行里的）
 	chat    bool   // 走 chatHTTP（SSE 那条）而不是 HTTP
 	build   func(c *Client, a *auth.Auth, base string) *http.Request
+	// ignoreValue 该路径上**刻意偏离**的头（只豁免值比对，不豁免存在性）。
+	// 每一笔都必须写明为什么 —— 这是给自己放水的唯一入口，滥用它等于把门禁关掉。
+	ignoreValue map[string]bool
 }
 
 // dynamicHeader 值每次不同、不能逐一比对（只比存在性与形态）。
@@ -159,6 +162,9 @@ func TestOfficialParity(t *testing.T) {
 		},
 		{
 			fixture: "official_v3config_head.txt", path: "/v3/config",
+			// 本仓 /v3/config 的 UA 是刻意偏离：走 IDE UA + CLI UA 双路探测取并集，
+			// 实测两路各有独有模型（见 codeBuddyCLIUA 注释）；改成官方两段式会丢模型。
+			ignoreValue: map[string]bool{"user-agent": true},
 			build: func(c *Client, a *auth.Auth, base string) *http.Request {
 				req, _ := http.NewRequest(http.MethodGet, base+"/v3/config", nil)
 				req.Header.Set("Accept", "application/json, text/plain, */*")
@@ -263,6 +269,22 @@ func TestOfficialParity(t *testing.T) {
 				for _, d := range caseDiff {
 					t.Logf("   %s", d)
 				}
+			}
+			if len(tc.ignoreValue) > 0 {
+				kept := valDiff[:0]
+				for _, d := range valDiff {
+					skip := false
+					for h := range tc.ignoreValue {
+						if strings.Contains(strings.ToLower(d), strings.ToLower(h)+":") {
+							skip = true
+							t.Logf("   [刻意偏离，已豁免] %s", d)
+						}
+					}
+					if !skip {
+						kept = append(kept, d)
+					}
+				}
+				valDiff = kept
 			}
 			if len(valDiff) > 0 {
 				t.Logf("【值不同】")

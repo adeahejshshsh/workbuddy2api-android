@@ -187,6 +187,32 @@ func privateDataFor(a *auth.Auth) string {
 	return "false"
 }
 
+// busyHeaders /v2/chat/busy 的专用头（**8 个**，官方真机夹具
+// testdata/official_chat_busy_head.txt 逐字节）。
+//
+// 此前这个端点套的是 ChatHeaders —— 那是 chat 族 43 个头的集合（stainless 八连、
+// IDE 三连、agent 归因、conversation 四连、baggage、b3…）。一个官方只发 8 个头的
+// 端点我们发了 34 个，是最刺眼的指纹差异：**问题不在某个头，在头族的作用域**。
+//
+// 官方这里用的是 RPC 族：Accept 宽松值 + X-Product + X-Domain + X-Request-ID，
+// 没有浏览器语义头、没有 stainless 族、没有 conversation 族、也没有 x-no-* 哨兵。
+func (c *Client) busyHeaders(req *http.Request, a *auth.Auth) {
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", c.rpcUAFor(a))
+	req.Header.Set("X-Request-ID", randHex32())
+	req.Header.Set("X-Product", "SaaS")
+	if at := a.AccessTokenValue(); at != "" {
+		req.Header.Set("Authorization", "Bearer "+at)
+	}
+	if a != nil && a.UID != "" {
+		req.Header.Set("X-User-Id", a.UID)
+	}
+	// X-Domain 声明「哪个前端在调用」，取 Origin 的主机名（CN www.workbuddy.cn /
+	// GL www.workbuddy.ai），与 report / 登录三端点同源口径。
+	req.Header.Set("X-Domain", strings.TrimPrefix(strings.TrimPrefix(originRefererFor(a), "https://"), "http://"))
+}
+
 // billingUA 白名单类（billing/checkin/banner）出站 UA：单段 `WorkBuddy/<clientVersion>`
 // （官方 banner 显式覆写形态，不带 CLI 段）。默认生效（伪造官方桌面端指纹）；
 // 显式 client_name="SaaS" 才不设 UA（还原旧行为，Go 默认 UA）。
@@ -326,8 +352,11 @@ type ChatMeta struct {
 // meta 为会话头族元数据（纯新增，不改既有头），见 injectConversationHeaders。
 func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, meta ChatMeta) {
 	c.CommonHeaders(req, a)
-	// chat 流式 Accept 覆盖 CommonHeaders 的非流式默认（D6）。
-	req.Header.Set("Accept", "application/json, text/event-stream")
+	// chat 的 Accept 就是 **application/json**（2026-11-01 真机夹具逐字节）——
+	// 官方即便走 SSE 也不在请求头里声明 event-stream（那由 body 的 stream:true 决定，
+	// 响应是否分块跟 Accept 无关）。此前我们发 `application/json, text/event-stream`，
+	// 是「按流式推理」的产物，与真机不符。
+	req.Header.Set("Accept", "application/json")
 	// chat 链路交回 net/http 自动 gzip：SSE 长流要走 monitorBody / idle 监控 / 首包计时，
 	// 在 do() 里再套一层解码会把三处的时序全打乱。删掉头 = 让 Transport 自己加 gzip 并
 	// 透明解压（那时 resp.Header 里不会有 Content-Encoding，do() 的解码分支自然跳过）。
@@ -337,6 +366,9 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	// chat 族 UA 首段恒驼峰 WorkBuddy（SDK buildUserAgent）——CommonHeaders 给的是
 	// RPC 族形态，这里改回来。
 	req.Header.Set("User-Agent", c.userAgent(a))
+	// 链路追踪四头（traceparent / b3 / X-B3-ParentSpanId / acp-connection-id）：
+	// 官方由 undici/OTel 每条自动注入，此前我们整族都缺。
+	injectTraceHeaders(req)
 	// CLI 客户端没有浏览器语义：chat 路径从不发 Origin / Referer / Accept-Language
 	// （两版客户端真机逐头对照）。CommonHeaders 为其它路径设了它们，这里剥掉。
 	req.Header.Del("Origin")
@@ -388,13 +420,12 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	if a != nil && !a.IsGlobal() {
 		if a.EnterpriseID != "" {
 			req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
-		} else {
-			req.Header.Set("X-No-Enterprise-Id", "1")
 		}
+		// 不再补 X-No-Enterprise-Id / X-No-Department-Info：官方 chat 链路的真机夹具里
+		// **一个 x-no-* 都没有**（`x-no-*` 是未鉴权/未落库端点 —— 登录三端点 —— 的哨兵，
+		// 不是 chat 的）。缺企业 ID / 域时宁可不发，也不自造一个官方不发的头。
 		if d := a.DomainValue(); d != "" {
 			req.Header.Set("X-Domain", d)
-		} else {
-			req.Header.Set("X-No-Department-Info", "1")
 		}
 	} else {
 		c.injectGlobalChatHeaders(req, a)
@@ -545,7 +576,8 @@ func (c *Client) injectAttribution(req *http.Request, a *auth.Auth) {
 	// 这里用不带 realm 的 clientVersion() 会覆盖成 CN 默认 5.8.3 —— global 号的
 	// UA 是 5.8.4 而 X-IDE-Version 是 5.8.3，两个头自相矛盾。
 	req.Header.Set("X-IDE-Version", c.clientVersionFor(a))
-	req.Header.Set("X-Product", name)
+	// X-Product **恒为 SaaS**（官方真机夹具）：此前这里用 IDE name 覆盖成 "WorkBuddy"，
+	// 与官方不符 —— X-IDE-Name/Type 才是 "WorkBuddy"，X-Product 是部署形态。
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。
