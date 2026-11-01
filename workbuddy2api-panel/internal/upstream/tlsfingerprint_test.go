@@ -21,6 +21,11 @@ import (
 
 // helloFields ClientHello 里算 JA3/JA4 需要的字段。
 type helloFields struct {
+	// sessionIDLen / recordLen：session_id 与 record 长度**不属于 JA3/JA4**，必须
+	// 单独断言 —— 否则 uTLS 若发出 0 字节 session_id，指纹照样"一致"。
+	// 官方 Node 每次连接发 32 字节随机 session_id（39 次抓包 39 个不同值）。
+	sessionIDLen      int
+	recordLen         int
 	version           uint16
 	ciphers           []uint16
 	exts              []uint16
@@ -34,7 +39,7 @@ type helloFields struct {
 
 func parseClientHello(t *testing.T, raw []byte) *helloFields {
 	t.Helper()
-	f := &helloFields{}
+	f := &helloFields{recordLen: len(raw)}
 	p := 5
 	if len(raw) < p+4 || raw[p] != 1 {
 		t.Fatalf("不是 ClientHello（首字节 %d）", raw[0])
@@ -43,7 +48,9 @@ func parseClientHello(t *testing.T, raw []byte) *helloFields {
 	f.version = binary.BigEndian.Uint16(raw[p : p+2])
 	p += 2 + 32
 	sidLen := int(raw[p])
+
 	p += 1 + sidLen
+	f.sessionIDLen = sidLen
 	csLen := int(binary.BigEndian.Uint16(raw[p : p+2]))
 	p += 2
 	for i := 0; i+1 < csLen; i += 2 {
@@ -271,6 +278,15 @@ func TestNodeFingerprintMatchesOfficial(t *testing.T) {
 
 	if got := f.ja3(); got != OfficialJA3 {
 		t.Errorf("JA3 与官方不一致\n  want: %s\n  got : %s", OfficialJA3, got)
+	}
+	// session_id 与 record 长度**不在 JA3/JA4 里**，但同样是形态的一部分：
+	// uTLS 若某天改成发 0 字节 session_id，指纹仍然"一致"，风控却一眼看得出。
+	// 官方 39 次抓包每次都是 32 字节随机值（无重复）。
+	if f.sessionIDLen != 32 {
+		t.Errorf("session_id 长度 = %d want 32（官方每次连接恒 32 字节，且不进 JA3/JA4，必须单独盯）", f.sessionIDLen)
+	}
+	if f.recordLen == 0 {
+		t.Errorf("record 长度 = 0，ClientHello 没被抓到")
 	}
 	if got := f.ja4(); got != OfficialJA4 {
 		t.Errorf("JA4 与官方不一致\n  want: %s\n  got : %s", OfficialJA4, got)

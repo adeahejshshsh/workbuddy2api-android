@@ -44,7 +44,10 @@ var dynamicHeader = map[string]bool{
 	"traceparent": true, "b3": true, "x-b3-traceid": true,
 	"x-b3-parentspanid": true, "x-b3-spanid": true, "x-trace-id": true,
 	"baggage": true, "authorization": true, "x-user-id": true,
-	"content-length": true, "host": true, "connection": true,
+	// connection **不在此列**：它的值由 path 决定（keep-alive / close），是官方
+	// 固定发送的字段而非传输层动态产物。豁免它等于让「官方必发、我们从没发过」
+	// 这类回归永远不会被门禁抓到 —— 本项目已经踩过一次（56f479d）。
+	"content-length": true, "host": true,
 	"content-encoding": true, "cookie": true, "x-device-token": true,
 	// x-domain 从上游 base 推出来，测试里 base 是 127.0.0.1 抓包监听，
 	// 生产环境才等于真实域；这条差异是脚手架造成的，不算产品缺陷。
@@ -53,7 +56,7 @@ var dynamicHeader = map[string]bool{
 
 // transportHeader 传输层头，不进内容比对。
 var transportHeader = map[string]bool{
-	"host": true, "connection": true, "content-length": true,
+	"host": true, "content-length": true,
 	"accept-encoding": true, "content-encoding": true,
 }
 

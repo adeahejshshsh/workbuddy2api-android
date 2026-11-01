@@ -23,6 +23,8 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	// acp-connection-id 归一成 Acp-Connection-Id、X-B3-ParentSpanId 拍成
 	// X-B3-Parentspanid —— 头集合与取值全对，逐字节看仍是另一族包）。
 	// 逐名映射而非无差别小写化：后者会把 User-Agent 打回 Go-http-client/1.1。
+	// 官方必发、Go 默认不发的那一行（见 applyConnectionHeader）
+	applyConnectionHeader(req)
 	req = normalizeHeaderSpelling(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -75,4 +77,36 @@ func injectTraceHeaders(req *http.Request) {
 	req.Header.Set("b3", trace+"-"+span+"-1-"+parent)
 	req.Header.Set("X-B3-ParentSpanId", parent)
 	req.Header.Set("acp-connection-id", randUUID())
+}
+
+// officialConnectionValue 给出该 path 上官方客户端实际发送的 Connection 值。
+//
+// 2026-10-30 双版本真机抓包（CN 5.9.3 / GL 5.9.4）：官方在每条 RPC 上都**显式**
+// 写了 Connection —— 除 `/v3/config` 是 `close` 外，其余全是 `keep-alive`。
+// HTTP/1.1 默认即复用，Go 因此从不发这一行；但头集合少了它就是少一个字段，
+// 风控按白名单查头时，「缺一个官方必发的头」和「多一个官方不发的头」一样显眼。
+//
+// 没抓到过的 path 返回空串，保持 Go 默认行为，不臆造。
+func officialConnectionValue(path string) string {
+	switch path {
+	case "/v3/config":
+		return "close"
+	case "/v2/chat/completions", "/v2/chat/busy", "/v2/report":
+		return "keep-alive"
+	}
+	return ""
+}
+
+// applyConnectionHeader 把官方那个显式的 Connection 头补回去。
+//
+// `close` **不能**写进 Header：net/http 的 transferWriter 会按 req.Close 自己写
+// 一行 `Connection: close`，手写会重复成两行。`keep-alive` 相反 —— Go 认为它是
+// 默认值所以从不发出，必须手写才会出现在线上字节里。
+func applyConnectionHeader(req *http.Request) {
+	switch officialConnectionValue(req.URL.Path) {
+	case "close":
+		req.Close = true
+	case "keep-alive":
+		req.Header.Set("Connection", "keep-alive")
+	}
 }
