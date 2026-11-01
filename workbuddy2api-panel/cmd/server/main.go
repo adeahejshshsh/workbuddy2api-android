@@ -210,6 +210,8 @@ func main() {
 	up := upstream.New()
 	// 思考档位策略（thinking 节）：启动装载，面板保存配置时热更新。
 	up.SetEffortPolicy(effortPolicyOf(cfg))
+	up.KeepRecentRounds.Store(int64(cfg.Prompt.KeepRecentRounds))
+	up.KeepRecentRounds.Store(int64(cfg.Prompt.KeepRecentRounds)) // 按轮裁剪历史（0 = 关）
 	if cfg.Thinking.Enabled {
 		priority := "客户端优先（只在缺档时补默认档）"
 		if !cfg.Thinking.ClientPriority {

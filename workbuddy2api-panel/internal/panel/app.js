@@ -1354,6 +1354,7 @@ const CFG_MAP = {
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
+  prompt_keep_recent_rounds: ['prompt', 'keep_recent_rounds'],
   request_archive_max_mb: ['logging', 'request_archive_max_mb'],
   account_spread_seconds: ['schedule', 'account_spread_seconds'],
   prompt_identity_override_enabled: ['prompt', 'identity_override_enabled'],
@@ -1424,7 +1425,7 @@ async function loadConfig() {
 const NUMERIC_CFG = new Set([
   'request_retention_days', 'request_archive_max_mb', 'package_detail_limit',
   'max_in_flight', 'max_in_flight_global', 'breaker_threshold', 'degrade_threshold',
-  'credit_floor', 'balance_refresh_minutes', 'account_spread_seconds',
+  'credit_floor', 'balance_refresh_minutes', 'prompt_keep_recent_rounds', 'account_spread_seconds',
   'balance_refresh_jitter_permill',
   'timeout_seconds', 'header_timeout_seconds', 'idle_timeout_seconds',
   'idle_weight_per_hour', 'idle_weight_max',

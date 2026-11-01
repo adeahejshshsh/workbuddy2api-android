@@ -73,7 +73,8 @@
   },
   "prompt": {
     "mode": "passthrough",
-    "file": ""
+    "file": "",
+    "keep_recent_rounds": 0
   },
   "upstash": {
     "url": "",
