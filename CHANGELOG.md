@@ -1,5 +1,64 @@
 # 变更记录
 
+## v1.35.6
+
+> 本节主线只有一件事：**把出站请求做到与官方客户端逐字节一致**。前面几版一直在补
+> 单个头，这版换了个做法——先把真机抓包做成夹具、让门禁能自己量出差异，再按量出来
+> 的差异逐项清。做完之后又发现 HTTP 层本来就只是半张脸。
+
+### 指纹对齐（HTTP 层）
+
+- 🔤 **头名逐名映射**：Go 的 `CanonicalMIMEHeaderKey` 会把 `acp-connection-id` 归一成
+  `Acp-Connection-Id`、`X-B3-ParentSpanId` 拍成 `X-B3-Parentspanid` —— 头集合与取值
+  全对，**逐字节看仍是另一族包**。按 45 项真机表逐名纠正（不是无差别小写化，那会把
+  `User-Agent` 打回 `Go-http-client/1.1`）。
+- 📐 **头发送顺序**：Go 按 key 排序写头，官方是 Node，按代码插入序。在 conn 层重排成
+  官方顺序（43 头 / 11 头 / 8 头 / 6 头四张表，表外路径不动）。
+- 🎯 **头族作用域纠偏**：`/v2/chat/busy` 此前套的是 chat 族 43 个头的集合，官方只发
+  **8 个**。这类问题的根子不在某个头，在**头族的作用域** —— 一个端点的头集合应该是
+  一整套，而不是从别处顺手套过来的。
+- ➕ **补回 `Connection`**：7 份夹具里 6 份 `keep-alive`、`/v3/config` 是 `close`，
+  官方每条 RPC 都显式写。HTTP/1.1 默认复用，Go 永远不发这一行。
+- 🧩 chat 补齐 4 个链路头（`traceparent` / `b3` / `X-B3-ParentSpanId` / `acp-connection-id`）；
+  去掉 chat 不该有的 `x-no-*` 哨兵；`X-Product` 改回官方 `SaaS`；`Accept` 改回
+  `application/json`（SSE 不靠请求头协商）。
+- 🗜 **`Accept-Encoding` 补齐真机四段** `gzip, compress, deflate, br`，配套实现
+  gzip / deflate(zlib+裸) / br 解码 —— 显式声明会关闭 net/http 的透明解压，两边必须成对。
+
+### 指纹对齐（TLS 层）
+
+- 🔐 **出站 TLS ClientHello 复刻官方 Node/OpenSSL**：头做到 100% 一致也只到 HTTP 层，
+  TLS 握手在它之前就完成了。用 uTLS 手搓官方 ClientHello，**JA3 / JA4 与真机常量相等**
+  （`71dc8c53…` / `t13d0a1200_…`，CN 与 GL 同值）。配置 `upstream.tls_fingerprint`
+  可切 `node` / `go`。
+
+### 门禁与回归
+
+- 🧪 **真机头夹具 + 逐路径对拍**：7 份抓包原文进 `testdata`，`WB2A_PARITY=1` 逐头比对
+  名字 / 值 / 大小写 / 顺序。先落量具、再清差异、最后才接进 CI —— 红门禁进 main 只会
+  逼着以后绕开 CI。
+- 🚨 对拍立刻量出两处老问题：`/v2/chat/busy` 我们发 34 个头（官方 8 个）、chat 缺 4 个
+  链路头。**没有这把尺子，这些差异会一直躺在那里。**
+
+### 修复
+
+- 🌐 **抓取跨域兜底**：CN 域对 Google 系域名一律 403 `15021`（域名级判定，换遍全池都是
+  同一个 403），此前在默认配置下「抓 Google 文档」必失败，还会把整池 CN 号逐个喂到
+  连败出池。现在识别 15021、不罚号、改试 global 域。
+- ⏳ 6020 带 `retry_after` 时不再换号（白烧一个号不如等）。
+- 🔑 `model_fallback` 支持 `cn:` / `global:` 域前缀键，且**只在本域生效**（跨域串味会
+  凭空多出一条没验证过的降级路径）。
+- ✂️ `prompt.keep_recent_rounds`：出站前只保留最近 N 轮（整轮边界，system 全留）。
+- ⚖️ 账号调度按窗口用量加权，热门号自动降权。
+- 🔌 登录链路禁 h2 + 三档超时（握手 8s / 首字节 15s），半死连接不再拖到超时。
+
+### 面板
+
+- 🗂 配置页新增「分域配置」：可直接编辑国内版 / 国际版的 `chat_base` / `billing_base`
+  （此前只能手改配置文件）。三档切换（全部 / 国内版 / 国际版）只控制可见性，保存仍回传
+  整份配置，切换不丢字段。
+- 🧾 模型列表按 models.dev 形状输出（context / efforts / 图片输入）。
+
 ## v1.35.5
 
 ### 新增功能
