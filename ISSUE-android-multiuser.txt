@@ -1,0 +1,99 @@
+标题：[Android] 双用户（secondary user）布局下 pnpm 等 shim 全部 exit 127，共享存储 realpath 探测失效
+
+## 环境
+
+- 设备：Android（OnePlus/ColorOS），系统开了**双用户/多用户**（主用户 user 0 + 分身/工作资料 user 10）
+- 应用：DSH 移动壳（Termux 派生），包名 `com.dsharnessmobile.shell`
+- 应用本体实际落点：`/data/user/10/com.dsharnessmobile.shell`
+- 版本：`@deepseek-ai/dsh` 0.2.1-rc.3
+
+## 现象
+
+1. 所有走 pnpm 的插件安装（subagent、marketplace、普通 npm 包）**全部失败**，退出码 127（command not found / cannot execute）。
+2. DSH 自身对 `/storage/emulated/0` 的 realpath 探测失败，共享目录相关功能不可用。
+3. 在「所有文件访问」里已授权，但对上述两个现象没有任何改善。
+
+## 根因一：shim 脚本把构建期前缀写死成 user 0
+
+`$PREFIX/bin/pnpm` 的实际内容：
+
+```sh
+#!/system/bin/sh
+# dsh-mobile: pnpm standalone shim（npm registry 打包，自包含；node 由快照提供）
+exec "/data/user/0/com.dsharnessmobile.shell/files/usr/bin/node" \
+     "/data/user/0/com.dsharnessmobile.shell/files/usr/lib/node_modules/pnpm/bin/pnpm.cjs" "$@"
+```
+
+它写死的是 `user 0` 的前缀。当应用装在 `user 10` 时：
+
+- 真实 `$PREFIX` 是 `/data/user/10/com.dsharnessmobile.shell/files/usr`
+- 而 shim 去执行 `/data/user/0/...`（**另一个 Android 用户**的数据目录）
+
+Android 的跨用户隔离让 user 10 的进程无法访问 user 0 的 app 私有目录，于是 `exec` 直接失败 → 127。
+
+**这不是 pnpm 独有的问题**：`$PREFIX/bin` 下共 **160 个文件**含该硬编码路径（clang 包装器、`termux-exec-system-linker-exec`、`socat-mux.sh`、`irb`、`chsh`、`termux-backup` 等）。
+
+## 根因二：共享存储路径写死成 primary 用户
+
+DSH 侧对共享存储的探测以 `/storage/emulated/0` 为基准。多用户布局下：
+
+- `user 0` 的共享存储才是 `/storage/emulated/0`
+- `user 10` 的共享存储是 `/storage/emulated/10`
+- `MANAGE_EXTERNAL_STORAGE` 是**按用户授予**的，你在 user 0 实例里点的「所有文件访问」不会继承给 user 10
+
+所以 user 10 里的 app 进程既拿不到 user 0 的共享存储，也不会自动改用 `/storage/emulated/10` —— realpath 探测必然失败。
+
+## 影响面
+
+- 插件生态（subagent / marketplace）在多用户布局下**完全不可用**
+- 任何依赖共享存储的导入/导出/workspace 交互不可用
+- 用户侧的「已授权」状态与实际可用性不一致，容易误判为权限问题，排查成本高
+
+## 建议修法
+
+**shim（应用侧，也是这批 160 个文件的正解）**
+
+不要在安装期把绝对前缀写死，运行时相对解析：
+
+```sh
+#!/system/bin/sh
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+PREFIX=$(cd "$SELF_DIR/.." && pwd)
+exec "$PREFIX/bin/node" "$PREFIX/lib/node_modules/pnpm/bin/pnpm.cjs" "$@"
+```
+
+这样同一个快照在 user 0 / user 10 / 工作资料下都能自洽，不需要按用户重打。
+
+**共享存储（DSH 侧）**
+
+不要写死 `/storage/emulated/0`，按当前用户的共享存储根探测：
+
+- 优先用平台 API 拿到的外部存储目录（Android 上 `context.getExternalFilesDir()` 的父级 / `Environment.getExternalStorageDirectory()`）
+- 退而求其次：探测 `/storage/emulated/<当前 userId>`（userId 可从 `/proc/self/uid_map` 或 `stat` app 目录得到），或枚举 `/storage/emulated/*` 里**当前用户可写**的那一个
+- 探测失败时降级到 app 私有目录，并在 UI 上明说「共享存储不可用（多用户）」，而不是静默失败
+
+## 复现步骤
+
+1. 主用户（user 0）安装该应用 → 一切正常
+2. 系统设置里新建/启用第二个用户（或工作资料），在该用户下也安装同一应用
+3. 在 **user 10** 实例里打开 DSH
+4. 尝试安装任意插件（`subagent` / marketplace / `pnpm add`）→ exit 127
+5. 检查 `$PREFIX/bin/pnpm` → 路径指向 `/data/user/0/...`
+
+## 附：可自查的一行命令
+
+```sh
+grep -rl "/data/user/0/com.dsharnessmobile.shell" "$PREFIX/bin" | wc -l
+# 多用户布局下这一条是问题规模的度量；user 0 下应视为正常
+```
+
+## 环境采集（当前实例，user 0，仅供参考对照）
+
+```
+uid=10355(u0_a355) ...        # user 0 实例
+$ readlink -f /data/data/com.dsharnessmobile.shell
+/data/data/com.dsharnessmobile.shell
+$ head -3 "$(command -v pnpm)"
+#!/system/bin/sh
+exec "/data/user/0/com.dsharnessmobile.shell/files/usr/bin/node" ...
+```
