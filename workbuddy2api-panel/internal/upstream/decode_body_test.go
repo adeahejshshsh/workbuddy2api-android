@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/andybalholm/brotli"
 )
 
 func encodeWith(t *testing.T, enc string, plain []byte) []byte {
@@ -24,6 +26,10 @@ func encodeWith(t *testing.T, enc string, plain []byte) []byte {
 		_ = w.Close()
 	case "deflate-zlib":
 		w := zlib.NewWriter(&buf)
+		_, _ = w.Write(plain)
+		_ = w.Close()
+	case "br":
+		w := brotli.NewWriter(&buf)
 		_, _ = w.Write(plain)
 		_ = w.Close()
 	case "deflate-raw":
@@ -44,6 +50,7 @@ func TestDecodeBodyIfNeeded(t *testing.T) {
 		{"gzip", "gzip"},
 		{"deflate", "deflate-zlib"},
 		{"deflate", "deflate-raw"},
+		{"br", "br"},
 	}
 	for _, c := range cases {
 		payload := encodeWith(t, c.algo, plain)
@@ -68,15 +75,15 @@ func TestDecodeBodyIfNeeded(t *testing.T) {
 	}
 }
 
-// 不认识的编码（br/compress）必须原样放过 —— 本仓没有 brotli 解码器，
+// 不认识的编码（compress 是 LZW，Go 无内置解码器）必须原样放过 ——
 // 「解错」比「不解」更危险：会把它当明文去解析并误判。
 func TestDecodeBodyUnknownEncodingPassesThrough(t *testing.T) {
 	resp := &http.Response{
-		Header: http.Header{"Content-Encoding": []string{"br"}},
+		Header: http.Header{"Content-Encoding": []string{"compress"}},
 		Body:   io.NopCloser(strings.NewReader("not-really-br")),
 	}
 	out := decodeBodyIfNeeded(resp)
-	if out.Header.Get("Content-Encoding") != "br" {
+	if out.Header.Get("Content-Encoding") != "compress" {
 		t.Fatal("未知编码不该被吞掉")
 	}
 	got, _ := io.ReadAll(out.Body)
@@ -91,7 +98,7 @@ func TestCommonHeadersAcceptEncoding(t *testing.T) {
 	req, _ := http.NewRequest("GET", "https://x.test/v2/x", nil)
 	c.CommonHeaders(req, nil)
 	ae := req.Header.Get("Accept-Encoding")
-	if ae != "gzip, deflate" {
-		t.Fatalf("Accept-Encoding=%q want \"gzip, deflate\"（不能声明解不了的 br）", ae)
+	if ae != "gzip, compress, deflate, br" {
+		t.Fatalf("Accept-Encoding=%q want 真机四段 \"gzip, compress, deflate, br\"", ae)
 	}
 }

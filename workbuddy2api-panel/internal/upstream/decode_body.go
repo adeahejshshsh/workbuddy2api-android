@@ -15,6 +15,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/andybalholm/brotli"
 )
 
 // decodeBodyIfNeeded 按 Content-Encoding 包一层解码；不认识 / 未压缩时原样返回。
@@ -51,10 +53,11 @@ func decodeBodyIfNeeded(resp *http.Response) *http.Response {
 		} else {
 			resp.Body = io.NopCloser(flate.NewReader(bytes.NewReader(raw)))
 		}
+	case "br":
+		// brotli：真机四段里有它，声明了就必须能解（否则上游真回 br 时整类接口解析失败）。
+		resp.Body = readCloser{r: brotli.NewReader(resp.Body), c: resp.Body}
 	default:
-		// br / compress 等：本仓**没有**对应解码器（brotli 需要额外依赖，本机离线装不上），
-		// 所以 CommonHeaders 的 Accept-Encoding 只声明 gzip, deflate —— 真机是四段
-		// `gzip, compress, deflate, br`，这是已知且刻意的偏离（声明了却解不了比不声明更糟）。
+		// compress（LZW）等：HTTP 侧实际不会被选中（Go 无内置解码器），原样放过。
 		return resp
 	}
 	resp.Header.Del("Content-Encoding")

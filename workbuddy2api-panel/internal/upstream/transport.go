@@ -8,11 +8,14 @@ package upstream
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // 连接层参数集中定义（与 server/backoff.go 同风格：一处定义，测试可回读断言）。
@@ -139,7 +142,7 @@ func newTransport() *http.Transport {
 		// 代价：设了它之后 TLSHandshakeTimeout / TLSClientConfig 不再生效，握手超时与
 		// ServerName 由 newTLSDialer 自行保证（我们本来也没配自定义 CA）。
 		// 走代理时不生效（Go 对代理场景只走 DialContext + CONNECT），退化为原生排序。
-		DialTLSContext: newTLSDialer(dialer, nil),
+		DialTLSContext: newTLSDialer(dialer, nil, TLSFingerprintNode),
 		// 出站代理走标准环境变量（上游 PR #223）：HTTP_PROXY / HTTPS_PROXY / NO_PROXY。
 		// 未设时返回 nil = 直连，行为与之前完全一致。
 		Proxy: http.ProxyFromEnvironment,
@@ -192,7 +195,15 @@ func roundTripCloseIdle(rt http.RoundTripper) {
 //
 // 代价：设了它之后 Transport 的 TLSHandshakeTimeout / TLSClientConfig 不再生效，
 // 握手超时与 ServerName 由本函数自行保证（本仓没有自定义 CA，生产恒传 nil）。
-func newTLSDialer(d *net.Dialer, cfg *tls.Config) func(context.Context, string, string) (net.Conn, error) {
+func newTLSDialer(d *net.Dialer, cfg *tls.Config, fp string) func(context.Context, string, string) (net.Conn, error) {
+	insecure := cfg != nil && cfg.InsecureSkipVerify
+	// sniOverride 允许调用方显式指定 SNI（测试把连接指到 127.0.0.1 但仍要发
+	// 真实域名的 SNI，否则 uTLS 对 IP 地址按 RFC 不发 SNI，抓到的 ClientHello
+	// 会少一个扩展、JA3/JA4 全跑偏）。生产 cfg 恒 nil，行为不受影响。
+	sniOverride := ""
+	if cfg != nil {
+		sniOverride = cfg.ServerName
+	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		raw, err := d.DialContext(ctx, network, addr)
 		if err != nil {
@@ -202,6 +213,32 @@ func newTLSDialer(d *net.Dialer, cfg *tls.Config) func(context.Context, string, 
 		if splitErr != nil {
 			host = addr
 		}
+		if sniOverride != "" {
+			host = sniOverride
+		}
+		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+		defer cancel()
+
+		// 复刻路径：uTLS 手搓 ClientHello。ALPN 刻意留空——官方 Node 栈就是
+		// 不带 ALPN，这与 Transport 禁 h2 的口径一致（见 newTransport 注释）。
+		if useNodeFingerprint(fp) {
+			uc := utls.UClient(raw, &utls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: insecure,
+				MinVersion:         tls.VersionTLS12,
+			}, utls.HelloCustom)
+			if perr := uc.ApplyPreset(officialHelloSpec()); perr != nil {
+				raw.Close()
+				return nil, fmt.Errorf("tls fingerprint preset: %w", perr)
+			}
+			if herr := uc.HandshakeContext(hctx); herr != nil {
+				raw.Close()
+				return nil, herr
+			}
+			return newHeadOrderConn(uc), nil
+		}
+
+		// 原生路径：crypto/tls。
 		var tc0 *tls.Config
 		if cfg != nil {
 			tc0 = cfg.Clone()
@@ -209,15 +246,38 @@ func newTLSDialer(d *net.Dialer, cfg *tls.Config) func(context.Context, string, 
 			tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
 		tc0.ServerName = host
-		// NextProtos 留空：与「禁 h2」口径一致 —— 原 Transport 禁 h2 后同样不发 ALPN。
 		tc0.NextProtos = nil
 		tc := tls.Client(raw, tc0)
-		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
-		defer cancel()
 		if herr := tc.HandshakeContext(hctx); herr != nil {
 			raw.Close()
 			return nil, herr
 		}
 		return newHeadOrderConn(tc), nil
+	}
+}
+
+func (c *Client) SetTLSFingerprint(fp string) error {
+	norm, err := validateTLSFingerprint(fp)
+	if err != nil {
+		return err
+	}
+	c.TLSFingerprint = norm
+	c.rebuildTLSDialer()
+	return nil
+}
+
+func (c *Client) rebuildTLSDialer() {
+	d := c.dialer
+	if d == nil {
+		d = newDialer()
+	}
+	for _, cl := range []*http.Client{c.HTTP, c.ChatHTTP} {
+		if cl == nil {
+			continue
+		}
+		if t, ok := cl.Transport.(*http.Transport); ok && t.DialTLSContext != nil {
+			t.DialContext = d.DialContext
+			t.DialTLSContext = newTLSDialer(d, nil, c.TLSFingerprint)
+		}
 	}
 }

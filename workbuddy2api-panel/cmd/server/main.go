@@ -208,6 +208,17 @@ func main() {
 	// upstream.New() 里构造，晚于它调用等于永不生效。
 	upstream.SetDNSServers(cfg.Upstream.DNSServers)
 	up := upstream.New()
+	// TLS 指纹档位（node = 复刻官方 Node/OpenSSL 的 JA3/JA4；go = 原生，排障用）。
+	// 头部对齐只到 HTTP 层，TLS 在 HTTP 之前就握手完了，这一层才是下一道。
+	if err := up.SetTLSFingerprint(cfg.Upstream.TLSFingerprint); err != nil {
+		log.Fatalf("CONFIG: %v", err)
+	}
+	if up.TLSFingerprint == upstream.TLSFingerprintNode {
+		log.Printf("[upstream] TLS 指纹复刻已启用（JA3 %s / JA4 %s）",
+			upstream.OfficialJA3MD5, upstream.OfficialJA4)
+	} else {
+		log.Printf("[upstream] TLS 指纹为原生 Go 形态（JA3/JA4 与官方客户端不一致）")
+	}
 	// 思考档位策略（thinking 节）：启动装载，面板保存配置时热更新。
 	up.SetEffortPolicy(effortPolicyOf(cfg))
 	up.KeepRecentRounds.Store(int64(cfg.Prompt.KeepRecentRounds))

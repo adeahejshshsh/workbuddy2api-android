@@ -66,7 +66,8 @@
     "device_token_file": "",
     "passthrough_ip": false,
     "dump_dir": "",
-    "dump_max_bytes": 0
+    "dump_max_bytes": 0,
+    "tls_fingerprint": "node"
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

@@ -233,6 +233,10 @@ type Config struct {
 		ClientVersion string `json:"client_version"`
 		// ClientVersionGlobal global realm 专用版本段（空 = 内置默认 5.8.4）。
 		// CN 与 intl 是两条独立发版线，单值会让一侧 UA 与真实安装包不符。
+		// TLSFingerprint 出站 TLS ClientHello 指纹档位："node"（默认，复刻官方
+		// Node/OpenSSL 的 JA3/JA4）/ "go"（crypto/tls 原生，排障与回滚用）。
+		// 头部做到 100% 一致也只到 HTTP 层 —— TLS 在 HTTP 之前就握手完了。
+		TLSFingerprint      string `json:"tls_fingerprint"`
 		ClientVersionGlobal string `json:"client_version_global"`
 		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
 		CliVersion string `json:"cli_version"`
@@ -651,6 +655,9 @@ func applyEnv(c *Config) {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			c.Schedule.BalanceRefreshJitterPermill = n
 		}
+	}
+	if v := os.Getenv("WB2A_TLS_FINGERPRINT"); v != "" {
+		c.Upstream.TLSFingerprint = v
 	}
 	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
