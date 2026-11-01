@@ -313,10 +313,13 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-client-platform", "web")
-	req.Header.Set("Origin", c.webBase(a))
-	req.Header.Set("Referer", pageURL)
-	req.Header.Set("User-Agent", ua)
+	// 官方 CN 侧 /v2/report 只有一种形态：11 个头、**无浏览器语义**
+	// （2026-11-01 真机夹具 testdata/official_cn_report_head.txt）。此前这里造的是
+	// 「Chrome/152 UA + x-client-platform + Origin + Referer」的**第三族**请求 ——
+	// 官方客户端从不发，而且 Chrome/152 本身是不可能的值（Electron 37 内置 Chromium 138），
+	// 等于自报「我不是官方客户端」。
+	req.Header.Set("User-Agent", c.rpcUAFor(a))
+	req.Header.Set("X-Request-ID", randHex32())
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
