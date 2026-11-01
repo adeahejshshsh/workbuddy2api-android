@@ -1,0 +1,44 @@
+POST /v2/chat/completions HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+X-Requested-With: XMLHttpRequest
+x-stainless-arch: x64
+x-stainless-lang: js
+x-stainless-os: Windows
+x-stainless-package-version: 6.25.0
+x-stainless-retry-count: 0
+x-stainless-runtime: node
+x-stainless-runtime-version: v22.21.1
+X-Conversation-ID: f7c6c392-e016-43bb-beca-ab918b436668
+X-Agent-Purpose: conversation
+X-IDE-Type: WorkBuddy
+X-IDE-Name: WorkBuddy
+X-IDE-Version: 5.9.3
+X-Agent-Intent: craft
+X-Agent-Runtime: local-agent
+X-Private-Data: false
+acp-connection-id: 01a194ad-6b5d-7394-92ad-61e04eb3a3df
+x-codebuddy-request: 1
+X-Request-ID: 01a194adc6bc7205b0d188e0c9b6a728
+X-Conversation-Message-ID: 01a194adc6bc7205b0d188e0c9b6a728
+X-Conversation-Request-ID: 01a194ad31c27d81804ee9915cf954fb
+X-Root-Request-ID: 01a194ad31c27d81804ee9915cf954fb
+X-Agent-Type: main
+baggage: buddyId=,buddyName=,codebuddy.session_id=f7c6c392-e016-43bb-beca-ab918b436668,codebuddy.conversation_request_id=01a194ad31c27d81804ee9915cf954fb
+Content-Encoding: gzip
+traceparent: 00-7458e488eb564b059622db42023ae293-82e31fea372dea0e-01
+b3: 7458e488eb564b059622db42023ae293-82e31fea372dea0e-1-57587f4a3ce47317
+X-B3-TraceId: 7458e488eb564b059622db42023ae293
+X-B3-ParentSpanId: 57587f4a3ce47317
+X-B3-SpanId: 82e31fea372dea0e
+X-B3-Sampled: 1
+X-Trace-ID: 7458e488eb564b059622db42023ae293
+X-Product: SaaS
+User-Agent: WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+Authorization: Bearer <REDACTED>
+X-User-Id: 11f49997-8875-4ce2-ae68-d093e3088524
+X-Domain: www.workbuddy.cn
+Content-Length: 54062
+Accept-Encoding: gzip, compress, deflate, br
+Host: www.workbuddy.cn
+Connection: keep-alive

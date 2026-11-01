@@ -1,0 +1,12 @@
+POST /v2/report HTTP/1.1
+Accept: application/json, text/plain, */*
+Content-Type: application/json;charset=UTF-8
+X-Request-ID: 4891f0b179cc4959be94b2c867c16e3c
+X-Product: SaaS
+User-Agent: WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+Authorization: Bearer <REDACTED>
+X-User-Id: 11f49997-8875-4ce2-ae68-d093e3088524
+X-Domain: www.workbuddy.cn
+Content-Length: 765
+Host: www.workbuddy.cn
+Connection: keep-alive

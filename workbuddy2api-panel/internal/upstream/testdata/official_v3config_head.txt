@@ -1,0 +1,7 @@
+GET /v3/config HTTP/1.1
+Accept: application/json, text/plain, */*
+Connection: close
+User-Agent: WorkBuddy/5.9.3 CLI/2.165.0
+X-Request-ID: c16e715dd3a042cb8f58616fd5b6fe71
+X-Product: SaaS
+Host: www.workbuddy.cn

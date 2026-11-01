@@ -1,0 +1,12 @@
+POST /v2/chat/busy HTTP/1.1
+Accept: application/json, text/plain, */*
+Content-Type: application/json
+User-Agent: WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+X-Request-ID: d7c563ab9dc0414fb0c99a4de06a0a85
+X-Product: SaaS
+Authorization: Bearer <REDACTED>
+X-User-Id: 11f49997-8875-4ce2-ae68-d093e3088524
+X-Domain: www.workbuddy.cn
+Content-Length: 25
+Host: www.workbuddy.cn
+Connection: keep-alive
