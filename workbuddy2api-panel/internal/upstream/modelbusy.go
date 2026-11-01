@@ -58,8 +58,8 @@ func (c *Client) ModelBusy(a *auth.Auth, models []string) (map[string]string, er
 		if err != nil {
 			return out, err
 		}
-		req.Header.Set("Content-Type", "application/json")
-		c.ChatHeaders(req, a, "", ChatMeta{})
+		// 8 个头，不是 chat 族 43 个（见 busyHeaders 注释）
+		c.busyHeaders(req, a)
 		data, err := c.doJSON(req)
 		if err != nil {
 			var ue *Error

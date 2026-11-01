@@ -45,3 +45,34 @@ func randHex32() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+
+// randHex16 16 位 hex（span id 形态）。
+func randHex16() string { return randHex32()[:16] }
+
+// randUUID 生成 uuid 形态串（32 hex 分 8-4-4-4-12）。真机 acp-connection-id 是这个形状。
+func randUUID() string {
+	h := randHex32()
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// injectTraceHeaders 补 W3C / B3 链路头（官方 chat 四条恒发）：
+//
+//	traceparent:          00-<traceID 32>-<spanID 16>-01
+//	b3:                   <traceID>-<spanID>-1-<parentSpanID>
+//	X-B3-ParentSpanId:    <parentSpanID 16>
+//	acp-connection-id:    uuid 形态
+//
+// 此前整族都缺 —— 对拍夹具里 4 条「漏发」就是它们。这些是链路追踪头，官方由
+// undici/OTel 自动注入，每条请求都带。
+func injectTraceHeaders(req *http.Request) {
+	if req.Header.Get("traceparent") != "" || req.Header.Get("Traceparent") != "" {
+		return // 调用方已显式设置（透传场景）不覆盖
+	}
+	trace := randHex32()
+	span := randHex16()
+	parent := randHex16()
+	req.Header.Set("traceparent", "00-"+trace+"-"+span+"-01")
+	req.Header.Set("b3", trace+"-"+span+"-1-"+parent)
+	req.Header.Set("X-B3-ParentSpanId", parent)
+	req.Header.Set("acp-connection-id", randUUID())
+}
