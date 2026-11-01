@@ -19,7 +19,13 @@ import (
 // 本文件的职责边界：**只做出站前的统一改写**，不改变请求内容、不做重试、不改超时。
 // 谁需要按路径区分行为，在调用方决定，不在这里加分支。
 func (c *Client) do(req *http.Request) (*http.Response, error) {
-	return c.HTTP.Do(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return resp, err
+	}
+	// 我们在 CommonHeaders 里显式声明了 Accept-Encoding（关掉了 net/http 的透明解压），
+	// 所以解码责任也在这里 —— 九个出站点一次覆盖，不会有谁忘了解。
+	return decodeBodyIfNeeded(resp), nil
 }
 
 // randHex32 生成 32 hex 纯随机请求 ID。
