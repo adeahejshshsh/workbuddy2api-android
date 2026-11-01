@@ -75,7 +75,7 @@ func (c *Client) globalRegisterReq(method, url, token string, body any) (*http.R
 
 // globalRegisterJSON 发注册链路请求并解外层信封（code/msg）。
 func (c *Client) globalRegisterJSON(req *http.Request) (code int, msg string, raw json.RawMessage, err error) {
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return 0, "", nil, err
 	}

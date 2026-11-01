@@ -88,7 +88,7 @@ func (c *Client) agentTool(ctx context.Context, a *auth.Auth, path string, body 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	c.ChatHeaders(req, a, "", ChatMeta{})
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}

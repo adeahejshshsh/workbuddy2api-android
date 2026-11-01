@@ -135,7 +135,7 @@ func (c *Client) webJSON(ctx context.Context, a *auth.Auth, method, url string, 
 	if err != nil {
 		return err
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return err
 	}
@@ -418,7 +418,7 @@ func (c *Client) acpPost(ctx context.Context, sess WebSession, connID string, ri
 	req.Header.Set("Acp-Connection-Id", connID)
 	req.Header.Set("Authorization", "Bearer "+sess.Token)
 	req.Header.Set("User-Agent", globalWebUA)
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return err
 	}
