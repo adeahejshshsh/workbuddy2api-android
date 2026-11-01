@@ -11,11 +11,13 @@ package panel
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -50,7 +52,26 @@ func loginDeviceNonce() string {
 }
 
 // loginHTTP 设备授权专用 client：短超时、无 cookie（每请求携带 state，无会话态）。
-var loginHTTP = &http.Client{Timeout: 30 * time.Second}
+//
+// 必须**显式禁 h2**：裸 `&http.Client{}` 会走 HTTP/2，而登录端点在国内网络下
+// 经常卡在 "http2: timeout awaiting response headers"（upstream transport.go 里
+// 那段注释讲的就是同一个坑，这里此前没套）。禁法是置空 TLSNextProto 让 ALPN 不再
+// 协商 h2 —— 只设 ForceAttemptHTTP2=false 不管用（已实测）。
+var loginHTTP = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   8 * time.Second,
+			KeepAlive: 15 * time.Second,
+		}).DialContext,
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout:   8 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       60 * time.Second,
+	},
+}
 
 // validUID 校验上游返回的 uid 是否可安全用于拼文件名。
 // 只放行字母、数字、下划线、连字符（腾讯侧 uid 实测为 UUID 形态），
