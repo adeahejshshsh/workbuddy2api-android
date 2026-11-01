@@ -133,6 +133,13 @@ func newTransport() *http.Transport {
 	dialer := newDialer()
 	return &http.Transport{
 		DialContext: dialer.DialContext,
+		// 头序重排必须接管整条 TLS 拨号：http.Transport 在 DialContext 之上自己完成
+		// 握手，那一层看到的是加密记录，改不了请求头；只有 DialTLSContext 返回「已握手
+		// 的 TLS conn」时，上层写入的才是明文 HTTP 字节，headOrderConn 才能按官方顺序重排。
+		// 代价：设了它之后 TLSHandshakeTimeout / TLSClientConfig 不再生效，握手超时与
+		// ServerName 由 newTLSDialer 自行保证（我们本来也没配自定义 CA）。
+		// 走代理时不生效（Go 对代理场景只走 DialContext + CONNECT），退化为原生排序。
+		DialTLSContext: newTLSDialer(dialer, nil),
 		// 出站代理走标准环境变量（上游 PR #223）：HTTP_PROXY / HTTPS_PROXY / NO_PROXY。
 		// 未设时返回 nil = 直连，行为与之前完全一致。
 		Proxy: http.ProxyFromEnvironment,
@@ -173,5 +180,44 @@ func roundTripCloseIdle(rt http.RoundTripper) {
 	}
 	if ci, ok := rt.(closeIdler); ok {
 		ci.CloseIdleConnections()
+	}
+}
+
+// newTLSDialer 构造出站 TLS 拨号函数：TCP → TLS 握手 → 头序包装。
+//
+// 为什么必须接管整个 TLS 拨号（而不是只包 DialContext）：http.Transport 在
+// DialContext 之上自己完成 TLS 握手，写进 conn 的是**加密记录**，在那一层看不到也
+// 改不了请求头。只有 DialTLSContext 返回「已握手的 TLS conn」时，上层写入的才是
+// 明文 HTTP 字节，headOrderConn 才能按官方顺序重排。
+//
+// 代价：设了它之后 Transport 的 TLSHandshakeTimeout / TLSClientConfig 不再生效，
+// 握手超时与 ServerName 由本函数自行保证（本仓没有自定义 CA，生产恒传 nil）。
+func newTLSDialer(d *net.Dialer, cfg *tls.Config) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		host, _, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			host = addr
+		}
+		var tc0 *tls.Config
+		if cfg != nil {
+			tc0 = cfg.Clone()
+		} else {
+			tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		tc0.ServerName = host
+		// NextProtos 留空：与「禁 h2」口径一致 —— 原 Transport 禁 h2 后同样不发 ALPN。
+		tc0.NextProtos = nil
+		tc := tls.Client(raw, tc0)
+		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+		defer cancel()
+		if herr := tc.HandshakeContext(hctx); herr != nil {
+			raw.Close()
+			return nil, herr
+		}
+		return newHeadOrderConn(tc), nil
 	}
 }

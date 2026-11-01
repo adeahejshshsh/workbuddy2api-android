@@ -1,0 +1,14 @@
+POST /v2/plugin/auth/token/refresh HTTP/1.1
+Accept: application/json, text/plain, */*
+Content-Type: application/json
+X-Domain: www.workbuddy.ai
+X-Refresh-Token: eyJhbGciOiJIUzUxMiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJjMWM0OWU5Yi0wYWU2LTQyMWMtOTVmOS05ODdiMDk4NjljNTUifQ.eyJleHAiOjE4MjQ4NzY2NDEsImlhdCI6MTc5MzQ5NjIwNywianRpIjoiZGQ0YmQ4NjItNjk1MS00NWY5LTgxOTAtMmNhNDNmOGFiNDFkIiwiaXNzIjoiaHR0cHM6Ly93d3cud29ya2J1ZGR5LmFpL2F1dGgvcmVhbG1zL2NvcGlsb3QiLCJhdWQiOiJodHRwczovL3d3dy53b3JrYnVkZHkuYWkvYXV0aC9yZWFsbXMvY29waWxvdCIsInN1YiI6IjIwNGFmNDlkLTAyMDgtNGVkOS1hMzZkLTM1ZGZjYmJlYzgxOCIsInR5cCI6Ik9mZmxpbmUiLCJhenAiOiJjb25zb2xlIiwic2lkIjoiZmEwZTEyZTItOTVmZi00YmU5LWJiYTAtNDkzNGIxNDc3NDMxIiwic2NvcGUiOiJvcGVuaWQgYWNyIHByb2ZpbGUgYmFzaWMgd2ViLW9yaWdpbnMgcm9sZXMgb2ZmbGluZV9hY2Nlc3MgZW1haWwifQ.KhEjjcmhURyMHLk_m3PYOAAGrGOGoNOjPUGV0JT-rYN8sAWtuA-9HKnkJrbe5Znjs4LtvEURho-8ad8Xwizyzg
+X-Auth-Refresh-Source: plugin
+User-Agent: workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
+X-Request-ID: 83bf6bd3885544188ffb214b7d437a0d
+X-Product: SaaS
+Authorization: Bearer <REDACTED>
+X-User-Id: 204af49d-0208-4ed9-a36d-35dfcbbec818
+Content-Length: 2
+Host: www.workbuddy.ai
+Connection: keep-alive
