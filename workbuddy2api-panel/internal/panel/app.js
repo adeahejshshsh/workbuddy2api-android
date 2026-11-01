@@ -1332,6 +1332,10 @@ const CFG_MAP = {
   // 连登管家没有独立排程（它在签到末尾自动跑，见 scheduler.runStreakBonus），
   // 所以这里**不能**加 streak_enabled/streak_hours（报告 #18）——
   // 加了只会得到「永远回显为关、改了也不生效」的死字段。
+  // 分域 base（上游 39fba11）：配置里是嵌套的 cn.* / global.*，此前面板既回显
+  // 不了也改不了，只能手改配置文件。
+  cn_chat_base: ['cn', 'chat_base'], cn_billing_base: ['cn', 'billing_base'],
+  global_chat_base: ['global', 'chat_base'], global_billing_base: ['global', 'billing_base'],
   request_archive_enabled: ['logging', 'request_archive_enabled'],
   // 键名必须与 Go 的 `logging.request_retention_days` 一致（报告 #17）：
   // 此前写成 request_archive_days，读不到现值，保存时又以未知键落盘，永不生效。
@@ -1374,7 +1378,30 @@ const CFG_MAP = {
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'prompt_identity_override_text']);
+const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'prompt_identity_override_text',
+  'cn_chat_base', 'cn_billing_base', 'global_chat_base', 'global_billing_base']);
+
+// cfgRealmFilter 配置页分域切换：all 显示全部；cn/global 仅显示该域专属字段
+// （data-realm 标记）。共享配置（无 data-realm）始终显示。保存时仍回传整份配置，
+// 故切换只控制可见性、不丢字段。
+let cfgRealmFilter = 'all';
+function applyCfgRealmFilter() {
+  document.querySelectorAll('#cfgForm [data-realm]').forEach(el => {
+    const r = el.getAttribute('data-realm');
+    el.style.display = (cfgRealmFilter === 'all' || cfgRealmFilter === r) ? '' : 'none';
+  });
+  const tabs = $('cfgRealmTabs');
+  if (tabs) tabs.querySelectorAll('button[data-realm]').forEach(b => b.classList.toggle('on', b.dataset.realm === cfgRealmFilter));
+}
+if ($('cfgRealmTabs')) {
+  $('cfgRealmTabs').addEventListener('click', ev => {
+    const btn = ev.target.closest('button[data-realm]');
+    if (!btn) return;
+    cfgRealmFilter = btn.dataset.realm;
+    applyCfgRealmFilter();
+  });
+  applyCfgRealmFilter();
+}
 
 /* 身份首句替换只在 passthrough / append 下有意义（custom 模式没有客户端身份句）。
    这里按当前 prompt_mode 禁用/启用那两个控件；**保留**它们的值，切回 passthrough
