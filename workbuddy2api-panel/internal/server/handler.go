@@ -536,8 +536,51 @@ func (h *Handler) modelAlias(realm, bare string) (string, bool) {
 	if m == nil {
 		return "", false
 	}
-	target, ok := m[strings.ToLower(realm)+":"+strings.ToLower(bare)]
-	return target, ok
+	key := strings.ToLower(realm) + ":" + strings.ToLower(bare)
+	// 精确键优先：配了 `cn:claude-sonnet-4-6` 就绝不被通配抢走。
+	if target, ok := m[key]; ok {
+		return target, true
+	}
+	// 通配（`claude-*=glm-5.2` / `?` 单字符）：精确键不够用时才走这里。
+	// Claude Code 每升级一个小版本就换一个名字，逐条精确配根本跟不上。
+	//
+	// 多个通配同时命中时的定序：**模式长的优先**（`cn:claude-*` 压过 `*` ——
+	// 带域前缀的写法本来就更具体），同长取字典序，保证结果与 map 遍历顺序无关。
+	bestKey, bestTarget := "", ""
+	for pattern, target := range m {
+		if target == "" || !strings.ContainsAny(pattern, "*?") || !wildcardMatch(pattern, key) {
+			continue
+		}
+		if bestKey == "" || len(pattern) > len(bestKey) ||
+			(len(pattern) == len(bestKey) && pattern < bestKey) {
+			bestKey, bestTarget = pattern, target
+		}
+	}
+	return bestTarget, bestKey != ""
+}
+
+// wildcardMatch 通配匹配（`*` 任意串、`?` 单字符），大小写不敏感。
+// 用回溯法而不是递归：模式来自配置，长度可控，但没必要留栈风险。
+func wildcardMatch(pattern, s string) bool {
+	p, t := strings.ToLower(pattern), strings.ToLower(s)
+	pi, ti, star, mark := 0, 0, -1, 0
+	for ti < len(t) {
+		switch {
+		case pi < len(p) && (p[pi] == '?' || p[pi] == t[ti]):
+			pi, ti = pi+1, ti+1
+		case pi < len(p) && p[pi] == '*':
+			star, pi, mark = pi, pi+1, ti
+		case star != -1:
+			pi, mark = star+1, mark+1
+			ti = mark
+		default:
+			return false
+		}
+	}
+	for pi < len(p) && p[pi] == '*' {
+		pi++
+	}
+	return pi == len(p)
 }
 
 // modelAllowed 报告 (realm, 裸模型名) 是否被 config models.allowed 白名单放行
