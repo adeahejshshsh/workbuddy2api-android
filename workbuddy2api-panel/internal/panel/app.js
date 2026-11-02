@@ -338,6 +338,17 @@ function rateLimitMeta(row, now) {
   }
   return { model, kind, detail, title: title.join('\n') };
 }
+/* fallbackTargetFor 查该 (域, 模型) 配置的降级目标（未配置 → 空串）。
+   配置键既可能是裸名，也可能带 cn:/global: 前缀，查找顺序必须与网关侧一致：
+   **带域前缀的键优先，再回退裸名**。此前这里写的是裸名优先，两域各配了不同
+   目标时会把 cn 的显示成 global 的。限流行与锁池表共用。 */
+function fallbackTargetFor(model, realm) {
+  if (!model) return '';
+  const bare = String(model).replace(/^[a-z]+:/, '');
+  const t = (overviewData && overviewData.model_fallback) || {};
+  return (realm ? t[realm + ':' + bare] : '') || t[model] || t[bare] || '';
+}
+
 function rateLimitRowsHtml(rows, now) {
   const all = Array.isArray(rows) ? rows.filter(row => row && row.model) : [];
   if (!all.length) return '';
@@ -349,10 +360,9 @@ function rateLimitRowsHtml(rows, now) {
   if (list.length) {
     // 降级路由标注（overview.model_fallback）：限流的模型若配了等价模型，请求已被
     // 同账号改道 —— 不标出来用户会以为「v4.1 限流 = 服务断了」。
-    const fbTable = (overviewData && overviewData.model_fallback) || {};
     html += list.map(row => {
       const m = rateLimitMeta(row, now);
-      const to = fbTable[m.model] || fbTable['cn:' + m.model] || fbTable['global:' + m.model] || '';
+      const to = fallbackTargetFor(m.model, row.realm);
       const route = to ? ' <i class="bh-route" title="该模型限流期间，请求已改道到 ' + esc(to) + '">⤳ ' + esc(to) + '</i>' : '';
       return '<div class="rate-limit" title="' + esc(m.title) + '"><b>' + esc(m.model) +
         '</b><span>' + esc(m.detail) + route + '</span></div>';
@@ -667,10 +677,16 @@ function renderModelLocks(rows) {
     return ms ? dur(Math.max(0, Math.round((ms - Date.now()) / 1000))) : '—';
   };
   tb.innerHTML = rows.map(r => {
+    // 「锁了但请求照样能过」是这张表最容易误读的地方：配了降级路由表时，该模型在
+    // 本域不可用期间请求已被改道到等价模型继续服务。不标出来，会把「锁定」直接
+    // 读成「服务中断」。
+    const _alt = fallbackTargetFor(r.model, r.realm);
+    const fbTag = _alt ? '<div class="note" title="该模型在本域不可用时，请求已自动改道到 ' +
+      esc(_alt) + '">⤳ 已路由至 ' + esc(_alt) + '</div>' : '';
     const st = STATE[r.state] || ['mute', r.state || '—'];
     const realm = r.realm === 'global' ? '国际版' : '国内版';
     return '<tr>' +
-      '<td>' + esc(r.model) + '</td>' +
+      '<td><b>' + esc(r.model) + '</b>' + fbTag + '</td>' +
       // 域就只是文字：同一列里「国内版」是纯文本、「国际版」套了蓝框，看起来像
       // 两种性质不同的东西。状态已有颜色（全池锁定红 / 部分限流绿），域不必再抢。
       '<td>' + realm + '</td>' +

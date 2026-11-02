@@ -179,3 +179,30 @@ func TestAuthLayerBehavior(t *testing.T) {
 		t.Error("valid key must pass the auth layer")
 	}
 }
+
+// 面板鉴权是**默认拒绝**：除三个静态资源外，一切请求先验 Bearer 再分发 ——
+// 包括**尚未注册**的路径（先验后分发，顺带不暴露路径是否存在）。
+//
+// 这条用例的意义不在当前行为对不对，而在**将来**：新增路由忘了加鉴权时，它不会
+// 静默变成匿名可访问。此前 49 条路由逐条包 withAuth，那种写法漏一条谁也不知道。
+func TestPanelDefaultDeny(t *testing.T) {
+	p := New(Config{Version: "test", APIKey: "test-key"})
+	for _, path := range []string{
+		"/panel/api/overview",    // 已注册
+		"/panel/api/config",      // 已注册
+		"/panel/api/nonexistent", // **未注册**：必须也是 401 而不是 404
+	} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s: code=%d, want 401（默认拒绝）", path, rec.Code)
+		}
+	}
+	for _, path := range []string{"/panel/", "/panel/app.js", "/panel/theme.js"} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: code=%d, want 200（静态资源免鉴权）", path, rec.Code)
+		}
+	}
+}

@@ -216,6 +216,16 @@ func main() {
 	if up.TLSFingerprint == upstream.TLSFingerprintNode {
 		log.Printf("[upstream] TLS 指纹复刻已启用（JA3 %s / JA4 %s）",
 			upstream.OfficialJA3MD5, upstream.OfficialJA4)
+		// 经代理的出站**不走** DialTLSContext：net/http 自己 CONNECT + crypto/tls
+		// 握手，指纹与头序重排都不生效（SOCKS 下更糟，可能直接出网绕过代理）。
+		// 我们没有代理池模块，这一层修不了，但至少不能让它静默失效。
+		for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
+			if os.Getenv(k) != "" {
+				log.Printf("[upstream] ⚠ 检测到 %s：经代理的连接会退回 Go 原生 TLS 握手，"+
+					"JA3/JA4 与官方不一致，头发送顺序也不再重排", k)
+				break
+			}
+		}
 	} else {
 		log.Printf("[upstream] TLS 指纹为原生 Go 形态（JA3/JA4 与官方客户端不一致）")
 	}
