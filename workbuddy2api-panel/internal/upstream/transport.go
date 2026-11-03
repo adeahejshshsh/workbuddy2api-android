@@ -143,9 +143,15 @@ func newTransport() *http.Transport {
 		// ServerName 由 newTLSDialer 自行保证（我们本来也没配自定义 CA）。
 		// 走代理时不生效（Go 对代理场景只走 DialContext + CONNECT），退化为原生排序。
 		DialTLSContext: newTLSDialer(dialer, nil, TLSFingerprintNode),
-		// 出站代理走标准环境变量（上游 PR #223）：HTTP_PROXY / HTTPS_PROXY / NO_PROXY。
-		// 未设时返回 nil = 直连，行为与之前完全一致。
-		Proxy: http.ProxyFromEnvironment,
+		// 代理**由我们自己接管**（见 proxytunnel.go），所以这里必须显式置 nil：
+		// 留着 ProxyFromEnvironment 的话，net/http 会自己 CONNECT + crypto/tls 握手，
+		// DialTLSContext 不参与 —— 指纹与头序全部失效，正是要修的那个问题。
+		//
+		// 环境变量语义不变（HTTPS_PROXY / ALL_PROXY / NO_PROXY 及其小写变体），
+		// 只是解析挪到 dialOutbound 里，且只作用于 TLS 连接。
+		// 已知边界：明文 http:// 目标不经代理（我们没有任何 http:// 上游；
+		// 真配了会直连，与「代理全挂时静默直连暴露本机 IP」同类，故显式记在此处）。
+		Proxy: nil,
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
 		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。
@@ -205,7 +211,10 @@ func newTLSDialer(d *net.Dialer, cfg *tls.Config, fp string) func(context.Contex
 		sniOverride = cfg.ServerName
 	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		raw, err := d.DialContext(ctx, network, addr)
+		// 有代理就先建隧道（CONNECT / SOCKS5），拿到的仍是**裸 TCP** ——
+		// 指纹握手在下面照常做。此前这里直接 d.DialContext，代理一旦开启，
+		// TLS 就被 net/http 自己接管，指纹与头序全部失效。
+		raw, err := dialOutbound(ctx, d, addr)
 		if err != nil {
 			return nil, err
 		}
