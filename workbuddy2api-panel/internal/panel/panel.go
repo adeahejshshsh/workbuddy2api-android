@@ -231,8 +231,14 @@ func (p *Panel) withLiveFlags(entries []map[string]any) []map[string]any {
 				realm, bare = "", id
 			}
 			supported, _ := e["supported_efforts"].([]string)
-			if eff := upstream.ResolveGatewayEffort(policy.DefaultEffortFor(realm, bare), supported); eff != "" {
+			want := policy.DefaultEffortFor(realm, bare)
+			if eff := upstream.ResolveGatewayEffort(want, supported); eff != "" {
 				cp["gateway_effort"] = eff
+			}
+			// 目标档独立给出（即使解析不出实际档也保留）：前端拿它与 gateway_effort
+			// 对比，判断「这个模型会降级吗」，进而给默认档下拉做聚合提示。
+			if want != "" {
+				cp["gateway_effort_wanted"] = want
 			}
 		}
 		out[i] = cp

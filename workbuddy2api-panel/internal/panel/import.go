@@ -17,23 +17,28 @@ import (
 
 // cockpitAccount 映射 cockpit tools 导出格式的单个账号。
 type cockpitAccount struct {
-	ID             string `json:"id"`
-	Email          string `json:"email"`
-	UID            string `json:"uid"`
-	Nickname       string `json:"nickname"`
-	AccessToken    string `json:"access_token"`
-	RefreshToken   string `json:"refresh_token"`
-	TokenType      string `json:"token_type"`
-	ExpiresAt      int64  `json:"expires_at"`
-	Domain         string `json:"domain"`
-	DosageNotify   string `json:"dosage_notify_code"`
-	PaymentType    string `json:"payment_type"`
-	Status         string `json:"status"`
-	UsageUpdatedAt int64  `json:"usage_updated_at"`
-	LastCheckin    int64  `json:"last_checkin_time"`
-	CheckinStreak  int    `json:"checkin_streak"`
-	CreatedAt      int64  `json:"created_at"`
-	LastUsed       int64  `json:"last_used"`
+	ID           string `json:"id"`
+	Email        string `json:"email"`
+	UID          string `json:"uid"`
+	Nickname     string `json:"nickname"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresAt    int64  `json:"expires_at"`
+	Domain       string `json:"domain"`
+	// 企业标识：cockpit 导出里两种命名都出现过，任一非空即按企业号处理。
+	// 丢了它，企业号导入后会退化成个人号 —— 签到/成长任务全线白打，还会被上游
+	// 400 code 10001 刷一屏假错误。
+	EnterpriseID      string `json:"enterprise_id"`
+	EnterpriseIDCamel string `json:"enterpriseId"`
+	DosageNotify      string `json:"dosage_notify_code"`
+	PaymentType       string `json:"payment_type"`
+	Status            string `json:"status"`
+	UsageUpdatedAt    int64  `json:"usage_updated_at"`
+	LastCheckin       int64  `json:"last_checkin_time"`
+	CheckinStreak     int    `json:"checkin_streak"`
+	CreatedAt         int64  `json:"created_at"`
+	LastUsed          int64  `json:"last_used"`
 }
 
 // postImportActivate 导入后的后置动作（异步执行，bug #23）：注册激活 / 领 trial /
@@ -58,7 +63,7 @@ func (p *Panel) postImportActivate(a *auth.Auth, realm string) {
 		} else if claimed {
 			log.Printf("panel: import global trial uid=%s 已领", a.UID)
 		}
-	} else if !a.IsEnterprise() {
+	} else if a.SupportsPersonalGrowth() {
 		// 企业号没有个人成长体系（上游对 daily-checkin 一律 400 code 10001
 		// "企业账号不支持该操作"）：同仓库的 login.go / panel.go / scheduler.go 都做了
 		// IsEnterprise 分流，只有导入后置动作漏了（bug B11）——导入几十个企业号
@@ -186,6 +191,13 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			UID:          uid,
 			Nickname:     nickname,
 			FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", uid)),
+		}
+		// 企业标识原样带过去（两种命名取先非空者）：没有它，后续签到/成长任务
+		// 判定会把企业号当个人号。
+		if ent := strings.TrimSpace(acc.EnterpriseID); ent != "" {
+			a.EnterpriseID = ent
+		} else if ent := strings.TrimSpace(acc.EnterpriseIDCamel); ent != "" {
+			a.EnterpriseID = ent
 		}
 
 		if realm == "global" {

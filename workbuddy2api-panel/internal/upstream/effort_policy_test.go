@@ -22,6 +22,14 @@ func TestResolveGatewayEffort(t *testing.T) {
 		sup  []string
 		exp  string
 	}{
+		// off 不是可降级档位：glm / v4-pro 这类 [off, high, xhigh] 的列表在「要的档
+		// 比最低正档还低」时必须落到 high，而不是把思考静默关掉（修前是 off）。
+		{"列表含 off 时不得降级到 off", "medium", []string{"high", "xhigh", "off"}, "high"},
+		{"minimal 遇 off 列表仍取最低正档", "minimal", []string{"high", "xhigh", "off"}, "high"},
+		{"low 遇 off 列表仍取最低正档", "low", []string{"high", "off"}, "high"},
+		// 退化列表（只声明了 off）：没有任何可降级的正档，返回 "" = 不改写，与
+		// 「无法识别愿望档」同口径。绝不返回 off —— 那等于凭一个缺失的档位把思考关掉。
+		{"只有 off 时无从降级", "low", []string{"off"}, ""},
 		{"max 取最高档", "max", supported, "xhigh"},
 		{"空愿望档等同于 max", "", supported, "xhigh"},
 		{"具体档支持则原样", "high", supported, "high"},

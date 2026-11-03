@@ -211,9 +211,11 @@ scanLoop:
 			if a.IsGlobal() {
 				return
 			}
-			// 企业版门控：同上——企业版无个人成长体系（GET /v2/activity/growth/tasks
-			// 上游 403「growth system is only available for personal users」）。
-			if a.IsEnterprise() {
+			// 成长体系门控：企业版与静态 API Key 都没有个人成长体系（GET
+			// /v2/activity/growth/tasks 上游 403「growth system is only available
+			// for personal users」）。此前只看 IsEnterprise，API Key 号照样打过去
+			// 白吃一个 403。
+			if !a.SupportsPersonalGrowth() {
 				return
 			}
 			if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {
@@ -472,8 +474,8 @@ dispatch:
 				mu.Unlock()
 				return
 			}
-			// 企业版门控：同上（企业版无个人成长体系，任务端点上游一律 403）。
-			if a.IsEnterprise() {
+			// 成长体系门控：同上（企业版与 API Key 都无个人成长体系，任务端点一律 403）。
+			if !a.SupportsPersonalGrowth() {
 				mu.Lock()
 				dg.gated++
 				mu.Unlock()

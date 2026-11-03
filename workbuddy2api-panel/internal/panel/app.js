@@ -1394,6 +1394,45 @@ const CFG_MAP = {
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  */
+/* 默认网关档位不支持提示：选中档位若高于/低于某些模型的支持范围，网关会按
+   「≤ 目标档的最高支持档，没有更低的正档则取最低正档」降级（off 不参与降级）。
+   数据来自 /panel/api/models 的 gateway_effort_wanted vs gateway_effort——
+   后端用出站同一套 ResolveGatewayEffort 算的，提示与真实注入不会漂移。
+   目录为空时静默隐藏（不编造）。 */
+function refreshEffortDowngradeNote() {
+  const el = $('effortDowngradeNote');
+  if (!el) return;
+  const sel = $('cfgForm') && $('cfgForm').elements['thinking_default_effort'];
+  const want = sel ? String(sel.value || '').trim().toLowerCase() : '';
+  const models = (typeof mdAll !== 'undefined' && Array.isArray(mdAll)) ? mdAll : [];
+  if (!want || !models.length) { el.textContent = ''; return; }
+  // 只统计「真正会降级」的模型：目标档与生效档不同，且生效档非空（空 = 不改写，
+  // 比如该模型根本没声明档位，不属于降级）。
+  const downgraded = models.filter(m => {
+    const got = String(m.gateway_effort || '').trim().toLowerCase();
+    const w = String(m.gateway_effort_wanted || '').trim().toLowerCase();
+    return got && w === want && got !== want;
+  });
+  if (!downgraded.length) { el.textContent = ''; return; }
+  // 按落点聚合，几十个模型全列出来会把面板撑爆。
+  const byTarget = {};
+  for (const m of downgraded) {
+    const t = String(m.gateway_effort || '').toLowerCase();
+    (byTarget[t] || (byTarget[t] = [])).push(m.id || '');
+  }
+  const parts = Object.keys(byTarget).sort().map(t => byTarget[t].length + ' 个降到 ' + t);
+  el.textContent = '⚠ 当前有 ' + downgraded.length + ' 个模型不支持 ' + want + '：' + parts.join('、') +
+    '（逐个模型可在「模型与档位」页的「网关档位」列单独指定）';
+}
+// 改「默认网关档位」时立刻重算降级提示：让操作员在保存前就看到「这一档有几个模型
+// 支持、几个会降级」，而不是保存后去事件日志里猜实际生效的档位。
+// typeof 守卫：面板 JS 的单测沙箱只提供 elements 表、没有 addEventListener。
+if ($('cfgForm') && typeof $('cfgForm').addEventListener === 'function') {
+  $('cfgForm').addEventListener('change', ev => {
+    if (ev.target.name === 'thinking_default_effort') refreshEffortDowngradeNote();
+  });
+}
+
 const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'prompt_identity_override_text',
   'cn_chat_base', 'cn_billing_base', 'global_chat_base', 'global_billing_base']);
 
