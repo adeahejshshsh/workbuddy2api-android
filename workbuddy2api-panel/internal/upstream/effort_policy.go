@@ -140,6 +140,16 @@ func ResolveGatewayEffort(want string, supported []string) string {
 		if strings.EqualFold(strings.TrimSpace(s), want) {
 			return s
 		}
+		// off 不是可降级的档位，只作为**显式**的「关闭思考」目标（上面 isOffEffort
+		// 已单独处理）。留着它参与降级会造出静默的破坏性行为：glm-5.2 /
+		// deepseek-v4-pro 的支持列表是 [off, high, xhigh]，默认档填 medium 或 low
+		// 时「没有更低的正档」会落到 off —— 操作员想要弱一档，拿到的是把该模型的
+		// 思考完全关掉，而面板上显示的还是 medium。
+		// 越过 off 后取最低**正**档（high），与 normalizeReasoningEffort 的口径一致：
+		// off 只由客户端显式表达。
+		if idx == effortRank[EffortOff] {
+			continue
+		}
 		if idx < lowestRank {
 			lowest, lowestRank = s, idx
 		}

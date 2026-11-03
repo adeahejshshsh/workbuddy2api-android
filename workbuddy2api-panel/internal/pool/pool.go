@@ -56,6 +56,9 @@ type Pool struct {
 	// 收费与否的判据见 floorBlockedForModel：本地实测台账优先，缺失时用上游目录
 	// 倍率（modelRateOf 注入）兜底，避免「无观测的高价新模型」绕过保底。
 	creditFloor int64
+	// creditFloorByRealm 按域覆盖 creditFloor（issue #147；键 "cn"/"global"）。
+	// nil/空表 = 全部回落全局阈值。
+	creditFloorByRealm map[string]int64
 	// balanceWindow 窗口用量调度的窗口长度（issue #112）：>0 时按 (账号, 模型) 本窗口
 	// 已花的 token 反比降权；0 = 关停（行为与旧版逐字节一致）。
 	balanceWindow time.Duration
@@ -248,6 +251,26 @@ func (p *Pool) SetDegrade(threshold int, cooldown, cooldownMax time.Duration) {
 func (p *Pool) CreditFloor() int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	return p.creditFloor
+}
+
+// SetCreditFloorByRealm 注入按域覆盖表（issue #147；键 "cn"/"global"）。
+// nil/空表 = 全部回落全局阈值。config 校验已剔非法键与负值，这里不再防御。
+func (p *Pool) SetCreditFloorByRealm(m map[string]int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.creditFloorByRealm = m
+}
+
+// creditFloorFor 该域的积分保底阈值：按域覆盖优先，未写回落全局值。
+// 调用方须持锁；realm 为空当 "cn"（与 Auth.Realm 的归一化口径一致）。
+func (p *Pool) creditFloorFor(realm string) int64 {
+	if realm == "" {
+		realm = "cn"
+	}
+	if v, ok := p.creditFloorByRealm[realm]; ok {
+		return v
+	}
 	return p.creditFloor
 }
 

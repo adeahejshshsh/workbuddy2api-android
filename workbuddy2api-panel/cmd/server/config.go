@@ -332,6 +332,12 @@ type Config struct {
 		// tier 0（免费）/ tier 1（无观测）不受限；签到回血越过 floor 自动恢复。
 		// 默认 0 = 关闭；负值钳 0。
 		CreditFloor int64 `json:"credit_floor"`
+		// CreditFloorByRealm 积分保底按域覆盖（issue #147）：键只认 "cn"/"global"，
+		// 未写的域回落 CreditFloor，写 0 = 该域关闭保底。
+		//
+		// 动机：留 1000 分养号的国内池和只留 350 分接低流量的国际池，此前只能共用
+		// 一个阈值 —— 要么国内号被过度消耗，要么国际号被过度保护。
+		CreditFloorByRealm map[string]int64 `json:"credit_floor_by_realm,omitempty"`
 		// BalanceWindow 窗口用量调度窗口（issue #112）：>0 时按 (账号, 模型) 本窗口
 		// 已花的 token 反比降权，把热点号打散；"0" 关停（行为同旧版）。缺省 1h。
 		BalanceWindow string `json:"balance_window"`
@@ -933,6 +939,24 @@ func (c *Config) normalize() error {
 	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
 	if c.Pool.CreditFloor < 0 {
 		c.Pool.CreditFloor = 0
+	}
+	// 按域覆盖表：剔非法键（只认 cn/global）、负值归零；清空后留 nil（= 全部回落全局）。
+	if len(c.Pool.CreditFloorByRealm) > 0 {
+		clean := make(map[string]int64, 2)
+		for k, v := range c.Pool.CreditFloorByRealm {
+			if k != "cn" && k != "global" {
+				continue
+			}
+			if v < 0 {
+				v = 0
+			}
+			clean[k] = v
+		}
+		if len(clean) == 0 {
+			c.Pool.CreditFloorByRealm = nil
+		} else {
+			c.Pool.CreditFloorByRealm = clean
+		}
 	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3

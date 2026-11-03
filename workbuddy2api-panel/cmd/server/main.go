@@ -172,6 +172,7 @@ func main() {
 	p.SetSoftResetMax(cfg.SoftResetMaxDur)               // 权威重置墙钟上限（soft_reset_max，默认 24h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetCreditFloor(cfg.Pool.CreditFloor)               // 积分保底（默认 0 = 关闭）
+	p.SetCreditFloorByRealm(cfg.Pool.CreditFloorByRealm) // 按域覆盖（issue #147）
 	p.SetBalanceWindow(balanceWindowOf(cfg))             // 窗口用量调度（默认 1h，"0" 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
@@ -618,7 +619,7 @@ func panelListenPath(listen string) string {
 //
 // 热生效范围（设计取舍）：
 //   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
-//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring/SetCreditFloor
+//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring/SetCreditFloor/SetCreditFloorByRealm
 //   - schedule.* → scheduler.Reconfigure/SetBalanceInterval/SetExpiringSoonWindow
 //
 // 需重启（涉及监听地址、HTTP client 超时、auth_dir 等装配期依赖）：
@@ -753,6 +754,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetSoftResetMax(newCfg.SoftResetMaxDur)               // 权威重置墙钟上限热生效
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetCreditFloor(newCfg.Pool.CreditFloor)               // 积分保底热生效（0 = 关闭）
+	p.SetCreditFloorByRealm(newCfg.Pool.CreditFloorByRealm) // 按域覆盖热生效（issue #147）
 	p.SetBalanceWindow(balanceWindowOf(newCfg))             // 窗口用量调度热生效
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
