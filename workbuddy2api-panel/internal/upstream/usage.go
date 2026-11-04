@@ -45,6 +45,12 @@ func bestUsageCacheHitTokens(usage map[string]any) (float64, bool) {
 		{"input_tokens_details", "cached_tokens"},
 	}
 
+	// 取**最大**正值，不是第一个正值：同一个语义（缓存命中）上游会在多个字段里重复
+	// 上报，而它们的刷新时机不同 —— 先命中的那个可能是上一轮残留的小值。取首个正值
+	// 会让缓存命中数偏小（进而把「命中率」算低、把成本算高），而命中率又是缓存率闸
+	// （budget.go 的 cache_low_rate）的判据，偏差会传导到「误判低命中 → 冷却 60s」。
+	best := 0.0
+	found := false
 	for _, path := range paths {
 		var value any
 		if path.section == "" {
@@ -52,11 +58,11 @@ func bestUsageCacheHitTokens(usage map[string]any) (float64, bool) {
 		} else if details, ok := usage[path.section].(map[string]any); ok {
 			value = details[path.key]
 		}
-		if tokens, ok := positiveUsageNumber(value); ok {
-			return tokens, true
+		if tokens, ok := positiveUsageNumber(value); ok && tokens > best {
+			best, found = tokens, true
 		}
 	}
-	return 0, false
+	return best, found
 }
 
 func positiveUsageNumber(value any) (float64, bool) {

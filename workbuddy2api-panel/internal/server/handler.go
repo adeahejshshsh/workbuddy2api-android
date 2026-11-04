@@ -333,7 +333,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			status := obs.status
 			if status == 0 {
-				status = http.StatusOK
+				// 一个字节都没写就返回了（handler panic / 漏写响应）：这不是 200。
+				// 此前记成 200，面板「请求记录」里显示成功，而客户端什么都没收到 ——
+				// 真出问题的时候这条记录反而误导排查。记 500 并留一条 WARN，
+				// 让「静默空响应」在日志里看得见。
+				status = http.StatusInternalServerError
+				log.Printf("WARN: [server] %s 未写任何响应即返回（panic 或漏写），按 500 记账 request_id=%s",
+					r.URL.Path, trace.id)
 			}
 			h.cfg.RequestLog.Record(trace.event(status))
 		}()

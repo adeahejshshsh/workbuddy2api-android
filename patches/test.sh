@@ -34,7 +34,11 @@ for pkg in $pkgs; do
   if ! ( cd "$P" && go test -c -o "$PREFIX/tmp/$pkg.test" "./internal/$pkg" >/dev/null 2>&1 ); then
     echo "  $pkg 编译失败"; fail=1; continue
   fi
-  out=$(cd "$P/internal/$pkg" && /system/bin/linker64 "$PREFIX/tmp/$pkg.test" 2>&1 | tail -1)
+  # -test.timeout 必给：这条路径**绕过**了 `go test`（本机只能经 linker64 跑测试二进制），
+  # 而 go test 自带的默认 10 分钟超时也就一起没了 —— 一个挂住的用例会让脚本永久卡死，
+  # 在 CI/发版流水线里表现为「一直不出结果」而不是「失败」。超时后 testing 会打印
+  # 全部 goroutine 栈，比无限等待有用得多。
+  out=$(cd "$P/internal/$pkg" && /system/bin/linker64 "$PREFIX/tmp/$pkg.test" -test.timeout=180s 2>&1 | tail -1)
   printf "  %-11s %s\n" "$pkg" "$out"
   [ "$out" = "PASS" ] || fail=1
 done

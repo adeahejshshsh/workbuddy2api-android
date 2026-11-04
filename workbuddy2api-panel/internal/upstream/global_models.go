@@ -128,8 +128,13 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 	// 是 4 路上游请求（3 个 UA 的 /v3/config + 企业端点）。CN 侧 handler.fetchDynamicModels
 	// 专门用 modelsFetchMu 防了这件事，global 侧此前漏了。
 	if c.globalModels.probing {
+		// 已有探测在跑：**不打上游**，但也别直接回 nil —— nil 在调用方看来等于
+		// 「该域没有任何模型」，一次并发就会让 /v1/models 短暂丢掉全部 global 条目
+		// （缓存过期瞬间正好几个请求同时进来就是这个场景）。有上一轮的成功缓存就
+		// 先用它顶着（宁可旧一小时，也别让列表突然空掉）；确实没有缓存才回 nil。
+		names, infos = c.globalModels.names, c.globalModels.infos
 		c.globalModels.Unlock()
-		return nil, nil // 已有探测在跑：本次直接按"暂无数据"返回，不打上游
+		return names, infos
 	}
 	c.globalModels.probing = true
 	c.globalModels.Unlock()

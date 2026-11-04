@@ -49,6 +49,17 @@ else
 fi
 [ -n "$TOKEN" ] || { echo "❌ token 为空"; exit 1; }
 
+# 认证头只走**环境变量**，不进 argv（review：签名口令与 GitHub token 进 argv）。
+# `git -c http.extraHeader=...` 会把 base64 后的 token 放进命令行，ps / /proc/*/cmdline
+# 对任何用户可读；GIT_CONFIG_* 走的是 /proc/PID/environ，只有同 uid（root）能读。
+B64=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+gauth() {
+  GIT_CONFIG_COUNT=1 \
+  GIT_CONFIG_KEY_0=http.extraHeader \
+  GIT_CONFIG_VALUE_0="Authorization: Basic $B64" \
+  git "$@"
+}
+
 # 取不到要明确报错（bug B19 的机制其实不成立：脚本是 set -eu 且**没有** pipefail，
 # 管道的退出码取 sed，所以 grep 找不到不会让脚本退出 —— 实测会带着空版本号一路跑
 # 下去，最后打出 `版本: v` 并用空 tag 建 Release）。这里补显式判空。
@@ -75,7 +86,7 @@ mkdir -p "$STAGE"
 # 所以必须发生在 tar 覆盖之前。
 if [ "$BRANCH" != "main" ] && [ -d "$STAGE/.git" ]; then
   _B64=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
-  if git -c http.extraHeader="Authorization: Basic $_B64" -C "$STAGE" \
+  if gauth -C "$STAGE" \
        fetch -q "https://github.com/$OWNER/$NAME.git" main 2>/dev/null; then
     git -C "$STAGE" reset --hard -q FETCH_HEAD
     echo "  分支模式：暂存库已重置到 origin/main（PR 只含本轮改动）"
@@ -198,14 +209,14 @@ sys.stdout.write(d.replace(t, "***") if t else d)'
 # 带斜杠的规范地址，而**重定向会把 URL 里的 auth 丢掉** → push 报
 # "could not read Username for 'https://github.com'"。改用「无凭据 URL + Authorization 头」，
 # http.extraHeader 会跟着重定向一起走（实测 push 成功）。
-B64=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+# B64 已在脚本开头算好（gauth 用它注入头），这里不再重复。
 PURL="https://github.com/$OWNER/$NAME.git"
-gpush() { git -c http.extraHeader="Authorization: Basic $B64" push "$@" "$PURL" "$BRANCH:$BRANCH"; }
+gpush() { gauth push "$@" "$PURL" "$BRANCH:$BRANCH"; }
 # 暂存目录（$STAGE）可能被环境清理成"全新历史"：先 fetch 远端，把本轮提交接到远端之后，
 # 保证是快进推送（不丢远端历史、也不依赖强推）。
 set +e
 # fetch 也带认证头（review S-24）：仓库一旦转私有，裸 fetch 会静默失败。
-git -c http.extraHeader="Authorization: Basic $B64" fetch -q "$PURL" "$BRANCH" 2>/dev/null; frc=$?
+gauth fetch -q "$PURL" "$BRANCH" 2>/dev/null; frc=$?
 set -e
 if [ $frc -eq 0 ] && git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1; then
   if ! git merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
@@ -244,7 +255,7 @@ done
 if [ $push_ok -ne 1 ]; then
   # 只有「远端是本地的祖先」（快进）时强推才等价于正常推送；否则拒绝。
   set +e
-  git -c http.extraHeader="Authorization: Basic $B64" fetch -q "$PURL" "$BRANCH" 2>/dev/null
+  gauth fetch -q "$PURL" "$BRANCH" 2>/dev/null
   if git rev-parse --verify -q FETCH_HEAD >/dev/null 2>&1 \
      && git merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
     echo "  重试 3 次仍失败；已确认是快进关系 → 强推"

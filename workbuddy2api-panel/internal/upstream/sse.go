@@ -1094,6 +1094,30 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 
 	br := bufio.NewReaderSize(r, 64*1024)
 	validFrames := 0
+	// dataPending 多行 data: 的累积缓冲。
+	//
+	// SSE 规范允许一个事件的多行 data: 用 \n 拼成一条消息（JSON 美化输出/长行折行时
+	// 上游会这么发）。此前每读到一行 data: 就当独立帧处理 —— 一条多行 JSON 会被拆成
+	// N 个碎片，每个都不是合法 JSON，writeFrame 走「非 JSON 原样降级」分支逐条写出，
+	// 客户端按帧解析全部失败。
+	//
+	// 判定方式：先看这行本身是不是完整 JSON（绝大多数上游单行发送，走这条快路，
+	// 行为与改动前逐字一致）；不是才攒起来，等后续行拼出合法 JSON 再一次性写出。
+	// 攒到上限仍未成 JSON 就原样刷出（绝不吞字节）。
+	var dataPending []string
+	const dataPendingMax = 64
+	// 名字带 DataLines：同函数作用域里已有一个 flushPending（DSML 修复的原始字节缓冲），
+	// 两者语义不同，别合并。
+	flushDataLines := func() error {
+		if len(dataPending) == 0 {
+			return nil
+		}
+		joined := strings.Join(dataPending, "\n")
+		dataPending = dataPending[:0]
+		n, werr := writeFrame(joined)
+		validFrames += n
+		return werr
+	}
 	// readErr 上游读错误（非 EOF）：流中途被掐。记下来走统一收尾，绝不裸 return。
 	var readErr error
 readLoop:
@@ -1106,14 +1130,44 @@ readLoop:
 			payload := strings.TrimPrefix(strings.TrimPrefix(trimmed, "data:"), " ")
 			if strings.TrimSpace(payload) == "[DONE]" {
 				// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
+				if werr := flushDataLines(); werr != nil {
+					return werr
+				}
 				break readLoop
 			}
-			n, werr := writeFrame(payload)
-			validFrames += n
-			if werr != nil {
-				return werr
+			// 已在攒多行：拼上继续等，拼成合法 JSON 就整体写出。
+			if len(dataPending) > 0 {
+				dataPending = append(dataPending, payload)
+				if json.Valid([]byte(strings.Join(dataPending, "\n"))) || len(dataPending) >= dataPendingMax {
+					if werr := flushDataLines(); werr != nil {
+						return werr
+					}
+				}
+				if err != nil {
+					if err == io.EOF {
+						break readLoop
+					}
+					readErr = err
+					break readLoop
+				}
+				continue
+			}
+			// 单行就是完整 JSON（绝大多数上游）：立即写出，行为与改动前一致。
+			if json.Valid([]byte(payload)) {
+				n, werr := writeFrame(payload)
+				validFrames += n
+				if werr != nil {
+					return werr
+				}
+			} else {
+				// 不是完整 JSON：可能是多行 data 的第一段，先攒着。
+				dataPending = append(dataPending, payload)
 			}
 		case trimmed != "":
+			// 先把攒着的多行 data 刷出，保证与注释行的先后顺序。
+			if werr := flushDataLines(); werr != nil {
+				return werr
+			}
 			// 注意：注释/心跳行（": ping"）**不计**有效帧 —— 心跳不是内容。
 			// 整条流只有心跳时按空流处理（补 error 帧 + 502）是刻意行为，
 			// TestStreamEmptyFramesCase/只有注释行 钉住了这一点：客户端拿到一堆
@@ -1202,6 +1256,10 @@ readLoop:
 	// 不重发也不会丢东西：调用方下次会用「不扣帧」的方式重放，帧照旧透传。
 	if hold && !meaningful && !wroteAny && readErr == nil && validFrames > 0 {
 		return errSilentEmptyTurn
+	}
+	// 先把「攒着还没拼成 JSON 的多行 data」原样刷出（绝不吞字节），再走扣帧兜底。
+	if werr := flushDataLines(); werr != nil {
+		return werr
 	}
 	// 兜底：走到这里说明「扣住的帧要保留」（静默判定没命中，例如客户端已收到心跳行
 	// 导致 wroteAny=true）。必须先把 pending 刷出去，否则 role/finish 帧会被 [DONE]
