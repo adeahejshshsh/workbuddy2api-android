@@ -189,6 +189,13 @@ func NewHandler(cfg Config) *Handler {
 	// 突发积分闸 / 缓存率闸（review 移植 58262f31）：0 = 关闭。
 	h.budget.setGuards(cfg.BurstCreditLimit, cfg.CacheLowRate)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Codex Responses 入站：请求体转 chat 内核，回程按 Responses 事件族下发
+	// （reasoning_summary_* / response.output_text.delta / response.completed）。
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	// Codex 在 supports_websockets/prefer_websockets 时先探 GET /v1/responses 升级 WS。
+	// 本网关不做连接内 previous_response_id 复用，回 426 让它**立刻且粘性**回落 HTTPS
+	// （见 responses.go:responsesWebsocketUnsupported）。
+	h.mux.HandleFunc("GET /v1/responses", h.withAuth(h.responsesWebsocketUnsupported))
 	// 官方 agenttool 联网检索的网关透传（非对话端点，与 images 同套取号/失败处置）。
 	h.mux.HandleFunc("POST /v1/search", h.withAuth(h.search))
 	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。
@@ -227,12 +234,13 @@ func NewHandler(cfg Config) *Handler {
 	return h
 }
 
-// isChatEntry 入站协议路径：/v1/messages（含 /messages 别名）经 r.Clone 转进
-// chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套行日志/归档/来源采集/
-// X-Request-Id——三者一视同仁，别再按单路径放行（否则整类请求无来源、不入归档）。
+// isChatEntry 入站协议路径：/v1/responses 与 /v1/messages（含 /messages 别名）经
+// r.Clone 转进 chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套
+// 行日志/归档/来源采集/X-Request-Id——四者一视同仁，别再按单路径放行（Codex 走
+// /v1/responses，曾因此整类请求无来源、不入归档）。
 func isChatEntry(path string) bool {
 	switch path {
-	case "/v1/chat/completions", "/v1/messages", "/messages":
+	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages":
 		return true
 	}
 	return false
