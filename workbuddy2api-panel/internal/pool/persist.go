@@ -181,6 +181,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			a:                        &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
 			needAuth:                 true,                 // 标记占位（bug P1-3）：拿到真实凭证前不参与路由
 			remark:                   s.Remark,
+			group:                    s.Group,
 			credits:                  s.Credits,
 			creditsTotal:             s.CreditsTotal,
 			creditsExpiring:          s.CreditsExpiring,
@@ -340,6 +341,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 	for uid, e := range p.byUID {
 		s := stateAccount{
 			Remark:                   e.remark,
+			Group:                    e.group,
 			Credits:                  e.credits,
 			CreditsTotal:             e.creditsTotal,
 			Disabled:                 e.disabled,

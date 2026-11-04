@@ -64,6 +64,7 @@ type Status struct {
 	UID          string `json:"uid"`
 	Nickname     string `json:"nickname,omitempty"`
 	Remark       string `json:"remark,omitempty"` // 运维备注（上游 PR #178）
+	Group        string `json:"group,omitempty"`  // 运维分组标签（空 = 未分组，issue #159）
 	Credits      int64  `json:"credits"`
 	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
@@ -226,6 +227,9 @@ type entry struct {
 	// remark 运维备注（上游 PR #178）：纯本地标注，不参与选号/路由/上游请求。
 	// 持久化在 state.json，跨重启保留。
 	remark string
+	// group 运维自定义分组标签（面板手填，issue #159）。纯管理维度：不参与选号 /
+	// 计费 / 鉴权，只用于面板按组筛选与组内批量操作。空 = 未分组。持久化（state.json）。
+	group string
 	// lastCheckinDay 最近一次签到成功的本地日期（"2006-01-02"）。签到成功与上游
 	// 幂等拒绝（"今天已签到"）都算；statusOf 据此输出 CheckinDone 供面板按钮显示
 	// 签到/已签。持久化：跨重启不丢当日状态。
@@ -500,6 +504,7 @@ type stateAccount struct {
 	Credits      int64     `json:"credits"`
 	CreditsTotal int64     `json:"credits_total,omitempty"`
 	Remark       string    `json:"remark,omitempty"` // 运维备注（上游 PR #178）
+	Group        string    `json:"group,omitempty"`  // 运维分组标签（issue #159）
 	Disabled     bool      `json:"disabled"`
 	Paused       bool      `json:"paused,omitempty"`
 	Reason       string    `json:"reason,omitempty"`

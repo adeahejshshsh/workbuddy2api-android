@@ -651,6 +651,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Realm:                    e.a.Realm(),
 		Enterprise:               e.a.IsEnterprise(),
 		Remark:                   e.remark,
+		Group:                    e.group,
 		Nickname:                 e.a.NicknameValue(),
 		Credits:                  e.credits,
 		CreditsTotal:             e.creditsTotal,
@@ -815,6 +816,32 @@ func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedMod
 		return nil
 	}
 	return rows
+}
+
+// groupMaxRunes 分组标签长度上限。面板输入框同样限 24（与账号备注同口径），
+// 这里是服务端兜底：脚本直接灌超长值会让每次落盘时整份 state.json 变大。
+const groupMaxRunes = 24
+
+// SetGroup 设置账号分组标签（空串 = 取消分组，幂等）。纯管理维度：不参与选号 /
+// 计费 / 鉴权，也不动任何冷却与计数 —— 只影响面板按组筛选与组内批量操作。
+// 返回 false 表示账号不存在（供调用方区分「改成功了」与「uid 打错」）。
+func (p *Pool) SetGroup(uid, group string) bool {
+	group = strings.TrimSpace(group)
+	if r := []rune(group); len(r) > groupMaxRunes {
+		group = string(r[:groupMaxRunes])
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	if e.group == group {
+		return true
+	}
+	e.group = group
+	p.dirty.Store(true)
+	return true
 }
 
 // SetRemark 设置账号的运维备注（上游 PR #178）。纯本地标注：不参与选号/路由/
