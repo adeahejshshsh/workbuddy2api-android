@@ -1112,8 +1112,16 @@ readLoop:
 			// 整条流只有心跳时按空流处理（补 error 帧 + 502）是刻意行为，
 			// TestStreamEmptyFramesCase/只有注释行 钉住了这一点：客户端拿到一堆
 			// ping 却没有任何 data 帧，若报「成功」反而更误导。
-			// 注释/其他行：原样透传
+			// 注释/其他行：原样透传，并**补回帧分隔空行**。
+			//
+			// 本函数吞掉上游的分隔空行、自产 "\n\n" 只覆盖 data 帧；注释行只写单行的话，
+			// 会与下一个 "data: " 帧粘成 ": heartbeat\ndata: ..." —— 下游按 "\n\n" 切帧后
+			// 整块没有 "data: " 前缀，直接丢弃。实测 GLM 的工具调用首帧（携带 id+name）
+			// 正是被这样吞掉的：调用整个消失、completed 的 output 变 null。
 			if _, werr := io.WriteString(w, line); werr != nil {
+				return clientWriteErr(werr)
+			}
+			if _, werr := io.WriteString(w, "\n"); werr != nil {
 				return clientWriteErr(werr)
 			}
 			wroteAny = true
