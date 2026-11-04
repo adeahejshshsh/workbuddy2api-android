@@ -693,6 +693,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <button data-realm="cn">国内版 <b id="accCntCn">0</b></button>
         <button data-realm="global">国际版 <b id="accCntGlobal">0</b></button>
       </span>
+      <!-- 分组筛选（issue #159）：分组是服务端字段，这里只做筛选；
+           组内批量按钮平时隐藏，选了某一组才出现 —— 避免「以为在操作整池」。 -->
+      <select id="accGroupFilter" aria-label="按分组筛选"><option value="">全部分组</option></select>
+      <span id="accGroupActions" hidden>
+        <button class="xs" type="button" data-gact="checkin">组内签到</button>
+        <button class="xs" type="button" data-gact="pause">组内暂停选号</button>
+        <button class="xs" type="button" data-gact="resume">组内恢复选号</button>
+      </span>
       <span class="sep">/</span>
       <span class="meta" id="subMeta">-</span>
       <div class="grow"></div>
@@ -1466,8 +1474,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 <div class="veil" id="remarkVeil">
   <div class="dlg" style="width:460px">
     <header>
-      <h3>账号备注</h3>
-      <div class="hint">只存在这台设备的浏览器里（localStorage），不会写回服务端，也不参与选号。</div>
+      <h3>账号备注与分组</h3>
+      <div class="hint">备注只存在这台设备的浏览器里（localStorage），不写回服务端；<b>分组写回服务端</b>（state.json），用于账号池按组筛选与组内批量。两者都不参与选号。</div>
     </header>
     <div class="body">
       <div id="remarkBody"></div>

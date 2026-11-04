@@ -513,6 +513,36 @@ function disabledAge(iso) {
 let accRealmFilter = 'all';
 let lastAccountsList = [];
 
+// 分组筛选（issue #159）：空串 = 全部分组。只影响**可见行**，不动数据。
+let accGroupFilter = '';
+
+// refreshGroupFilter 按当前账号列表重建分组下拉；选中值不在新列表里就退回「全部分组」
+// —— 否则筛到一个已清空的组会看到永远空表。
+function refreshGroupFilter() {
+  const sel = $('accGroupFilter');
+  if (!sel) return;
+  const groups = [];
+  for (const s of lastAccountsList) {
+    const g = String(s.group || '');
+    if (g && !groups.includes(g)) groups.push(g);
+  }
+  groups.sort();
+  if (accGroupFilter && !groups.includes(accGroupFilter)) accGroupFilter = '';
+  sel.innerHTML = '<option value="">全部分组</option>' +
+    groups.map(g => '<option value="' + esc(g) + '"' + (g === accGroupFilter ? ' selected' : '') + '>' +
+      esc(g) + '（' + lastAccountsList.filter(s => String(s.group || '') === g).length + '）</option>').join('');
+  const acts = $('accGroupActions');
+  if (acts) acts.hidden = !accGroupFilter;
+}
+
+// visibleAccounts 当前筛选下真正可见的行 —— 组内批量的作用域就是它，
+// 不是「整池」：按钮文案与作用域必须一致，否则一次误点会波及全池。
+function visibleAccounts() {
+  return accGroupFilter
+    ? lastAccountsList.filter(s => String(s.group || '') === accGroupFilter)
+    : lastAccountsList;
+}
+
 function renderAccounts(list) {
   const tb = $('accBody');
   lastAccountsList = Array.isArray(list) ? list : [];
@@ -520,6 +550,7 @@ function renderAccounts(list) {
   const globalCnt = lastAccountsList.filter(s => s.realm === 'global').length;
   const cnCnt = total - globalCnt;
 
+  refreshGroupFilter();
   const elTabs = $('accRealmTabs');
   if (elTabs) {
     const cAll = $('accCntAll'), cCn = $('accCntCn'), cGl = $('accCntGlobal');
@@ -536,6 +567,10 @@ function renderAccounts(list) {
     filtered = lastAccountsList.filter(s => s.realm !== 'global');
   } else if (accRealmFilter === 'global') {
     filtered = lastAccountsList.filter(s => s.realm === 'global');
+  }
+  // 分组筛选叠加在 realm 之上：两个维度都生效，用户看到的就是两个条件都满足的行。
+  if (accGroupFilter) {
+    filtered = filtered.filter(s => String(s.group || '') === accGroupFilter);
   }
 
   if (!filtered.length) {
@@ -4359,7 +4394,7 @@ function storeRemarks(map) {
    没有」的键，避免账号被移除后备注看起来凭空消失。 */
 function remarkFormRows() {
   const rows = ((overviewData && overviewData.accounts) || [])
-    .map(s => ({ uid: remarkKey(s.uid), who: s.nickname || remarkKey(s.uid) }))
+    .map(s => ({ uid: remarkKey(s.uid), who: s.nickname || remarkKey(s.uid), group: String(s.group || '') }))
     .filter(r => r.uid);
   for (const k of Object.keys(remarksAll())) {
     if (!rows.some(r => r.uid === k)) rows.push({ uid: k, who: k });
@@ -4378,7 +4413,9 @@ function renderRemarkBody(onlyUID) {
   }
   box.innerHTML = rows.length
     ? rows.map(r => '<div class="rm-row"><span class="rm-who" title="' + esc(r.who) + '">' + esc(r.who) + '</span>' +
-        '<input type="text" data-uid="' + esc(r.uid) + '" value="' + esc(remarksAll()[r.uid] || '') + '" placeholder="备注（留空即清除）" maxlength="24"></div>').join('')
+        '<input type="text" data-uid="' + esc(r.uid) + '" value="' + esc(remarksAll()[r.uid] || '') + '" placeholder="备注（留空即清除）" maxlength="24">' +
+        // 分组写服务端（state.json）：与备注不同，它要跨设备、供筛选与组内批量用。
+        '<input type="text" data-guid="' + esc(r.uid) + '" data-orig="' + esc(r.group || '') + '" value="' + esc(r.group || '') + '" placeholder="分组（留空即取消）" maxlength="24"></div>').join('')
     : '<div class="empty">暂无账号：先在「账号池」加载一次账号列表。</div>';
 }
 function openRemarks(onlyUID) {
@@ -4395,12 +4432,56 @@ function saveRemarkForm() {
     else delete map[k];
   });
   const saved = storeRemarks(map);
+  // 分组走服务端：**只提交真正改动的行**（几十个号逐个 PUT 是白打上游）。
+  const groupPuts = [];
+  document.querySelectorAll('#remarkBody input[data-guid]').forEach(inp => {
+    const uid = inp.getAttribute('data-guid');
+    const orig = inp.getAttribute('data-orig') || '';
+    const v = inp.value.trim();
+    if (v !== orig) groupPuts.push(api('accounts/' + encodeURIComponent(uid) + '/group',
+      { method: 'POST', body: JSON.stringify({ group: v }) }).catch(() => null));
+  });
+  if (groupPuts.length) {
+    Promise.all(groupPuts).then(() => { if (view === 'accounts') loadOverview(true); });
+  }
   closeRemarks();
   // 备注只影响本机展示：重渲染当前视图即可，无需后端参与。
   if (view === 'accounts') loadOverview(true);
   else if (view === 'usage' && usageData) renderUsage(usageData);
   toast(saved ? '备注已保存（仅本机浏览器）' : '备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失', saved ? '' : 'err');
 }
+// 分组筛选联动（issue #159）：只重渲染，不重新拉数据。
+if ($('accGroupFilter')) $('accGroupFilter').onchange = () => {
+  accGroupFilter = $('accGroupFilter').value;
+  renderAccounts(lastAccountsList);
+};
+
+// 组内批量（issue #159）：作用域 = **当前筛选下可见的行**，逐个打已有的单号接口，
+// 不新增批量端点、也不动调度器。签到跳过企业版 / 静态 Key / 已禁用号 ——
+// 它们的签到端点注定 4xx，不该算进失败数。
+if ($('accGroupActions')) $('accGroupActions').onclick = async ev => {
+  const btn = ev.target.closest('button[data-gact]');
+  if (!btn) return;
+  const act = btn.dataset.gact;
+  const rows = visibleAccounts();
+  if (!rows.length) return;
+  const label = { checkin: '签到', pause: '暂停选号', resume: '恢复选号' }[act] || act;
+  if (!confirm('将对分组「' + accGroupFilter + '」的 ' + rows.length + ' 个账号执行「' + label + '」，继续？')) return;
+  btn.disabled = true;
+  let ok = 0, skipped = 0, failed = 0;
+  try {
+    for (const r of rows) {
+      if (act === 'checkin' && (r.disabled || r.enterprise || r.api_key)) { skipped++; continue; }
+      try {
+        await api('accounts/' + encodeURIComponent(r.uid) + '/' + act, { method: 'POST' });
+        ok++;
+      } catch (e) { failed++; }
+    }
+    toast('组内' + label + '：成功 ' + ok + (skipped ? '，跳过 ' + skipped : '') + (failed ? '，失败 ' + failed : ''), failed ? 'err' : 'ok');
+    loadOverview(true);
+  } finally { btn.disabled = false; }
+};
+
 if ($('btnRemarks')) $('btnRemarks').onclick = () => openRemarks('');
 if ($('btnRemarkClose')) $('btnRemarkClose').onclick = closeRemarks;
 if ($('btnRemarkClear')) $('btnRemarkClear').onclick = () => {

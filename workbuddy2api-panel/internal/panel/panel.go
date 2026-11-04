@@ -273,6 +273,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.importCockpit)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.accountRevive)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remark", p.accountRemark)
+	// 账号分组标签（issue #159）：纯管理维度，落 state.json，供面板按组筛选与组内批量。
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/group", p.accountGroup)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.accountDisable)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.accountPause)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.accountResume)
@@ -1414,6 +1416,30 @@ func (p *Panel) accountRemark(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "remark": strings.TrimSpace(body.Remark)})
+}
+
+// accountGroup 设置 / 清除账号分组标签（body: {"group":"..."}，空串 = 取消分组）。
+// 纯管理维度：不参与选号 / 计费 / 鉴权，只影响面板按组筛选与组内批量操作。
+// 返回库里真正落下的值 —— 超长会被池层截断，前端据此回显而不是显示用户输入的原值。
+func (p *Panel) accountGroup(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	var body struct {
+		Group string `json:"group"`
+	}
+	limitJSONBody(w, r)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if !p.cfg.Pool.SetGroup(uid, body.Group) {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	group := ""
+	if st, ok := p.cfg.Pool.Status(uid); ok {
+		group = st.Group
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group": group})
 }
 
 // creditHistory 输出积分变动流水（新的在前）。
