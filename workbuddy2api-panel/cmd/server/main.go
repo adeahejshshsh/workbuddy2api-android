@@ -479,6 +479,7 @@ func main() {
 		// 运维接口（手动补跑排程）+ 操作审计：整段缺省关闭。
 		AdminEnabled:                  cfg.Admin.Enabled,
 		Tasks:                         sch,
+		GrowthRunner:                  pn.RunGrowthQueueOnce,
 		Audit:                         auditLog,
 		ModelsAllowed:                 cfg.Models.Allowed, // 模型白名单（issue #68）
 		ModelsHidden:                  cfg.Models.Hidden,  // 模型黑名单（上游 PR #225）

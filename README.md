@@ -36,7 +36,8 @@
   `cn:` / `global:` 前缀路由；出图模型在 `/v1/models` 里带 `image_generation: true`
   单列）、`/v1/embeddings`（需开 `features.embeddings_enabled`）、`/metrics`（需开 metrics）
 * 运维接口（`admin.enabled`，缺省关闭）：`POST /admin/tasks/{name}/run` 手动补跑排程
-  （`checkin` / `activity` / `keepalive` / `travel` / `balance_refresh` / `streak_bonus`），
+  （`checkin` / `activity` / `keepalive` / `travel` / `balance_refresh` / `streak_bonus` /
+  `growth` —— 后者由面板成长队列执行），
   立刻 202、后台执行、同名任务不并发；`admin.audit_enabled` 时每次操作追加一行 JSONL
   审计（只写 8 位密钥指纹，绝不写明文 Key）
 * 多账号池 + 轮转：失败自动换号、模型级冷却、成本分层（优先免费号）、会话粘性
