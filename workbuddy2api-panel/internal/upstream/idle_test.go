@@ -1,8 +1,14 @@
 package upstream
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,3 +128,77 @@ func (r *oneByteReader) Read(p []byte) (int, error) {
 type nopCloserBody struct{ io.Reader }
 
 func (nopCloserBody) Close() error { return nil }
+
+func TestStreamConnReusedAfterDone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, f := range []string{`data: {"choices":[{"delta":{"content":"hi"}}]}`, "data: [DONE]"} {
+			_, _ = io.WriteString(w, f+"\n\n")
+			w.(http.Flusher).Flush()
+		}
+		// 上游在 [DONE] 之后过一会儿才发 chunked 结束块：读者在这之前就已关闭。
+		time.Sleep(20 * time.Millisecond)
+	}))
+	defer srv.Close()
+	cl := &http.Client{Transport: newTransport()}
+	defer cl.CloseIdleConnections()
+
+	stream := func() (reused bool) {
+		ctx, cancel := context.WithCancel(context.Background())
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(i httptrace.GotConnInfo) { reused = i.Reused }})
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, nil)
+		resp, err := cl.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := monitorBody(resp.Body, time.Minute, cancel)
+		br := bufio.NewReader(body)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				t.Fatalf("没读到 [DONE]：%v", err)
+			}
+			if strings.TrimSpace(line) == "data: [DONE]" {
+				break
+			}
+		}
+		body.Close()
+		return reused
+	}
+	stream()
+	for i := 0; i < 5; i++ {
+		if !stream() {
+			t.Fatalf("第 %d 次流式请求没有复用连接", i+2)
+		}
+	}
+}
+
+// closeCounter 记 Close 次数与 Close 之后的 Read：幂等的 Close 只关一次底流，之后也不再读它。
+type closeCounter struct {
+	closes, readsAfterClose int
+}
+
+func (c *closeCounter) Read(p []byte) (int, error) {
+	if c.closes > 0 {
+		c.readsAfterClose++
+		return 0, errors.New("read on closed body")
+	}
+	return 0, io.EOF
+}
+
+func (c *closeCounter) Close() error { c.closes++; return nil }
+
+// Close 幂等：调用链里两层各关一次是常态，第二次不能再读流尾、再关底流。
+func TestIdleBodyCloseIsIdempotent(t *testing.T) {
+	under := &closeCounter{}
+	canceled := 0
+	b := monitorBody(under, time.Minute, func() { canceled++ })
+	for range 3 {
+		if err := b.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if under.closes != 1 || under.readsAfterClose != 0 || canceled != 1 {
+		t.Fatalf("closes=%d readsAfterClose=%d canceled=%d, want 1/0/1", under.closes, under.readsAfterClose, canceled)
+	}
+}
