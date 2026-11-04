@@ -107,6 +107,10 @@ type Config struct {
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
 	RecordClientInfo bool
+	// RecordContext 是否把会话上下文（system + messages / 出图 prompt）记入请求事件。
+	// 来自 logging.request_archive_context（缺省 false）：比 IP/UA 敏感得多——那是
+	// 用户的实际对话内容，所以缺省不开。
+	RecordContext bool
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -118,6 +122,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		APIKey:           h.cfg.APIKey,
 		SoftCooldown:     h.cfg.SoftCooldown,
 		RecordClientInfo: h.cfg.RecordClientInfo,
+		RecordContext:    h.cfg.RecordContext,
 	}
 }
 
@@ -976,6 +981,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+	// 会话上下文（面板「请求事件日志」展开看）：/messages 与 /responses 都先转成
+	// chat 体再进来，所以这一处就覆盖三条入站协议。开关关时为零值 nil，不落盘。
+	if h.loadLive().RecordContext {
+		if tr := requestTraceFrom(r); tr != nil {
+			tr.context = archiveContext(body)
+		}
+	}
 
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
 	// （见 upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」

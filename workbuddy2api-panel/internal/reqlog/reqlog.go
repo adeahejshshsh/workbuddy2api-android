@@ -96,6 +96,10 @@ type Event struct {
 	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
 	ClientIP        string `json:"client_ip,omitempty"`
 	UserAgent       string `json:"user_agent,omitempty"`
+	// Context 本轮会话上下文（system + messages / 出图 prompt 原文），由
+	// logging.request_archive_context 决定是否填充；关掉时保持 nil，事件里不出现该字段。
+	// 比 IP/UA 敏感得多（是用户的实际对话内容），所以单独一个开关、缺省关闭。
+	Context json.RawMessage `json:"context,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），

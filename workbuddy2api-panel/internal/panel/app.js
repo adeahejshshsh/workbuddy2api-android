@@ -1313,12 +1313,16 @@ function renderRequestTable() {
   const list = reqEntries.filter(e => reqMatch(e));
   const tb = $('reqBody');
   if (!tb) return;
-  tb.innerHTML = list.map(e => {
+  // data-ev 存**原始下标**（不是过滤后的）：点行打开上下文时要能取回同一条。
+  tb.innerHTML = reqEntries.map((e, i) => ({ e, i })).filter(x => reqMatch(x.e)).map(({ e, i }) => {
     const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
     const ip = e && e.client_ip ? e.client_ip : '';
     const ua = e && e.user_agent ? e.user_agent : '';
     const rid = e && e.request_id ? e.request_id : '';
-    return '<tr title="' + esc(requestLogText(e)) + '">' +
+    const hasCtx = !!(e && e.context);
+    return '<tr data-ev="' + i + '"' + (hasCtx
+        ? ' class="has-ctx" title="点击查看请求上下文"'
+        : ' title="' + esc(requestLogText(e)) + '"') + '>' +
       '<td class="num">' + esc(when) + '</td>' +
       '<td>' + reqOutcomeTag(e) + '</td>' +
       '<td>' + esc(e && e.model || '—') + '</td>' +
@@ -1343,6 +1347,35 @@ function renderRequestTable() {
       (hasSource ? '' : ' · 来源未记录');
   $('reqCount').className = (filtered || !hasSource) ? 'note src-off' : 'note';
 }
+
+/* renderEventContext 把一次请求的会话上下文渲染成「角色 + 原文」块。
+   只认 archiveContext 写出的三种键（system / messages / prompt）；content 是数组的
+   多模态块原样 JSON 展示——拆开反而丢掉结构。 */
+function renderEventContext(ctx) {
+  if (!ctx) return '<div class="ev-ctx-empty">本次请求没有记录上下文（在「配置 → 日志」打开「记录请求上下文」后新产生的请求才有）</div>';
+  const textOf = c => typeof c === 'string' ? c : (c == null ? '' : JSON.stringify(c, null, 2));
+  const block = (role, text) => '<div class="ev-ctx-msg"><span class="ev-ctx-role">' + esc(role) + '</span><pre>' + esc(text) + '</pre></div>';
+  const parts = [];
+  if (ctx.system != null) parts.push(block('system', textOf(ctx.system)));
+  if (ctx.prompt != null) parts.push(block('prompt', textOf(ctx.prompt)));
+  (ctx.messages || []).forEach(m => parts.push(block((m && m.role) || '?', textOf(m && m.content))));
+  return '<div class="ev-ctx">' + parts.join('') + '</div>';
+}
+
+/* 请求记录点行打开上下文弹窗。挂 tbody 一次，重渲染后照样有效。
+   只有带 context 的行才响应——没有上下文时保持原来的「整行 tooltip」。 */
+if ($('reqBody')) $('reqBody').onclick = ev => {
+  const tr = ev.target.closest('tr[data-ev]');
+  if (!tr || !tr.classList.contains('has-ctx')) return;
+  const e = reqEntries[Number(tr.dataset.ev)] || {};
+  // 标题带上请求身份：弹窗遮住表格后，否则看不出打开的是哪一条。
+  $('evCtxHint').textContent = [e.time ? fmtLocalDateTime(e.time) : '', e.path, e.model].filter(Boolean).join(' · ');
+  $('evCtxBody').innerHTML = renderEventContext(e.context);
+  $('evCtxVeil').classList.add('on');
+};
+if ($('btnEvCtxClose')) $('btnEvCtxClose').onclick = () => $('evCtxVeil').classList.remove('on');
+// 点遮罩关闭（与其它弹窗一致：只在点在 veil 自身时关，点内容不关）。
+if ($('evCtxVeil')) $('evCtxVeil').onclick = ev => { if (ev.target === $('evCtxVeil')) $('evCtxVeil').classList.remove('on'); };
 
 /* 请求记录筛选控件。搜索框防抖 150ms：最多 1000 行重渲染，不必每键一次。
    这段顶层绑定放在 requestLogText 之前，是为了让"纯函数切片"式前端测试
@@ -1457,6 +1490,7 @@ const CFG_MAP = {
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  request_archive_context: ['logging', 'request_archive_context'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *

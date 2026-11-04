@@ -45,6 +45,14 @@ type Config struct {
 		// 关掉。关闭后 Event.ClientIP/UserAgent 保持为空，归档里不出现该字段。
 		// 热生效（经 livecfg 快照），无需重启。
 		RequestClientInfo bool `json:"request_client_info"`
+		// RequestArchiveContext 是否把会话上下文（system + messages / 出图 prompt）
+		// 记入请求事件，供面板「请求事件日志」展开查看。缺省 false。
+		//
+		// 为什么缺省关：它比 IP/UA 敏感得多——那是用户**实际发出去的对话内容**。
+		// 排查「上游到底收到了什么」时它无可替代，但不该是默认行为。
+		// 单个事件上限 16KB（超长按「丢最旧轮次 → 截断最后一条」收敛，保持合法 JSON）。
+		// 热生效（经 livecfg 快照），无需重启。
+		RequestArchiveContext bool `json:"request_archive_context"`
 	} `json:"logging"`
 
 	Server struct {
