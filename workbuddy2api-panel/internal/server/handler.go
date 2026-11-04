@@ -2330,27 +2330,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				!as.Cooling && !as.NeedAuth {
 				realmHealthy++
 			}
+			// **不再逐号回显 uid8**（review：503 错误体回显账号池实况与 uid8）。
+			// 这条 hint 是发给**下游客户端**的，而客户端 key 是要分发的 —— uid8 属于
+			// 账号标识，不该随错误体外泄。用户真正需要的「哪个维度空了」由上面的
+			// 聚合计数（total/healthy/cooling/degraded/paused/disabled/in_flight_full/
+			// model_cooled/realm_healthy）已经讲清楚；具体是哪个号，走 admin 专用的
+			// /status 看（见 withAdminAuth）。
 			if len(parts) < 4 {
-				short := as.UID
-				if len(short) > 8 {
-					short = short[:8]
-				}
-				if as.Realm != "" {
-					short += "/" + as.Realm
-				}
 				switch {
-				case as.Disabled:
-					parts = append(parts, short+":disabled")
-				case as.Paused:
-					parts = append(parts, short+":paused")
 				case deg:
-					parts = append(parts, short+":degraded "+time.Until(as.DegradeUntil).Truncate(time.Second).String())
+					parts = append(parts, "degraded:"+time.Until(as.DegradeUntil).Truncate(time.Second).String())
 				case cooled:
-					parts = append(parts, short+":model_cooled")
+					parts = append(parts, "model_cooled")
+				case as.Disabled:
+					parts = append(parts, "disabled")
+				case as.Paused:
+					parts = append(parts, "paused")
 				case as.InFlight > 0:
-					parts = append(parts, short+":in_flight="+fmt.Sprintf("%d", as.InFlight))
-				default:
-					parts = append(parts, short+":ok")
+					parts = append(parts, "in_flight")
 				}
 			}
 		}
