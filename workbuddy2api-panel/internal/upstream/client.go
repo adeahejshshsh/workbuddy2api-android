@@ -2527,6 +2527,12 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 		}
 		return []CreditPackage{pkg}, remain, total, nil
 	}
+	// 国际版 5.8.4 起额度查询换成 summary + paid/free 三件套（见 billing_summary.go）：
+	// 继续按 CN 的分页 body 打 get-user-resource，拿回来的形态里没有 Accounts 树，
+	// 解析结果恒 0——积分保底随即把这些号当耗尽号挡出选号。
+	if c.globalOn(a) {
+		return c.globalCreditPackages(a)
+	}
 	data, err := c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
 	if err != nil {
 		return nil, 0, 0, err
@@ -2777,6 +2783,14 @@ func (c *Client) UserResourceDetailedWithExpiryCtx(ctx context.Context, a *auth.
 	// 恒返回空 Accounts（实测 code 0 且 Accounts null），故分流到企业口径端点。
 	if a.UsesEnterpriseBilling() {
 		remain, total, expiring, earliestAt, earliestRemaining, err = c.enterpriseResourceCtx(ctx, a, soon)
+		c.notifyCredits(a, remain, err)
+		return
+	}
+	// 国际版 5.8.4 起额度查询换成 summary + paid/free 三件套（见 billing_summary.go）：
+	// 旧路径对 global 返回的形态已无 Accounts 树，按 CN 解析会得到恒 0 的余额，
+	// 积分保底随即把好号当耗尽号挡出选号。
+	if c.globalOn(a) {
+		remain, total, expiring, earliestAt, earliestRemaining, err = c.globalUserResource(a, soon)
 		c.notifyCredits(a, remain, err)
 		return
 	}
