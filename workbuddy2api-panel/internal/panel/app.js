@@ -1210,10 +1210,12 @@ async function loadLogs() {
     reqErrText = '';
     const requestLogs = api('request_logs?' + rq.toString())
       .catch(e => { reqErrText = e.message; return { entries: [] }; });
-    const [d, metrics, requestRows] = await Promise.all([
+    const [d, metrics, requestRows, errSum] = await Promise.all([
       api('logs'),
       api('request_metrics').catch(() => ({})),
       requestLogs,
+      // 错误汇总失败不该拖垮整页日志（它只是视图之一）：失败按 null 渲染成「—」。
+      api('error_summary').catch(() => null),
     ]);
     // 归档开启时以归档为准——「区间内没有记录」是一个真实结果，不能回落成内存里
     // 的最近 100 条（那会把筛选条件之外、时间范围之外的请求显示出来）。
@@ -1245,6 +1247,7 @@ async function loadLogs() {
     $('logNote').textContent = logCh === 'all'
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
+    renderErrorSummary(errSum);
   } catch (e) {
     // 拉取失败要提示（bug #15）：此前完全吞掉，页面保持上一次内容，
     // 用户以为"日志没更新"，实际是请求失败了。
@@ -1346,6 +1349,32 @@ function renderRequestTable() {
     : (filtered ? '命中 ' + list.length + ' / ' + reqEntries.length + ' 条' : reqEntries.length + ' 条') +
       (hasSource ? '' : ' · 来源未记录');
   $('reqCount').className = (filtered || !hasSource) ? 'note src-off' : 'note';
+}
+
+/* renderErrorSummary 渲染错误汇总（后端 /panel/api/error_summary 已聚合+排序）：
+   只渲染，不在这里再算。severity 决定行配色（bad 红 / warn 黄 / info 常规）。 */
+function renderErrorSummary(d) {
+  const rows = (d && d.rows) || [];
+  const tb = $('errBody');
+  if (tb) {
+    tb.innerHTML = rows.length ? rows.map(r =>
+      '<tr class="' + (r.sev === 'bad' ? 'lv-e' : r.sev === 'warn' ? 'lv-w' : '') + '">' +
+      '<td>' + esc(r.account || '—') + '</td>' +
+      '<td>' + esc(r.kind) + '</td>' +
+      '<td>' + esc(r.code || '—') + '</td>' +
+      '<td>' + esc(r.model || '—') + '</td>' +
+      '<td class="num">' + r.count + '</td>' +
+      '<td>' + esc(r.last || '—') + '</td>' +
+      '<td>' + esc(r.until || '—') + '</td>' +
+      '<td class="sample" title="' + esc(r.sample_full || r.sample || '') + '">' + esc(r.sample || '') + '</td></tr>'
+    ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">窗口内没有 WARN/ERR</td></tr>';
+  }
+  const note = $('errNote');
+  if (note) {
+    note.textContent = d
+      ? '扫描 ' + (d.scanned || 0) + ' 行 · ' + rows.length + ' 类 · 截至 ' + (d.updated_at || '—')
+      : '—';
+  }
 }
 
 /* renderEventContext 把一次请求的会话上下文渲染成「角色 + 原文」块。

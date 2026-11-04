@@ -1374,6 +1374,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
       <div class="box">
         <header>
+          <h3>错误汇总</h3>
+          <div class="hint">日志环里的 WARN/ERR 按「账号 × 错误类型」聚合——原始日志里几十行同质告警，人眼抓不到真正重要的差异。</div>
+          <span class="grow"></span>
+          <span class="note" id="errNote">—</span>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th>账号</th><th>类型</th><th>业务码</th><th>模型</th>
+              <th class="num">次数</th><th>最近</th><th>解除时刻</th><th>样本</th>
+            </tr></thead>
+            <tbody id="errBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
           <h3>运行日志</h3>
           <span class="grow"></span>
           <span class="chips" id="logChips">

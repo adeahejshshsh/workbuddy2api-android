@@ -257,6 +257,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.creditHistory)
 	p.mux.HandleFunc("GET /panel/api/overview", p.overview)
 	p.mux.HandleFunc("GET /panel/api/logs", p.logsHandler)
+	// 错误观测：把日志环里的 WARN/ERR 按「账号 × 错误类型」聚合（见 errors.go）。
+	// 与日志同源、零新增存储——原始日志里几十行同质 WARN，人眼抓不到真正重要的差异。
+	p.mux.HandleFunc("GET /panel/api/error_summary", p.errorSummary)
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.requestMetrics)
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.requestLogs)
 	// 清空请求事件归档（issue #160）：日志留存归运营自己管，别只能等定期 prune。
@@ -426,6 +429,21 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
+}
+
+// errorSummary 把日志环里的 WARN/ERR 按「账号 × 类型」聚合（见 errors.go）。
+// 与日志同源、零新增存储：环里有几行就聚合几行。
+func (p *Panel) errorSummary(w http.ResponseWriter, r *http.Request) {
+	entries := p.logs.Snapshot()
+	lines := make([]LogLine, 0, len(entries))
+	for _, e := range entries {
+		lines = append(lines, LogLine{Text: e.Text, TS: e.TS})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rows":       AggregateErrors(lines),
+		"scanned":    len(entries),
+		"updated_at": time.Now().Format("15:04:05"),
+	})
 }
 
 // requestMetrics 返回进程内请求指标、最近 100 条与归档状态。
