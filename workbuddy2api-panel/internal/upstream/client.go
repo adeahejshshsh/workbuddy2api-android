@@ -312,10 +312,23 @@ func HasCodeMarker(body, want string) bool { return hasBusinessCode(body, want) 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
 const modelBlockCode = "11102"
 
-// modelBlockMsgMarker 11102 答复的确定性文案（官方 error message 固定短语）。
-// 只收这个窄短语，不收 "model ... not found" 宽正则——后者会误伤其他业务的
+// modelBlockMsgMarkers 11102 / 14401 答复的确定性文案（官方 error message 固定短语）。
+// 14401「route config not found」是图像模型的同族答复：该模型在本域没有路由，
+// 与 11102「该后端无此模型」一样，换号与重试都不可能成功——不收它的话，14401 会落
+// ErrClient 被当成账号问题，把整池健康号轮一遍后仍失败。
+// 只收这两个窄短语，不收 "model ... not found" 宽正则——后者会误伤其他业务的
 // not found 措辞。
-const modelBlockMsgMarker = "service info not found"
+var modelBlockMsgMarkers = []string{"service info not found", "route config not found"}
+
+// containsModelBlockMarker 报告文本是否命中上面任一窄短语（调用方已小写化）。
+func containsModelBlockMarker(lower string) bool {
+	for _, m := range modelBlockMsgMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
 
 // ModelBlockReason 11102 负缓存条目在 pool.modelCooldowns 里的 reason 前缀。
 // handler 写 BlockModelBackoff；pool.BlockModelClear 按 "11102" 前缀识别条目
@@ -339,7 +352,7 @@ func IsModelBlocked(status int, body string) bool {
 		return false
 	}
 	// 轻量预检：body 既无 "11102" 又无 marker 时直接短路（大多数 4xx 零分配返回）。
-	if !strings.Contains(body, modelBlockCode) && !strings.Contains(strings.ToLower(body), modelBlockMsgMarker) {
+	if !strings.Contains(body, modelBlockCode) && !containsModelBlockMarker(strings.ToLower(body)) {
 		return false
 	}
 	var root map[string]any
@@ -366,7 +379,7 @@ func IsModelBlocked(status int, body string) bool {
 	if code == modelBlockCode {
 		return true
 	}
-	return strings.Contains(strings.ToLower(msg), modelBlockMsgMarker)
+	return containsModelBlockMarker(strings.ToLower(msg))
 }
 
 // hasBusinessCode reports whether a JSON error envelope contains an exact
@@ -902,6 +915,15 @@ type Client struct {
 	// globalModels 缓存 global 模型名目录探测结果（成功 ∩ 静态 overlay；
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
+
+	// imageMu/imageModels 最近一次目录解析留存的出图/出视频模型（按 realm 分桶），
+	// 见 images.go。存 Client 上（不是包级全局）：测试各建各的 Client，互不串味。
+	imageMu     sync.Mutex
+	imageModels map[string][]ModelInfo
+	// imageChargeMu/imageCharges 出图实扣按「尺寸 × 画质」分档的聚合（见 images.go）。
+	// 内存态、重启清零：它是「最近实扣观测」，不是账单。
+	imageChargeMu sync.Mutex
+	imageCharges  map[string]ImageChargeAgg
 
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	// 面板保存配置热改 + chat 热路径并发读写，用 atomic.Bool 消除数据竞争。
@@ -1632,6 +1654,9 @@ type ModelInfo struct {
 	OnlyReasoning      bool   // onlyReasoning 是否纯推理模型
 	SupportsImages     bool   // 顶层 supportsImages（多模态能力，透出到 /v1/models）
 	MaxAllowedSize     int64  // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
+	// GenerationKind 媒体生成类型（"image"/"video"），仅由旁路留存设置（见 images.go）：
+	// 这批模型被 nonChatModel 剔出对话列表，靠它单列到 /v1/models 与面板。
+	GenerationKind     string
 	CanDisableThinking bool   // reasoning.canDisableThinking：思考可关（off 档可用）
 	ReasoningEffort    string // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
 	ReasoningSummary   string // reasoning.summary 推理摘要模式（如 "auto"）
@@ -1750,13 +1775,22 @@ func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 	if maxOutputTokens > 0 && maxOutputTokens <= 256 {
 		return true
 	}
+	return generationKind(tags) != ""
+}
+
+// generationKind 从 tags 判媒体生成类型（"" = 非生成模型）：image 出图/改图、
+// video 出视频/改视频。nonChatModel（把它们剔出对话列表）与旁路留存（/v1/models 与
+// 面板单列，见 images.go）共用同一份判据——两边各写一套必然漂移。
+func generationKind(tags []string) string {
 	for _, t := range tags {
-		switch t {
-		case "text-to-image", "image-to-image", "text-to-video", "image-to-video":
-			return true
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "text-to-image", "image-to-image":
+			return "image"
+		case "text-to-video", "image-to-video":
+			return "video"
 		}
 	}
-	return false
+	return ""
 }
 
 // codeBuddyIDEUA /v3/config 要求能解析出 CodeBuddy 版本号的 UA。
@@ -1962,6 +1996,9 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 出图模型旁路留存（供 /v1/models 以 image_generation 标记列出），下面照旧不进对话列表。
+	// 必须在可见性过滤**前**做：媒体模型不在 agent 菜单里，过滤后就拿不到了。
+	c.stashGenerationModels("cn", sortedInfos(byID))
 	// 按 id 排序后再输出（bug #8）：byID 是 map，迭代序随机 —— 于是 /v1/models 与
 	// 面板「模型与档位」的顺序每 10 分钟缓存过期就重排一次，mergeModelInfos 承诺的
 	// 「输出顺序 = primary 原序在前」不成立，前端按顺序做的对比/截图也无法复现。

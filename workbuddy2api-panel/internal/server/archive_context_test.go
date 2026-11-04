@@ -184,3 +184,32 @@ func TestRequestLogContextAcrossProtocols(t *testing.T) {
 		})
 	}
 }
+
+// 日预算必须真的累计：chatStat.done() 是唯一记账点，漏调的话 /status 里
+// daily_budget.used 永远是 0、闸门永不触发（曾出现 add/observeCache 全无调用方）。
+func TestChatStatDoneCommitsBudget(t *testing.T) {
+	// 末帧带 usage.credit=0.5：done() 应把它记进日预算。
+	const sseCredit = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"credit\":0.5}}\n\n" +
+		"data: [DONE]\n\n"
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, sseCredit, true
+	})
+	h := NewHandler(Config{
+		Pool:        testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:    up,
+		DailyBudget: 100,
+	})
+	if used, _, _, _ := h.budget.snapshot(); used != 0 {
+		t.Fatalf("初始应为 0，实际 %v", used)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[]}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if used, _, _, _ := h.budget.snapshot(); used <= 0 {
+		t.Fatalf("done() 未把本轮实扣记进日预算，used=%v", used)
+	}
+}

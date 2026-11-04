@@ -201,10 +201,13 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestLevelFailFastKind 报告该类上游错误是否与账号无关（换号必然同样失败）。
-// search 侧用它判「请求本身的问题」：参数/内容/模型级 400 换号只会打满全池。
+// search 与 images 共用：检索/出图的域级模型路由（14401 route config not found）、
+// 审核与参数错误都是请求本身的属性，换号只会打满全池。chat 侧另有一套（各账号的
+// 模型权限可能不同）。
 func requestLevelFailFastKind(kind upstream.ErrKind) bool {
 	switch kind {
 	case upstream.ErrBadParams, upstream.ErrPromptTooLong, upstream.ErrImageInvalid,
+		upstream.ErrModelParamInvalid,
 		upstream.ErrContentBlocked, upstream.ErrModelBlocked:
 		return true
 	}

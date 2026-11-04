@@ -65,6 +65,8 @@ type chatStat struct {
 	cacheHit  int64
 	cacheMiss int64
 	hasCache  bool
+	// budget 日预算/突发积分/缓存率闸的记账点（见 done）；nil = 不记账。
+	budget *dailyBudget
 
 	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
 	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
@@ -102,12 +104,14 @@ func toolCallCount(resp map[string]any) int {
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
-func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
+// budget 为日预算/突发积分/缓存率闸的记账点：done() 里把本轮实扣与缓存率记进去，
+// 漏传等于该路径的消费不进账（曾经 add/observeCache 全无调用方，闸门永远读到 used=0）。
+func newChatStat(now time.Time, body []byte, stream bool, budget *dailyBudget) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1, budget: budget}
 }
 
 // done 幂等落一行表格日志。
@@ -119,6 +123,11 @@ func (s *chatStat) done() {
 	total := time.Since(s.start)
 	logChatRowEx(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks,
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent)
+	// 记账：日预算累计 + 连续低缓存率闸。budget 为 nil（测试直接构造 chatStat）时跳过。
+	if s.budget != nil {
+		s.budget.add(s.credit, s.hasCredit)
+		s.budget.observeCache(int64(s.cacheHit), int64(s.cacheMiss), s.hasCache)
+	}
 	noteProm(s, total)
 }
 
