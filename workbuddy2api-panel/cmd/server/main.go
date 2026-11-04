@@ -453,6 +453,18 @@ func main() {
 	// 队列内部已按账号串行、账号间并发、并遵守跳过名单与尝试型开关。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 
+	// /admin 操作审计（缺省关闭）：开一次失败就 Fatal —— 审计开不起来还继续跑，
+	// 等于承诺了「操作有据可查」却拿不出证据。
+	var auditLog *server.AuditLog
+	if cfg.Admin.AuditEnabled {
+		al, aerr := server.NewAuditLog(cfg.Admin.AuditFile, cfg.APIKey)
+		if aerr != nil {
+			p.Flush() // Fatal 绕过 defer：至少把池状态落盘再退
+			log.Fatalf("admin audit: %v", aerr)
+		}
+		auditLog = al
+	}
+
 	h := server.NewHandler(server.Config{
 		Pool:                          p,
 		Upstream:                      up,
@@ -463,6 +475,10 @@ func main() {
 		SoftCooldown:                  cfg.SoftRateDur,
 		MaxBodyMB:                     cfg.ServerMaxBodyMB,
 		MetricsEnabled:                cfg.MetricsEnabled,
+		// 运维接口（手动补跑排程）+ 操作审计：整段缺省关闭。
+		AdminEnabled:                  cfg.Admin.Enabled,
+		Tasks:                         sch,
+		Audit:                         auditLog,
 		ModelsAllowed:                 cfg.Models.Allowed, // 模型白名单（issue #68）
 		ModelsHidden:                  cfg.Models.Hidden,  // 模型黑名单（上游 PR #225）
 		ModelsAliases:                 cfg.Models.Aliases, // 模型名映射（issue #30）

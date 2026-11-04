@@ -390,6 +390,16 @@ type Config struct {
 	// MetricsEnabled 暴露 GET /metrics（Prometheus 文本 0.0.4）。缺省关闭：
 	// 指标含池健康分布，不该默认对外暴露。
 	MetricsEnabled bool `json:"metrics_enabled"`
+	// Admin 运维接口（手动补跑排程）与操作审计。整段缺省关闭——它能让调用者
+	// 立刻对全池账号发起上游动作，不该默认对外暴露。
+	Admin struct {
+		// Enabled 注册 POST /admin/tasks/{name}/run。
+		Enabled bool `json:"enabled"`
+		// AuditEnabled 把每次 /admin 操作追加一行 JSONL（谁、何时、对什么、结果）。
+		AuditEnabled bool `json:"audit_enabled"`
+		// AuditFile 审计日志路径；缺省 ./data/admin_audit.log。
+		AuditFile string `json:"audit_file"`
+	} `json:"admin"`
 }
 
 // Default 默认配置。
@@ -471,6 +481,7 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	c.Admin.AuditFile = "./data/admin_audit.log"
 	return c
 }
 
@@ -759,6 +770,25 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PREFER_EXPIRING"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Pool.PreferExpiring = b
+		}
+	}
+	// 运维接口与审计：与上游同名 env，便于容器/脚本一键开。
+	if v := os.Getenv("WB2A_ADMIN_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Admin.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_ADMIN_AUDIT_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Admin.AuditEnabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_ADMIN_AUDIT_FILE"); v != "" {
+		c.Admin.AuditFile = v
+	}
+	if v := os.Getenv("WB2A_METRICS_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.MetricsEnabled = b
 		}
 	}
 }

@@ -35,6 +35,10 @@
   `/v1/images/generations` 与 `/v1/images/edits`（文生图 / 图生图，模型名按
   `cn:` / `global:` 前缀路由；出图模型在 `/v1/models` 里带 `image_generation: true`
   单列）、`/v1/embeddings`（需开 `features.embeddings_enabled`）、`/metrics`（需开 metrics）
+* 运维接口（`admin.enabled`，缺省关闭）：`POST /admin/tasks/{name}/run` 手动补跑排程
+  （`checkin` / `activity` / `keepalive` / `travel` / `balance_refresh` / `streak_bonus`），
+  立刻 202、后台执行、同名任务不并发；`admin.audit_enabled` 时每次操作追加一行 JSONL
+  审计（只写 8 位密钥指纹，绝不写明文 Key）
 * 多账号池 + 轮转：失败自动换号、模型级冷却、成本分层（优先免费号）、会话粘性
 * 双域路由：`[realm:]model` 前缀区分国内（cn）与海外（global），跨域自动隔离
 * 上游错误原样透传（code / requestId / 原文），并附带 `gateway_hint` 说明该怎么处理
