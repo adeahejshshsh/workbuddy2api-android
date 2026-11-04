@@ -3195,6 +3195,11 @@ function renderExpiryDistribution(list, now) {
     '<div class="pk-expiry-foot">' + esc(foot) + '</div>';
 }
 
+/* 账号套餐分类（后端 pool.ClassifyPlan 从包名派生）：账号的「来头」决定稳定性——
+   免费版额度最小、最容易撞 6004；活动号积分全靠赠送，用完就没了；标准版有正式订阅。
+   后端判定不出来的回 unknown，这里不显示标签（不猜）。 */
+const PLAN_LABELS = { free: '免费版', trial: '体验版', activity: '活动号', standard: '标准版' };
+
 function renderPackages(d, detailLimit) {
   const list = (d.accounts || []);
   const now = Date.now();
@@ -3258,9 +3263,12 @@ function renderPackages(d, detailLimit) {
           ';flex:' + Math.max(0.008, s.amount / expiryTotal).toFixed(4) +
           ' 1 0" title="' + esc(title) + '"></i>';
       }).join('') + '</div>' : '';
+    const planTag = PLAN_LABELS[a.plan]
+      ? '<span class="plan" title="' + esc(a.plan_evidence ? '判定依据：' + a.plan_evidence : '由积分包名派生') + '">' +
+        PLAN_LABELS[a.plan] + '</span>' : '';
     return '<div class="pk-card">' +
       '<div class="who"><span class="nm">' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</span>' +
-      '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
+      '<span class="realm">' + esc(a.realm || '') + '</span>' + planTag + '</div>' +
       '<div class="big">' + fmtTok(a.remain) + '</div>' +
       '<div class="sub">共 ' + fmtTok(a.size) + ' · ' + (a.packages || []).length +
       ' 个包 · 占最高 ' + (Number(a.remain || 0) / maxRemain * 100).toFixed(0) + '%</div>' +
