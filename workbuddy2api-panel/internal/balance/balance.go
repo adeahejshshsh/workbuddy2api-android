@@ -178,6 +178,16 @@ func (r *Recorder) Add(uid string, credits int64) bool {
 	// 点数超硬上限：立即折叠一次（异常保护）。
 	if len(r.points) > maxPoints {
 		r.rollupLocked(now)
+		// 折叠只处理**超出 detailedKeep 的旧点**：若全部点都在保留窗内（异常刷点、
+		// 时钟错乱、或 detailedKeep 配得很大），上面那次折叠一个点都不会减少，
+		// 上限就形同虚设 —— 文件会一直涨到磁盘满。这里补一道硬截断：真的还超，
+		// 就丢掉最旧的点（保留最近的，曲线形状仍可读），并留一条 WARN 说明发生了截断。
+		if len(r.points) > maxPoints {
+			drop := len(r.points) - maxPoints
+			r.points = append([]Point(nil), r.points[drop:]...)
+			log.Printf("WARN: [balance] 原始点数超上限（%d > %d）且折叠无效，已丢弃最旧 %d 个点",
+				len(r.points)+drop, maxPoints, drop)
+		}
 	}
 	return true
 }
