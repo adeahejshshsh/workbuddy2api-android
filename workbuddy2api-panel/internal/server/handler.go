@@ -194,6 +194,14 @@ func NewHandler(cfg Config) *Handler {
 	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。
 	h.mux.HandleFunc("POST /v1/fetch", h.withAuth(h.fetch))
 	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
+	// Anthropic Messages 入站（Claude Code 等只认这套协议），/messages 为官方无前缀别名。
+	// 鉴权走 withAnthropicAuth：官方 SDK 用 x-api-key，不是 Bearer。
+	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
+	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.messages))
+	// count_tokens：Claude Code 上下文将满时先调它决定要不要压缩；上游没有计数接口，
+	// 只能本地估算。缺这个端点客户端直接报错。
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAnthropicAuth(h.countTokens))
+	h.mux.HandleFunc("POST /messages/count_tokens", h.withAnthropicAuth(h.countTokens))
 	// POST /v2/chat/busy：官方客户端的「模型忙」预检（国区上游 200、国际版上游 404，
 	// 见 busy.go 文件头）。本地按池台账算，不打上游。
 	h.mux.HandleFunc("POST /v2/chat/busy", h.withAuth(h.chatBusy))
@@ -219,9 +227,20 @@ func NewHandler(cfg Config) *Handler {
 	return h
 }
 
+// isChatEntry 入站协议路径：/v1/messages（含 /messages 别名）经 r.Clone 转进
+// chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套行日志/归档/来源采集/
+// X-Request-Id——三者一视同仁，别再按单路径放行（否则整类请求无来源、不入归档）。
+func isChatEntry(path string) bool {
+	switch path {
+	case "/v1/chat/completions", "/v1/messages", "/messages":
+		return true
+	}
+	return false
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
-		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
+	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && isChatEntry(r.URL.Path) {
+		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
 		}

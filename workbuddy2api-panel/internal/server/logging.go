@@ -493,6 +493,9 @@ type requestTraceKey struct{}
 type requestTrace struct {
 	id    string
 	start time.Time
+	// path 入站协议路径（/v1/chat/completions 或 /v1/messages 等别名）。空 = 直连
+	// chat 端点（老调用方不填）。归档要按它区分「哪套协议进来的」。
+	path  string
 	stat  *chatStat
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
@@ -546,10 +549,14 @@ func requestTraceFrom(r *http.Request) *requestTrace {
 }
 
 func (t *requestTrace) event(status int) reqlog.Event {
+	path := t.path
+	if path == "" {
+		path = "/v1/chat/completions"
+	}
 	e := reqlog.Event{
 		Time:      t.start,
 		RequestID: t.id,
-		Path:      "/v1/chat/completions",
+		Path:      path,
 		Status:    status,
 	}
 	duration := time.Since(t.start)
