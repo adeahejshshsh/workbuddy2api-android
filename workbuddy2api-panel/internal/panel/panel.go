@@ -259,6 +259,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/logs", p.logsHandler)
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.requestMetrics)
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.requestLogs)
+	// 清空请求事件归档（issue #160）：日志留存归运营自己管，别只能等定期 prune。
+	p.mux.HandleFunc("POST /panel/api/request_logs/clear", p.requestLogsClear)
 	p.mux.HandleFunc("GET /panel/api/models", p.models)
 	// (账号 × 模型) 手动开关：运维显式禁用某账号的某模型（永久语义，仅手动解）。
 	// 与上游触发的临时冷却（6004/11102）正交，且手动优先。
@@ -471,6 +473,24 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 		rows = []reqlog.Event{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": rows, "limit": limit})
+}
+
+// requestLogsClear 清空归档目录里的请求事件文件（面板「清空归档」）。
+// 只删 requests-*.jsonl，与定期 prune 同口径；目录里的其它文件不碰。
+// 删除由归档写循环执行（它是文件句柄的唯一持有者），所以这一步是串行的、不会把
+// 正在写的文件删成「已删除但仍在写」。
+func (p *Panel) requestLogsClear(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.RequestLog == nil {
+		writeErr(w, http.StatusNotImplemented, "request logger not available")
+		return
+	}
+	res, err := p.cfg.RequestLog.Purge()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	log.Printf("panel: 清空请求事件归档，删除 %d 个文件（%d 字节）", res.Files, res.Bytes)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "files": res.Files, "bytes": res.Bytes})
 }
 
 // models 实时查询上游模型列表与 reasoning 实际档位（直连上游，不读路由层 1h 缓存）：
