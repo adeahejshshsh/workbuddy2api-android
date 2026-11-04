@@ -684,6 +684,13 @@ func TestConfigFormMatchesCFGMap(t *testing.T) {
 	if !names["request_client_info"] {
 		t.Error("配置表单缺「记录调用来源」开关（logging.request_client_info）")
 	}
+	// 归档上下文开关同理：后端有配置项，面板请求记录页靠它决定能不能展开看原文。
+	if !strings.Contains(js, "request_archive_context: ['logging', 'request_archive_context']") {
+		t.Error("CFG_MAP 缺 request_archive_context 条目")
+	}
+	if !names["request_archive_context"] {
+		t.Error("配置表单缺「记录请求上下文」开关（logging.request_archive_context）")
+	}
 }
 
 // 同到期时间按面额降序；其余未用完包与零/负余额包分别聚合。
@@ -1205,5 +1212,53 @@ process.stdout.write(JSON.stringify({
 	const want = `{"congestedBad":true,"busyWarn":true,"idleQuiet":true,"normalQuiet":true,"noneQuiet":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("繁忙度标签渲染不符:\n got=%s\nwant=%s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// renderEventContext 只认 archiveContext 写出的三种键（system / messages / prompt）：
+// 缺上下文时给提示而不是空白弹窗，content 是数组时原样 JSON（不拆结构）。
+func TestAppJSRenderEventContext(t *testing.T) {
+	nodeBin(t)
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const escStart = src.indexOf('function esc(');
+const start = src.indexOf('function renderEventContext(');
+const end = src.indexOf('if ($(\'reqBody\'))', start);
+if (escStart < 0 || start < 0 || end < 0) throw new Error('renderEventContext not found');
+const ctx = { JSON, String, Object };
+vm.createContext(ctx);
+vm.runInContext(src.slice(escStart, src.indexOf('\n}', escStart) + 2) +
+  src.slice(start, end) + '\nthis.renderEventContext = renderEventContext;', ctx);
+
+const empty = ctx.renderEventContext(null);
+if (!empty.includes('ev-ctx-empty')) throw new Error('缺上下文时应给提示块: ' + empty);
+
+const html = ctx.renderEventContext({
+  system: 'S',
+  prompt: 'P',
+  messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: [{ type: 'text', text: 'hi' }] }]
+});
+for (const want of ['system', 'prompt', 'user', 'assistant', 'hello']) {
+  if (!html.includes(want)) throw new Error('缺 ' + want + ': ' + html);
+}
+if (html.includes('undefined')) throw new Error('渲染出 undefined: ' + html);
+if (!html.includes('&quot;type&quot;')) throw new Error('多模态块应原样 JSON 展示: ' + html);
+console.log('ok');
+`
+	f, err := os.CreateTemp(t.TempDir(), "render-event-context-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("renderEventContext node test failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "ok" {
+		t.Fatalf("renderEventContext=%s want ok", out)
 	}
 }

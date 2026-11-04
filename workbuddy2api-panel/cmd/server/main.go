@@ -371,6 +371,7 @@ func main() {
 		SoftCooldown:           cfg.SoftRateDur,
 		SanitizeFingerprints:   cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:       cfg.Logging.RequestClientInfo,
+		RecordContext:          cfg.Logging.RequestArchiveContext,
 		ModelFallback:          cfg.Pool.ModelFallback,
 		ModelAliases:           livecfg.NormalizeModelAliases(cfg.Models.Aliases),
 		HiddenModels:           livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
@@ -482,6 +483,7 @@ func main() {
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
+		RecordContext:    cfg.Logging.RequestArchiveContext,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
 	})
@@ -731,6 +733,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
+		RecordContext:        newCfg.Logging.RequestArchiveContext,
 		// review #3：这两个表是 handler 每次请求从 live 快照读的，漏填等于「保存任意
 		// 配置 → 运行时降级表/别名表被清空」，直到进程重启才恢复。
 		ModelFallback: newCfg.Pool.ModelFallback,

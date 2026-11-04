@@ -333,6 +333,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .dlg .tabs .tab { padding: 4px 14px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
 .dlg .tabs .tab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
 .tab-panel + .tab-panel { border-top: 1px solid var(--line-soft); margin: 0 -20px; padding: 14px 20px 0; }
+/* 请求上下文弹窗（请求记录点行打开）：角色 + 原文两列；content 是多模态块时原样
+   展示 JSON —— 拆开反而丢掉结构。 */
+.ev-ctx { padding: 2px 0; display: flex; flex-direction: column; gap: 10px; }
+.ev-ctx-msg { display: grid; grid-template-columns: 76px 1fr; gap: 10px; align-items: start; }
+.ev-ctx-role { font-size: 11px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; padding-top: 3px; }
+.ev-ctx-msg pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; line-height: 1.55; color: var(--ink); }
+.ev-ctx-empty { padding: 10px 12px; font-size: 12px; color: var(--ink-3); }
 .url {
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
   padding: 11px 13px; font: 12px var(--mono); word-break: break-all; color: var(--accent);
@@ -1294,6 +1301,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <input type="checkbox" name="request_client_info"></div>
             <div class="hint">开启后，「运行日志」页的请求记录会显示每次调用来自哪个 IP、用什么客户端；
               关闭则归档与面板都不再出现来源信息。改动即时生效，无需重启。</div>
+            <div class="switch"><span class="lb">记录请求上下文（system + messages 原文）</span>
+              <input type="checkbox" name="request_archive_context"></div>
+            <div class="hint">开启后，请求记录里点任意一行可展开看**这次请求实际发出去的对话内容**，
+              排查「上游到底收到了什么」时无可替代。它比 IP/UA 敏感得多（是用户的真实对话），
+              所以缺省关闭；单条上限 16KB，超长按「丢最旧轮次 → 截断最后一条」收敛。
+              改动即时生效，无需重启。</div>
             <div class="grid2">
               <div class="switch"><span class="lb">请求记录归档</span>
                 <input type="checkbox" name="request_archive_enabled"></div>
@@ -1490,6 +1503,22 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 </div>
 
 <div id="toasts"></div>
+
+<!-- 请求上下文：从请求记录表点行打开。内容可能很长，交给 .dlg .body 滚动，
+     不挤占表格高度（内嵌展开会把整张表往下推）。 -->
+<div class="veil" id="evCtxVeil">
+  <div class="dlg" style="width:880px">
+    <header>
+      <h3>请求上下文</h3>
+      <div class="hint" id="evCtxHint"></div>
+    </header>
+    <div class="body" id="evCtxBody"></div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnEvCtxClose">关闭</button>
+    </footer>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>
