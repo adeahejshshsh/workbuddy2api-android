@@ -22,10 +22,14 @@
 **对外提供 OpenAI 兼容接口**
 
 * `/v1/chat/completions`（流式 / 非流式）、`/v1/models`
+* **OpenAI Responses 兼容**：`/v1/responses` —— Codex 这类只认 Responses 协议的
+  客户端可直接接入；推理走 `reasoning_summary_*` 事件族，截断如实报
+  `response.incomplete`，每事件带 `sequence_number`；`GET /v1/responses` 回 426
+  让 Codex 立刻粘性回落 HTTPS（网关不做连接内状态复用）
 * **Anthropic 兼容**：`/v1/messages`（含 `/messages` 别名）、`/v1/messages/count_tokens`
   —— Claude Code 这类只认 Messages 协议的客户端可直接接入，流式按 Anthropic SSE
   事件（`message_start` / `content_block_delta` / `message_stop`）下发；
-  声明 `web_search` 服务端工具时由网关侧代执行联网检索
+  两种协议声明联网检索服务端工具时都由网关侧代执行
 * 兼容入口：`/v1/search`（DeepSeek Search）、`/v1/fetch`（网页抓取）、
   `/v2/chat/busy`（模型忙预检）、`/v1/capacity?model=`（按模型查可用账号容量）、
   `/v1/embeddings`（需开 `features.embeddings_enabled`）、`/metrics`（需开 metrics）

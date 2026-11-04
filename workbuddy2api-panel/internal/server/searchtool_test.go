@@ -340,3 +340,71 @@ func lastMessage(obj map[string]any) string {
 	m, _ := msgs[len(msgs)-1].(map[string]any)
 	return asString(m["content"])
 }
+
+// TestResponsesHostedWebSearchExecutes Codex 的托管联网：声明 {"type":"web_search"}
+// → 网关侧执行检索（用模型自己写的检索词）→ 结果注入 → 正常 Responses 流。
+func TestResponsesHostedWebSearchExecutes(t *testing.T) {
+	f := &searchToolFake{}
+	h := newSearchToolHandler(f)
+	body := `{"model":"glm-5.2","stream":true,"input":"玉林的电梯维保新规是什么？",` +
+		`"tools":[{"type":"web_search"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f.chatCalls != 3 {
+		t.Fatalf("chat 调用 %d 次，want 3（探测×2 + 最终答案）", f.chatCalls)
+	}
+	if len(f.searchQ) != 1 || f.searchQ[0] != "玉林 电梯 维保" {
+		t.Fatalf("检索词 %v（应为模型写的词）", f.searchQ)
+	}
+	// 托管工具不得原样留在上游 tools 里：上游收下不报错但也不会执行（空转）。
+	var final map[string]any
+	_ = decodeJSON(f.chatBodies[len(f.chatBodies)-1], &final)
+	if bodyHasTool(final, "web_search") {
+		t.Fatalf("托管 web_search 仍被透传给上游: %v", final["tools"])
+	}
+	if !strings.Contains(lastMessage(final), "http://scjdglj.gxzf.example/1.shtml") {
+		t.Fatalf("未注入检索结果: %v", lastMessage(final))
+	}
+	if !strings.Contains(rec.Body.String(), "response.completed") {
+		t.Fatalf("非正常 Responses 流: %s", rec.Body.String())
+	}
+}
+
+// TestResponsesWithoutHostedSearchSkipsProbe 没声明托管搜索时零额外开销（含非托管工具）。
+func TestResponsesWithoutHostedSearchSkipsProbe(t *testing.T) {
+	f := &searchToolFake{}
+	h := newSearchToolHandler(f)
+	body := `{"model":"glm-5.2","stream":true,"input":"hi","tools":[{"type":"function",` +
+		`"name":"f","parameters":{"type":"object"}}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f.chatCalls != 1 || len(f.searchQ) != 0 {
+		t.Fatalf("不该探测/检索: chatCalls=%d searchQ=%v", f.chatCalls, f.searchQ)
+	}
+}
+
+// TestSplitHostedSearch 只摘托管检索（无 name 的 web_search*），其余原样留下。
+func TestSplitHostedSearch(t *testing.T) {
+	kept, srv := splitHostedSearch([]any{
+		map[string]any{"type": "web_search"},
+		map[string]any{"type": "web_search_preview", "max_uses": float64(2)},
+		map[string]any{"type": "web_search", "name": "web_search"}, // 带 name：客户端自己的函数工具
+		map[string]any{"type": "code_interpreter"},
+		map[string]any{"type": "function", "name": "f"},
+	})
+	if len(srv) != 2 || srv[0].Name != webSearchToolName || srv[0].MaxUses != 0 || srv[1].MaxUses != 2 {
+		t.Fatalf("srv=%v", srv)
+	}
+	if len(kept) != 3 {
+		t.Fatalf("kept=%v", kept)
+	}
+	if _, srv2 := splitHostedSearch([]any{map[string]any{"type": "function", "name": "f"}}); len(srv2) != 0 {
+		t.Fatal("普通 function 工具被误摘")
+	}
+}
