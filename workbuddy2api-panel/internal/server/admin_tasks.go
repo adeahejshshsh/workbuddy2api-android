@@ -8,6 +8,7 @@
 package server
 
 import (
+	"log"
 	"net/http"
 	"strings"
 )
@@ -77,6 +78,14 @@ func (h *Handler) adminTaskRun(w http.ResponseWriter, r *http.Request) {
 			h.taskMu.Lock()
 			delete(h.taskRunning, name)
 			h.taskMu.Unlock()
+		}()
+		// panic 兜底：这个 goroutine 不是 net/http 起的，Go 不会替它 recover ——
+		// 一次 panic 打死的是整个网关（所有在途 SSE 一起断），而客户端早在 202 时
+		// 就拿到「已启动」，完全看不出后台崩了。与 scheduler.runBatch 同口径。
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("ERR: [admin] 任务 %s 执行 panic: %v", name, rec)
+			}
 		}()
 		run()
 	}()

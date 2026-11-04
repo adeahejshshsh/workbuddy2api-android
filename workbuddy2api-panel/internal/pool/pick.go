@@ -296,7 +296,9 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 			}
 		}
 	} else {
-		e = p.pickWeighted(eligible, reqModel) // eligible 保序 = top5 降序子集
+		// 分母用全集口径的 maxCredits（与上面的 top5 截断排序同一基准），
+		// 不能在子集上重算 —— 见 pickWeighted 注释。
+		e = p.pickWeighted(eligible, reqModel, maxCredits) // eligible 保序 = top5 降序子集
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -474,9 +476,13 @@ var minPickGap = 100 * time.Millisecond
 // 截断排序与抽签权重共享同一基准，两阶段权重可比（issue B13）。此前本函数在传入的
 // eligible 子集上重新算 max —— 子集里最高 credits 的号若刚好被 minPickGap 排除，
 // 基准就变小、credits 权重被相对放大，与注释承诺不符。
-func (p *Pool) pickWeighted(cands []*entry, model string) *entry {
+// pickWeighted 在 cands 内按权重加权抽签。maxCredits 由调用方传**全集口径**的分母：
+//
+// 权重是 `1 + credits/maxCredits*10 + 闲置 + …`，常数项不随分母缩放 —— 所以拿
+// top5 子集重算分母并不等价于整体缩放：子集里若没有余额最大的那个号，分母变小、
+// credits 项被放大，权重比例就变了，与「截断排序与抽签共享同一基准」的承诺相反。
+func (p *Pool) pickWeighted(cands []*entry, model string, maxCredits int64) *entry {
 	now := time.Now()
-	maxCredits := secondCredits(cands)
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
 	var total int64

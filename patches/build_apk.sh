@@ -286,8 +286,12 @@ if [ ! -f "$KS" ]; then
   fi
   echo "⚠ --new-keystore：生成新签名密钥 $KS"
   echo "   已装旧版的用户将无法覆盖升级，必须卸载重装。"
+  # 口令走 env（review）：`-storepass <明文>` 会进 argv，ps / /proc/*/cmdline 直接可读 ——
+  # 与脚本自己「口令不进命令行明文」的规矩矛盾。keytool 支持 -storepass:env。
+  export WB2A_KS_PASS="$KS_PASS"
   keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias wb2api \
-    -keyalg RSA -keysize 2048 -validity 10950 -storepass "$KS_PASS" -keypass "$KS_PASS" \
+    -keyalg RSA -keysize 2048 -validity 10950 \
+    -storepass:env WB2A_KS_PASS -keypass:env WB2A_KS_PASS \
     -dname "CN=WorkBuddy2API, OU=DSH, O=Local, L=Local, ST=Local, C=CN"
 fi
 # 口令走临时文件（review S-21）：`pass:xxx` 会把明文塞进 argv，ps / /proc/*/cmdline
