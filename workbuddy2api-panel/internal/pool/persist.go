@@ -299,7 +299,16 @@ func (p *Pool) saveLocked() error {
 	// 先把**上一版**内容留一份 .bak（misakano7545 `4356a346`）：state.json 被外部
 	// 截断/写坏时能回退，而不是整段运行态清零。
 	if prev, rerr := os.ReadFile(p.stateFp); rerr == nil && len(prev) > 0 {
-		_ = auth.ReplaceAtomic(p.stateFp+".bak", prev, 0o600)
+		// 只备份**合法**的上一版：state.json 可能是被外部截断/写坏的残骸，而我们刚刚
+		// 才从 .bak 恢复出来 —— 这时把残骸写进 .bak，就等于把唯一的退路也污染掉。
+		// 紧接着若主文件写入失败（磁盘满 / 单文件 bind mount EBUSY），两份都是坏的、
+		// corrupt-* 也没生成，冷却截止、熔断计数、成本账本、credits、「已签到」全部
+		// 不可恢复。
+		if json.Valid(prev) {
+			_ = auth.ReplaceAtomic(p.stateFp+".bak", prev, 0o600)
+		} else {
+			log.Printf("WARN: [pool] state.json 内容非法（%d 字节），跳过 .bak 覆盖：保留上一份可恢复备份", len(prev))
+		}
 	}
 	if err := auth.ReplaceAtomic(p.stateFp, raw, 0o600); err != nil {
 		p.notePersistFail(err)

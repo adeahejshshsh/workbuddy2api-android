@@ -39,6 +39,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -265,9 +266,18 @@ func (c *Client) DeleteWebConversation(ctx context.Context, a *auth.Auth, id str
 // 只有「status 变成 completed」才算成功——SSE 收到 session/endTurn 也在里面判一次
 // 提前收工的依据，但最终以 console 状态为准（hub 的判据同口径：只建会话不接沙箱、
 // 或接了沙箱没等它跑完，上游都不计为一次有效对话）。
-func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, sess WebSession, prompt, model string) (WebTurnResult, error) {
-	res := WebTurnResult{Conversation: id}
+func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, sess WebSession, prompt, model string) (res WebTurnResult, err error) {
+	res = WebTurnResult{Conversation: id}
 	started := time.Now()
+	// 事件计数由 SSE goroutine 累加、主流程读 —— 用 atomic 而不是直接改 res：
+	// 此前 goroutine 里 `res.Events++` 与主流程 `return res`（按值拷贝）构成数据竞争，
+	// 计数还可能少最后一截。改成本地 atomic，返回前在 defer 里一次性写回 res
+	// （命名返回值，defer 能改到真正返回的那个值）。
+	var events, chunks int64
+	defer func() {
+		res.Events = int(atomic.LoadInt64(&events))
+		res.Chunks = int(atomic.LoadInt64(&chunks))
+	}()
 	if strings.TrimSpace(prompt) == "" {
 		prompt = webDailyPrompt
 	}
@@ -304,9 +314,8 @@ func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, s
 
 	// 读 SSE：只统计，不解析 update 内容（打卡不关心说了什么）。
 	// 流结束（或 ctx 取消）时 goroutine 自然退出，不阻塞主流程。
-	done := make(chan struct{})
+	// 不建 done 通道：此前建了却从没接收过，等于一个恒不关闭的假同步点。
 	go func() {
-		defer close(done)
 		sc := bufio.NewScanner(stream.Body)
 		sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 		for sc.Scan() {
@@ -331,12 +340,12 @@ func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, s
 			}
 			switch msg.Method {
 			case "session/update":
-				res.Events++
+				atomic.AddInt64(&events, 1)
 				if msg.Params.Update.SessionUpdate == "agent_message_chunk" {
-					res.Chunks++
+					atomic.AddInt64(&chunks, 1)
 				}
 			case "session/endTurn":
-				res.Events++
+				atomic.AddInt64(&events, 1)
 			}
 		}
 	}()
