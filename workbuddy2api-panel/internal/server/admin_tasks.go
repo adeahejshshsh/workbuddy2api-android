@@ -1,9 +1,10 @@
 // admin_tasks.go 手动补跑排程。POST /admin/tasks/{name}/run，立刻 202，后台执行。
-// 暴露的是本仓调度器**实际有**的六个入口：checkin / activity / keepalive / travel /
-// balance_refresh / streak_bonus。
+// 暴露的入口：调度器那六个（checkin / activity / keepalive / travel /
+// balance_refresh / streak_bonus）+ 面板的 growth（任务中心成长队列）。
 //
-// 上游另有 growth（任务中心）一档，本仓尚未移植面板后台作业系统
-// （panel/taskjobs.go），没有对应执行体，故不列出——列一个恒空转的入口比没有更糟。
+// growth 与那六个不是同一个宿主：调度器只有排程时机，执行体在面板
+// （panel.RunGrowthQueueOnce，经 Config.GrowthRunner 注入）。所以它单列一个
+// 可选字段——没接面板的部署（测试/裸用）不会因此多出一个恒空转的入口。
 package server
 
 import (
@@ -21,8 +22,10 @@ type TaskRunner interface {
 	RunStreakBonusNow()
 }
 
+// adminTaskNames 已知任务名（拼「unknown task; known: …」用）。growth 只在接了
+// GrowthRunner 时才真能跑，但名字要在这里——否则运维看到「unknown」会以为入口不存在。
 var adminTaskNames = []string{
-	"checkin", "activity", "keepalive", "travel", "balance_refresh", "streak_bonus",
+	"checkin", "activity", "keepalive", "travel", "balance_refresh", "streak_bonus", "growth",
 }
 
 func (h *Handler) taskRunners() map[string]func() {
@@ -30,7 +33,7 @@ func (h *Handler) taskRunners() map[string]func() {
 	if t == nil {
 		return nil
 	}
-	return map[string]func(){
+	m := map[string]func(){
 		"checkin":         t.RunCheckinNow,
 		"activity":        t.RunActivityNow,
 		"keepalive":       t.RunKeepaliveNow,
@@ -38,6 +41,10 @@ func (h *Handler) taskRunners() map[string]func() {
 		"balance_refresh": t.RunBalanceRefreshNow,
 		"streak_bonus":    t.RunStreakBonusNow,
 	}
+	if h.cfg.GrowthRunner != nil {
+		m["growth"] = h.cfg.GrowthRunner
+	}
+	return m
 }
 
 func (h *Handler) adminTaskRun(w http.ResponseWriter, r *http.Request) {

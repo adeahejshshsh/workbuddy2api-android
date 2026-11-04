@@ -115,6 +115,9 @@ type Config struct {
 	AdminEnabled bool
 	// Tasks 手动补跑排程的入口（*scheduler.Scheduler 满足它）。nil 时开了 admin 也回 503。
 	Tasks TaskRunner
+	// GrowthRunner 成长任务队列的执行体（面板 panel.RunGrowthQueueOnce）。调度器只有
+	// 排程时机、没有执行体，所以它单独注入；nil 时 /admin/tasks/growth/run 回 404。
+	GrowthRunner func()
 	// Audit /admin 操作审计日志（可选；nil = 不记）。见 admin_audit.go。
 	Audit *AuditLog
 }
