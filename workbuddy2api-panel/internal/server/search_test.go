@@ -240,3 +240,35 @@ func TestDeepSeekSearchClientDetection(t *testing.T) {
 		}
 	}
 }
+
+// deep:true 必须改走综述式检索（agentic_search），否则那个开关就是空转——
+// 客户端以为拿到了带引用的综述，实际还是几条 snippet。
+func TestSearchDeepRoutesToAgentic(t *testing.T) {
+	// done 帧原文（AgenticSearch 只取 event=done 的 data）。
+	doneBody := "event: status\ndata: {\"source\":\"websearch\"}\n\n" +
+		"event: done\ndata: {\"synthesis\":{\"content\":\"综述正文\"},\"results\":[],\"partial\":false}\n\n"
+	f := &searchFake{status: 200, body: doneBody}
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: f.client()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/search",
+		strings.NewReader(`{"query":"玉林 电梯 维保","deep":true}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.paths) != 1 || f.paths[0] != "/agenttool/v1/agentic_search" {
+		t.Fatalf("deep:true 应走 agentic_search，实际 %v", f.paths)
+	}
+	if !strings.Contains(rec.Body.String(), "综述正文") {
+		t.Fatalf("应回 done 帧原文：%s", rec.Body.String())
+	}
+
+	// 不传 deep：仍是 snippet 快路径。
+	f2 := &searchFake{status: 200, body: searchOKBody}
+	h2 := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: f2.client()})
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/search",
+		strings.NewReader(`{"query":"玉林 电梯 维保"}`)))
+	if len(f2.paths) != 1 || f2.paths[0] == "/agenttool/v1/agentic_search" {
+		t.Fatalf("默认应走 snippet 检索，实际 %v", f2.paths)
+	}
+}

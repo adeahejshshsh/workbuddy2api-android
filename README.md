@@ -30,7 +30,8 @@
   —— Claude Code 这类只认 Messages 协议的客户端可直接接入，流式按 Anthropic SSE
   事件（`message_start` / `content_block_delta` / `message_stop`）下发；
   两种协议声明联网检索服务端工具时都由网关侧代执行
-* 兼容入口：`/v1/search`（DeepSeek Search）、`/v1/fetch`（网页抓取）、
+* 兼容入口：`/v1/search`（DeepSeek Search；带 `"deep":true` 走综述式检索，
+  单次 40~66s 换回带引用的综述 + 整页正文）、`/v1/fetch`（网页抓取）、
   `/v2/chat/busy`（模型忙预检）、`/v1/capacity?model=`（按模型查可用账号容量）、
   `/v1/images/generations` 与 `/v1/images/edits`（文生图 / 图生图，模型名按
   `cn:` / `global:` 前缀路由；出图模型在 `/v1/models` 里带 `image_generation: true`

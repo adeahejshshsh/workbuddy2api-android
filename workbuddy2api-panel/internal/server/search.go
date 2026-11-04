@@ -10,6 +10,7 @@
 //
 //	POST /v1/search
 //	{"query": "玉林 电梯 维保 新规", "max_results": 5}
+//	{"query": "...", "deep": true}   ← 综述式（agentic_search），单次 40~66s
 package server
 
 import (
@@ -36,6 +37,10 @@ type searchRequest struct {
 	Count int    `json:"count"`
 	Model string `json:"model"` // 可选，只取 realm 前缀
 	Realm string `json:"realm"` // 可选，优先于 model 前缀
+	// Deep 走官方综述式检索（agentic_search），回 done 帧原文（synthesis.content
+	// 带引用的综述 + results 整页正文）。实测单次 40~66s、prompt 47K tokens，
+	// 故默认 false 保持 snippet 快路径（~1s）。
+	Deep bool `json:"deep"`
 }
 
 // deepSeekSearchClient 判定请求是否来自 DSH（DeepSeek Harness）。
@@ -153,7 +158,13 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		}
 		// 用算好的 maxResults（含 count 回落）：直接用 req.MaxResults 会让
 		// DeepSeek Search API 的 count 字段永远不生效。
-		data, err := h.cfg.Upstream.Search(r.Context(), a, query, maxResults)
+		var data json.RawMessage
+		var err error
+		if req.Deep {
+			data, err = h.cfg.Upstream.AgenticSearch(r.Context(), a, query)
+		} else {
+			data, err = h.cfg.Upstream.Search(r.Context(), a, query, maxResults)
+		}
 		h.cfg.Pool.Release(a.UID)
 		if err == nil {
 			w.Header().Set("Content-Type", "application/json")
