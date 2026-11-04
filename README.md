@@ -32,7 +32,9 @@
   两种协议声明联网检索服务端工具时都由网关侧代执行
 * 兼容入口：`/v1/search`（DeepSeek Search）、`/v1/fetch`（网页抓取）、
   `/v2/chat/busy`（模型忙预检）、`/v1/capacity?model=`（按模型查可用账号容量）、
-  `/v1/embeddings`（需开 `features.embeddings_enabled`）、`/metrics`（需开 metrics）
+  `/v1/images/generations` 与 `/v1/images/edits`（文生图 / 图生图，模型名按
+  `cn:` / `global:` 前缀路由；出图模型在 `/v1/models` 里带 `image_generation: true`
+  单列）、`/v1/embeddings`（需开 `features.embeddings_enabled`）、`/metrics`（需开 metrics）
 * 多账号池 + 轮转：失败自动换号、模型级冷却、成本分层（优先免费号）、会话粘性
 * 双域路由：`[realm:]model` 前缀区分国内（cn）与海外（global），跨域自动隔离
 * 上游错误原样透传（code / requestId / 原文），并附带 `gateway_hint` 说明该怎么处理

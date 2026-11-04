@@ -215,6 +215,9 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 				ch <- probeResult{err: perr}
 				return
 			}
+			// 出图模型旁路留存（/v1/models 以 image_generation 标记列出），照旧不进
+			// 对话列表。必须在可见性过滤前做：媒体模型不在 agent 菜单里。
+			c.stashGenerationModels("global", sortedInfos(byID))
 			ids := make([]string, 0, len(byID))
 			outInfos := make([]ModelInfo, 0, len(byID))
 			for _, mi := range byID {

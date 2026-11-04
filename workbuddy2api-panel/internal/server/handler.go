@@ -201,6 +201,10 @@ func NewHandler(cfg Config) *Handler {
 	// 本网关不做连接内 previous_response_id 复用，回 426 让它**立刻且粘性**回落 HTTPS
 	// （见 responses.go:responsesWebsocketUnsupported）。
 	h.mux.HandleFunc("GET /v1/responses", h.withAuth(h.responsesWebsocketUnsupported))
+	// 图像端点：文生图 / 图生图。上游图像模型不进**对话**列表（选了会 11102），
+	// 模型名按 realm 前缀路由、不走目录校验（见 images.go）。
+	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, false) }))
+	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) }))
 	// 官方 agenttool 联网检索的网关透传（非对话端点，与 images 同套取号/失败处置）。
 	h.mux.HandleFunc("POST /v1/search", h.withAuth(h.search))
 	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。
@@ -242,10 +246,12 @@ func NewHandler(cfg Config) *Handler {
 // isChatEntry 入站协议路径：/v1/responses 与 /v1/messages（含 /messages 别名）经
 // r.Clone 转进 chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套
 // 行日志/归档/来源采集/X-Request-Id——四者一视同仁，别再按单路径放行（Codex 走
-// /v1/responses，曾因此整类请求无来源、不入归档）。
+// /v1/responses，曾因此整类请求无来源、不入归档）。图像两条端点不是转协议，但同样
+// 要进归档（出图也要看得到谁在打、扣了多少），故一并列入。
 func isChatEntry(path string) bool {
 	switch path {
-	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages":
+	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages",
+		"/v1/images/generations", "/v1/images/edits":
 		return true
 	}
 	return false
@@ -622,6 +628,17 @@ func wildcardMatch(pattern, s string) bool {
 	return pi == len(p)
 }
 
+// allowlistEnabled 报告 config models.allowed 白名单是否启用（有任一非空条目即启用）。
+// 与 modelAllowed 共用同一个判据，避免「白名单已启用/未启用」两处各算一次而漂移。
+func (h *Handler) allowlistEnabled() bool {
+	for _, raw := range h.cfg.ModelsAllowed {
+		if strings.TrimSpace(raw) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // modelAllowed 报告 (realm, 裸模型名) 是否被 config models.allowed 白名单放行
 // （issue #68）。语义是「不在白名单 = 对本网关不存在」：未启用（空配置 / 全空条目）
 // 恒 true（向后兼容）；启用时非白名单条目一律 false。
@@ -629,13 +646,14 @@ func wildcardMatch(pattern, s string) bool {
 // 解析口径与 modelHidden 完全一致（显式前缀 + 大小写不敏感）：两处若不一致，
 // 「CN:glm-5.2 能被 hidden 拦住、却拦不住白名单」这种不对称会让配置行为无法预测。
 func (h *Handler) modelAllowed(realm, bare string) bool {
-	enabled := false
+	if !h.allowlistEnabled() {
+		return true // 白名单未启用（或全是空条目）→ 默认放行所有模型
+	}
 	for _, raw := range h.cfg.ModelsAllowed {
 		e := strings.TrimSpace(raw)
 		if e == "" {
 			continue
 		}
-		enabled = true
 		if r, b, ok := splitRealmPrefixFold(e); ok {
 			if r == realm && strings.EqualFold(b, bare) {
 				return true
@@ -646,8 +664,7 @@ func (h *Handler) modelAllowed(realm, bare string) bool {
 			return true // 裸名：两域都放行
 		}
 	}
-	// 白名单未启用（或全是空条目）→ 默认放行所有模型。
-	return !enabled
+	return false
 }
 
 // modelUnavailable 报告该模型是否「对本网关不可见」：黑名单命中，或白名单启用且
@@ -799,6 +816,46 @@ func (h *Handler) modelList() []map[string]any {
 				}
 				h.declareReasoning(entry, "global", id, efforts)
 			}
+			out = append(out, entry)
+		}
+	}
+	out = append(out, h.generationModelEntries()...)
+	return out
+}
+
+// generationModelEntries /v1/models 里的出图模型条目（来自最近一次目录解析的旁路
+// 留存，零额外上游请求；尚未探测过该域时为空）。字段只给确定值：不编 context/output。
+func (h *Handler) generationModelEntries() []map[string]any {
+	if h.cfg.Upstream == nil {
+		return nil
+	}
+	realms := []string{"cn"}
+	if h.cfg.GlobalEnabled {
+		realms = append(realms, "global")
+	}
+	var out []map[string]any
+	for _, realm := range realms {
+		for _, mi := range h.cfg.Upstream.GenerationModels(realm) {
+			// 只列图片：视频没有网关端点（视频走连接器），列出来只会引诱客户端去调
+			// 不存在的路由。视频模型照旧不进对话名单（nonChatModel）。
+			if mi.GenerationKind != "image" {
+				continue
+			}
+			// 黑名单/白名单同样管出图单列：列表里留着它等于告诉客户端「这个能用」。
+			if h.modelUnavailable(realm, mi.ID) {
+				continue
+			}
+			entry := map[string]any{
+				"id":               realm + ":" + mi.ID,
+				"object":           "model",
+				"created":          1753600000,
+				"owned_by":         "workbuddy",
+				"image_generation": true,
+			}
+			entry = applyModelInfoFields(entry, mi)
+			// 出图模型：modalities.output = ["image"]（没有上下文/输出，limit 自然省略）。
+			// 与对话模型同一份函数，保证两处字段形状一致。
+			applyModelsDevShape(entry, mi, nil, true)
 			out = append(out, entry)
 		}
 	}
@@ -1109,7 +1166,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
-	st := newChatStat(time.Now(), body, peek.Stream)
+	st := newChatStat(time.Now(), body, peek.Stream, h.budget)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 补 requestID（bug B1）：全仓没有任何一处给 st.requestID 赋值，于是
