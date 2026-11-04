@@ -278,15 +278,21 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		}
 	}
 	// mergeMessageFields 把非 delta 的完整 message 内容并入聚合（message 是整条下发，
-	// 非流式拼接，content 只取一次）。role/reasoning_content/tool_calls 与 delta 分支
-	// 同构透出；content 同样置 gotAnyContent，与 delta 路径的 latch 语义一致
-	// （一帧整条 message 之后，后续 delta 帧不重复追加）。
-	mergeMessageFields := func(msg map[string]any) {
+	// 非流式拼接，content 只取一次）。
+	//
+	// withContent=false 表示正文已由 delta 拿过（latch 生效），此时**只跳过正文**：
+	// tool_calls 与 reasoning_content 必须无条件合并。曾经整个闭包被 latch 门控，
+	// 于是「上游先发 delta.content、末帧才用 message 带 tool_calls」这种形态会把
+	// tool_calls 连同 reasoning 一起丢掉，而 finish_reason 仍是 stop —— 客户端判定
+	// 「模型只说了话」，工具不执行且日志里没有痕迹。
+	mergeMessageFields := func(msg map[string]any, withContent bool) {
 		if r2, ok := msg["role"].(string); ok && r2 != "" {
 			role = r2
 		}
-		if txt, ok := msg["content"].(string); ok {
-			appendContent(txt)
+		if withContent {
+			if txt, ok := msg["content"].(string); ok {
+				appendContent(txt)
+			}
 		}
 		if rc, ok := msg["reasoning_content"].(string); ok {
 			reasoning.WriteString(rc)
@@ -380,12 +386,12 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 									mergeToolCallsChunk(tcs)
 								}
 							}
-							// 有的上游把完整消息放在 message 里（非 delta）：
-							// 整条并入（role/content/reasoning_content/tool_calls），
-							// 与 delta 分支同构。delta 已取过正文（gotAnyContent）则跳过
-							// （避免与 delta 路径重复拼接——PR #134 的 latch 语义）。
-							if msg, ok := c["message"].(map[string]any); ok && !gotAnyContent {
-								mergeMessageFields(msg)
+							// 有的上游把完整消息放在 message 里（非 delta）：整条并入。
+							// delta 已取过正文（gotAnyContent）时只跳过**正文**——tool_calls
+							// 与 reasoning 仍要并进来，否则末帧才带工具调用的上游会被静默
+							// 丢掉整轮工具（见 mergeMessageFields 注释）。
+							if msg, ok := c["message"].(map[string]any); ok {
+								mergeMessageFields(msg, !gotAnyContent)
 							}
 						}
 					}

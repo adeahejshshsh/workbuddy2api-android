@@ -122,7 +122,12 @@ func main() {
 			// 双击 exe / 裸跑 docker 即开，无需先手工复制样例。
 			key, werr := WriteDefault(*cfgPath)
 			if werr == nil {
-				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，记录在该文件里，可自行修改）", *cfgPath, key)
+				// 只打掩码：完整 key 写进 config.json 就够了。日志会进 docker logs /
+				// journald / logcat / CI 输出并长期留存，能读日志的人拿到 key 即拥有
+				// 全量 API、/status 全池账号，admin.enabled 打开时还能触发运维任务。
+				// 启动横幅那边一直是掩码（maskSecret），这里此前是漏网。
+				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，完整值见该文件，可自行修改）",
+					*cfgPath, maskSecret(key))
 				cfg, err = Load(*cfgPath)
 			}
 			if werr != nil || err != nil {
@@ -467,17 +472,18 @@ func main() {
 	}
 
 	h := server.NewHandler(server.Config{
-		Pool:                          p,
-		Upstream:                      up,
-		APIKey:                        cfg.APIKey,
-		Session:                       sessRouter,
-		StickyCount:                   sessCount,
-		RedisMode:                     redisMode,
-		SoftCooldown:                  cfg.SoftRateDur,
-		MaxBodyMB:                     cfg.ServerMaxBodyMB,
-		MetricsEnabled:                cfg.MetricsEnabled,
+		Pool:           p,
+		Upstream:       up,
+		APIKey:         cfg.APIKey,
+		Session:        sessRouter,
+		StickyCount:    sessCount,
+		RedisMode:      redisMode,
+		SoftCooldown:   cfg.SoftRateDur,
+		MaxBodyMB:      cfg.ServerMaxBodyMB,
+		MetricsEnabled: cfg.MetricsEnabled,
 		// 运维接口（手动补跑排程）+ 操作审计：整段缺省关闭。
 		AdminEnabled:                  cfg.Admin.Enabled,
+		AdminAPIKey:                   cfg.AdminAPIKey,
 		Tasks:                         sch,
 		GrowthRunner:                  pn.RunGrowthQueueOnce,
 		Audit:                         auditLog,
@@ -494,6 +500,7 @@ func main() {
 		PromptIdentityOverrideText:    cfg.Prompt.IdentityOverrideText,
 		// 日预算 + 两道快速闸（0 = 关闭）。
 		DailyBudget:      cfg.Budget.DailyBudget,
+		BudgetStateFile:  cfg.BudgetStateFile,
 		BurstCreditLimit: cfg.Budget.BurstCreditLimit,
 		CacheLowRate:     cfg.Budget.CacheLowRate,
 		// 模型降级路由表：读 live 快照（支持面板热更，改完即生效、无需重启）。

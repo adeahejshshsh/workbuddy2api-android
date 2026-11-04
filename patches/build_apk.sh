@@ -8,8 +8,9 @@
 #      那是 Android 唯一允许 app 执行的位置
 #   3) 资源 aapt2 → Java javac → dex d8(r8.jar) → zip 组装 → apksigner 签名
 #
-# 用法: bash build_apk.sh            # 输出到工作区 WorkBuddy2API.apk
+# 用法: bash build_apk.sh                    # 输出到工作区 WorkBuddy2API.apk
 #       bash build_apk.sh <输出目录>
+#       bash build_apk.sh --new-keystore      # 显式换签名密钥（已装用户必须卸载重装）
 set -eu
 PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
 GOROOT="$PREFIX/lib/go"
@@ -58,7 +59,16 @@ else
   echo "⚠ 缺 $AJ → aapt2 改用 $AJ_FALLBACK；dex 复用上一版（本次必须无 Java 改动）"
   AAPT_INCLUDE="$AJ_FALLBACK"
 fi
-OUTDIR="${1:-$WS}"
+# 参数：--new-keystore 显式允许生成新签名密钥（换密钥 = 已装用户无法覆盖升级，
+# 必须是人的明确决定，不能是脚本的自动兜底）。
+NEW_KEYSTORE=0
+OUTDIR="$WS"
+for arg in "$@"; do
+  case "$arg" in
+    --new-keystore) NEW_KEYSTORE=1 ;;
+    *) OUTDIR="$arg" ;;
+  esac
+done
 B="$PREFIX/build/apk"
 KS_TARGET="$SRC/wb2api.keystore"
 # 口令不进仓库、也不进命令行明文（pass:xxx 会出现在 ps 里）。
@@ -121,6 +131,26 @@ if [ "$AAPT_OK" = "1" ]; then
     -o base.apk res.zip
 else
   echo "⚠ aapt2 不可用 → 复用上一版 APK 的清单与资源（只重编 dex 与 .so）"
+  # 清单与资源必须校验（review 19）：这条降级路径只能复用上一版 APK 的清单与 res/，
+  # 而它此前**只**校验 Java 源码指纹。于是改了 android:exported / 加权限 /
+  # 改 usesCleartextTraffic / 换图标 → 改动全部被丢弃，产物是「新版本号 + 旧清单」，
+  # apksigner verify 通过、打印「完成」，所有人都以为已经发版。
+  # 安全相关的清单改动被静默吞掉是最坏的一种，所以这里必须硬失败。
+  RES_HASH_FILE="$B/.res-src-hash"
+  CUR_RES=$( { cat "$SRC/AndroidManifest.xml"; find "$SRC/res" -type f -print0 | sort -z | xargs -0 cat; } | md5sum | cut -d' ' -f1)
+  if [ -f "$RES_HASH_FILE" ]; then
+    OLD_RES=$(cat "$RES_HASH_FILE")
+    if [ "$CUR_RES" != "$OLD_RES" ]; then
+      echo "❌ apk-src 的清单或 res/ 在上次构建后被改过（$OLD_RES → $CUR_RES），但当前环境没有可用的 aapt2。"
+      echo "   降级路径只能复用上一版 APK 的清单与资源 —— 继续构建会产出「新版本号 + 旧清单」，"
+      echo "   清单里的 exported / 权限 / 明文流量 / 图标改动全部丢失。请先补回可用的 aapt2 再构建。"
+      exit 1
+    fi
+    echo "  清单与 res/ 未变（$CUR_RES），复用安全"
+  else
+    echo "⚠ 无清单/资源指纹（首次走降级路径），本次复用无法校验；已写入 $RES_HASH_FILE"
+    echo "$CUR_RES" > "$RES_HASH_FILE"
+  fi
   PREV="$OUTDIR/WorkBuddy2API.apk"
   [ -f "$PREV" ] || { echo "❌ 既无可用 aapt2 也无上一版 APK，生成不了清单与资源"; exit 1; }
   python3 - "$PREV" base.apk "$VERNAME" <<'PYAXML'
@@ -242,7 +272,20 @@ mv -f wb2api-aligned.apk wb2api-unsigned.apk
 
 echo "== 6/6 签名 =="
 KS="$KS_TARGET"
+# 签名密钥**绝不自动生成**：keystore 被 .gitignore 与 push_github.sh 双重排除，换机 /
+# 误删 / 清工作区后它就是不存在的。自动生成的新密钥与线上包不同，装到已装旧版的手机
+# 上直接 INSTALL_FAILED_UPDATE_INCOMPATIBLE —— 只能卸载重装，面板配置、api_key、
+# auths 全丢，而脚本 exit 0 打「完成」。那是无声的发版事故。
+# 要换密钥必须显式 --new-keystore（并且自己承担「全员必须卸载重装」）。
 if [ ! -f "$KS" ]; then
+  if [ "$NEW_KEYSTORE" != "1" ]; then
+    echo "❌ 缺签名密钥 $KS"
+    echo "   拒绝自动生成：换签名密钥 = 已装用户无法覆盖升级（只能卸载重装，配置全丢）。"
+    echo "   从备份恢复该文件；确认要换新密钥再加 --new-keystore。"
+    exit 1
+  fi
+  echo "⚠ --new-keystore：生成新签名密钥 $KS"
+  echo "   已装旧版的用户将无法覆盖升级，必须卸载重装。"
   keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias wb2api \
     -keyalg RSA -keysize 2048 -validity 10950 -storepass "$KS_PASS" -keypass "$KS_PASS" \
     -dname "CN=WorkBuddy2API, OU=DSH, O=Local, L=Local, ST=Local, C=CN"

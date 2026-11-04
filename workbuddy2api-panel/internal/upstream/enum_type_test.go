@@ -66,3 +66,40 @@ func TestEnumValuesUntouched(t *testing.T) {
 		t.Fatalf("enum 值被改动: %v", vals)
 	}
 }
+
+// 走**真实管线**（prepareBodyOptFull 用 dec.UseNumber()）验证数字 enum 补类型。
+// 此前用例都用默认 Unmarshal 造夹具（数字是 float64），于是「生产路径上数字是
+// json.Number」这个事实被完全绕过 —— 修复实际上从未生效，用例却一直绿。
+func TestEnumTypeFilledThroughRealPipeline(t *testing.T) {
+	cases := []struct {
+		name string
+		enum string
+		want string
+	}{
+		{"整数 enum", `[1,2,3]`, "integer"},
+		{"小数 enum", `[1.5,2.5]`, "number"},
+		{"大整数 enum（UseNumber 才保得住原文）", `[9007199254740993,9007199254740995]`, "integer"},
+		{"字符串 enum", `["a","b"]`, "string"},
+		{"布尔 enum", `[true,false]`, "boolean"},
+		{"混合标量不猜", `[1,"a"]`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := []byte(`{"model":"kimi-k2","messages":[],"tools":[{"type":"function",` +
+				`"function":{"name":"f","parameters":{"type":"object","properties":{` +
+				`"p":{"enum":` + c.enum + `}}}}}]}`)
+			// 真实主改写管线（与 chat 出站同一条）
+			out := PrepareBodyOptWithEffortPolicy(src, false, nil, nil, "cn", nil)
+			var obj map[string]any
+			if err := json.Unmarshal(out, &obj); err != nil {
+				t.Fatalf("输出不是合法 JSON: %v", err)
+			}
+			params := obj["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
+			p := params["properties"].(map[string]any)["p"].(map[string]any)
+			got, _ := p["type"].(string)
+			if got != c.want {
+				t.Fatalf("enum=%s 补出的 type=%q want %q（生产路径上数字是 json.Number）", c.enum, got, c.want)
+			}
+		})
+	}
+}

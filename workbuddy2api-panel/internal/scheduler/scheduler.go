@@ -557,8 +557,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 		if !sleepCtx(ctx, wakeupGraceDelay) {
 			return // 开机瞬间网络/DNS 可能未就绪（同 issue #152 的宽限口径）
 		}
-		s.runBatch(ctx, missed)
-		s.markRan(missed, cst.Now())
+		if done := s.runBatch(ctx, missed); len(done) > 0 {
+			s.markRan(done, cst.Now())
+		}
 	}
 	for {
 		// 用北京时间算时点（misakano7545 `025cc107`）：上游的「今天」是北京自然日，
@@ -599,8 +600,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 			// 分支调用，当天 09:00 正常跑完后重启，missedToday 仍认为「时点已过且
 			// 未补跑」→ 再对全池打一轮。现在每批跑完即记账，一天重启多次不再翻倍。
 			go func(kinds []taskKind) {
-				s.runBatch(ctx, kinds)
-				s.markRan(kinds, cst.Now())
+				// 只标记**真正跑完**的族（见 runBatch 返回值的语义）：此前无论跳过
+				// 还是被取消都记「今天已跑」，一次重启窗口就能吃掉当天一整轮签到/保活。
+				if done := s.runBatch(ctx, kinds); len(done) > 0 {
+					s.markRan(done, cst.Now())
+				}
 			}(kinds)
 		}
 	}
@@ -608,8 +612,16 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 // runBatch 并行派发一批任务（同一唤醒时刻的多类任务），等全部完成返回。
 // ctx 取消时由各任务内部的可取消等待快速收尾。
-func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
+//
+// 返回**真正执行完成**的族：任务族互斥抢不到（上一轮仍在跑）、panic 兜底、
+// ctx 已取消三种情况都不算完成。调用方只对这些族写「今天已跑」标记 ——
+// 此前无条件 markRan，一次重启窗口（09:00 触发时收到 SIGTERM，goroutine 秒退）
+// 就会写下 checkin=今天，重启后 missedToday 判定「已补跑」，当天整轮签到不再执行，
+// 而且没有任何报错。
+func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) []taskKind {
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	done := make([]taskKind, 0, len(kinds))
 	for _, k := range kinds {
 		wg.Add(1)
 		go func(k taskKind) {
@@ -648,9 +660,17 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 					hook()
 				}
 			}
+			// 到这里说明这个族真的跑完了（没被互斥挡、没 panic）。ctx 已取消的话
+			// 各任务族是「收尾返回」而非「跑完」，不能算数。
+			if ctx.Err() == nil {
+				mu.Lock()
+				done = append(done, k)
+				mu.Unlock()
+			}
 		}(k)
 	}
 	wg.Wait()
+	return done
 }
 
 // sleepCtx 可取消的等待：ctx 取消立即返回 false（优雅停机不必等限速睡醒），
@@ -717,9 +737,9 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 		// 400 code 10001「企业账号不支持该操作」。跳过签到，但**不 continue**——
 		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
 		// credit_floor 判定与面板额度展示的唯一数据源）。
-		// 账号级摊开（issue #45 方案 A）：等本号在窗口内的偏移时刻再动手。
-		// 计划为 nil（未启用摊开）时 wait 立即返回。
-		if !plan.wait(ctx, st.UID) {
+		// 账号级摊开（issue #45 方案 A）：等本号在窗口内的偏移时刻再动手；
+		// 没配摊开窗口时回落到签到族的固定间隔（见 accountPace）。
+		if !s.accountPace(ctx, plan, st.UID, checkinAccountDelay) {
 			return // 停机/取消：不再把剩余账号的等待全睡完
 		}
 		if a.SupportsPersonalEndpoints() {
@@ -797,8 +817,9 @@ func (s *Scheduler) runActivity(ctx context.Context, spread bool) {
 		// 无需改动 upstream。此处曾按「D4 门控：global 无活跃体系」跳过 global，实测该
 		// 判断不成立——国际版 /v2/report 可用，跳过即国际版账号永远点不亮连登（上游
 		// a190252 同口径修复）。checkin/travel 的 global 门控不受影响，仍跳过。
-		// 账号级摊开（review #3）：等本号在窗口内的偏移时刻（未启用时立即返回）。
-		if !plan.wait(ctx, st.UID) {
+		// 账号级摊开（review #3）：等本号在窗口内的偏移时刻；未配窗口时回落到
+		// 活跃上报族的固定间隔（见 accountPace）。
+		if !s.accountPace(ctx, plan, st.UID, activityAccountDelay) {
 			return // 优雅停机：不等限速睡满，剩余账号下轮再报
 		}
 		// 拼上账号标识（bug #12）：原来是纯毫秒时间戳，46 个号里同毫秒处理 2 个以上
@@ -864,6 +885,23 @@ func (s *Scheduler) accountDelay(fallback time.Duration) time.Duration {
 	return fallback
 }
 
+// accountPace 账号间节奏：spread 计划优先（窗口内错峰），计划为空（未配置
+// schedule.account_spread_seconds / 手动触发）时回落到**该任务族的固定间隔**。
+//
+// 为什么必须有回落：四个 xxxAccountDelay 变量此前只有 streak 一个调用点，四类任务
+// 全靠 spreadPlan —— 而 account_spread_seconds 在 config.json / config.example.json
+// 里都没配，spreadPlan 恒返回 nil、wait 恒立即返回。于是默认部署下签到/活跃/保活/
+// 旅行是**全池同秒连发**（46 个号背靠背，runKeepalive 还是 46 次 refresh 连发），
+// 正是本文件自己写的那条自激链：连发 → 上游频控 → WAF 403 → 软冷却 → 次日再撞。
+//
+// fallback 按任务传入（测试靠把四个变量置 0 免等待，统一成一个常量会让用例真睡）。
+func (s *Scheduler) accountPace(ctx context.Context, plan *accountSpread, uid string, fallback time.Duration) bool {
+	if plan != nil {
+		return plan.wait(ctx, uid)
+	}
+	return sleepCtx(ctx, s.accountDelay(fallback))
+}
+
 // RunKeepaliveNow 无 ctx 版本（保留给旧调用方）。
 func (s *Scheduler) RunKeepaliveNow() { s.RunKeepaliveNowCtx(context.Background(), false) }
 
@@ -897,8 +935,9 @@ func (s *Scheduler) runKeepalive(ctx context.Context, spread, selective bool) {
 				continue
 			}
 		}
-		// 账号级摊开：等本号在窗口内的偏移时刻（未启用时立即返回）。
-		if !plan.wait(ctx, st.UID) {
+		// 账号级摊开：等本号在窗口内的偏移时刻；未配窗口时回落到保活族的固定间隔
+		// （保活是 46 次 refresh 连发，最需要节流的一族，见 accountPace）。
+		if !s.accountPace(ctx, plan, st.UID, keepaliveAccountDelay) {
 			return // 停机/取消：立刻退出
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {

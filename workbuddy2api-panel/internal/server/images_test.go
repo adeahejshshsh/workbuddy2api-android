@@ -432,7 +432,7 @@ func TestImagesFailFastOnAccountIndependentErrors(t *testing.T) {
 // 否则「隐藏了却还列给客户端」等于没隐藏。
 func TestGenerationModelsListedInV1Models(t *testing.T) {
 	up := &upstream.Client{
-		HTTP:          &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader(`{}`)),
 				Header: http.Header{"Content-Type": []string{"application/json"}}}, nil
 		})},
