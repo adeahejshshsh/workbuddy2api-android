@@ -400,6 +400,42 @@ type Config struct {
 		// AuditFile 审计日志路径；缺省 ./data/admin_audit.log。
 		AuditFile string `json:"audit_file"`
 	} `json:"admin"`
+
+	// Alerting 账号池可用性阈值告警（见 internal/alert）。整段缺省关闭。
+	//
+	// 语义是「连续 N 个 tick 都坏才告警，连续 M 个 tick 都恢复才解除」——单次抖动
+	// 不该把人半夜叫起来；webhook 用 HMAC-SHA256 签（X-WB2A-Signature），接收方可验真。
+	Alerting struct {
+		Enabled    bool   `json:"enabled"`
+		WebhookURL string `json:"webhook_url"`
+		// Secret 非空时给每个 POST 加 HMAC-SHA256 签名头。
+		Secret string `json:"secret"`
+		// IntervalSeconds 采样间隔（缺省 30s）；TimeoutSeconds 单次 POST 超时（缺省 5s）。
+		IntervalSeconds int `json:"interval_seconds"`
+		TimeoutSeconds  int `json:"timeout_seconds"`
+		// StartupGraceSeconds 启动宽限（缺省 30s）：刚起来池还没填完，别立刻报「健康号不足」。
+		StartupGraceSeconds int `json:"startup_grace_seconds"`
+		// MinHealthyCN / MinHealthyGlobal 该域健康号下限；<=0 = 不检查该域。
+		MinHealthyCN     int `json:"min_healthy_cn"`
+		MinHealthyGlobal int `json:"min_healthy_global"`
+		// RecoverHealthy 解除告警的健康号数（缺省 1）。
+		RecoverHealthy int `json:"recover_healthy"`
+		// BreakerThreshold 两域熔断号合计达此值告警；<=0 = 不检查。
+		BreakerThreshold int `json:"breaker_threshold"`
+		// ForTicks / ClearTicks 连续坏 / 连续好各需几个 tick 才改状态（缺省 2 / 2）。
+		ForTicks   int `json:"for_ticks"`
+		ClearTicks int `json:"clear_ticks"`
+		// SendResolve 恢复时也推一条 resolve（缺省不推，只推 alert）。
+		SendResolve bool `json:"send_resolve"`
+	} `json:"alerting"`
+
+	// Watchdog 上游目录改版监控：定期对「客户端实际看到的 /v1/models」取指纹，
+	// 变了就经告警通道通知（未配 webhook 时只写日志）。缺省关闭——只在「想第一时间
+	// 知道上游改了目录」时有价值，开了才有轮询成本。
+	Watchdog struct {
+		Enabled         bool `json:"enabled"`
+		IntervalSeconds int  `json:"interval_seconds"`
+	} `json:"watchdog"`
 }
 
 // Default 默认配置。
@@ -482,6 +518,14 @@ func Default() *Config {
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
 	c.Admin.AuditFile = "./data/admin_audit.log"
+	c.Alerting.IntervalSeconds = 30
+	c.Alerting.TimeoutSeconds = 5
+	c.Alerting.StartupGraceSeconds = 30
+	c.Alerting.MinHealthyCN = 1
+	c.Alerting.RecoverHealthy = 1
+	c.Alerting.ForTicks = 2
+	c.Alerting.ClearTicks = 2
+	c.Watchdog.IntervalSeconds = 3600 // 目录变化是低频事件，一小时一次足够
 	return c
 }
 
@@ -789,6 +833,38 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_METRICS_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.MetricsEnabled = b
+		}
+	}
+	// 告警：webhook 地址/密钥不适合写进配置文件（会跟着仓库走），优先走 env。
+	if v := os.Getenv("WB2A_ALERTING_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Alerting.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_ALERTING_WEBHOOK"); v != "" {
+		c.Alerting.WebhookURL = v
+	}
+	if v := os.Getenv("WB2A_ALERTING_SECRET"); v != "" {
+		c.Alerting.Secret = v
+	}
+	if v := os.Getenv("WB2A_ALERTING_MIN_HEALTHY_CN"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Alerting.MinHealthyCN = n
+		}
+	}
+	if v := os.Getenv("WB2A_ALERTING_MIN_HEALTHY_GLOBAL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Alerting.MinHealthyGlobal = n
+		}
+	}
+	if v := os.Getenv("WB2A_WATCHDOG_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Watchdog.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_WATCHDOG_INTERVAL_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Watchdog.IntervalSeconds = n
 		}
 	}
 }
