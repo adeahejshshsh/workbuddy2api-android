@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/balance"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
@@ -531,6 +532,32 @@ func main() {
 	// 模型归零；倍率表当时尚未建立）。
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
 	go warmModelRates(ctx, up, p)
+
+	// 账号池可用性告警（alerting.*，缺省关闭）：连续 N 个 tick 都坏才推 webhook，
+	// 连续 M 个 tick 都恢复才解除——单次抖动不该把人半夜叫起来。观测源直接取
+	// handler 的池健康与 WAF 状态（见 server/alert_source.go）。
+	alertMon := alert.New(alert.Config{
+		Enabled:          cfg.Alerting.Enabled,
+		WebhookURL:       cfg.Alerting.WebhookURL,
+		Secret:           cfg.Alerting.Secret,
+		Interval:         time.Duration(cfg.Alerting.IntervalSeconds) * time.Second,
+		Timeout:          time.Duration(cfg.Alerting.TimeoutSeconds) * time.Second,
+		StartupGrace:     time.Duration(cfg.Alerting.StartupGraceSeconds) * time.Second,
+		MinHealthyCN:     cfg.Alerting.MinHealthyCN,
+		MinHealthyGlobal: cfg.Alerting.MinHealthyGlobal,
+		RecoverHealthy:   cfg.Alerting.RecoverHealthy,
+		BreakerThreshold: cfg.Alerting.BreakerThreshold,
+		ForTicks:         cfg.Alerting.ForTicks,
+		ClearTicks:       cfg.Alerting.ClearTicks,
+		SendResolve:      cfg.Alerting.SendResolve,
+	}, h.AlertSource())
+	go alertMon.Run(ctx)
+	// 上游目录改版监控（watchdog.*，缺省关闭）：盯住「客户端实际看到的 /v1/models」
+	// 的指纹，变了就经告警通道推一条（没配 webhook 时只写日志）。首轮只建基线。
+	if cfg.Watchdog.Enabled {
+		go h.WatchCatalog(ctx, time.Duration(cfg.Watchdog.IntervalSeconds)*time.Second, alertMon.Notify)
+		log.Printf("watchdog: 上游目录监控开，每 %ds", cfg.Watchdog.IntervalSeconds)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
