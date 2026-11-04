@@ -61,9 +61,20 @@ func (s *Scheduler) RunStreakBonusNowCtx(ctx context.Context) {
 func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	// 0. 补签保连登：昨日漏签且有补签卡则补上（连续天数一断就要重攒 7 天）。
 	s.makeupYesterday(a)
-	// 0.5 礼包/补偿（每号一次，无则业务错误静默跳过）。
-	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil {
-		log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(a.UID, a.NicknameValue()), credit)
+	// 0.5 礼包（先查后领）：ClaimGift 对「已领过」也返回 (0, nil)——上游 200 且 body
+	// 无 credit 字段，所以盲领写法会给每个已领号**每天**打一行假的「🎊 新手礼包 +0c」
+	// （日志有、余额流水里 delta 一次都没有），还白打一次上游。改成先查状态：
+	// active=false 是「当前无活动」的正常 200，不报错也不刷日志。
+	if st, err := s.cfg.Upstream.GetGiftStatus(a); err != nil {
+		log.Printf("streak-bonus %s: 礼包状态查询失败: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
+	} else if st.Pending() {
+		if credit, cerr := s.cfg.Upstream.ClaimGift(a); cerr != nil {
+			log.Printf("streak-bonus %s: 礼包领取失败（截止 %s，可领 %dc）: %v",
+				logfmt.Label(a.UID, a.NicknameValue()), st.EndTime, st.CreditNum, cerr)
+		} else {
+			log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc（截止 %s）",
+				logfmt.Label(a.UID, a.NicknameValue()), credit, st.EndTime)
+		}
 	}
 	// 先查后领（上游 PR #196）：直接 claim 会把「没有活动 / 已领 / 领取失败」
 	// 压成同一个静默错误，带截止日的补偿会静默过期。
