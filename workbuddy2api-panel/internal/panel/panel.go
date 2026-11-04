@@ -1322,7 +1322,12 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 		Remain   int64                    `json:"remain"`
 		Size     int64                    `json:"size"`
 		Packages []upstream.CreditPackage `json:"packages"`
-		Error    string                   `json:"error,omitempty"`
+		// Plan/PlanEvidence 账号套餐分类（见 pool.ClassifyPlan）：包名派生，无包时 unknown。
+		// 账号的「来头」决定稳定性——免费版额度最小、最容易撞 6004；活动号积分全靠赠送，
+		// 用完就没了；标准版有正式订阅。面板标出来，运维一眼知道该指望哪个号。
+		Plan         pool.PlanKind `json:"plan"`
+		PlanEvidence string        `json:"plan_evidence,omitempty"`
+		Error        string        `json:"error,omitempty"`
 	}
 	out := make([]row, len(accts))
 	// 结果按下标写回，靠 UID 非空区分「未派发」：空 uid 的行会被静默丢弃，
@@ -1373,6 +1378,12 @@ dispatch:
 			it.Packages = packs
 			it.Remain = remain
 			it.Size = size
+			// 套餐分类由包名派生（pool.ClassifyPlan）：匹配不上就是 unknown，不猜。
+			names := make([]string, 0, len(packs))
+			for _, pk := range packs {
+				names = append(names, pk.Name)
+			}
+			it.Plan, it.PlanEvidence = pool.ClassifyPlan(names)
 			out[i] = it
 		}(i, s)
 	}

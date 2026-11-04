@@ -95,6 +95,11 @@ type Scheduler struct {
 	// stampMu 串行化补跑标记文件的读写（见 runstamps.go）。
 	stampMu sync.Mutex
 
+	// authHealMu/authHealAt 余额 401 → refresh 求证的退避时刻（uid → 上次求证成功时刻）。
+	// 见 balance_401.go：降级 token 每轮探测都会 401，不做退避就会一天轮换 288 次 RT。
+	authHealMu sync.Mutex
+	authHealAt map[string]time.Time
+
 	// schedMu 保护排程参数（时点/开关）；Reconfigure 可在运行期热改（面板保存配置时调用）。
 	// rearmSchedule/rearmBalance 是「排程已变，立即重算」通知：Run 与余额刷新循环各自消费，
 	// 分别用独立 channel（同 channel 被两个 select 消费会丢信号）。
@@ -1006,6 +1011,10 @@ dispatch:
 			remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiryCtx(ctx, a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.NicknameValue()), err)
+				// 401 的登录态求证（见 balance_401.go）：余额刷新是池内唯一的分钟级健康
+				// 观测量，只写日志的话上游批量注销会话后，号在面板上仍显示「可用」，
+				// 要等保活连败满阈（≈3 天）才转 disabled。
+				s.noteBalanceAuthFailure(a, uid, err)
 				return
 			}
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
