@@ -1120,9 +1120,49 @@ $('logChips').addEventListener('click', ev => {
   document.querySelectorAll('#logChips .chip').forEach(c => c.classList.toggle('on', c === b));
   loadLogs();
 });
+// ── 面板偏好记忆（issue #160）──
+// 只记「展示类」偏好：写不进去就当没设过，偏好丢了不影响任何功能。
+// 模型 / 来源下拉不记 —— 它们每次按当前归档重建选项，记住容易指向已不存在的事件。
+const LS_PREF = 'wb2api.pref.v1';
+function prefGet(k) {
+  try { return (JSON.parse(localStorage.getItem(LS_PREF)) || {})[k] || ''; } catch (e) { return ''; }
+}
+function prefSet(k, v) {
+  try {
+    const m = JSON.parse(localStorage.getItem(LS_PREF)) || {};
+    if (v) m[k] = v; else delete m[k];
+    localStorage.setItem(LS_PREF, JSON.stringify(m));
+  } catch (e) { /* 隐私模式 / 配额满：忽略，功能不受影响 */ }
+}
+
+// 清空归档（issue #160）：删的是磁盘上的事件文件，不可恢复，二次确认后再打。
+// 后端由归档写循环串行执行删除 —— 否则会把正在写的文件删成「已删除但仍在写」。
+if ($('btnEventClearLogs')) $('btnEventClearLogs').onclick = async () => {
+  if (!confirm('清空归档会删掉归档目录里的全部请求事件文件（不可恢复，导出过的 JSON 不受影响）。确认清空？')) return;
+  const b = $('btnEventClearLogs');
+  b.disabled = true;
+  try {
+    const r = await api('request_logs/clear', { method: 'POST' });
+    toast('已清空归档：删除 ' + (r.files || 0) + ' 个文件（' + fmtBytes(r.bytes || 0) + '）', 'ok');
+    await loadLogs();
+  } catch (e) {
+    toast('清空失败：' + e.message, 'err');
+  } finally { b.disabled = false; }
+};
+
+if ($('reqLimit')) {
+  const saved = prefGet('reqLimit');
+  if (saved) $('reqLimit').value = saved;
+  $('reqLimit').addEventListener('change', () => prefSet('reqLimit', $('reqLimit').value));
+}
+
 async function loadLogs() {
   const box = $('logBox');
   const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+  if ($('reqLimit') && !$('reqLimit').value) {
+    const saved = prefGet('reqLimit');
+    if (saved) $('reqLimit').value = saved;
+  }
   const limit = ($('reqLimit') && $('reqLimit').value) || 100;
   // 时间范围由归档侧过滤（不是前端筛已拉取的条目）：区间落在更早的时间段时，
   // 「最近 N 条」里根本不会有那些记录，必须让服务端按时间取。
