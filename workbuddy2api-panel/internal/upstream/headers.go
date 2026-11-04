@@ -70,6 +70,14 @@ const (
 	defaultCliVersionGlobal    = "2.161.0"
 )
 
+// X-Agent-Type 的原始取值。真机 resolveModelCallAgentType 的主/次分支：
+// 用户主对话恒 main；标题、摘要、网关自发任务这类辅助链取 auxiliary。
+const (
+	agentTypeMain = "main"
+	// agentTypeAuxiliary 辅助链档位：用于非用户主对话的模型调用（网关自发的探测/摘要）。
+	agentTypeAuxiliary = "auxiliary"
+)
+
 // clientVersionFor / cliVersionFor 按账号 realm 取生效版本段。
 // 优先级：realm 专用显式配置（仅 global）> 通用显式配置 > realm 内置默认。
 func (c *Client) clientVersionFor(a *auth.Auth) string {
@@ -343,7 +351,17 @@ type ChatMeta struct {
 	// CacheKeyID prompt_cache_key 的会话段来源（网关派生的粘性会话键 sessKey；
 	// sessKey 为空时由调用方用内容派生键填入）。只影响缓存槽，不影响出站头。
 	CacheKeyID string
+	// AgentType X-Agent-Type 场景枚举：空 = main（用户主对话）。网关自发、不属于用户
+	// 对话的模型调用（面板自动任务、夜猫子、工具侧探测）填 auxiliary。真机另有
+	// compaction / subagent / team 三档，网关没有对应路径，故不预留假值。
+	AgentType string
 }
+
+// X-Agent-Type 的服务层取值（ChatMeta.AgentType 用）：空串等价 AgentTypeMain。
+const (
+	AgentTypeMain      = agentTypeMain
+	AgentTypeAuxiliary = agentTypeAuxiliary
+)
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
 // 缺省字段用 X-No-* 约定（与 CodeBuddy 官方 CLI 一致）。
@@ -392,7 +410,13 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 		req.Header.Set("X-Stainless-Runtime-Version", "v22.21.1")
 		req.Header.Set("X-Stainless-Retry-Count", "0")
 		// 官方 chat 头组里的 agent 归因（另两处在 desktop 专家路径已设）。
-		req.Header.Set("X-Agent-Type", "main")
+		// 按场景取（ChatMeta.AgentType）：空 = 用户主对话 main，auxiliary = 网关自发
+		// 的辅助链（工具探测、摘要）。此前恒发 main，等于让网关自己的调用自称用户主对话。
+		if meta.AgentType != "" {
+			req.Header.Set("X-Agent-Type", meta.AgentType)
+		} else {
+			req.Header.Set("X-Agent-Type", agentTypeMain)
+		}
 		req.Header.Set("X-Agent-Intent", "craft")
 		req.Header.Set("X-Product", "SaaS")
 		req.Header.Set("X-IDE-Name", "WorkBuddy")
