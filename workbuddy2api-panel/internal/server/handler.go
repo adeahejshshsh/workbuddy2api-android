@@ -111,6 +111,12 @@ type Config struct {
 	// 来自 logging.request_archive_context（缺省 false）：比 IP/UA 敏感得多——那是
 	// 用户的实际对话内容，所以缺省不开。
 	RecordContext bool
+	// AdminEnabled 为 true 才注册 POST /admin/tasks/{name}/run。缺省关闭。
+	AdminEnabled bool
+	// Tasks 手动补跑排程的入口（*scheduler.Scheduler 满足它）。nil 时开了 admin 也回 503。
+	Tasks TaskRunner
+	// Audit /admin 操作审计日志（可选；nil = 不记）。见 admin_audit.go。
+	Audit *AuditLog
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -163,6 +169,10 @@ type Handler struct {
 	degrade    degradeGate
 	// budget 日预算 + 突发积分闸 + 缓存率闸（budget.go）。
 	budget *dailyBudget
+	// taskMu/taskRunning /admin/tasks/{name}/run 的在跑标记（同名任务不并发，
+	// 重复提交回 409）。见 admin_tasks.go。
+	taskMu      sync.Mutex
+	taskRunning map[string]bool
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
@@ -239,6 +249,12 @@ func NewHandler(cfg Config) *Handler {
 	})
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
+	}
+	// 手动补跑排程（缺省关闭）：运维「这次签到没跑成功，重来一遍」的唯一入口。
+	// 挂在 withAuth 之内，再套一层审计（开了才落盘）。
+	if cfg.AdminEnabled {
+		h.mux.HandleFunc("POST /admin/tasks/{name}/run",
+			h.withAuth(h.audit("task.run", auditPathValue("name"), h.adminTaskRun)))
 	}
 	return h
 }
