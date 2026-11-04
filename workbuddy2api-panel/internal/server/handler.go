@@ -33,10 +33,13 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	APIKey   string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
+	// MetricsEnabled 为 true 才注册 GET /metrics（Prometheus 文本）。缺省关闭：
+	// 指标里含池健康分布，不该默认对外暴露。
+	MetricsEnabled bool
+	MaxRotate      int // 单请求最多换号次数，默认 3
 	// ModelsHidden 模型黑名单（上游 PR #225）：裸名=两域都藏；"cn:x"/"global:x"=只藏该域。
 	// 生效点：/v1/models 列表过滤 + chat 点名拒绝（400 model_unavailable）。
 	// ModelsAllowed 模型白名单（issue #68）：与 ModelsHidden 对称的「可能可见」集合。
@@ -190,6 +193,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/search", h.withAuth(h.search))
 	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。
 	h.mux.HandleFunc("POST /v1/fetch", h.withAuth(h.fetch))
+	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
 	// POST /v2/chat/busy：官方客户端的「模型忙」预检（国区上游 200、国际版上游 404，
 	// 见 busy.go 文件头）。本地按池台账算，不打上游。
 	h.mux.HandleFunc("POST /v2/chat/busy", h.withAuth(h.chatBusy))
@@ -198,6 +202,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withDualAuth(h.models))
 	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	if h.cfg.MetricsEnabled {
+		h.mux.HandleFunc("GET /metrics", h.withAuth(h.promMetrics))
+	}
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	// 存活探针（bug P2-2）：/healthz 是「可服务」语义（池里没有可用账号就 503），
 	// 用它做容器健康检查会让"刚起来还没加账号"的容器永远 unhealthy，

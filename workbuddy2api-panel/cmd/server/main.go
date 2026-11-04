@@ -461,6 +461,7 @@ func main() {
 		RedisMode:                     redisMode,
 		SoftCooldown:                  cfg.SoftRateDur,
 		MaxBodyMB:                     cfg.ServerMaxBodyMB,
+		MetricsEnabled:                cfg.MetricsEnabled,
 		ModelsAllowed:                 cfg.Models.Allowed, // 模型白名单（issue #68）
 		ModelsHidden:                  cfg.Models.Hidden,  // 模型黑名单（上游 PR #225）
 		ModelsAliases:                 cfg.Models.Aliases, // 模型名映射（issue #30）

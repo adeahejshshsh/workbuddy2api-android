@@ -116,8 +116,10 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRowEx(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks,
+	total := time.Since(s.start)
+	logChatRowEx(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks,
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent)
+	noteProm(s, total)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，

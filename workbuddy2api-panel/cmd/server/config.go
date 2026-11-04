@@ -379,6 +379,9 @@ type Config struct {
 	ShutdownTimeoutDur time.Duration `json:"-"`
 	// ServerMaxBodyMB /v1/chat/completions 请求体上限（MB）；0 = 不限制。
 	ServerMaxBodyMB int `json:"-"`
+	// MetricsEnabled 暴露 GET /metrics（Prometheus 文本 0.0.4）。缺省关闭：
+	// 指标含池健康分布，不该默认对外暴露。
+	MetricsEnabled bool `json:"metrics_enabled"`
 }
 
 // Default 默认配置。

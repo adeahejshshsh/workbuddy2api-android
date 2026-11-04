@@ -822,6 +822,67 @@ func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedMod
 // 这里是服务端兜底：脚本直接灌超长值会让每次落盘时整份 state.json 变大。
 const groupMaxRunes = 24
 
+type RealmHealth struct {
+	Total   int
+	Healthy int
+	Cooling int
+	// Disabled 仅统计**已禁用**；Paused（暂停选号）单列——两者对监控口径不同：
+	// /status 与 /metrics 的「不可用」要合并（d+p）由调用方各自加，见 countsDetailedForRealm。
+	Disabled       int
+	Paused         int
+	InFlightFull   int
+	Breaker        int
+	Degraded       int
+	ManualDisabled int
+	ModelCooled    int
+	InFlight       int
+}
+
+func (p *Pool) RealmHealth(realm string) RealmHealth {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	var h RealmHealth
+	for _, e := range p.byUID {
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		h.Total++
+		switch {
+		case e.disabled || e.paused:
+			// 两者都不可选，但分开计数：disabled 是「判死」（需人工解冻），paused 是
+			// 「临时让位」（照常保号）。合并口径由调用方声明（/status、/metrics 合并；
+			// 面板概况分开，见 CountsDetailedWithPaused）。
+			if e.disabled {
+				h.Disabled++
+			} else {
+				h.Paused++
+			}
+		case !e.healthy(now):
+			h.Cooling++
+		default:
+			h.Healthy++
+			if p.inFlightFull(e) {
+				h.InFlightFull++
+			}
+		}
+		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
+			h.Breaker++
+		}
+		if !e.degradeUntil.IsZero() && now.Before(e.degradeUntil) {
+			h.Degraded++
+		}
+		for _, mc := range e.modelCooldowns {
+			if !mc.Until.IsZero() && now.Before(mc.Until) {
+				h.ModelCooled++
+				break
+			}
+		}
+		h.InFlight += int(e.inFlight.Load())
+	}
+	return h
+}
+
 // SetGroup 设置账号分组标签（空串 = 取消分组，幂等）。纯管理维度：不参与选号 /
 // 计费 / 鉴权，也不动任何冷却与计数 —— 只影响面板按组筛选与组内批量操作。
 // 返回 false 表示账号不存在（供调用方区分「改成功了」与「uid 打错」）。
