@@ -12,7 +12,11 @@
 # token 从 /sdcard/public_repo 读（40 位 ghp_…），只在命令行里用，
 # **不会**写进任何文件、也不会进仓库（推之前还会全量扫一遍高危串）。
 # 暂存目录 $PREFIX/tmp/ghrepo 会保留（复用它的 .git 才能累加历史，不用每次强推）。
-set -eu
+# pipefail 必须开：脚本里有多处 `cmd | cmd` 管道（最要紧的是 tar | tar），没有它时
+# 管道退出码取**最后一个**命令 —— `/sdcard`（FUSE）单文件读失败时 GNU tar 只打一行
+# warning、跳过该文件，归档依然"完整"→ 读端 exit 0 → git add -A 把「文件消失」当成
+# 删除暂存 → 推送后远端少掉那个文件，脚本照常打印「已推送」。
+set -euo pipefail
 # 参数解析：release 可出现在任意位置，其余视作提交标题。
 DO_RELEASE=0
 MSG=""
@@ -107,6 +111,18 @@ tar -C "$WS" \
     --exclude='./*BUG清单*.md' \
     -cf - . | tar -C "$STAGE" -xf -
 [ -d "$STAGE/.git" ] && echo "  （沿用已有 .git，历史可累加）"
+# 拷贝完整性断言（review 15）：pipefail 能抓住「读失败」，但抓不住「tar 打了 warning
+# 后跳过单个文件」。这里比一下文件数，少一个就中止 —— 少文件推到远端等于静默删代码。
+WS_N=$(find "$WS" -mindepth 1 \( -path "$WS/.git" -o -path "$WS/workbuddy2api-panel/.git" -o -path "$WS/.tmp" \) -prune -o -type f -print | wc -l)
+ST_N=$(find "$STAGE" -mindepth 1 -path "$STAGE/.git" -prune -o -type f -print | wc -l)
+# 暂存侧比工作区少是正常的（--exclude 排掉了密钥/运行数据/成品 APK 等）；
+# 关键是**不能是负偏差以外的异常**：这里只拦「暂存文件数明显少于工作区一半」这种
+# 量级事故，逐项精确对齐会因为 exclude 清单演化而误报。
+if [ "$ST_N" -lt $((WS_N / 2)) ]; then
+  echo "❌ 暂存树文件数异常：工作区 $WS_N 个 → 暂存 $ST_N 个（拷贝可能中途失败）"
+  exit 1
+fi
+echo "  拷贝完整性：工作区 $WS_N 个文件 → 暂存 $ST_N 个（exclude 规则已排除部分）"
 
 echo "== 1.5/5 敏感串扫描（命中就中止）"
 TOKEN="$TOKEN" STAGE="$STAGE" python3 - <<'PY'
@@ -332,17 +348,23 @@ else:
 # 旧附件先清（幂等）：附件名带构建时间戳，每次都不一样，只按同名删会让重发
 # 累积出多个 APK。按前缀清掉本仓所有 WorkBuddy2API*.apk 附件。
 name = apk.name
-st, b, _ = call(api + f"/releases/{rel['id']}/assets")
-for a in json.loads(b) if st == 200 else []:
-    if a["name"].startswith("WorkBuddy2API") and a["name"].endswith(".apk"):
-        call(api + f"/releases/assets/{a['id']}", "DELETE")
-        print(f"  删掉旧 asset {a['name']}，准备重传")
+# **先上传、成功后再删旧**（review 16）：此前先按前缀删掉全部旧 APK 再上传，而上传
+# 走移动网络、重试 3 次仍失败就 SystemExit(1) —— 那一刻旧附件已删完，Release 变成
+# 0 附件，用户点进去没有可下载的包，上一个版本也一起没了。一次弱网就清空发版页。
 url = rel["upload_url"].split("{")[0] + "?name=" + name
 data = apk.read_bytes()
 st, b, _ = call(url, "POST", data, ctype="application/vnd.android.package-archive")
 if st not in (200, 201):
-    print("  ❌ 上传 APK 失败:", st, b[:300]); raise SystemExit(1)
+    print("  ❌ 上传 APK 失败（旧附件保持原样，发版页仍可下载上一版）:", st, b[:300]); raise SystemExit(1)
 a = json.loads(b)
 print(f"  ✅ 上传成功 {a['name']}  {a['size']} 字节")
+# 新附件就位后才清旧：附件名带构建时间戳，每次都不一样，不清会累积多个 APK。
+st, b, _ = call(api + f"/releases/{rel['id']}/assets")
+for old in json.loads(b) if st == 200 else []:
+    if old["id"] == a["id"]:
+        continue
+    if old["name"].startswith("WorkBuddy2API") and old["name"].endswith(".apk"):
+        call(api + f"/releases/assets/{old['id']}", "DELETE")
+        print(f"  删掉旧 asset {old['name']}")
 print(f"  {rel['html_url']}")
 PY

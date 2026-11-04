@@ -1557,6 +1557,9 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
+		// 必须与 do() 走同一套出站改写（头名拼写 + Connection）：这条链此前绕过了
+		// do()，是「测试永远绿、线上每请求少一行头」的根源。见 prepareOutbound。
+		req = prepareOutbound(req)
 		resp, err := c.chatHTTP().Do(req)
 		if err != nil {
 			cancel()

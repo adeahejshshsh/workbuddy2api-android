@@ -18,14 +18,25 @@ import (
 //
 // 本文件的职责边界：**只做出站前的统一改写**，不改变请求内容、不做重试、不改超时。
 // 谁需要按路径区分行为，在调用方决定，不在这里加分支。
-func (c *Client) do(req *http.Request) (*http.Response, error) {
-	// 头名大小写对齐官方真机（Go 的 CanonicalMIMEHeaderKey 会把
-	// acp-connection-id 归一成 Acp-Connection-Id、X-B3-ParentSpanId 拍成
-	// X-B3-Parentspanid —— 头集合与取值全对，逐字节看仍是另一族包）。
-	// 逐名映射而非无差别小写化：后者会把 User-Agent 打回 Go-http-client/1.1。
-	// 官方必发、Go 默认不发的那一行（见 applyConnectionHeader）
+// prepareOutbound 出站前的统一头改写。**do() 与 chat 流式路径都必须走它。**
+//
+// 头名大小写对齐官方真机（Go 的 CanonicalMIMEHeaderKey 会把 acp-connection-id 归一成
+// Acp-Connection-Id、X-B3-ParentSpanId 拍成 X-B3-Parentspanid —— 头集合与取值全对，
+// 逐字节看仍是另一族包）。逐名映射而非无差别小写化：后者会把 User-Agent 打回
+// Go-http-client/1.1。外加官方必发、Go 默认不发的 Connection 行（见 applyConnectionHeader）。
+//
+// 为什么单独抽出来：chat 流式走 `c.chatHTTP().Do(req)`（无总时长上限的专用 client），
+// 此前**绕过了 do()**，于是最敏感的那条链上每请求少一行 Connection、错两个大小写 ——
+// 而唯一的端到端验证 headorder_e2e_test 走的却是 do()，测试永远绿。
+// 注意这里**不做** decodeBodyIfNeeded：chat 是 SSE，Accept-Encoding 已被删掉让
+// net/http 自己透明解压，再套一层解码会打乱 monitorBody/idle/首包计时的时序。
+func prepareOutbound(req *http.Request) *http.Request {
 	applyConnectionHeader(req)
-	req = normalizeHeaderSpelling(req)
+	return normalizeHeaderSpelling(req)
+}
+
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	req = prepareOutbound(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return resp, err

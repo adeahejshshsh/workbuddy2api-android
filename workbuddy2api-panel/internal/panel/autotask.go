@@ -302,7 +302,13 @@ func (p *Panel) listTasksSoftRate(a *auth.Auth, mp bool) ([]upstream.Task, error
 		d := softRateWait(err, attempt+1)
 		log.Printf("autotask %s: 上游软限流，等 %s 后重试（第 %d/%d 次）",
 			logfmt.Label(a.UID, a.Nickname), d.Round(time.Second), attempt+1, softRateRetries)
-		time.Sleep(d)
+		// 必须用可中止的 sleepAB，不能用 time.Sleep：本函数经 effectiveTaskCode /
+		// loadTaskMap 被**队列路径在账号锁内**调用。撞 429 后 worker 持锁 + 占并发槽
+		// 睡满 softRateWait（单次封顶 60s ×2），而 cancel.go 的 sleepAB / watchAbort
+		// 完全管不到 time.Sleep —— 客户端断连后照样睡完，用户重试全撞 409。
+		if !sleepAB(a.UID, d) {
+			return nil, errTaskAborted
+		}
 	}
 }
 
