@@ -193,3 +193,30 @@ shell 的管道）关掉了读端，网关立刻 141 退出，日志上看不出
   - **需要可安装包时才发版**：`bash push_github.sh release`（建 Release + 上传 APK）。
     多个修复攒到一起再发，避免 Release 列表被刷爆。
   - token 走 `GITHUB_TOKEN` 环境变量或 `/sdcard/public_repo`；脚本会先扫敏感串，命中就中止。
+
+---
+
+## 六、与上游（misakano7545/workbuddy2api-panel）的能力对照
+
+2026-11-04 做过一次逐项对照：**路由层面已经清零**（上游的每一条 HTTP 路由我们都有；
+我们只多一条 `GET /livez`）。剩下的差异是四个**已判定不移植**的子系统——写在这里，
+免得下次有人重新推一遍。
+
+| 上游 | 我们的状态 | 为什么不动 |
+|---|---|---|
+| `internal/server/continue.go`（截断自动续写，551 行） | 未移植 | **上游自己没接线**：`continueReader` 只在它自己的测试里构造，生产路径零引用。把一段上游都不敢启用的流式手术搬进来，风险全归我们 |
+| `internal/upstream/timing.go`（分段耗时 prep/do） | 未移植 | 纯观测、不改行为。要动 `prepareBody` 的返回值（热路径）与 `logChatRow` 的签名，而我们的日志行早已与上游分叉（effort/think 字段不同源）。收益是「把 TTFB 拆开 0.5s」，不值得为它在热路径上重新布线 |
+| `internal/panel/taskjobs.go` + `tasksweep.go`（持久化作业记录） | **设计不同，不是缺口** | 上游是「作业记录模型」（ID/生命周期/上限/清扫）；我们是「队列 + 同步执行」（`taskcenter.go` 的 queue + `autotask.go`）。两者都提供「异步启动 + 轮询进度」，换实现是重构不是移植 |
+| `internal/proxypool/*` + `panel/proxies.go` | 不适用 | 我们走 env 代理 + 自建 CONNECT/SOCKS5 隧道（`upstream/proxytunnel.go`），没有节点池概念 |
+| `internal/updater/*` + `panel/update.go` | 不适用 | 产物是本地签名 APK，更新走 GitHub Release，不需要进程内自更新 |
+| `internal/probe/*` | 不适用 | `//go:build ignore` 的真机测量工具，不是运行期子系统 |
+
+**对照方法**（下次复用）：别比文件数量，比**路由**和**是否接线**。
+
+```bash
+# 路由对照
+git show FETCH_HEAD:internal/server/handler.go | grep -o 'HandleFunc("[A-Z]* [^"]*"' | sort
+git show FETCH_HEAD:internal/panel/panel.go     | grep -o 'HandleFunc("[A-Z]* [^"]*"' | sort
+# 接线判定：函数有调用点才算「能力」，只在测试里出现的是死代码
+git grep -n "SomeThing" FETCH_HEAD -- '*.go' | grep -v _test.go | grep -v "func SomeThing"
+```
