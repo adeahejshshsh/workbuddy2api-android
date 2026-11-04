@@ -86,7 +86,11 @@ public class GatewayService extends Service {
     static volatile String overlayErr = "";
     public static String overlayError() { return overlayErr; }
     static volatile String lastExit = "";       // 上一次网关退出的原因（跨 App 重启保留）
-    static volatile boolean userStop = false;   // 用户在通知里点了"停止"：那就不再自愈
+    static volatile boolean userStop = false;     // 用户在通知里点了"停止"：那就不再自愈
+    // fgsBlocked 前台服务起不来（startForeground 被拒/超窗）→ onDestroy 不许再挂复活链。
+    // 没有这个出口的话，失败路径 stopSelf() 会走 onDestroy 的 `if (!userStop)`，
+    // 无条件重挂 alarm + JobScheduler：5 分钟后拉回来再失败再挂，无限循环、日志刷屏。
+    static volatile boolean fgsBlocked = false;
     static volatile boolean startCounted = false; // 本进程是否已统计过"被杀重启"（bug #5）
     public static int appRestartCount() { return appRestarts; }
     public static String lastExitText() { return lastExit; }
@@ -275,6 +279,20 @@ public class GatewayService extends Service {
             return START_NOT_STICKY;
         }
         ensureChannel();
+        userStop = false;
+        // **先起前台**：Android 只给 startForegroundService() 5 秒，而下面的
+        // SharedPreferences 读写、appLog 同步写盘、ReviveJobService.schedule 的 binder
+        // 调用全在主线程、全在 startForeground 之前 —— 冷启动 + 日志翻代 + 慢盘叠加
+        // 就能超窗，抛 ForegroundServiceDidNotStartInTimeException（进程当场被打死）。
+        // 通知内容此刻还是上一轮的展示态，拿到真实状态后由 refreshNotification() 刷新。
+        String fgsErr = startForegroundCompat();
+        if (fgsErr != null) {   // 起不来就别赖着，否则等 5s 被系统判 ANR 崩掉
+            fgsBlocked = true;  // 让 onDestroy 别再重挂复活链（见字段注释）
+            setState(ST_STOPPED, "前台服务起不来", fgsErr);
+            appLog(this, "前台服务起不来：" + fgsErr);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         // 上一次实例没清"运行中"标记，说明是 App 进程被系统杀掉之后又被拉起来的 → 记一笔
         try {
             SharedPreferences sp = getSharedPreferences(PREF, MODE_PRIVATE);
@@ -300,13 +318,8 @@ public class GatewayService extends Service {
                 + (appRestarts > 0 ? "，App 进程已被系统杀过 " + appRestarts + " 次" : "")
                 + (lastExit.isEmpty() ? "" : "，上次网关退出：" + lastExit));
         ReviveJobService.schedule(this);   // 第五层：JobScheduler，系统托管，跨重启仍在
-        String fgsErr = startForegroundCompat();
-        if (fgsErr != null) {   // 起不来就别赖着，否则等 5s 被系统判 ANR 崩掉
-            setState(ST_STOPPED, "前台服务起不来", fgsErr);
-            appLog(this, "前台服务起不来：" + fgsErr);
-            stopSelf();
-            return START_NOT_STICKY;
-        }
+        // 前台已在 ensureChannel 之后立刻起过（5 秒窗口），这里只刷新通知内容。
+        refreshNotification();
         holdWake();   // 保活：不持它，后台时看门狗线程与 Go 定时器都会被冻住
         appLog(this, "保活状态：wakelock=" + wakeHeld() + "，常驻图层=" + (overlay != null)
                 + "，alarm=" + (exactAlarmOk(this) ? "精确" : "非精确（未授予「闹钟与提醒」）") + "，任务列表=划掉也不停");
@@ -345,7 +358,9 @@ public class GatewayService extends Service {
         // 会一直显示「启动中」，直到 5 分钟后的 alarm 把服务拉回来 —— 用户以为卡死了。
         setState(ST_STOPPED, "已停止",
                 userStop ? "用户点了停止，不再自愈" : "服务被系统销毁，等待 alarm/Job 拉起");
-        if (!userStop) {       // 不是用户点的停止 → alarm + job 两条路把服务拉回来
+        // fgsBlocked：前台服务起不来的设备不再重挂复活链 —— 否则 5 分钟一次
+        // 「拉起来 → 起不来 → stopSelf → onDestroy 再挂」的静默无限循环。
+        if (!userStop && !fgsBlocked) {       // 不是用户点的停止 → alarm + job 两条路把服务拉回来
             appLog(this, "服务被销毁（非用户操作）→ 已重挂 alarm + JobScheduler 兜底");
             armAlarm(this);
             ReviveJobService.schedule(this);
@@ -700,8 +715,8 @@ public class GatewayService extends Service {
                 String head = cur.substring(0, brace).replaceAll("\\s+$", "");
                 String sep = (head.isEmpty() || head.endsWith("{")) ? "" : ",";
                 String injected = head + sep + " \"api_key\": \"" + key + "\"\n" + cur.substring(brace);
-                try (java.io.FileOutputStream os = new java.io.FileOutputStream(cfg)) {
-                    os.write(injected.getBytes("UTF-8"));
+                try {
+                    writeFileAtomic(cfg, injected.getBytes("UTF-8"));
                 } catch (Throwable t) {
                     appLog(this, "config.json 缺 api_key 且补写失败：" + t);
                     return;
@@ -716,8 +731,8 @@ public class GatewayService extends Service {
                     || "sk-xxx".equalsIgnoreCase(curKey);
             if (!bad) return;                      // 正常 key：一个字都不改
             String fixed = m.replaceFirst("\"api_key\": \"" + key + "\"");
-            try (java.io.FileOutputStream os = new java.io.FileOutputStream(cfg)) {
-                os.write(fixed.getBytes("UTF-8"));
+            try {
+                writeFileAtomic(cfg, fixed.getBytes("UTF-8"));
             } catch (Throwable t) {
                 appLog(this, "config.json 的占位 api_key 替换失败：" + t);
                 return;
@@ -738,11 +753,38 @@ public class GatewayService extends Service {
             tpl = tpl.replace("\"api_key\": \"CHANGE_ME\"", "\"api_key\": \"" + key + "\"");
             tpl = tpl.replace("\"api_key\": \"test_key\"", "\"api_key\": \"" + key + "\"");
             if (!tpl.contains(key)) tpl = tpl.replace("CHANGE_ME", key).replace("test_key", key);
-            try (FileOutputStream os = new FileOutputStream(cfg)) { os.write(tpl.getBytes("UTF-8")); }
+            writeFileAtomic(cfg, tpl.getBytes("UTF-8"));
         } catch (Throwable t) {
-            try (FileOutputStream os = new FileOutputStream(cfg)) {
-                os.write(("{\"listen\":\":7863\",\"api_key\":\"" + key + "\",\"auth_dir\":\"./auths\",\"state_file\":\"./data/state.json\"}").getBytes("UTF-8"));
+            try {
+                writeFileAtomic(cfg, ("{\"listen\":\":7863\",\"api_key\":\"" + key + "\",\"auth_dir\":\"./auths\",\"state_file\":\"./data/state.json\"}").getBytes("UTF-8"));
             } catch (Throwable ignored) {}
+        }
+    }
+
+    /**
+     * 原子写文件：先写同目录的 .tmp，再 rename 覆盖目标。
+     *
+     * 为什么必须：这段代码恰好在「服务被反复杀」的路径上（看门狗每 10s 一拍、用户点停止、
+     * 低内存）。直接 new FileOutputStream(cfg) 覆盖时写到一半被杀 → 留下半截 JSON →
+     * 下一轮正则找不到 api_key、`cur.lastIndexOf('}') <= 0` 直接 return → 坏文件原样保留 →
+     * 网关 Load() 失败 log.Fatalf → 起不来 → 看门狗无限重拉。
+     * 同分区 rename 是原子的：要么旧内容、要么新内容，不会出现半截。
+     */
+    void writeFileAtomic(File target, byte[] data) throws java.io.IOException {
+        File tmp = new File(target.getParentFile(), target.getName() + ".tmp");
+        java.io.FileOutputStream os = new java.io.FileOutputStream(tmp);
+        try {
+            os.write(data);
+            os.flush();
+            os.getFD().sync();   // 落盘后再 rename，掉电也不会留下空文件
+        } finally {
+            try { os.close(); } catch (Throwable ignored) {}
+        }
+        if (!tmp.renameTo(target)) {
+            // 个别文件系统 rename 会失败（目标已存在且不允许覆盖）：退回一次直接写，
+            // 但至少保证不是「半个文件 + 不报错」。
+            tmp.delete();
+            throw new java.io.IOException("rename " + tmp + " -> " + target + " failed");
         }
     }
 

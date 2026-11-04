@@ -43,6 +43,25 @@ func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm stri
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。
 func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
+	return p.pickLocked(tried, reqModel, realm, false)
+}
+
+// PickAcquireExcludingForRealm 选号并在**同一把锁内**占用一个在途名额
+// （把「选完再占位」的 check-then-act 收敛成一步）。
+//
+// 为什么需要它：pick 只用 inFlightFull 过滤、不占位，真正占位是 Acquire 的 CAS。
+// 两步之间没有任何保留 —— 池里 1 个健康号、max_in_flight=3、5 个并发同时进时，
+// 5 次 pick 都返回同一个号，Acquire 只放 3 个，另外 2 个把 uid 记进 tried 重选、
+// 本轮再也选不到它 → 503，而空位其实几十毫秒后就出现。反过来，任何忘记检查
+// Acquire 返回值的调用方会让单号并发突破上限。
+//
+// 返回值 nil = 没有「可用且还有名额」的号（调用方按无容量处理）。
+func (p *Pool) PickAcquireExcludingForRealm(tried map[string]bool, reqModel, realm string) *auth.Auth {
+	return p.pickLocked(tried, reqModel, realm, true)
+}
+
+// pickLocked 选号实现。reserve=true 时在锁内为选中的号占一个在途名额。
+func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve bool) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -77,7 +96,18 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
+		a := p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
+		if a == nil || !reserve {
+			return a
+		}
+		// 兜底路径不看 in-flight（它选的是「还能救回来的号」），但占位时要看：
+		// 已经满额的号不能再接一单，否则单号并发突破上限。
+		e, ok := p.byUID[a.UID]
+		if !ok || p.inFlightFull(e) {
+			return nil
+		}
+		e.inFlight.Add(1)
+		return a
 	}
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -278,6 +308,11 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	e.lastUsed = now // 锁内即时标记：下一个进入 pick 的 goroutine 立即看到本号已用
 	p.pickSeq++
 	e.usedSeq = p.pickSeq // 单调序号：保证 usedSeq 严格全序（防惊群/LRU 的权威依据）
+	if reserve {
+		// 锁内占位：与上面的 inFlightFull 过滤在同一把锁里，中间没有别的 goroutine
+		// 能插进来把名额抢走。
+		e.inFlight.Add(1)
+	}
 	return e.a
 }
 

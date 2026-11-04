@@ -1,9 +1,16 @@
 // budget.go 积分闸：当日累计上限 + 突发积分 + 连续低缓存率。
-// 只加观测到的 usage.credit（缺失≠0）。按 CST 自然日惰性归零，进程内不落盘。
+// 只加观测到的 usage.credit（缺失≠0）。按 CST 自然日惰性归零。
+//
+// 累计值**落盘**（budgetStateFile）：此前只在进程内存里，重启即清零 —— 崩溃循环 /
+// 反复部署下，唯一的成本止损线等于不存在。写入节流到 ≥budgetSaveEvery（每 5 秒最多
+// 一次小文件写），日界翻转时强制写一次。
 package server
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -45,10 +52,86 @@ type dailyBudget struct {
 	cacheCoolTill time.Time
 
 	lastReject string // "burst" / "cache"，仅用于错误信息与面板诊断
+
+	// 落盘（可选）：path 为空 = 不落盘（纯内存，测试与旧行为）。
+	path     string
+	lastSave time.Time
 }
 
-func newDailyBudget(limit float64) *dailyBudget {
-	return &dailyBudget{limit: limit, day: cstDay(time.Now())}
+// budgetSaveEvery 落盘节流间隔：累计值每 5 秒最多写一次，崩溃最多丢 5 秒的用量。
+// 多副本部署各写各的文件没有意义（需要共享存储），所以这里只解决单实例重启清零。
+const budgetSaveEvery = 5 * time.Second
+
+// budgetState 落盘形态。day 用来判「跨日」：读到旧日期的状态直接丢弃。
+type budgetState struct {
+	Day  string  `json:"day"`
+	Used float64 `json:"used"`
+}
+
+// newDailyBudget 构造积分闸。path 非空时从它读回当日累计（跨日/损坏按 0 起算），
+// 后续 add 会节流落盘（见 saveLocked）。
+func newDailyBudget(limit float64, path string) *dailyBudget {
+	b := &dailyBudget{limit: limit, day: cstDay(time.Now()), path: path}
+	b.loadBudgetState()
+	return b
+}
+
+// loadBudgetState 从 path 读回当日累计；跨日/文件缺失/损坏都按「从 0 开始」。
+// 读失败不阻断启动（预算闸是保护，不该让网关起不来），只打一行日志。
+func (b *dailyBudget) loadBudgetState() {
+	if b == nil || b.path == "" {
+		return
+	}
+	raw, err := os.ReadFile(b.path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Printf("WARN: [budget] 读 %s 失败，按 0 起算: %v\n", b.path, err)
+		}
+		return
+	}
+	var st budgetState
+	if json.Unmarshal(raw, &st) != nil {
+		fmt.Printf("WARN: [budget] %s 不是合法 JSON，按 0 起算\n", b.path)
+		return
+	}
+	if st.Day != cstDay(time.Now()) {
+		return // 跨日：昨天的用量与今天无关
+	}
+	if st.Used > 0 {
+		b.used = st.Used
+	}
+}
+
+// saveLocked 落盘（调用方已持锁）。节流到 budgetSaveEvery；force=true 时立即写。
+//
+// 写失败只打日志：预算闸是保护手段，写不下去也不该影响服务。
+func (b *dailyBudget) saveLocked(now time.Time, force bool) {
+	if b == nil || b.path == "" {
+		return
+	}
+	if !force && now.Sub(b.lastSave) < budgetSaveEvery {
+		return
+	}
+	b.lastSave = now
+	raw, err := json.Marshal(budgetState{Day: b.day, Used: b.used})
+	if err != nil {
+		return
+	}
+	if dir := filepath.Dir(b.path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Printf("WARN: [budget] 建目录 %s 失败: %v\n", dir, err)
+			return
+		}
+	}
+	// 原子写：临时文件 + rename（同分区 rename 原子），避免半截 JSON 让下次读到 0。
+	tmp := b.path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		fmt.Printf("WARN: [budget] 写 %s 失败: %v\n", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, b.path); err != nil {
+		fmt.Printf("WARN: [budget] rename %s 失败: %v\n", b.path, err)
+	}
 }
 
 func (b *dailyBudget) setLimit(limit float64) {
@@ -118,11 +201,12 @@ func (b *dailyBudget) add(credit float64, observed bool) {
 	b.rollLocked()
 	if observed && credit > 0 {
 		b.used += credit
+		now := time.Now()
 		if b.burstLimit > 0 {
-			now := time.Now()
 			b.trimBurstLocked(now)
 			b.burst = append(b.burst, budgetSample{at: now, credit: credit})
 		}
+		b.saveLocked(now, false)
 	}
 }
 
@@ -186,7 +270,8 @@ func (b *dailyBudget) trimBurstLocked(now time.Time) {
 }
 
 func (b *dailyBudget) rollLocked() {
-	if today := cstDay(time.Now()); today != b.day {
+	now := time.Now()
+	if today := cstDay(now); today != b.day {
 		b.day = today
 		b.used = 0
 		b.rejected = 0
@@ -194,5 +279,10 @@ func (b *dailyBudget) rollLocked() {
 		b.cacheStreak = 0
 		b.cacheCoolTill = time.Time{}
 		b.lastReject = ""
+		// 跨日强制落盘：不写的话磁盘上留着昨天的累计值，进程在同一天内重启会
+		// 被 loadBudgetState 的「日期不等就丢弃」判掉——那是对的；但若重启发生在
+		// 跨日之后、第一次 add 之前，磁盘仍是旧日期，同样丢弃。这里写一次是为了
+		// 让文件里的 day 与新的一天对齐，避免「看起来还有昨天的量」。
+		b.saveLocked(now, true)
 	}
 }

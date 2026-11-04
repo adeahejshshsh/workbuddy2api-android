@@ -114,17 +114,14 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, realm string, tried map[string]bool) (error, bool) {
 	var lastErr error
 	for attempt := 0; attempt < searchAttempts; attempt++ {
-		a := h.cfg.Pool.PickExcludingForRealm(tried, "", realm)
+		// 选号与在途占位在同一把锁内（check-then-act 收敛）：此前是 Pick + Acquire
+		// 两步，并发下多个请求同时选中同一个还有空位的号、只有一个抢到，其余把这个
+		// 号记进 tried 重选 → 空位明明还在却报「在途已满」。
+		a := h.cfg.Pool.PickAcquireExcludingForRealm(tried, "", realm)
 		if a == nil {
 			break
 		}
 		tried[a.UID] = true
-		// 占在途名额（review #7）：与 chat 路径同口径。
-		if !h.cfg.Pool.Acquire(a.UID) {
-			// 同 search（review #1）：抢不到名额也要留 lastErr，否则末尾解引用 panic。
-			lastErr = fmt.Errorf("账号 %s 在途已满", a.UID)
-			continue
-		}
 		data, ferr := h.cfg.Upstream.WebFetch(r.Context(), a, target)
 		h.cfg.Pool.Release(a.UID)
 		if ferr == nil {

@@ -7,7 +7,7 @@ import (
 )
 
 func TestDailyBudgetStopsAtLimit(t *testing.T) {
-	b := newDailyBudget(1)
+	b := newDailyBudget(1, "")
 	b.add(0.4, true)
 	if ok, _ := b.admit(); !ok {
 		t.Fatal("under limit should pass")
@@ -30,7 +30,7 @@ func TestDailyBudgetStopsAtLimit(t *testing.T) {
 
 // TestDailyBudgetBurstGuard issue #229：5 分钟窗口内耗分达阈值就拒，窗口外的旧样本不再计入。
 func TestDailyBudgetBurstGuard(t *testing.T) {
-	b := newDailyBudget(0) // 日上限关闭，只有突发闸
+	b := newDailyBudget(0, "") // 日上限关闭，只有突发闸
 	b.setGuards(30, 0)
 	if ok, _ := b.admit(); !ok {
 		t.Fatal("空窗口应放行")
@@ -64,7 +64,7 @@ func TestDailyBudgetBurstGuard(t *testing.T) {
 
 // TestDailyBudgetCacheGuard issue #229：连续 5 轮低命中率触发 60s 冷却，恢复一轮即清零。
 func TestDailyBudgetCacheGuard(t *testing.T) {
-	b := newDailyBudget(0)
+	b := newDailyBudget(0, "")
 	b.setGuards(0, 10) // 命中率低于 10% 算低
 	// 未观测样本（上游没给缓存字段）不参与判定。
 	for i := 0; i < 10; i++ {
@@ -106,7 +106,7 @@ func TestDailyBudgetCacheGuard(t *testing.T) {
 
 // TestDailyBudgetGuardsOffByDefault 两道闸缺省关闭，行为与旧版一致。
 func TestDailyBudgetGuardsOffByDefault(t *testing.T) {
-	b := newDailyBudget(0)
+	b := newDailyBudget(0, "")
 	b.add(1000, true)
 	for i := 0; i < 10; i++ {
 		b.observeCache(0, 1000, true)

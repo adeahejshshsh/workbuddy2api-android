@@ -624,7 +624,13 @@ func unescapePatternLiteralEscapes(node any) {
 }
 
 // inferEnumType 从 enum 取值推断 JSON Schema 类型；推不出唯一类型时返回空（不改写）。
-// 数字经 encoding/json 解出来一律是 float64，故按「全为整数值」区分 integer / number。
+// 按「全为整数值」区分 integer / number。
+//
+// **必须同时认 float64 与 json.Number**：主改写管线 prepareBodyOptFull 用
+// dec.UseNumber() 解码（为保住大整数原文），所以生产路径上 enum 里的数字是
+// json.Number；只有默认 Unmarshal（测试夹具）才是 float64。此前只写了 float64 分支，
+// 客户端发 `{"enum":[1,2,3]}` 时三个计数器全 0、返回 ""、type 不补 → 上游照旧 11133，
+// 而用例因为走默认 Unmarshal 永远是绿的。
 func inferEnumType(values []any) string {
 	var strs, nums, ints, bools int
 	for _, v := range values {
@@ -636,6 +642,11 @@ func inferEnumType(values []any) string {
 		case float64:
 			nums++
 			if x == math.Trunc(x) {
+				ints++
+			}
+		case json.Number:
+			nums++
+			if _, err := x.Int64(); err == nil {
 				ints++
 			}
 		}

@@ -25,8 +25,14 @@ func (h *Handler) responsesWebsocketUnsupported(w http.ResponseWriter, r *http.R
 }
 
 func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
+	// 上限必须在读体之前（见 bodylimit.go）：本路径先读全量再转 chat 体。
+	limit := h.limitBody(w, r)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if bodyTooLarge(err) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", bodyLimitText(limit))
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}

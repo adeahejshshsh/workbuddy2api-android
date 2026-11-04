@@ -269,11 +269,11 @@ func (c *Client) globalCreditPackages(a *auth.Auth) ([]CreditPackage, int64, int
 			remain = size
 		}
 		pkg := CreditPackage{
-			Name:       p.PackageCode,
+			Name:        p.PackageCode,
 			PackageCode: p.PackageCode,
-			Remain:     remain,
-			Size:       size,
-			Cycle:      true,
+			Remain:      remain,
+			Size:        size,
+			Cycle:       true,
 		}
 		if size >= 0 {
 			pkg.Used = size - remain

@@ -20,10 +20,16 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
-	AuthDir   string `json:"auth_dir"`   // ./auths
-	StateFile string `json:"state_file"` // ./data/state.json
+	Listen string `json:"listen"`  // ":7863"
+	APIKey string `json:"api_key"` // 空 = 不鉴权
+	// AdminAPIKey 运维面（/status、/admin/*）专用密钥；空 = 回退 api_key（旧行为）。
+	//
+	// 为什么值得单独配：api_key 是要发给下游客户端与 Agent 的，而 /status 会回全池
+	// 账号清单（uid/昵称/积分/模型冷却/成本表）、admin 一开还能触发上游动作。
+	// 一把 key 打通三面 = 任何一次客户端 key 泄漏都等于全池清单 + 运维写操作一起泄漏。
+	AdminAPIKey string `json:"admin_api_key"`
+	AuthDir     string `json:"auth_dir"`   // ./auths
+	StateFile   string `json:"state_file"` // ./data/state.json
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -66,11 +72,14 @@ type Config struct {
 		// 时限）。长流式 SSE 的合法时长可达分钟级，固定 5s 必然把在途对话掐成连接
 		// 重置。缺省 "30s"；"0" = 不等待直接退。改动需重启进程。
 		ShutdownTimeout string `json:"shutdown_timeout"`
-		// MaxBodyMB /v1/chat/completions 请求体上限（MB，review P1-10）。
-		// 三态（issue ISSUE-07）：null/缺省 = 默认 64（远超真实长上下文，只挡内存炸弹）；
-		// 0 = **不限制**（保留历史上「对齐上游不设限」的语义）；负值 = 报错。
-		// 用指针而不是 int：0 在 Go 里与"没填"不可区分，此前注释承诺 0=不限制、
-		// 实现却把 0 当默认值，用户按注释填 0 仍然被 64MB 挡住。
+		// MaxBodyMB **所有**入站读体端点的请求体上限（MB，review P1-10）。
+		// 三态：null/缺省 = 64；0 = 32MB 安全上限；负值 = 报错。
+		//
+		// 0 曾经表示「真的不限制」，2026-11-05 改掉了：ReadTimeout 只限时间不限体积，
+		// body 体积没有任何其它兜底，一个畸形请求就能把进程 OOM 杀掉 —— 连带打断
+		// 所有在途 SSE 与整池账号。32MB 远超任何真实请求（100 万 token 的 JSON 约
+		// 4MB，20MB 原图转 base64 约 27MB），真要更大就显式填一个更大的数。
+		// 用指针而不是 int：0 与"没填"必须可区分（前者是安全上限、后者是默认 64）。
 		MaxBodyMB *int `json:"max_body_mb"`
 	} `json:"server"`
 
@@ -178,6 +187,12 @@ type Config struct {
 		BurstCreditLimit float64 `json:"burst_credit_limit"`
 		// CacheLowRate 连续 5 轮缓存命中率低于此百分比即冷却 60s（0 = 关闭）。
 		CacheLowRate float64 `json:"cache_low_rate"`
+		// StateFile 当日累计值的落盘路径（空 = 只存内存）。
+		//
+		// 为什么要落盘：日预算此前只在进程内存里，重启即清零 —— 崩溃循环或反复部署下，
+		// 唯一的成本止损线等于不存在。落盘后崩溃最多丢 5 秒用量（写入节流）。
+		// 注意多副本部署各写各的文件没有意义（需要共享存储），这里只解决单实例重启。
+		StateFile string `json:"state_file"`
 	} `json:"budget"`
 
 	Models struct {
@@ -385,8 +400,10 @@ type Config struct {
 	ServerReadTimeoutDur time.Duration `json:"-"`
 	// ShutdownTimeoutDur 解析后的优雅关停窗口；<=0 = 不等待在途请求直接退。
 	ShutdownTimeoutDur time.Duration `json:"-"`
-	// ServerMaxBodyMB /v1/chat/completions 请求体上限（MB）；0 = 不限制。
+	// ServerMaxBodyMB 所有入站读体端点的请求体上限（MB）；0 = 用 32MB 安全上限。
 	ServerMaxBodyMB int `json:"-"`
+	// BudgetStateFile 解析后的积分闸落盘路径（空 = 只存内存）。
+	BudgetStateFile string `json:"-"`
 	// MetricsEnabled 暴露 GET /metrics（Prometheus 文本 0.0.4）。缺省关闭：
 	// 指标含池健康分布，不该默认对外暴露。
 	MetricsEnabled bool `json:"metrics_enabled"`
@@ -518,6 +535,7 @@ func Default() *Config {
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
 	c.Admin.AuditFile = "./data/admin_audit.log"
+	c.Budget.StateFile = "./data/budget.json"
 	c.Alerting.IntervalSeconds = 30
 	c.Alerting.TimeoutSeconds = 5
 	c.Alerting.StartupGraceSeconds = 30
@@ -946,10 +964,12 @@ func (c *Config) normalize() error {
 	case c.Server.MaxBodyMB == nil:
 		c.ServerMaxBodyMB = 64 // 缺省：远超真实长上下文，只挡内存炸弹
 	case *c.Server.MaxBodyMB < 0:
-		return fmt.Errorf("server.max_body_mb: 负值 %d 无意义（0 = 不限制，null = 默认 64）", *c.Server.MaxBodyMB)
+		return fmt.Errorf("server.max_body_mb: 负值 %d 无意义（0 = 32MB 安全上限，null = 默认 64）", *c.Server.MaxBodyMB)
 	default:
-		c.ServerMaxBodyMB = *c.Server.MaxBodyMB // 0 = 不限制
+		c.ServerMaxBodyMB = *c.Server.MaxBodyMB // 0 = 由 handler 回落 32MB 安全上限
 	}
+	// 积分闸落盘路径：空字符串显式表示「只存内存」（测试/无盘部署），不回落默认。
+	c.BudgetStateFile = c.Budget.StateFile
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
 	}

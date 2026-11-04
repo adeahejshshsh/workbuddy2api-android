@@ -72,8 +72,14 @@ const imageAttempts = 3
 // imagesGenerations / imagesEdits 共用实现；edit 决定上游路径与入参校验。
 func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	start := time.Now()
+	// 上限必须在读体之前（见 bodylimit.go）：出图请求带 base64 原图，body 可以很大。
+	limit := h.limitBody(w, r)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
+		if bodyTooLarge(err) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", bodyLimitText(limit))
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}

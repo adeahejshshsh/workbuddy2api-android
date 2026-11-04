@@ -1646,14 +1646,14 @@ type ModelInfo struct {
 	// 「订阅优先」），空=不受限。只透文案不给布尔：海外是 Pro 专属（免费号调不通），
 	// 国内只是「优先调度」（能用，排队靠后），同一个 requiredUserType 两种语义，
 	// 一刀切成「不可用」会把国内这三个模型错标成禁选（issue #235）。
-	Tier               string
-	Vendor             string // vendor 厂商标识
-	IsDefault          bool   // isDefault 是否默认模型
-	SupportsReasoning  bool   // supportsReasoning 是否支持推理
-	SupportsToolCall   bool   // supportsToolCall 是否支持工具调用
-	OnlyReasoning      bool   // onlyReasoning 是否纯推理模型
-	SupportsImages     bool   // 顶层 supportsImages（多模态能力，透出到 /v1/models）
-	MaxAllowedSize     int64  // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
+	Tier              string
+	Vendor            string // vendor 厂商标识
+	IsDefault         bool   // isDefault 是否默认模型
+	SupportsReasoning bool   // supportsReasoning 是否支持推理
+	SupportsToolCall  bool   // supportsToolCall 是否支持工具调用
+	OnlyReasoning     bool   // onlyReasoning 是否纯推理模型
+	SupportsImages    bool   // 顶层 supportsImages（多模态能力，透出到 /v1/models）
+	MaxAllowedSize    int64  // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
 	// GenerationKind 媒体生成类型（"image"/"video"），仅由旁路留存设置（见 images.go）：
 	// 这批模型被 nonChatModel 剔出对话列表，靠它单列到 /v1/models 与面板。
 	GenerationKind     string

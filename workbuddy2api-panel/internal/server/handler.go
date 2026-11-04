@@ -55,7 +55,10 @@ type Config struct {
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	// DailyBudget 日预算上限（credit）；0 = 不限。BurstCreditLimit / CacheLowRate 见
 	// budget.go：前者是 5 分钟窗口的突发积分闸，后者是连续低缓存命中率闸（均 0 = 关）。
-	DailyBudget      float64
+	DailyBudget float64
+	// BudgetStateFile 积分闸累计值的落盘路径；空 = 只存内存（测试/旧行为）。
+	// 落盘解决的是「单实例重启清零」：崩溃循环下唯一的成本止损线等于不存在。
+	BudgetStateFile  string
 	BurstCreditLimit float64
 	CacheLowRate     float64
 	// MaxBodyMB /v1/chat/completions 请求体上限（MB）。0 = 不限制（旧语义）。
@@ -113,6 +116,13 @@ type Config struct {
 	RecordContext bool
 	// AdminEnabled 为 true 才注册 POST /admin/tasks/{name}/run。缺省关闭。
 	AdminEnabled bool
+	// AdminAPIKey 运维面（/status、/admin/*）专用密钥。空 = 回退到 APIKey（旧行为）。
+	//
+	// 为什么要分：APIKey 是要发给下游客户端与 Agent 的，而 /status 会回全池账号
+	// （uid/昵称/积分/模型冷却/成本表），admin 一开还能对所有账号触发上游动作。
+	// 一把 key 同时打通客户端面、状态面与运维面 = 任何一次客户端 key 泄漏都等于
+	// 全池清单 + 运维写操作一起泄漏。
+	AdminAPIKey string
 	// Tasks 手动补跑排程的入口（*scheduler.Scheduler 满足它）。nil 时开了 admin 也回 503。
 	Tasks TaskRunner
 	// GrowthRunner 成长任务队列的执行体（面板 panel.RunGrowthQueueOnce）。调度器只有
@@ -203,7 +213,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "custom" && cfg.PromptText == "" {
 		log.Printf("WARN: [server] prompt.mode=custom 但 prompt.text 为空：本次不会改写客户端 system（疑似配置漏项）")
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), budget: newDailyBudget(cfg.DailyBudget)}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), budget: newDailyBudget(cfg.DailyBudget, cfg.BudgetStateFile)}
 	// 突发积分闸 / 缓存率闸（review 移植 58262f31）：0 = 关闭。
 	h.budget.setGuards(cfg.BurstCreditLimit, cfg.CacheLowRate)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -238,7 +248,7 @@ func NewHandler(cfg Config) *Handler {
 	// 只挂 Bearer 会让同一份密钥「能对话、列不出模型」。
 	h.mux.HandleFunc("GET /v1/models", h.withDualAuth(h.models))
 	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
-	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	h.mux.HandleFunc("GET /status", h.withAdminAuth(h.status))
 	if h.cfg.MetricsEnabled {
 		h.mux.HandleFunc("GET /metrics", h.withAuth(h.promMetrics))
 	}
@@ -257,7 +267,7 @@ func NewHandler(cfg Config) *Handler {
 	// 挂在 withAuth 之内，再套一层审计（开了才落盘）。
 	if cfg.AdminEnabled {
 		h.mux.HandleFunc("POST /admin/tasks/{name}/run",
-			h.withAuth(h.audit("task.run", auditPathValue("name"), h.adminTaskRun)))
+			h.withAdminAuth(h.audit("task.run", auditPathValue("name"), h.adminTaskRun)))
 	}
 	return h
 }
@@ -276,7 +286,41 @@ func isChatEntry(path string) bool {
 	return false
 }
 
+// admitBudget 判积分闸并按请求方协议回错误形状；返回 false 表示已拒绝并写好响应。
+//
+// Anthropic 侧按 Anthropic 口径回（type: error / rate_limit_error）：那类 SDK 解析不了
+// OpenAI 的 {"error":{"code":…}}，会当成「网关坏了」而不是「你超预算了」。
+func (h *Handler) admitBudget(w http.ResponseWriter, r *http.Request) bool {
+	ok, why := h.budget.admit()
+	if ok {
+		return true
+	}
+	used, limit, _, _ := h.budget.snapshot()
+	code, msg := "daily_budget_exceeded", fmt.Sprintf(
+		"daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit)
+	if why != "" {
+		// 快速闸的拒因自带可读说明，别和「当日用光」混成一句话
+		code, msg = "credit_guard_tripped", why
+	}
+	switch r.URL.Path {
+	case "/v1/messages", "/messages":
+		writeAnthropicError(w, http.StatusTooManyRequests, "rate_limit_error", msg)
+	default:
+		writeOpenAIError(w, http.StatusTooManyRequests, code, msg)
+	}
+	return false
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 积分闸：四个会真烧积分的入站入口（chat / messages / responses / images）在这里
+	// 统一判一次。此前只挂在 chatCompletions 开头 —— 出图构造了带 budget 的 chatStat
+	// 会**记账但不 admit**，于是预算打穿后 chat 全 429、出图照跑、积分继续烧。
+	// 放在这里也顺带省掉「读完全量 body 才发现超预算」的浪费。
+	if r.Method == http.MethodPost && isChatEntry(r.URL.Path) {
+		if !h.admitBudget(w, r) {
+			return
+		}
+	}
 	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && isChatEntry(r.URL.Path) {
 		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
 		if h.loadLive().RecordClientInfo {
@@ -328,6 +372,26 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// withAdminAuth 运维面鉴权：配了 admin_api_key 就只认它（客户端那把 key 一律拒绝），
+// 没配则回退 withAuth 保持旧行为。
+//
+// 回退而不是「强制要求 admin key」：既有部署里 /status 一直用主 key 调，直接改成
+// 强制会静默打断脚本；而配了 admin key 的人显然想要隔离。
+func (h *Handler) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	adminKey := h.cfg.AdminAPIKey
+	if adminKey == "" {
+		return h.withAuth(next)
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !httpauth.VerifyBearer(r, adminKey) {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key",
+				"this endpoint requires the admin api key")
 			return
 		}
 		next(w, r)
@@ -1015,38 +1079,19 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	if ok, why := h.budget.admit(); !ok {
-		used, limit, _, _ := h.budget.snapshot()
-		code, msg := "daily_budget_exceeded", fmt.Sprintf(
-			"daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit)
-		if why != "" {
-			// 快速闸的拒因自带可读说明，别和「当日用光」混成一句话
-			code, msg = "credit_guard_tripped", why
-		}
-		writeOpenAIError(w, http.StatusTooManyRequests, code, msg)
-		return
-	}
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
-	// 请求体上限（review P1-10）：历史上为了「对齐上游」把 max_body_mb 整个移除，
-	// 代价是 listen 一旦配成 0.0.0.0 且 key 泄漏，一个大 body 就能把进程内存打爆
-	// （ReadTimeout 只限时间不限体积）。现在改成可配：MaxBodyMB<=0 表示不限制
-	// （保留旧的「对齐上游」语义），>0 时用 MaxBytesReader 兜底并回 413。
-	// 默认值给 64MB —— 远超任何真实长上下文请求（100 万 token 的 JSON 约 4MB），
-	// 只挡内存炸弹。
-	if h.cfg.MaxBodyMB > 0 {
-		r.Body = http.MaxBytesReader(w, r.Body, int64(h.cfg.MaxBodyMB)<<20)
-	}
+	// 请求体上限：唯一实现在 bodylimit.go（四条转协议入口共用同一份，别再各自内联）。
+	// 默认 64MB —— 远超任何真实长上下文请求（100 万 token 的 JSON 约 4MB），只挡内存炸弹。
+	limit := h.limitBody(w, r)
 	// #41 的截断防御语义保留在读错误路径：截断只可能来自客户端自己断流或上面的
 	// 体积上限，读 body 出错就地 400/413，不把半截 JSON 喂上游 unmarshal。
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		// 体积超限：413 而不是 400 —— 客户端据此知道该缩小请求，而不是重试。
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
-				fmt.Sprintf("request body exceeds server.max_body_mb (%d MB)", h.cfg.MaxBodyMB))
+		if bodyTooLarge(err) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", bodyLimitText(limit))
 			return
 		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
@@ -1464,12 +1509,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 本次回落普通轮换。
 				unbindSticky()
 				acct = nil
+			} else if !h.cfg.Pool.Acquire(acct.UID) {
+				// 粘性命中也要在途名额。PickByUIDForModel 只做过滤不占位，这里 CAS
+				// 抢不到就解绑回落普通轮换（普通轮换的占位在选号锁内完成，不会重抢）。
+				unbindSticky()
+				acct = nil
 			}
 		}
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, curModel, realm)
+			// 选号与在途占位在**同一把锁内**完成（check-then-act 收敛，见 pool.pick.go）。
+			acct = h.cfg.Pool.PickAcquireExcludingForRealm(tried, curModel, realm)
 		}
 		if acct == nil {
 			// issue #117：全池该模型没号，但原因不是冷却而是**在途占满**时，等一个
@@ -1508,24 +1559,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			modelBlock = h.cfg.Pool.ModelBlockedForRealm(curModel, realm)
 			break
 		}
-		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
-		// 注意 tried / st.uid / st.nick 必须在**抢到之后**才记（bug-08）：抢失败时
-		// 这个号既没被真正使用，又被写进 tried 排除出本轮后续轮转 —— 可用号被无谓
-		// 浪费一次，而 st.uid/st.nick 还会让流水行把这次请求记到没服务成功的号头上。
-		if !h.cfg.Pool.Acquire(acct.UID) {
-			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
-			// 满载粘性号再浪费一次 PickByUID 往返（语义与 fail()/PickByUID-nil 的解绑一致）。
-			if stickyUID != "" && acct.UID == stickyUID {
-				unbindSticky()
-			}
-			if !rotateBackoff(i, r.Context()) {
-				// 客户端已断连：换号重试无意义，终止轮转走末端错误透传。
-				break
-			}
-			continue // 最后一个名额被并发抢走 → 换号
-		}
+		// 在途名额已在选号时**锁内占好**（PickAcquireExcludingForRealm）：此前是
+		// 「pick 过滤 + Acquire CAS」两步，中间没有保留 —— 并发时多个请求会同时选中
+		// 同一个还有空位的号，只有一个 CAS 成功，其余把这个号写进 tried 重选、本轮
+		// 再也选不到它 → 明明空位几十毫秒后就出现，客户端却拿到 503。
+		// 注意 tried / st.uid / st.nick 仍在**占位成功之后**才记（bug-08）。
 		heldUID = acct.UID
-		// 抢到名额才算"本轮真的试过这个号"（bug-08）。
 		tried[acct.UID] = true
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。

@@ -50,8 +50,8 @@ func globalAuth() *auth.Auth {
 // summary 给总额、明细按 PackageCode 对齐补到期；同一码多条周期明细只算一次。
 func TestGlobalUserResourceMergesSummaryAndDetails(t *testing.T) {
 	soon := 30 * 24 * time.Hour
-	future := time.Now().Add(10 * 24 * time.Hour).UnixMilli()  // 10 天后到期（在 soon 内）
-	later := time.Now().Add(200 * 24 * time.Hour).UnixMilli()  // 200 天后到期（不在 soon 内）
+	future := time.Now().Add(10 * 24 * time.Hour).UnixMilli() // 10 天后到期（在 soon 内）
+	later := time.Now().Add(200 * 24 * time.Hour).UnixMilli() // 200 天后到期（不在 soon 内）
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource-summary"):

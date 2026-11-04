@@ -394,25 +394,37 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 		return
 	}
 	now := time.Now()
-	hits := 0
+	var prev modelCooldown
 	if e.modelCooldowns != nil {
-		hits = e.modelCooldowns[model].Hits
+		prev = e.modelCooldowns[model]
 	}
-	hits++
+	// Hits 只对 11102 条目有意义（6004 条目 Hits 恒 0），所以混用不会把退避跳档。
+	hits := prev.Hits + 1
 	ttl := modelBlockBaseTTL
 	if d := ttl * (1 << uint(min(hits-1, modelBlockShift))); d < modelBlockMaxTTL {
 		ttl = d
 	} else {
 		ttl = modelBlockMaxTTL
 	}
+	until := now.Add(ttl)
+	// **只延长不缩短**：同一个 (账号, 模型) 上可能已有 6004 条目（Until 是上游重置
+	// 墙钟，可达数小时，带 ResetAt）。整体覆盖会把 6 小时保护砍成 11102 的 2 分钟
+	// TTL，并丢掉 ResetAt —— 2 分钟后这个号又被派到该模型、再撞一次 6004。
+	// 与 Cooldown / CooldownSoftRate / CooldownModelBusy 三处的守卫同一口径。
+	if prev.Until.After(until) {
+		// 保留更长的截止时刻与上游重置墙钟（ResetAt 对 /status 与豁免判定都有用），
+		// 但把语义换成 11102 的**硬阻断**：原条目可能是 AuditOnly 的 6004（只展示、
+		// 不参与选号），而 11102 是「该后端确定没有这个模型」，必须真的避开。
+		prev.AuditOnly = false
+		prev.Reason = reason
+	} else {
+		prev = modelCooldown{Until: until, Reason: reason}
+	}
+	prev.Hits = hits
 	if e.modelCooldowns == nil {
 		e.modelCooldowns = map[string]modelCooldown{}
 	}
-	e.modelCooldowns[model] = modelCooldown{
-		Until:  now.Add(ttl),
-		Reason: reason,
-		Hits:   hits,
-	}
+	e.modelCooldowns[model] = prev
 	p.dirty.Store(true)
 }
 

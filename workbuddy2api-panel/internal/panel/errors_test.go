@@ -1,9 +1,9 @@
 package panel
 
 import (
-	"os"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"

@@ -74,9 +74,10 @@ func (s *Scheduler) RunTravelNowCtx(ctx context.Context, spread bool) {
 		if !a.SupportsPersonalGrowth() {
 			continue // 企业版门控：无成长体系（/activity/growth/* 上游一律 403），不发起任何上游调用
 		}
-		// 账号级摊开（issue #45 方案 A）：等本号在窗口内的偏移时刻。
-		// wait 内部用 sleepCtx，停机/取消时立即返回（issue ISSUE-17）。
-		if !plan.wait(ctx, st.UID) {
+		// 账号级摊开（issue #45 方案 A）：等本号在窗口内的偏移时刻；未配窗口时
+		// 回落到旅行族的固定间隔（见 accountPace）。
+		// 内部用 sleepCtx，停机/取消时立即返回（issue ISSUE-17）。
+		if !s.accountPace(ctx, plan, st.UID, travelAccountDelay) {
 			return
 		}
 		s.travelOne(ctx, a)

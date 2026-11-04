@@ -79,7 +79,7 @@ type ImageChargeAgg struct {
 	// 原值，CN 恒 1、global 不回该字段）。只展示：它是上游自己的口径，本网关
 	// 不拿它重算价格——重算出来的数跟回执 credit 对不上就是二次编数。
 	LastCoefficient float64 `json:"last_output_image_coefficient,omitempty"`
-	LastAt      string  `json:"last_at,omitempty"`
+	LastAt          string  `json:"last_at,omitempty"`
 }
 
 // imageChargeKey 分档键：域:模型@尺寸/画质（缺项记 "-"，保证桶不串）。
@@ -218,11 +218,13 @@ func sortedInfos(byID map[string]ModelInfo) []ModelInfo {
 // /v1/models 等于引诱客户端选一个必然失败的模型（客户端枚举列表即踩）。
 //
 // 2026-10-22 复测（两个个人号，直连上游）：
-//   cn:hunyuan-image-alpha 200 → usage{output_image_coefficient:1, credit:5.71}
-//   global:hy-image-3.5    200 → usage{output_image_tokens:15000, credit:0.27}
-//   global:gpt-image-2.5-sunburst → **400 code=14401 route config not found**
-//     （已下架；两个域的目录里都不再有它，global 目录把可用出图模型只放在
-//     modelPromotions 里，见 fetchV3ConfigModelMap 的补入逻辑）
+//
+//	cn:hunyuan-image-alpha 200 → usage{output_image_coefficient:1, credit:5.71}
+//	global:hy-image-3.5    200 → usage{output_image_tokens:15000, credit:0.27}
+//	global:gpt-image-2.5-sunburst → **400 code=14401 route config not found**
+//	  （已下架；两个域的目录里都不再有它，global 目录把可用出图模型只放在
+//	  modelPromotions 里，见 fetchV3ConfigModelMap 的补入逻辑）
+//
 // 所以 sunburst 这条映射已作废：留着只会把一个必失败的模型列给客户端。
 //
 // ponytail: 只写实测过的组合，未知模型照旧列出（不猜）；图像模型变多时改成探测一次路由
