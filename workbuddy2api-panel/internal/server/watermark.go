@@ -18,6 +18,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -369,7 +370,7 @@ func round4(v float64) float64 { return float64(int64(v*10000+0.5)) / 10000 }
 //
 // 与 mcpProxyCall 的差别只有一处：图片按 MCP 规范的 image content 回（客户端直接
 // 渲染），数字走 structuredContent——同一份 base64 不在 JSON 里再传一遍。
-func (h *Handler) mcpStripWatermark(args map[string]any) (any, *mcpRPCError) {
+func (h *Handler) mcpStripWatermark(ctx context.Context, args map[string]any) (any, *mcpRPCError) {
 	if !h.loadLive().WatermarkStripEnabled {
 		return mcpToolError("水印裁切未开启：网关配置里的 features.watermark_strip_enabled 仍是 false（默认关闭），这条工具不可用。"), nil
 	}
@@ -386,7 +387,7 @@ func (h *Handler) mcpStripWatermark(args map[string]any) (any, *mcpRPCError) {
 	if err != nil {
 		return nil, &mcpRPCError{Code: -32602, Message: "Invalid params: " + err.Error()}
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/images/strip-watermark", strings.NewReader(string(body)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/strip-watermark", strings.NewReader(string(body))).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.watermarkStrip(rec, req)

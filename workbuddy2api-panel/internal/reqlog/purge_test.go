@@ -75,3 +75,36 @@ func TestPurgeDisabledArchiveIsNoop(t *testing.T) {
 		t.Fatalf("归档关闭时清空应为空操作: %+v %v", res, err)
 	}
 }
+
+// TestPurgeAfterLoopStoppedReturns 写循环已经退出时清空必须立即返回错误，不能把调用方
+// （面板的 HTTP handler）卡死。
+//
+// purgeCh 带缓冲时，「发进通道」和「done 已关」两个分支同时就绪，select 随机选；选中发送
+// 就落进一个没人读的缓冲，<-out 永远等不到结果。无缓冲后发送成功即说明写循环已收下请求。
+//
+// 这里直接关 stop 让 run 收尾（而不是走 Close）：Close 会先置 closed，purge 在 enabled()
+// 就早退了，缓冲这个坑被另一处守卫掩盖住 —— 那样这条用例就测不到 purgeCh 本身。
+func TestPurgeAfterLoopStoppedReturns(t *testing.T) {
+	r := New(Config{Enabled: true, Dir: t.TempDir(), MaxBytes: 1 << 20, RetentionDays: 7})
+	if r.archive == nil || r.archive.done == nil {
+		t.Fatal("归档未启用，用例前提不成立")
+	}
+	close(r.archive.stop) // 写循环收尾并关闭 done；不走 Close，所以 closed 仍为 false
+	<-r.archive.done
+
+	for i := 0; i < 20; i++ {
+		errc := make(chan error, 1)
+		go func() {
+			_, err := r.Purge()
+			errc <- err
+		}()
+		select {
+		case err := <-errc:
+			if err == nil {
+				t.Fatal("写循环已停止时清空应返回错误")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("第 %d 次清空卡住：写循环已退出，请求没人处理", i+1)
+		}
+	}
+}

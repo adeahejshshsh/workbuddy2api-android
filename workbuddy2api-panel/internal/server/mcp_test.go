@@ -90,14 +90,24 @@ func TestMCPProtocolVersionFallback(t *testing.T) {
 }
 
 // TestMCPNotificationsAccepted 通知（无 id）按规范只回 202、不回包。
+//
+// JSON-RPC 2.0：没有 id 的请求是通知，服务端一律不回应——不管方法认不认识，也不管是不是
+// notifications/ 开头（客户端发来新版规范里的通知、或不带 id 的调用，都不能回一个 id:null 的错误）。
 func TestMCPNotificationsAccepted(t *testing.T) {
 	h := NewHandler(Config{Pool: imagePool()})
-	rec, _ := mcpCall(t, h, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("通知 code=%d want 202", rec.Code)
-	}
-	if rec.Body.Len() != 0 {
-		t.Fatalf("通知不该有 body：%s", rec.Body)
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}`,
+		`{"jsonrpc":"2.0","method":"ping"}`,
+		`{"jsonrpc":"2.0","method":"no/such/method","id":null}`,
+	} {
+		rec, _ := mcpCall(t, h, body)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("通知 %s code=%d want 202", body, rec.Code)
+		}
+		if rec.Body.Len() != 0 {
+			t.Fatalf("通知 %s 不该有 body：%s", body, rec.Body)
+		}
 	}
 }
 

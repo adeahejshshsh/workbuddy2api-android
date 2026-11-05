@@ -319,12 +319,15 @@ func newArchiveWriter(cfg Config) *archiveWriter {
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = defaultQueue
 	}
+	// purgeCh 必须无缓冲：发送成功即说明写循环已收下请求，它一定会回结果。带缓冲时写循环
+	// 退出后（或正选中 stop 分支时）请求照样能发进通道却没人处理，<-out 永远等不到 ——
+	// HTTP handler 卡死。
 	w := &archiveWriter{
 		cfg:     cfg,
 		ch:      make(chan Event, cfg.QueueSize),
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
-		purgeCh: make(chan chan PurgeResult, 1),
+		purgeCh: make(chan chan PurgeResult),
 	}
 	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
 		w.setErr(err)
@@ -539,8 +542,10 @@ func (r *Recorder) Purge() (PurgeResult, error) {
 	return r.archive.purge()
 }
 
-// purge 把清空请求交给写循环并等它做完。
-// 归档已停止（done 关闭）时直接返回错误，否则往没人收的通道里发会永久阻塞调用方。
+// purge 把清空请求交给写循环并等它做完。归档已停止（done 关闭）时直接返回错误，
+// 否则会永久阻塞调用方（HTTP handler 卡死）。
+//
+// purgeCh 无缓冲（见 newArchiveWriter）：发送成功就说明写循环已经收下请求，它一定会回结果。
 func (w *archiveWriter) purge() (PurgeResult, error) {
 	if !w.enabled() {
 		return PurgeResult{}, nil

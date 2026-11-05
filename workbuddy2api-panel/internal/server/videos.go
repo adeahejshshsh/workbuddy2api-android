@@ -8,13 +8,14 @@
 //
 //  1. **任务只对提交它的账号可见**（上游按账号隔离）。上游 task id 前缀（如 1312831544）
 //     不能反推账号，Auth 结构里也没有数字租户 id —— 所以网关自己记一份 task→账号台账
-//     （videoTasks）。进程重启后台账清空，此时查询会退化成「逐个账号试」并重新收养。
+//     （videoTasks）。进程重启后台账清空，此时查询会退化成有界探测（videos_probe.go）并重新收养。
 //  2. **成品是签名直链**（COS，实测 12h 有效），网关只透出 URL，不转存字节——与出图同口径。
 //  3. **计费发生在出片完成那一刻**：提交不扣钱，轮询到 completed 才按 usage.credit 记账。
 //     同一任务重复查询不会重复记账（台账里的 Charged 标记）。
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
@@ -66,9 +68,8 @@ type videoTaskOwner struct {
 	Realm   string
 	Model   string
 	Created time.Time
-	// Foreign 这条任务不是本进程提交的（收养来的）：可查、但**不记账**，见 adoptForeign。
-	Foreign bool
 	// Charged 已记账标记：轮询到 completed 时按 usage.credit 记一次，重复查询不再记。
+	// 收养来的条目也用它：收养时任务已到终态就视为已记账（见 adopt）。
 	Charged bool
 	// 出片用量快照。上游 usage 只在**第一次**查到 completed 时回一次，之后重复查询没有 usage
 	// （kling 连 size 都不回）；不记住的话，客户端复查时这笔账会凭空消失。
@@ -132,21 +133,10 @@ func (s *videoTaskStore) get(id string) (videoTaskOwner, bool) {
 }
 
 // adopt 把「台账里没有、但某个账号确实能查到」的任务补进来（进程重启后的自愈路径）。
-func (s *videoTaskStore) adopt(id, uid, realm, model string) {
-	s.adoptWith(id, uid, realm, model, false)
-}
-
-// adoptForeign 收养一个**不是本进程提交**的任务（重启前的历史任务，或别的部署的 id）：
-// 能被查到，但拿不到记账权 —— claimCharge 对 foreign 条目恒返回 false。
 //
-// 为什么：收养后紧接着就是 claimCharge + recordVideoUsage，会把这一笔 credit 记到
-// 「第一个能查到它的号」头上。客户端传一个别的部署/别的账号的 task_id（或手滑的随机
-// id）就能污染成本账本，而这张账本是 costTier 与积分保底的唯一事实来源。
-func (s *videoTaskStore) adoptForeign(id, uid, realm, model string) {
-	s.adoptWith(id, uid, realm, model, true)
-}
-
-func (s *videoTaskStore) adoptWith(id, uid, realm, model string, foreign bool) {
+// charged 传「收养时任务是否已到终态」：已完成的任务多半在重启前被查过、记过账，再记一次就是
+// 重复计入；还在跑的任务不可能在任何地方记过账，留到出片时照常记一次。
+func (s *videoTaskStore) adopt(id, uid, realm, model string, charged bool) {
 	if s == nil || id == "" || uid == "" {
 		return
 	}
@@ -155,7 +145,7 @@ func (s *videoTaskStore) adoptWith(id, uid, realm, model string, foreign bool) {
 	if _, ok := s.m[id]; ok {
 		return
 	}
-	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Foreign: foreign}
+	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Charged: charged}
 }
 
 // claimCharge 尝试把任务标成「已记账」。返回 true 表示本次调用赢得了记账权
@@ -169,9 +159,6 @@ func (s *videoTaskStore) claimCharge(id string) bool {
 	o, ok := s.m[id]
 	if !ok {
 		return true // 台账里没有：无标记可用，交由调用方自行按 id 去重语义处理
-	}
-	if o.Foreign {
-		return false // 不是本进程提交的：可查、不记账（见 adoptForeign）
 	}
 	if o.Charged {
 		return false
@@ -549,7 +536,13 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, videoTaskPayload(taskID, videoTaskStateFromSubmit(taskStatus), model, h.videoLedger))
 			return
 		}
-		final, perr := h.awaitVideo(a, taskID, syncWait)
+		final, perr := h.awaitVideo(r.Context(), a, taskID, syncWait)
+		if r.Context().Err() != nil {
+			// 客户端已断开：任务留在台账里，之后可凭 task_id 查询；连接没人读了，不必再回包。
+			st.status, st.outcome = 499, reqlog.OutcomeInterrupted
+			log.Printf("videos task=%s: 客户端断开，停止同步等待（任务已提交，可继续查询）", taskID)
+			return
+		}
 		if perr != nil {
 			// 等待失败（账号失效/网络抖）：任务其实已提交，不能让客户端以为要重提。
 			log.Printf("videos task=%s 等待失败：%v（任务已提交，可继续查询）", taskID, perr)
@@ -671,7 +664,8 @@ func (h *Handler) videoWait(req map[string]any) (time.Duration, bool) {
 }
 
 // awaitVideo 轮询到终态或超时。返回最后一次状态（未终态时 Done()=false）。
-func (h *Handler) awaitVideo(a *auth.Auth, taskID string, wait time.Duration) (upstream.VideoTaskState, error) {
+// ctx 取消（客户端断开）时立即停手并返回 ctx.Err()：没人等结果了，再问上游只是白占账号的查询额度。
+func (h *Handler) awaitVideo(ctx context.Context, a *auth.Auth, taskID string, wait time.Duration) (upstream.VideoTaskState, error) {
 	deadline := time.Now().Add(wait)
 	var last upstream.VideoTaskState
 	for {
@@ -696,7 +690,13 @@ func (h *Handler) awaitVideo(a *auth.Auth, taskID string, wait time.Duration) (u
 		if time.Now().Add(videoPollInterval).After(deadline) {
 			return last, nil
 		}
-		time.Sleep(videoPollInterval)
+		t := time.NewTimer(videoPollInterval)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return last, ctx.Err()
+		case <-t.C:
+		}
 	}
 }
 
@@ -737,65 +737,29 @@ func (h *Handler) videoTasks(w http.ResponseWriter, r *http.Request) {
 	h.pollVideoTask(w, r, id)
 }
 
-// pollVideoTask 查一次任务状态；completed 时（首次）补记扣费。
-//
-// 账号定位：台账命中就用台账里的账号（任务只对提交它的账号可见）；台账没有（进程重启过、
-// 或者任务不是这台网关提交的）就按 cn 域逐个账号试一次，命中即收养进台账。
-// videoAuths 选查询账号：台账命中优先用台账里的账号（任务只对提交它的账号可见），
-// 台账没命中就按域逐个试（进程重启后还能查历史任务）。
-//
-// 逐个试出来的任务会被标 **foreign**（见 adoptForeign）：能查到，但拿不到记账权 ——
-// 否则客户端传一个别的部署的 task_id，这笔 credit 就记到本池第一个能查到的号头上了。
-func (h *Handler) videoAuths(owner videoTaskOwner, known bool, realm string) []*auth.Auth {
-	var auths []*auth.Auth
-	if known {
-		if a := h.cfg.Pool.AuthByUID(owner.UID); a != nil {
-			auths = append(auths, a)
-		}
-	}
-	if len(auths) == 0 {
-		for _, uid := range h.cfg.Pool.AvailableUIDsForRealm(realm) {
-			if a := h.cfg.Pool.AuthByUID(uid); a != nil {
-				auths = append(auths, a)
-			}
-		}
-	}
-	return auths
+// videoNotFoundHint 查不到任务时的提示（台账未命中 / 所属账号已不在号池 / 账号说不是它的任务）。
+const videoNotFoundHint = "任务只对提交它的账号可见；网关重启后台账会清空，仍可用同一 task_id 重试（会有限次地逐个账号探测，见 videos_probe.go）"
+
+func writeVideoNotFound(w http.ResponseWriter, taskID, hint string) {
+	writeOpenAIErrorHint(w, http.StatusNotFound, "task_not_found", "查不到任务 "+taskID, hint)
 }
 
-// queryVideoTask 按顺序问一次上游：只有「不是这个账号的任务」（404/403/400）才继续换号，
-// 其余错误直接抛给调用方（限流 429 要按限流处理，不能当"任务不存在"）。
-func (h *Handler) queryVideoTask(taskID string, auths []*auth.Auth, owner videoTaskOwner, known bool, realm string) (upstream.VideoTaskState, string, string, error) {
-	var lastErr error
-	for _, a := range auths {
-		data, err := h.cfg.Upstream.VideoTask(a, taskID)
-		if err != nil {
-			lastErr = err
-			var ue *upstream.Error
-			if errors.As(err, &ue) && (ue.Status == http.StatusNotFound ||
-				ue.Status == http.StatusForbidden || ue.Status == http.StatusBadRequest) {
-				continue
-			}
-			return upstream.VideoTaskState{}, a.UID, a.Nickname, err
-		}
-		state := upstream.ParseVideoTask(data)
-		if state.ID == "" {
-			state.ID = taskID
-		}
-		if !known {
-			// 收养但标 foreign：这次查询能成功，但这笔 credit 不该记到「第一个能查到
-			// 它的号」头上（见 adoptForeign）。
-			h.videoLedger.adoptForeign(taskID, a.UID, realm, owner.Model)
-			known = true
-		}
-		return state, a.UID, a.Nickname, nil
+// queryVideoTask 问台账里记着的那个账号一次。
+func (h *Handler) queryVideoTask(taskID string, a *auth.Auth) (upstream.VideoTaskState, string, string, error) {
+	data, err := h.cfg.Upstream.VideoTask(a, taskID)
+	if err != nil {
+		return upstream.VideoTaskState{}, a.UID, a.Nickname, err
 	}
-	return upstream.VideoTaskState{}, "", "", lastErr
+	state := upstream.ParseVideoTask(data)
+	if state.ID == "" {
+		state.ID = taskID
+	}
+	return state, a.UID, a.Nickname, nil
 }
 
 // pollVideoTask 查一次任务状态；completed 时（首次）补记扣费。
 //
-// 四条路径：
+// 台账里没有的任务走有界探测（videos_probe.go）；台账命中后分四条路径：
 //  1. 台账里已有终态快照 → 直接回缓存，不打上游（上游 usage 只回一次，密集查询还会 429）；
 //  2. 频率护栏（最小间隔 / 限流冷却）内的查询 → 回快照，不打上游；
 //  3. 正常查询 → 单飞合并并发请求，成功则记快照、首次出片记账；
@@ -811,6 +775,10 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 	defer st.done()
 
 	owner, known := h.videoLedger.get(taskID)
+	if !known {
+		h.pollUnknownVideoTask(w, st, taskID)
+		return
+	}
 	realm := owner.Realm
 	if realm == "" {
 		realm = "cn"
@@ -834,17 +802,18 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 		}
 	}
 
-	auths := h.videoAuths(owner, known, realm)
-	if len(auths) == 0 {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "no_account",
-			fmt.Sprintf("没有可用的 %s 账号（视频只在 %s 域出片）", realm, realm))
+	// 所属账号已被移出号池：不扇出到别的账号（任务只有它看得见），直接 404。
+	acct := h.cfg.Pool.AuthByUID(owner.UID)
+	if acct == nil {
+		st.status, st.outcome = http.StatusNotFound, "http_error"
+		writeVideoNotFound(w, taskID, videoNotFoundHint)
 		return
 	}
 
 	// 2) 正常查询（并发同一任务只打一次上游）。
 	state, uid, nick, err := h.videoLedger.pollShared(taskID, func() (upstream.VideoTaskState, string, string, error) {
 		h.videoLedger.markQuery(taskID)
-		return h.queryVideoTask(taskID, auths, owner, known, realm)
+		return h.queryVideoTask(taskID, acct)
 	})
 	if err == nil {
 		st.uid, st.nick, st.model = uid, nick, owner.Model
@@ -869,23 +838,20 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 			return
 		}
 		st.status, st.outcome = ue.Status, "http_error"
-		h.applyErrorPolicy(uid, ue.Kind, ue.Msg, "", ue)
 		writeOpenAIErrorHint(w, http.StatusTooManyRequests, "upstream_error", ue.Msg,
 			"上游对同一账号的密集查询限流：隔几秒再查；提交时用 wait=false 拿 task_id 更省心")
 		return
 	}
 
-	if errors.As(err, &ue) && ue.Status >= 500 {
-		h.applyErrorPolicy(uid, ue.Kind, ue.Msg, "", ue)
-	}
+	// 查询失败（含上面的 429）一律不调 applyErrorPolicy：查任务只是轮询，失败说明不了账号能不能
+	// 干活；按账号级冷却处理，会因为一个视频被查得勤就把这个号踢出对话的选号。
 	status, code := http.StatusNotFound, "task_not_found"
 	if errors.As(err, &ue) && ue.Status >= 400 {
 		status, code = ue.Status, "upstream_error"
 	}
 	st.status, st.outcome = status, "http_error"
-	log.Printf("videos task=%s: 查询失败（试了 %d 个账号）：%v", taskID, len(auths), err)
-	writeOpenAIErrorHint(w, status, code, "查不到任务 "+taskID,
-		"任务只对提交它的账号可见；网关重启后台账会清空，仍可用同一 task_id 重试（会按账号逐个试）")
+	log.Printf("videos task=%s: 查询失败：%v", taskID, err)
+	writeOpenAIErrorHint(w, status, code, "查不到任务 "+taskID, videoNotFoundHint)
 }
 
 // modelRate 取模型费率（上游 ModelRate），Client 为空时给空串。
