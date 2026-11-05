@@ -126,11 +126,9 @@ func normalizeEmbeddingsResponse(raw []byte, want int) ([]byte, error) {
 }
 
 func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
-	if !true /* 本仓不单独设开关：/v1/embeddings 配了就可用 */ {
-		writeOpenAIError(w, http.StatusForbidden, "embeddings_disabled",
-			"嵌入端点未开启：请在面板配置里打开 features.embeddings_enabled（默认关闭）")
-		return
-	}
+	// 本仓不单独设 embeddings 开关：路由挂了就可用（此前这里是一个 `if !true`
+	// 死分支，注释还指向一个不存在的 features.embeddings_enabled —— README 也照抄了，
+	// 运维会去 config.json 找一个永远不生效的键）。
 	raw, err := io.ReadAll(io.LimitReader(r.Body, (8<<20)+1))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())

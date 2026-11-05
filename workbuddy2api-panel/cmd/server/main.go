@@ -237,8 +237,9 @@ func main() {
 	}
 	// 思考档位策略（thinking 节）：启动装载，面板保存配置时热更新。
 	up.SetEffortPolicy(effortPolicyOf(cfg))
+	// 按轮裁剪历史（0 = 关）。此前这一句被写了两次（合并残留）：改一行以为另一行
+	// 负责别的语义，实际两行恒等。
 	up.KeepRecentRounds.Store(int64(cfg.Prompt.KeepRecentRounds))
-	up.KeepRecentRounds.Store(int64(cfg.Prompt.KeepRecentRounds)) // 按轮裁剪历史（0 = 关）
 	if cfg.Thinking.Enabled {
 		priority := "客户端优先（只在缺档时补默认档）"
 		if !cfg.Thinking.ClientPriority {
@@ -747,36 +748,45 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return nil, fmt.Errorf("write config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		// A single-file Docker bind mount cannot be renamed over its mount
-		// target (Linux returns EBUSY / "device or resource busy"). Keep the
-		// atomic path for regular files, but update the mounted file in place
-		// for this specific deployment shape.
-		if !errors.Is(err, syscall.EBUSY) {
-			return nil, fmt.Errorf("replace config: %w", err)
+	// 用 auth.ReplaceAtomic（带 fsync + 单文件 bind mount 的 EBUSY 兜底）：面板保存是
+	// config.json 的唯一写入路径，而 api_key 只存在于这一份文件里。此前是
+	// os.WriteFile + Rename、中间没有 fsync —— 点保存后立刻断电/被 SIGKILL，可能留下
+	// 0 字节或半截 config.json，下次启动 Load 直接 parse 失败 log.Fatalf 起不来，
+	// 随机生成的 api_key 也一起没了。同一失败模式在 WriteDefault（bug #15）与
+	// auth.ReplaceAtomic 里都已经修过，只有这条路没对齐。
+	if werr := auth.ReplaceAtomic(path, out, 0o600); werr != nil {
+		if !errors.Is(werr, syscall.EBUSY) {
+			return nil, fmt.Errorf("write config: %w", werr)
 		}
-		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-		if openErr != nil {
+		// EBUSY：单文件 Docker bind mount 不能 rename 覆盖挂载点，退回原地写
+		// （原地写内部仍有 f.Sync()，掉电安全性与 ReplaceAtomic 同档）。
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, out, 0o600); err != nil {
+			return nil, fmt.Errorf("write config: %w", err)
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			if !errors.Is(err, syscall.EBUSY) {
+				return nil, fmt.Errorf("replace config: %w", err)
+			}
+			f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+			if openErr != nil {
+				_ = os.Remove(tmp)
+				return nil, fmt.Errorf("replace config (bind mount fallback): %w", openErr)
+			}
+			_, writeErr := f.Write(out)
+			if writeErr == nil {
+				writeErr = f.Sync()
+			}
+			closeErr := f.Close()
+			// 写失败时保留 tmp（挂载文件已被 O_TRUNC 破坏，tmp 里是完整新内容，
+			// 可手工恢复）；写成功才清理。
+			if writeErr != nil {
+				return nil, fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
+			}
 			_ = os.Remove(tmp)
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", openErr)
-		}
-		_, writeErr := f.Write(out)
-		if writeErr == nil {
-			writeErr = f.Sync()
-		}
-		closeErr := f.Close()
-		// 写失败时保留 tmp（挂载文件已被 O_TRUNC 破坏，tmp 里是完整新内容，
-		// 可手工恢复）；写成功才清理。
-		if writeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
-		}
-		_ = os.Remove(tmp)
-		if closeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
+			if closeErr != nil {
+				return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
+			}
 		}
 	}
 

@@ -906,7 +906,7 @@ func (w *messagesWriter) handleFrame(frame string) error {
 	if strings.HasPrefix(frame, "data: [DONE]") {
 		return w.closeAndStop()
 	}
-	payload, ok := strings.CutPrefix(frame, "data: ")
+	payload, ok := cutDataPayload(frame)
 	if !ok {
 		return nil
 	}

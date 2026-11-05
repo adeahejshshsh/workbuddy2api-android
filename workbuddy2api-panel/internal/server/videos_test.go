@@ -478,3 +478,31 @@ func TestVideoRepeatPollKeepsUsage(t *testing.T) {
 		t.Fatalf("应只记一次账：%+v", st.ModelCosts)
 	}
 }
+
+// 收养来的任务（不是本进程提交的）可查但**不记账**：否则客户端传一个别的部署的
+// task_id，这笔 credit 就记到本池第一个能查到的号头上，而成本账本是 costTier 与
+// 积分保底的唯一事实来源。
+func TestVideoLedgerForeignAdoptDoesNotCharge(t *testing.T) {
+	s := newVideoTaskStore()
+	s.adoptForeign("foreign-task", "u1", "cn", "minimax-video-h3")
+
+	owner, ok := s.get("foreign-task")
+	if !ok {
+		t.Fatal("foreign 任务仍应可查（进程重启后还能看历史任务）")
+	}
+	if !owner.Foreign {
+		t.Fatalf("应标 foreign：%+v", owner)
+	}
+	if s.claimCharge("foreign-task") {
+		t.Fatal("foreign 任务不该拿到记账权")
+	}
+
+	// 本进程提交的（adopt，非 foreign）照常记账，且只记一次。
+	s.adopt("own-task", "u1", "cn", "minimax-video-h3")
+	if !s.claimCharge("own-task") {
+		t.Fatal("自己提交的任务应拿到记账权")
+	}
+	if s.claimCharge("own-task") {
+		t.Fatal("同一任务只该记一次账")
+	}
+}

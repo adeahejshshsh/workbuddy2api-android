@@ -66,7 +66,8 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 		return body
 	}
 	obj["prompt_cache_key"] = key
-	out, err := json.Marshal(obj)
+	// 同上（payload.go 主路径）：不转义 HTML，保持与客户端原文一致。
+	out, err := marshalNoEscape(obj)
 	if err != nil {
 		return body
 	}

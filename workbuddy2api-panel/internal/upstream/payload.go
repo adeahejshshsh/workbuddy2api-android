@@ -122,7 +122,12 @@ func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, 
 		// 等于整段原样出站（见 sanitizeTools 注释）。
 		sanitizeTools(obj["tools"])
 	}
-	out, err := json.Marshal(obj)
+	// 用 marshalNoEscape 而不是 json.Marshal：后者会把 < > & 转成 \u003c 等，
+	// 而 Agent 流量的常态就是 XML 工具标签（<tool_use>）、HTML、&amp;、shell 重定向
+	// （2>&1）—— 出站 body 与客户端原文不再逐字节一致，用 dump_dir 对比时会看到成片
+	// 转义、排障时分不清是客户端发的还是网关改的。语义上 JSON 等价，但本仓把
+	// 「body 字节与真实客户端不一致」列为指纹面之一。
+	out, err := marshalNoEscape(obj)
 	if err != nil {
 		return src
 	}

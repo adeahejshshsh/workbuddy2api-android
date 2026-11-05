@@ -161,6 +161,14 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 			// reviveCoolingLocked 随后按 coolKind 解冻，一次余额刷新就把它提前清掉。
 			return
 		}
+		// 「更晚但更弱」也要挡：未到期的 CoolHard 不许被 CoolSoft 覆盖。
+		// CooldownSoftRate / CooldownSoftForModel 都显式挡了这件事，唯独这里没挡 ——
+		// 后果是 until 被推得更晚、coolKind 却变成 soft，于是签到回血后
+		// reviveCoolingLocked（只认 CoolHard）直接跳过：余额已恢复，号还锁到墙钟，
+		// 只能人工 revive，而面板上写的还是 hard_credit。
+		if e.coolKind == CoolHard && kind != CoolHard && now.Before(e.until) {
+			return
+		}
 		e.until = next
 		e.coolKind = kind
 		e.reason = reason
@@ -177,9 +185,12 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 //   - resetAt 非零（带解析时间）→ modelCooldowns[model].Until = min(resetAt,
 //     now+softRateMax)，ResetAt 记录上游原始墙钟（台账 ResetAt）。不写 until
 //     （全账号级冷却不受模型级限流污染），切模型即可用（模型豁免）。
-//   - resetAt 零值（无时间文案）→ 有界退避：base 起按 softStreak 翻倍、封顶
-//     softRateMax，且**在软冷却中**（until 未到期）时不推进/不延长（兜底探测不再把
-//     冷却越堆越厚）。不记录模型（不豁免）。
+//   - resetAt 零值（无时间文案）→ **固定 base**（cappedSoftUntilLocked：零 resetAt
+//     给 now+base，封顶 softRateMax），**不做指数翻倍**；且**在软冷却中**（until 未
+//     到期）时不推进/不延长（兜底探测不再把冷却越堆越厚）。不记录模型（不豁免）。
+//     注意：handler 调用本函数时 model 恒非空，所以生产路径走的是「模型级固定 base」
+//     那条，softStreak++ 只存在于 model=="" 的账号级分支。调 cooldown.soft_rate
+//     调的是「每次固定冷却时长」，不是「退避基数」。
 //
 // 与旧实现的差异：有上游重置时间时绝对不做指数堆加；无重置时间时，「冷却中兜底
 // 探测再 429」不再 softStreak++ 翻倍——这正是用户「全池被推到 2h 封顶」的元凶。
