@@ -1,5 +1,69 @@
 # 变更记录
 
+## v1.35.9
+
+> 这一版是「把审查和上游一起吃干净」：上游 8 个提交（出视频 / MCP / 去水印）、
+> 两份独立审查共 39 条发现全部落地。其中 **6 条是「仓库以为已经修好、实际没修」**。
+
+### 三个新能力
+
+- 🎬 **出视频**：`POST /v1/videos/generations`（缺省阻塞到出片，`wait=false` 秒回
+  `task_id`）、`GET /v1/videos/{task_id}`、`POST /v1/videos/tasks`。任务→账号台账
+  （进程内）：任务只对**提交它的账号**可见；收养来的外来任务可查但**不记账**，
+  避免一个外部署的 `task_id` 污染成本账本。视频模型进 `/v1/models`
+  （`video_generation: true`）
+- 🔌 **MCP 服务端**：`POST /mcp`（JSON-RPC 2.0，无状态、无 SSE）。把生图 / 改图 /
+  出视频 / 查任务包成工具面，Claude Desktop / Cursor / Codex / DSH 配一个 URL 就能用；
+  工具内部直接调网关自己的 handler，换号 / 错误策略 / 记账 / 日志与 REST 同一条路径
+- 🧽 **去水印**（`features.watermark_strip_enabled`，缺省关）：`POST /v1/images/
+  strip-watermark` 把成品图底部纯白留白整条裁掉，右下角水印随之消失。纯本地图像处理、
+  不扣积分；留白不足回 422 并给实测像素数（绝不硬裁）。随带修了「回读图片跟随重定向
+  绕过域名白名单」的安全问题
+
+### 六条「以为修好、其实没修」
+
+- 🧾 **6004 降级后成本倍率不重算**：`modelRate` 在轮转循环**外**算一次常量，而
+  `applyFallback` 会改 `curModel` —— 降级流量按原模型倍率记账，而这张账本是
+  「哪个号在哪个模型上免费/收费」的唯一事实来源（costTier 与积分保底都读它）。
+  CHANGELOG 里写着「改用 curModel」，但只改了 `delta.Model` 与 `NoteModelCost`
+- 🧬 **`baggage` 头未清洗客户端输入**：`conversationId` 来自请求体，客户端塞个
+  `"abc\r\nX-Whatever: 1"` 就让 `net/http` 报 invalid header value → 走传输错误分支
+  → 判「网络抖动」→ 单账号池连续 5 次即降权出池 10 分钟。同函数族的另外四个会话头
+  早就套了 `HeaderSafe`，这是第三处漏网
+- 🧠 **面板默认档设成 `off` 时对所有模型塞 `thinking:{type:disabled}`**：不接受该字段的
+  上游直接 400，落 `ErrBadParams`（不罚号不轮转），日志里只有上游原文 —— 看不出是
+  网关自己塞的。加 `ThinkingSwitchSupported` 门控
+- 💾 **面板保存配置不 fsync**：config.json 是 `api_key` 的唯一载体，点保存后断电可能
+  留下 0 字节 → 下次启动 `parse config` 失败退出、密钥一起没了。同一失败模式在
+  `WriteDefault` 与 `ReplaceAtomic` 里都修过，只有这条路没对齐
+- 🚦 **`run.sh` 的 8 秒硬杀架空 `shutdown_timeout`**：一条 3 分钟的流式对话在途时
+  restart（watchdog 自愈也走这里）→ SIGKILL → 客户端拿到连接重置；把配置调到 60s
+  也一样被杀。改为从 config 推导等待预算
+- 📝 **`MaxBodyMB` 注释与实现相反**：注释说「0 = 不限制」，实际 0 走 32MB 安全上限
+
+### 其余修复（摘要）
+
+- 积分闸挪到**鉴权之后**（此前跑在 `withAuth` 前，未鉴权请求能读到成本水位、
+  并把 `budget.rejected` 打脏）；出图/出视频此前只记账不 admit
+- `Cooldown` 补「未到期 CoolHard 不被 CoolSoft 覆盖」守卫（另两处早就有）——
+  此前表现为「签到了、余额也有了，号还锁到墙钟」
+- 视频台账未命中时不再拿全池号逐个试并收养（改标 foreign：可查、不记账）
+- `modeltier` 落盘只在事实新增时做（此前每个 11158 请求都在**持池写锁**下 fsync）
+- `/metrics` 按模型 map 满了淘汰请求数最少的（此前静默丢弃 → 垃圾名挤掉真实模型）
+- `web_search` 的探测/检索改占在途名额 + 探测扣费进预算
+- 余额刷新的抖动 key 并入轮次（此前 key 恒定 = 固定相位，不是真抖动）
+- 桌面专家路径的 `Accept` / `X-Private-Data` 与主 chat 路径统一
+- SSE 多行 `data:` 正确拼帧；`data:` 无空格形态也认（抽 `cutDataPayload`）
+- 轮转退避的翻倍/封顶/抖动补上用例（此前 TestBase 置 0，三条逻辑从未被测）
+
+### 构建
+
+- 补回 `android.jar`（platform-35）：Java 改动现在能真正编进 dex（此前只能复用旧
+  dex，Java 改动会直接阻断构建）
+- `build_apk.sh` 的清单/资源指纹守卫**排除版本号**：否则每次发版都会被自己挡住
+- keystore 缺失改为硬失败（自动换签名密钥 = 已装用户无法覆盖升级）；
+  签名口令与 GitHub token 不再进 argv
+
 ## v1.35.8
 
 > 上一版是对齐「发出去的请求」。这一版补的是**能被谁接进来** —— 三条主流客户端协议

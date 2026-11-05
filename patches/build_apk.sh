@@ -137,7 +137,15 @@ else
   # apksigner verify 通过、打印「完成」，所有人都以为已经发版。
   # 安全相关的清单改动被静默吞掉是最坏的一种，所以这里必须硬失败。
   RES_HASH_FILE="$B/.res-src-hash"
-  CUR_RES=$( { cat "$SRC/AndroidManifest.xml"; find "$SRC/res" -type f -print0 | sort -z | xargs -0 cat; } | md5sum | cut -d' ' -f1)
+  # 版本号必须**排除**在指纹之外：降级路径本来就会就地把清单里的版本串改写成本次
+  # VERSION 的值（那是它的正常职责），不排除的话每次发版都会「清单变了」→ 硬失败，
+  # 这个守卫就把发版流程本身锁死了（第一次跑就被自己挡住）。
+  # 排除的只有 versionName / versionCode 两个属性值，其余属性（exported / 权限 /
+  # usesCleartextTraffic / 图标引用…）照旧参与指纹。
+  CUR_RES=$( {
+    sed -E 's/(android:versionName=")[^"]*"/\1@VER@"/; s/(android:versionCode=")[^"]*"/\1@CODE@"/' "$SRC/AndroidManifest.xml"
+    find "$SRC/res" -type f -print0 | sort -z | xargs -0 cat
+  } | md5sum | cut -d' ' -f1)
   if [ -f "$RES_HASH_FILE" ]; then
     OLD_RES=$(cat "$RES_HASH_FILE")
     if [ "$CUR_RES" != "$OLD_RES" ]; then
