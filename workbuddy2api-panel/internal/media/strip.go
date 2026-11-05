@@ -104,18 +104,24 @@ func Strip(raw []byte, opts Options) (Result, error) {
 		opts.Quality = DefaultJPEGQuality
 	}
 
+	// 先只读文件头拿尺寸、查像素上限，再完整解码：解码按声明的尺寸一次分配像素缓冲，
+	// 几十 KB 的高压缩 PNG 就能声明上亿像素，上限放在解码之后拦不住这次分配。
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return Result{}, fmt.Errorf("%w: %v", ErrNotImage, err)
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 {
+		return Result{}, fmt.Errorf("%w: 尺寸为 0", ErrNotImage)
+	}
+	if int64(cfg.Width)*int64(cfg.Height) > MaxPixels {
+		return Result{}, ErrTooLarge
+	}
 	img, inFormat, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return Result{}, fmt.Errorf("%w: %v", ErrNotImage, err)
 	}
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
-	if w <= 0 || h <= 0 {
-		return Result{}, fmt.Errorf("%w: 尺寸为 0", ErrNotImage)
-	}
-	if int64(w)*int64(h) > MaxPixels {
-		return Result{}, ErrTooLarge
-	}
 
 	res := Result{
 		Width: w, Height: h, MinBlank: opts.MinBlank, WhiteLum: opts.WhiteLum,

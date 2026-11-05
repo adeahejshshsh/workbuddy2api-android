@@ -196,7 +196,10 @@ type Handler struct {
 	taskRunning map[string]bool
 	// videoLedger 视频任务 → 提交账号的台账（见 videos.go）：任务只对提交它的账号可见，
 	// 上游账号结构里没有可反推的租户 id，只能自己记。进程内状态、重启清零。
+	// 台账未命中的 task_id 走有界探测自愈（见 videos_probe.go）。
 	videoLedger *videoTaskStore
+	// videoProbe 台账里没有的任务的探测状态（负缓存 / 全局限速 / 暂停），见 videos_probe.go。
+	videoProbe videoProber
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate

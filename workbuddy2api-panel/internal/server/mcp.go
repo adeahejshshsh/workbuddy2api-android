@@ -19,6 +19,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -93,8 +94,12 @@ func (h *Handler) mcpPost(w http.ResponseWriter, r *http.Request) {
 		h.mcpRespond(w, req.ID, nil, &mcpRPCError{Code: -32600, Message: "Invalid Request: jsonrpc 必须是 \"2.0\""})
 		return
 	}
-	// 没有 id 的是通知（notification）：按规范不能回包，只回 202。
-	notification := len(req.ID) == 0 || string(req.ID) == "null"
+	// 没有 id 的是通知（notification）：按规范不能回包，只回 202——不管方法认不认识，
+	// 否则未知通知会收到一个 id:null 的 Method not found。
+	if len(req.ID) == 0 || string(req.ID) == "null" {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 
 	switch req.Method {
 	case "initialize":
@@ -107,7 +112,7 @@ func (h *Handler) mcpPost(w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		h.mcpRespond(w, req.ID, map[string]any{"tools": h.mcpTools()}, nil)
 	case "tools/call":
-		result, rpcErr := h.mcpCallTool(req.Params)
+		result, rpcErr := h.mcpCallTool(r.Context(), req.Params)
 		h.mcpRespond(w, req.ID, result, rpcErr)
 	case "resources/list":
 		h.mcpRespond(w, req.ID, map[string]any{"resources": []any{}}, nil)
@@ -121,7 +126,6 @@ func (h *Handler) mcpPost(w http.ResponseWriter, r *http.Request) {
 			Message: fmt.Sprintf("Method not found: %s", req.Method),
 		})
 	}
-	_ = notification
 }
 
 // mcpRespond 统一回包：result 与 err 二选一；id 原样回显（通知已在调用处提前返回）。
@@ -169,7 +173,7 @@ func (h *Handler) mcpInitialize(params json.RawMessage) map[string]any {
 
 // mcpCallTool 执行一次工具调用。返回 (result, rpcErr)：工具业务失败走 result.isError
 // （内容照旧给模型看），只有参数结构坏了才回 JSON-RPC 错误。
-func (h *Handler) mcpCallTool(params json.RawMessage) (any, *mcpRPCError) {
+func (h *Handler) mcpCallTool(ctx context.Context, params json.RawMessage) (any, *mcpRPCError) {
 	var p struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -188,15 +192,15 @@ func (h *Handler) mcpCallTool(params json.RawMessage) (any, *mcpRPCError) {
 	case "list_generation_models":
 		return h.mcpListModels(args), nil
 	case "generate_image":
-		return h.mcpProxyCall(args, "/v1/images/generations", func(w http.ResponseWriter, r *http.Request) { h.images(w, r, false) })
+		return h.mcpProxyCall(ctx, args, "/v1/images/generations", func(w http.ResponseWriter, r *http.Request) { h.images(w, r, false) })
 	case "edit_image":
-		return h.mcpProxyCall(args, "/v1/images/edits", func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) })
+		return h.mcpProxyCall(ctx, args, "/v1/images/edits", func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) })
 	case "generate_video":
-		return h.mcpProxyCall(args, "/v1/videos/generations", h.videos)
+		return h.mcpProxyCall(ctx, args, "/v1/videos/generations", h.videos)
 	case "get_video_task":
-		return h.mcpVideoTask(args)
+		return h.mcpVideoTask(ctx, args)
 	case "strip_watermark":
-		return h.mcpStripWatermark(args)
+		return h.mcpStripWatermark(ctx, args)
 	}
 	return nil, &mcpRPCError{Code: -32602, Message: "Invalid params: 未知工具 " + p.Name}
 }
@@ -206,12 +210,12 @@ func (h *Handler) mcpCallTool(params json.RawMessage) (any, *mcpRPCError) {
 // 这样做是刻意的：MCP 与 REST 走**同一条**选号 / 失败换号 / 计费 / 台账路径，不会出现
 // 「REST 计费、MCP 不计费」这种双账本。代价是绕过了 HTTP 层（不经 ServeHTTP），
 // 所以 MCP 调用没有请求台账行——面板里要看的话，REST 那一层照旧有。
-func (h *Handler) mcpProxyCall(args map[string]any, path string, fn http.HandlerFunc) (any, *mcpRPCError) {
+func (h *Handler) mcpProxyCall(ctx context.Context, args map[string]any, path string, fn http.HandlerFunc) (any, *mcpRPCError) {
 	body, err := json.Marshal(args)
 	if err != nil {
 		return nil, &mcpRPCError{Code: -32602, Message: "Invalid params: " + err.Error()}
 	}
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body)))
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body))).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	fn(rec, req)
@@ -239,7 +243,7 @@ func (h *Handler) mcpProxyCall(args map[string]any, path string, fn http.Handler
 }
 
 // mcpVideoTask 查视频任务：复用 POST /v1/videos/tasks 的实现（含台账与计费）。
-func (h *Handler) mcpVideoTask(args map[string]any) (any, *mcpRPCError) {
+func (h *Handler) mcpVideoTask(ctx context.Context, args map[string]any) (any, *mcpRPCError) {
 	id, _ := args["task_id"].(string)
 	if strings.TrimSpace(id) == "" {
 		// 宽容一点：也认 id / video_id 两个常见写法，省得模型猜参数名。
@@ -253,7 +257,7 @@ func (h *Handler) mcpVideoTask(args map[string]any) (any, *mcpRPCError) {
 		return nil, &mcpRPCError{Code: -32602, Message: "Invalid params: task_id is required"}
 	}
 	body, _ := json.Marshal(map[string]any{"task_id": id})
-	req := httptest.NewRequest(http.MethodPost, "/v1/videos/tasks", strings.NewReader(string(body)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/videos/tasks", strings.NewReader(string(body))).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.videoTasks(rec, req)
