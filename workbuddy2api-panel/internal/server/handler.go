@@ -61,7 +61,10 @@ type Config struct {
 	BudgetStateFile  string
 	BurstCreditLimit float64
 	CacheLowRate     float64
-	// MaxBodyMB /v1/chat/completions 请求体上限（MB）。0 = 不限制（旧语义）。
+	// MaxBodyMB 所有入站读体端点的请求体上限（MB）。**0 = 用 32MB 安全上限**，
+	// 不是「不限制」——单一事实来源见 bodylimit.go 的 bodyLimitFallbackMB
+	// （ReadTimeout 只限时间不限体积，没有别的兜底，一个畸形请求就能 OOM 打死进程
+	// 并连带断掉所有在途 SSE）。
 	MaxBodyMB   int
 	RefreshSkew time.Duration // token 提前刷新窗口，默认 10m
 
@@ -319,9 +322,10 @@ func (h *Handler) admitBudget(w http.ResponseWriter, r *http.Request) bool {
 	if ok {
 		return true
 	}
-	used, limit, _, _ := h.budget.snapshot()
-	code, msg := "daily_budget_exceeded", fmt.Sprintf(
-		"daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit)
+	// 不回 used/limit：这条响应可能被任何持有（或未持有）key 的调用方看到，
+	// 成本水位属于运维信息，走 admin 专用的 /status 看。
+	code, msg := "daily_budget_exceeded",
+		"daily credit budget exhausted (resets at 00:00 CST); see /status for details"
 	if why != "" {
 		// 快速闸的拒因自带可读说明，别和「当日用光」混成一句话
 		code, msg = "credit_guard_tripped", why
@@ -336,15 +340,10 @@ func (h *Handler) admitBudget(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// 积分闸：四个会真烧积分的入站入口（chat / messages / responses / images）在这里
-	// 统一判一次。此前只挂在 chatCompletions 开头 —— 出图构造了带 budget 的 chatStat
-	// 会**记账但不 admit**，于是预算打穿后 chat 全 429、出图照跑、积分继续烧。
-	// 放在这里也顺带省掉「读完全量 body 才发现超预算」的浪费。
-	if r.Method == http.MethodPost && isChatEntry(r.URL.Path) {
-		if !h.admitBudget(w, r) {
-			return
-		}
-	}
+	// 积分闸**不能放在这里**：ServeHTTP 跑在 withAuth / withAnthropicAuth 之前，
+	// 未鉴权请求也能读到「used X of Y」并把 budget.rejected 计数打脏。改为在各
+	// 真正烧积分的 handler 开头判（chatCompletions / images / videos）——那些点
+	// 都在鉴权之后，且 messages/responses 经 chatCompletions 自动覆盖。
 	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && isChatEntry(r.URL.Path) {
 		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
 		if h.loadLive().RecordClientInfo {
@@ -1117,6 +1116,12 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	// 积分闸（在鉴权之后、读体之前）：四个会真烧积分的入口在这里或各自的 handler
+	// 开头判一次。放在鉴权之后是硬要求 —— 拒绝文案会暴露成本水位，不能让未鉴权
+	// 请求拿到；也不能让外部请求把 budget.rejected 计数打脏。
+	if !h.admitBudget(w, r) {
+		return
+	}
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
@@ -1260,12 +1265,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		return true
 	}
-	modelRate := ""
-	if h.cfg.Upstream != nil {
-		// 用 curModel（review #13）：降级后实际走的是等价模型，成本倍率要按它取，
-		// 否则降级流量按原模型的倍率记账，被降级到的模型反而没有成本观测。
-		modelRate = h.cfg.Upstream.ModelRate(realm, curModel)
-	}
+	// 成本倍率**不在这里算**：curModel 会在 applyFallback 里被换成等价模型，循环外
+	// 算一次常量会让降级流量按原模型的倍率记账（见 recordAttempt 内的现取）。
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream, h.budget)
@@ -1312,7 +1313,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
+		//
+		// 必须用 curModel（别名/降级解析后的真实名），不是 peek.Model（客户端原名）：
+		// 后续 PickByUIDForModel 用的是 curModel。用原名查时别名没有冷却记录、恒判
+		// 「可用」→ 粘性命中 → 下一跳按真实名判「不可用」→ 解绑回落轮换：每个请求
+		// 多一次「命中→解绑→重选」，还把 Session.Unbind + DelBind 写放大一次
+		// （限流窗口内粘性形同虚设）。
+		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, curModel); ok {
 			stickyUID = uid
 		}
 	}
@@ -1380,6 +1387,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		delta.Model = curModel
 		if delta.Model == "" {
 			delta.Model = peek.Model
+		}
+		// 成本倍率按**当时的** curModel 现取：applyFallback 会把它换成等价模型，
+		// 循环外算一次常量的话，降级流量会按原模型倍率记账 —— 而这张账本是
+		// 「哪个号在哪个模型上免费/收费」的唯一事实来源，costTier 与积分保底都读它。
+		// ModelRate 只是读一张 map，每 attempt 一次的代价可忽略。
+		modelRate := ""
+		if h.cfg.Upstream != nil {
+			modelRate = h.cfg.Upstream.ModelRate(realm, delta.Model)
 		}
 		latency := time.Since(started)
 		latencyMs := latency.Milliseconds()

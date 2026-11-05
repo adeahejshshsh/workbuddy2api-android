@@ -83,13 +83,32 @@ case "${1:-start}" in
   stop)
     p=$(running_pid)
     if [ -n "$p" ]; then
-      # 优雅停机预算：服务端收到 SIGTERM 后先 Flush，再 srv.Shutdown(5s) 等在途
-      # 请求收尾，之后才执行 defer 里的 Close。原来 sleep 1 就 kill -9，等于把
-      # 最后一次 Flush 抢走 —— 冷却时间/成功计数/用量记录丢一截，重启后表现为
-      # 「刚冷却的号又能用」「用量少了一截」。这里最多等 8 秒，超时才强杀。
+      # 优雅停机预算：**从 config 的 server.shutdown_timeout 推导**，不再写死 8 秒。
+      #
+      # 此前是固定 80×0.1s = 8s 后 kill -9，而服务端默认 ShutdownTimeout=30s
+      # （cmd/server/config.go）—— 于是「排干在途请求」的窗口永远只有 8 秒：
+      # 一条 3 分钟的流式对话在途时 restart（watchdog 自愈也走这里）→ SIGKILL →
+      # 客户端拿到连接重置而不是收尾帧，而且把 shutdown_timeout 调到 60s 也没用。
+      # 这里按配置值等，再留 2s 余量给 defer 收尾；上限 180s 防配置写错成天文数字。
+      SHUTDOWN_WAIT=$(python3 - "$APP_DIR/config.json" <<'PYWAIT'
+import json, sys, re
+try:
+    v = json.load(open(sys.argv[1], encoding="utf-8")).get("server", {}).get("shutdown_timeout", "30s")
+except Exception:
+    v = "30s"
+m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)?\s*$", str(v))
+if not m:
+    print(30)
+else:
+    n, unit = float(m.group(1)), (m.group(2) or "s")
+    sec = {"ms": n / 1000.0, "s": n, "m": n * 60, "h": n * 3600}[unit]
+    print(min(int(sec) + 2, 180))   # +2s 余量给 defer 收尾；上限 180s
+PYWAIT
+)
+      case "$SHUTDOWN_WAIT" in ''|*[!0-9]*) SHUTDOWN_WAIT=32 ;; esac
       kill "$p" 2>/dev/null
       i=0
-      while [ "$i" -lt 80 ] && kill -0 "$p" 2>/dev/null; do
+      while [ "$i" -lt $((SHUTDOWN_WAIT * 10)) ] && kill -0 "$p" 2>/dev/null; do
         sleep 0.1; i=$((i+1))
       done
       if kill -0 "$p" 2>/dev/null; then

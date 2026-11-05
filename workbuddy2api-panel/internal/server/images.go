@@ -72,6 +72,12 @@ const imageAttempts = 3
 // imagesGenerations / imagesEdits 共用实现；edit 决定上游路径与入参校验。
 func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	start := time.Now()
+	// 积分闸：出图会真扣积分，而它此前只记账不 admit（预算打穿后 chat 全 429、
+	// 出图照跑）。放在这里而不是 ServeHTTP：ServeHTTP 跑在鉴权之前，拒绝文案会
+	// 把成本水位暴露给未鉴权请求。
+	if !h.admitBudget(w, r) {
+		return
+	}
 	// 上限必须在读体之前（见 bodylimit.go）：出图请求带 base64 原图，body 可以很大。
 	limit := h.limitBody(w, r)
 	raw, err := io.ReadAll(r.Body)

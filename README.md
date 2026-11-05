@@ -35,7 +35,7 @@
   `/v2/chat/busy`（模型忙预检）、`/v1/capacity?model=`（按模型查可用账号容量）、
   `/v1/images/generations` 与 `/v1/images/edits`（文生图 / 图生图，模型名按
   `cn:` / `global:` 前缀路由；出图模型在 `/v1/models` 里带 `image_generation: true`
-  单列）、`/v1/embeddings`（需开 `features.embeddings_enabled`）、`/metrics`（需开 metrics）
+  单列）、`/v1/embeddings`（路由挂了就可用，无单独开关）、`/metrics`（需开 metrics）
 * **出视频**：`POST /v1/videos/generations`（缺省阻塞到出片，`wait=false` 秒回
   `task_id`）、`GET /v1/videos/{task_id}`、`POST /v1/videos/tasks`。任务只对**提交它的
   账号**可见（进程内台账）；视频模型在 `/v1/models` 里带 `video_generation: true` 单列

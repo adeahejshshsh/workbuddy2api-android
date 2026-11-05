@@ -983,7 +983,7 @@ func (w *responsesWriter) handleFrame(frame string) error {
 		_ = w.closeOpenItems()
 		return w.emitCompleted()
 	}
-	payload, ok := strings.CutPrefix(frame, "data: ")
+	payload, ok := cutDataPayload(frame)
 	if !ok {
 		return nil
 	}

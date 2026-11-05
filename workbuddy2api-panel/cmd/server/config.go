@@ -244,6 +244,10 @@ type Config struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
 		TimeoutSeconds int `json:"timeout_seconds"`
 		// HeaderTimeoutSeconds 聊天 SSE 首字节前（响应头）上限；<=0 回落 TimeoutSeconds。
+		//
+		// 缺省 60（不是 TimeoutSeconds 的 120）：transport.go 那边按 60s 论证过
+		// 「MaxRotate=3 的最坏轮转从 6 分钟压到 3 分钟」，而 <=0 回落 120 会让那个
+		// 硬化从不生效（三处口径 60/120/60 不一致）。显式配 0 仍可回落 120。
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
@@ -508,6 +512,7 @@ func Default() *Config {
 	// 人味化开关缺省关闭：旧部署行为逐字不变，要开的人显式配。
 	c.Schedule.BalanceRefreshJitterPermill = 0
 	c.Upstream.TimeoutSeconds = 120
+	c.Upstream.HeaderTimeoutSeconds = 60
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0

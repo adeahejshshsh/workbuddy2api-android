@@ -66,6 +66,8 @@ type videoTaskOwner struct {
 	Realm   string
 	Model   string
 	Created time.Time
+	// Foreign 这条任务不是本进程提交的（收养来的）：可查、但**不记账**，见 adoptForeign。
+	Foreign bool
 	// Charged 已记账标记：轮询到 completed 时按 usage.credit 记一次，重复查询不再记。
 	Charged bool
 	// 出片用量快照。上游 usage 只在**第一次**查到 completed 时回一次，之后重复查询没有 usage
@@ -131,6 +133,20 @@ func (s *videoTaskStore) get(id string) (videoTaskOwner, bool) {
 
 // adopt 把「台账里没有、但某个账号确实能查到」的任务补进来（进程重启后的自愈路径）。
 func (s *videoTaskStore) adopt(id, uid, realm, model string) {
+	s.adoptWith(id, uid, realm, model, false)
+}
+
+// adoptForeign 收养一个**不是本进程提交**的任务（重启前的历史任务，或别的部署的 id）：
+// 能被查到，但拿不到记账权 —— claimCharge 对 foreign 条目恒返回 false。
+//
+// 为什么：收养后紧接着就是 claimCharge + recordVideoUsage，会把这一笔 credit 记到
+// 「第一个能查到它的号」头上。客户端传一个别的部署/别的账号的 task_id（或手滑的随机
+// id）就能污染成本账本，而这张账本是 costTier 与积分保底的唯一事实来源。
+func (s *videoTaskStore) adoptForeign(id, uid, realm, model string) {
+	s.adoptWith(id, uid, realm, model, true)
+}
+
+func (s *videoTaskStore) adoptWith(id, uid, realm, model string, foreign bool) {
 	if s == nil || id == "" || uid == "" {
 		return
 	}
@@ -139,7 +155,7 @@ func (s *videoTaskStore) adopt(id, uid, realm, model string) {
 	if _, ok := s.m[id]; ok {
 		return
 	}
-	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now()}
+	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Foreign: foreign}
 }
 
 // claimCharge 尝试把任务标成「已记账」。返回 true 表示本次调用赢得了记账权
@@ -153,6 +169,9 @@ func (s *videoTaskStore) claimCharge(id string) bool {
 	o, ok := s.m[id]
 	if !ok {
 		return true // 台账里没有：无标记可用，交由调用方自行按 id 去重语义处理
+	}
+	if o.Foreign {
+		return false // 不是本进程提交的：可查、不记账（见 adoptForeign）
 	}
 	if o.Charged {
 		return false
@@ -389,6 +408,11 @@ func (h *Handler) generationModel(realm, bare string) (upstream.ModelInfo, bool)
 
 // videos 提交出视频任务：POST /v1/videos/generations。
 func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
+	// 积分闸：出视频单次几十 credit，比出图贵一个量级，同样必须 admit（理由见
+	// images.go 同一处注释：放在 handler 里而不是 ServeHTTP，避免未鉴权请求读到水位）。
+	if !h.admitBudget(w, r) {
+		return
+	}
 	start := time.Now()
 	raw, err := io.ReadAll(io.LimitReader(r.Body, videoMaxBody))
 	if err != nil {
@@ -718,7 +742,10 @@ func (h *Handler) videoTasks(w http.ResponseWriter, r *http.Request) {
 // 账号定位：台账命中就用台账里的账号（任务只对提交它的账号可见）；台账没有（进程重启过、
 // 或者任务不是这台网关提交的）就按 cn 域逐个账号试一次，命中即收养进台账。
 // videoAuths 选查询账号：台账命中优先用台账里的账号（任务只对提交它的账号可见），
-// 台账没命中就按域逐个试。
+// 台账没命中就按域逐个试（进程重启后还能查历史任务）。
+//
+// 逐个试出来的任务会被标 **foreign**（见 adoptForeign）：能查到，但拿不到记账权 ——
+// 否则客户端传一个别的部署的 task_id，这笔 credit 就记到本池第一个能查到的号头上了。
 func (h *Handler) videoAuths(owner videoTaskOwner, known bool, realm string) []*auth.Auth {
 	var auths []*auth.Auth
 	if known {
@@ -756,7 +783,9 @@ func (h *Handler) queryVideoTask(taskID string, auths []*auth.Auth, owner videoT
 			state.ID = taskID
 		}
 		if !known {
-			h.videoLedger.adopt(taskID, a.UID, realm, owner.Model)
+			// 收养但标 foreign：这次查询能成功，但这笔 credit 不该记到「第一个能查到
+			// 它的号」头上（见 adoptForeign）。
+			h.videoLedger.adoptForeign(taskID, a.UID, realm, owner.Model)
 			known = true
 		}
 		return state, a.UID, a.Nickname, nil
