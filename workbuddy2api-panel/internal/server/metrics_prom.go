@@ -44,7 +44,20 @@ func noteProm(s *chatStat, total time.Duration) {
 	mm := promMetrics.by[model]
 	if mm == nil {
 		if len(promMetrics.by) >= promMetricsCap {
-			return
+			// 满了就**淘汰请求数最少的那个**，而不是静默丢弃新模型。此前直接 return：
+			// 持 key 连发几百个不同模型名就能把 map 填满垃圾名，之后真实模型的统计
+			// 全部不再更新，直到重启 —— /metrics 与面板模型统计一起失真。
+			// 淘汰最少的那个：真实流量（请求数高）不会被垃圾名挤掉。
+			var victim string
+			var minReq int64 = -1
+			for k, v := range promMetrics.by {
+				if minReq < 0 || v.requests < minReq {
+					victim, minReq = k, v.requests
+				}
+			}
+			if victim != "" {
+				delete(promMetrics.by, victim)
+			}
 		}
 		mm = &promAcc{}
 		promMetrics.by[model] = mm

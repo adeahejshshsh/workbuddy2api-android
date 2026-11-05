@@ -93,16 +93,27 @@ func (p *Pool) NoteModelTierDenied(uid, userType, model string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.loadTierLocked()
+	// **只在事实新增时落盘**：saveTierLocked 走 auth.ReplaceAtomic（写 + fsync +
+	// rename），在 /sdcard 上是十毫秒量级，而这里是**持池写锁**执行的 —— 客户端反复
+	// 请求该等级用不了的模型时，每个请求都会让 pick / /status / /healthz 一起排队。
+	// 同一个 (userType, model) 第二次起就没有新信息，跳过写盘即可。
+	changed := false
 	if userType != "" {
 		if p.tier.Deny[userType] == nil {
 			p.tier.Deny[userType] = map[string]bool{}
 		}
-		p.tier.Deny[userType][model] = true
-		if uid != "" {
+		if !p.tier.Deny[userType][model] {
+			p.tier.Deny[userType][model] = true
+			changed = true
+		}
+		if uid != "" && p.tier.UIDType[uid] != userType {
 			p.tier.UIDType[uid] = userType
+			changed = true
 		}
 	}
-	p.saveTierLocked()
+	if changed {
+		p.saveTierLocked()
+	}
 }
 
 // ModelDeniedForAllAccounts 报告池内**每个账号**都能被判定为"用不了该模型"。

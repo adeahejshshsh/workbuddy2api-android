@@ -173,10 +173,13 @@ func TestResolveGatewayEffortOff(t *testing.T) {
 
 func TestApplyEffortPolicyOffTargetFillsDisable(t *testing.T) {
 	// 目标 off：客户端没发档位时补「关闭思考」形态（thinking.type=disabled，删档位）。
-	obj := policyObj(t, `{"model":"m"}`)
-	got := applyEffortPolicy(obj, "m", []string{"low", "high"}, &EffortPolicy{
+	// 用 deepseek 模型：只有它支持 thinking 开关（ThinkingSwitchSupported），
+	// 其它模型硬塞 thinking:{type:disabled} 会被上游 400（见 applyOffEffort）。
+	const m = "deepseek-v4.1-flash"
+	obj := policyObj(t, `{"model":"`+m+`"}`)
+	got := applyEffortPolicy(obj, m, []string{"low", "high"}, &EffortPolicy{
 		Enabled: true, ClientPriority: true, DefaultEffort: "max",
-		ModelDefaults: map[string]string{"cn:m": "off"},
+		ModelDefaults: map[string]string{"cn:" + m: "off"},
 	}, "cn")
 	th, _ := obj["thinking"].(map[string]any)
 	if got != EffortOff || th["type"] != "disabled" {
@@ -189,16 +192,17 @@ func TestApplyEffortPolicyOffTargetFillsDisable(t *testing.T) {
 
 func TestApplyEffortPolicyOffTargetRespectsScope(t *testing.T) {
 	// scope=level：off 要改开关，约定是「只改档位」——客户端显式档位保留。
+	const m = "deepseek-v4.1-flash"
 	obj := policyObj(t, `{"reasoning_effort":"high"}`)
 	p := &EffortPolicy{Enabled: true, DefaultEffort: "max", OverrideScope: OverrideScopeLevel,
-		ModelDefaults: map[string]string{"m": "off"}}
-	if got := applyEffortPolicy(obj, "m", []string{"low", "high"}, p, "cn"); got != "" || obj["reasoning_effort"] != "high" {
+		ModelDefaults: map[string]string{m: "off"}}
+	if got := applyEffortPolicy(obj, m, []string{"low", "high"}, p, "cn"); got != "" || obj["reasoning_effort"] != "high" {
 		t.Fatalf("scope=level should keep client effort: got=%q body=%v", got, obj)
 	}
 	// scope=all：连开关一起固定成关闭。
 	p.OverrideScope = OverrideScopeAll
 	obj = policyObj(t, `{"reasoning_effort":"high"}`)
-	got := applyEffortPolicy(obj, "m", []string{"low", "high"}, p, "cn")
+	got := applyEffortPolicy(obj, m, []string{"low", "high"}, p, "cn")
 	th, _ := obj["thinking"].(map[string]any)
 	if got != EffortOff || th["type"] != "disabled" {
 		t.Fatalf("scope=all off target: got=%q body=%v", got, obj)
@@ -218,5 +222,23 @@ func TestEffortPolicyNormalized(t *testing.T) {
 	}
 	if len(p.ModelDefaults) != 1 || p.ModelDefaults["glm-5.2"] != "high" {
 		t.Fatalf("model defaults=%v", p.ModelDefaults)
+	}
+}
+
+// 不支持的模型不许塞 thinking:{type:disabled}：面板把默认档设成 off 时，此前会对
+// **所有**模型塞这个字段，不接受它的上游直接 400（落 ErrBadParams，不罚号不轮转，
+// 日志里只有上游原文，看不出是网关塞的）。
+func TestApplyEffortPolicyOffSkipsUnsupportedModel(t *testing.T) {
+	const m = "glm-5.2" // 非 deepseek：不支持 thinking 开关
+	obj := policyObj(t, `{"model":"`+m+`"}`)
+	got := applyEffortPolicy(obj, m, []string{"low", "high"}, &EffortPolicy{
+		Enabled: true, ClientPriority: true, DefaultEffort: "max",
+		ModelDefaults: map[string]string{"cn:" + m: "off"},
+	}, "cn")
+	if got != "" {
+		t.Fatalf("不支持的模型应跳过改写，got=%q", got)
+	}
+	if _, ok := obj["thinking"]; ok {
+		t.Fatalf("不支持的模型不该被塞 thinking 字段：%v", obj)
 	}
 }
