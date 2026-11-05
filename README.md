@@ -36,6 +36,17 @@
   `/v1/images/generations` 与 `/v1/images/edits`（文生图 / 图生图，模型名按
   `cn:` / `global:` 前缀路由；出图模型在 `/v1/models` 里带 `image_generation: true`
   单列）、`/v1/embeddings`（需开 `features.embeddings_enabled`）、`/metrics`（需开 metrics）
+* **出视频**：`POST /v1/videos/generations`（缺省阻塞到出片，`wait=false` 秒回
+  `task_id`）、`GET /v1/videos/{task_id}`、`POST /v1/videos/tasks`。任务只对**提交它的
+  账号**可见（进程内台账）；视频模型在 `/v1/models` 里带 `video_generation: true` 单列
+* **MCP 服务端**：`POST /mcp`（JSON-RPC 2.0，无状态、无 SSE）。把生图 / 改图 / 出视频 /
+  查任务包成工具面（`list_generation_models` / `generate_image` / `edit_image` /
+  `generate_video` / `get_video_task`，可选 `strip_watermark`），Claude Desktop / Cursor /
+  Codex / DSH 这类客户端配一个 URL 就能用；工具内部直接调网关自己的 handler，换号 /
+  错误策略 / 记账 / 请求日志与 REST 同一条路径
+* **去水印（可选，`features.watermark_strip_enabled`，缺省关）**：
+  `POST /v1/images/strip-watermark` —— 把成品图底部的纯白留白整条裁掉，右下角水印随之
+  消失。纯本地图像处理、不扣积分；留白不足回 422 并给出实测像素数（绝不硬裁）
 * 运维接口（`admin.enabled`，缺省关闭）：`POST /admin/tasks/{name}/run` 手动补跑排程
   （`checkin` / `activity` / `keepalive` / `travel` / `balance_refresh` / `streak_bonus` /
   `growth` —— 后者由面板成长队列执行），

@@ -118,6 +118,9 @@ func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, 
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)
 		}
+		// 工具描述同样要洗：客户端作者把身份句写进 description 时，只洗 messages
+		// 等于整段原样出站（见 sanitizeTools 注释）。
+		sanitizeTools(obj["tools"])
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {

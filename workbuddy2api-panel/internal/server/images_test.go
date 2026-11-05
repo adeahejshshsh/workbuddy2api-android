@@ -440,7 +440,7 @@ func TestGenerationModelsListedInV1Models(t *testing.T) {
 		BillingBaseCN: "https://cn.example",
 	}
 	// 直接往旁路留存里塞一批（等价于一次目录解析的结果）：
-	// 一张图、一段视频（视频没有网关端点，不该列）、一个普通对话模型（不该出现在单列里）。
+	// 一张图、一段视频（视频现在有 /v1/videos/* 端点，要列）、一个普通对话模型（不该单列）。
 	up.StashGenerationModelsForTest("cn", []upstream.ModelInfo{
 		{ID: "hunyuan-image-alpha", GenerationKind: "image", Tags: []string{"text-to-image"}},
 		{ID: "kling-video-v3", GenerationKind: "video", Tags: []string{"text-to-video"}},
@@ -452,20 +452,34 @@ func TestGenerationModelsListedInV1Models(t *testing.T) {
 		return NewHandler(cfg).generationModelEntries()
 	}
 
+	// 图片与视频都单列（各自带自己的标记），普通对话模型不在这里出现。
 	got := build(Config{})
-	if len(got) != 1 || got[0]["id"] != "cn:hunyuan-image-alpha" || got[0]["image_generation"] != true {
-		t.Fatalf("只该列出图片模型：%v", got)
+	if len(got) != 2 {
+		t.Fatalf("图片与视频都该列出：%v", got)
+	}
+	byID := map[string]map[string]any{}
+	for _, e := range got {
+		byID[e["id"].(string)] = e
+	}
+	if e := byID["cn:hunyuan-image-alpha"]; e == nil || e["image_generation"] != true {
+		t.Fatalf("出图模型应带 image_generation: %v", got)
+	}
+	if e := byID["cn:kling-video-v3"]; e == nil || e["video_generation"] != true {
+		t.Fatalf("出视频模型应带 video_generation: %v", got)
+	}
+	if _, listed := byID["cn:glm-5.2"]; listed {
+		t.Fatalf("普通对话模型不该出现在媒体单列里：%v", got)
 	}
 
-	// 黑名单命中 → 不列。
-	if l := build(Config{ModelsHidden: []string{"cn:hunyuan-image-alpha"}}); len(l) != 0 {
-		t.Fatalf("黑名单里的出图模型不该列出：%v", l)
+	// 黑名单命中 → 不列（图片与视频同一条规则）。
+	if l := build(Config{ModelsHidden: []string{"cn:hunyuan-image-alpha", "cn:kling-video-v3"}}); len(l) != 0 {
+		t.Fatalf("黑名单里的媒体模型不该列出：%v", l)
 	}
 	// 白名单启用但没列它 → 不列；列了 → 列出。
 	if l := build(Config{ModelsAllowed: []string{"glm-5.2"}}); len(l) != 0 {
-		t.Fatalf("白名单外的出图模型不该列出：%v", l)
+		t.Fatalf("白名单外的媒体模型不该列出：%v", l)
 	}
-	if l := build(Config{ModelsAllowed: []string{"cn:hunyuan-image-alpha"}}); len(l) != 1 {
-		t.Fatalf("白名单内的出图模型应列出：%v", l)
+	if l := build(Config{ModelsAllowed: []string{"cn:hunyuan-image-alpha", "cn:kling-video-v3"}}); len(l) != 2 {
+		t.Fatalf("白名单内的媒体模型应列出：%v", l)
 	}
 }

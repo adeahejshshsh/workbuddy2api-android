@@ -376,6 +376,7 @@ func main() {
 		APIKey:                 cfg.APIKey,
 		SoftCooldown:           cfg.SoftRateDur,
 		SanitizeFingerprints:   cfg.Features.SanitizeBlacklistFingerprints,
+		WatermarkStripEnabled:  cfg.Features.WatermarkStripEnabled,
 		RecordClientInfo:       cfg.Logging.RequestClientInfo,
 		RecordContext:          cfg.Logging.RequestArchiveContext,
 		ModelFallback:          cfg.Pool.ModelFallback,
@@ -484,6 +485,7 @@ func main() {
 		// 运维接口（手动补跑排程）+ 操作审计：整段缺省关闭。
 		AdminEnabled:                  cfg.Admin.Enabled,
 		AdminAPIKey:                   cfg.AdminAPIKey,
+		WatermarkStripEnabled:         cfg.Features.WatermarkStripEnabled,
 		Tasks:                         sch,
 		GrowthRunner:                  pn.RunGrowthQueueOnce,
 		Audit:                         auditLog,
@@ -780,11 +782,12 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
-		APIKey:               newCfg.APIKey,
-		SoftCooldown:         newCfg.SoftRateDur,
-		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
-		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
-		RecordContext:        newCfg.Logging.RequestArchiveContext,
+		APIKey:                newCfg.APIKey,
+		SoftCooldown:          newCfg.SoftRateDur,
+		SanitizeFingerprints:  newCfg.Features.SanitizeBlacklistFingerprints,
+		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
+		RecordClientInfo:      newCfg.Logging.RequestClientInfo,
+		RecordContext:         newCfg.Logging.RequestArchiveContext,
 		// review #3：这两个表是 handler 每次请求从 live 快照读的，漏填等于「保存任意
 		// 配置 → 运行时降级表/别名表被清空」，直到进程重启才恢复。
 		ModelFallback: newCfg.Pool.ModelFallback,
