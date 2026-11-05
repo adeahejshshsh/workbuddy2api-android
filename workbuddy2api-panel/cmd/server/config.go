@@ -290,6 +290,11 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// WatermarkStripEnabled 去水印（裁白边）端点与 MCP 工具的总开关。缺省 false。
+		// 默认关的理由：这条链路要把成品图回读、解码、再 base64 回传（1024x1536 PNG 约
+		// 2.5MB → base64 3.4MB），只在真要彻底去水印时划算；而且它依赖提示词真的留出
+		// 白边（实测模型只肯给 25~38%），不适合当默认行为。热生效。
+		WatermarkStripEnabled bool `json:"watermark_strip_enabled"`
 	} `json:"features"`
 
 	Prompt struct {

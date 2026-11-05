@@ -114,6 +114,9 @@ type Config struct {
 	// 来自 logging.request_archive_context（缺省 false）：比 IP/UA 敏感得多——那是
 	// 用户的实际对话内容，所以缺省不开。
 	RecordContext bool
+	// WatermarkStripEnabled 去水印（裁白边）端点与 MCP 工具的总开关，缺省关闭。
+	// 关着时端点回 403、MCP 工具不出现在 tools/list 里，其它生成接口不受影响。
+	WatermarkStripEnabled bool
 	// AdminEnabled 为 true 才注册 POST /admin/tasks/{name}/run。缺省关闭。
 	AdminEnabled bool
 	// AdminAPIKey 运维面（/status、/admin/*）专用密钥。空 = 回退到 APIKey（旧行为）。
@@ -142,6 +145,8 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		SoftCooldown:     h.cfg.SoftCooldown,
 		RecordClientInfo: h.cfg.RecordClientInfo,
 		RecordContext:    h.cfg.RecordContext,
+
+		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
 	}
 }
 
@@ -186,6 +191,9 @@ type Handler struct {
 	// 重复提交回 409）。见 admin_tasks.go。
 	taskMu      sync.Mutex
 	taskRunning map[string]bool
+	// videoLedger 视频任务 → 提交账号的台账（见 videos.go）：任务只对提交它的账号可见，
+	// 上游账号结构里没有可反推的租户 id，只能自己记。进程内状态、重启清零。
+	videoLedger *videoTaskStore
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
@@ -213,7 +221,8 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "custom" && cfg.PromptText == "" {
 		log.Printf("WARN: [server] prompt.mode=custom 但 prompt.text 为空：本次不会改写客户端 system（疑似配置漏项）")
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), budget: newDailyBudget(cfg.DailyBudget, cfg.BudgetStateFile)}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), budget: newDailyBudget(cfg.DailyBudget, cfg.BudgetStateFile),
+		videoLedger: newVideoTaskStore()}
 	// 突发积分闸 / 缓存率闸（review 移植 58262f31）：0 = 关闭。
 	h.budget.setGuards(cfg.BurstCreditLimit, cfg.CacheLowRate)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -228,6 +237,18 @@ func NewHandler(cfg Config) *Handler {
 	// 模型名按 realm 前缀路由、不走目录校验（见 images.go）。
 	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, false) }))
 	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) }))
+	// 出视频（异步任务）：提交后可 wait=true 阻塞到出片，或拿 task_id 走查询端点。
+	// 任务只对**提交它的账号**可见（见 videos.go 的台账）。
+	h.mux.HandleFunc("POST /v1/videos/generations", h.withAuth(h.videos))
+	h.mux.HandleFunc("POST /v1/videos/tasks", h.withAuth(h.videoTasks))
+	h.mux.HandleFunc("GET /v1/videos/{task_id}", h.withAuth(h.videoTask))
+	// 去水印（裁白边）：默认关闭（features.watermark_strip_enabled）。
+	// 关着时回 403，MCP 的 strip_watermark 工具也不出现。
+	h.mux.HandleFunc("POST /v1/images/strip-watermark", h.withAuth(h.watermarkStrip))
+	// MCP（Model Context Protocol）：POST /mcp，JSON-RPC 2.0，无状态、无 SSE 流。
+	// 把生图/改图/出视频/查任务包成工具面，agent 客户端配一个 URL 就能用。
+	h.mux.HandleFunc("POST /mcp", h.withAuth(h.mcpPost))
+	h.mux.HandleFunc("GET /mcp", h.mcpMethodNotAllowed)
 	// 官方 agenttool 联网检索的网关透传（非对话端点，与 images 同套取号/失败处置）。
 	h.mux.HandleFunc("POST /v1/search", h.withAuth(h.search))
 	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。
@@ -280,7 +301,10 @@ func NewHandler(cfg Config) *Handler {
 func isChatEntry(path string) bool {
 	switch path {
 	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages",
-		"/v1/images/generations", "/v1/images/edits":
+		"/v1/images/generations", "/v1/images/edits",
+		// 出视频也是「会真扣积分」的入站写操作：不纳入归档的话面板里看不到谁在打、
+		// 扣了多少（videos.go 自己记账，但 requestTrace 要在这一层才有）。
+		"/v1/videos/generations", "/v1/videos/tasks":
 		return true
 	}
 	return false
@@ -925,9 +949,10 @@ func (h *Handler) generationModelEntries() []map[string]any {
 	var out []map[string]any
 	for _, realm := range realms {
 		for _, mi := range h.cfg.Upstream.GenerationModels(realm) {
-			// 只列图片：视频没有网关端点（视频走连接器），列出来只会引诱客户端去调
-			// 不存在的路由。视频模型照旧不进对话名单（nonChatModel）。
-			if mi.GenerationKind != "image" {
+			// 图片与视频都单列（视频走 /v1/videos/generations）：客户端据此发现可用模型名，
+			// 不会误发对话请求。其它 kind（对话模型）照旧不在这里出现。
+			kind := mi.GenerationKind
+			if kind != "image" && kind != "video" {
 				continue
 			}
 			// 黑名单/白名单同样管出图单列：列表里留着它等于告诉客户端「这个能用」。
@@ -935,16 +960,23 @@ func (h *Handler) generationModelEntries() []map[string]any {
 				continue
 			}
 			entry := map[string]any{
-				"id":               realm + ":" + mi.ID,
-				"object":           "model",
-				"created":          1753600000,
-				"owned_by":         "workbuddy",
-				"image_generation": true,
+				"id":       realm + ":" + mi.ID,
+				"object":   "model",
+				"created":  1753600000,
+				"owned_by": "workbuddy",
+			}
+			if kind == "video" {
+				entry["video_generation"] = true
+			} else {
+				entry["image_generation"] = true
 			}
 			entry = applyModelInfoFields(entry, mi)
-			// 出图模型：modalities.output = ["image"]（没有上下文/输出，limit 自然省略）。
-			// 与对话模型同一份函数，保证两处字段形状一致。
-			applyModelsDevShape(entry, mi, nil, true)
+			// 媒体模型没有上下文/输出（limit 自然省略）。modalities.output 按 kind 写：
+			// 图片 ["image"]、视频 ["video"]（共用函数只管看图/出图，视频这里覆盖一次）。
+			applyModelsDevShape(entry, mi, nil, kind == "image")
+			if kind == "video" {
+				entry["modalities"] = map[string]any{"output": []any{"video"}}
+			}
 			out = append(out, entry)
 		}
 	}

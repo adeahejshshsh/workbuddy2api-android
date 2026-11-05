@@ -739,6 +739,10 @@ function renderModelLocks(rows) {
   }
 }
 
+// overviewSig 上一次渲染用的账号+锁池快照（JSON 文本）。轮询每 5 秒一次，内容没变时
+// 跳过表格重渲染：重建 innerHTML 会丢掉行内焦点与悬停，几十个号就是每 5 秒抖一次。
+let overviewSig = '';
+
 async function loadOverview(quiet) {
   try {
     const d = await api('overview');
@@ -768,8 +772,13 @@ async function loadOverview(quiet) {
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
-    renderAccounts(d.accounts || []);
-    renderModelLocks(d.model_locks);
+    // 只在载荷真变了才重建两张表（见 overviewSig 注释）；统计卡与到期提醒照常刷新。
+    const sig = JSON.stringify([d.accounts || [], d.model_locks || []]);
+    if (sig !== overviewSig) {
+      overviewSig = sig;
+      renderAccounts(d.accounts || []);
+      renderModelLocks(d.model_locks);
+    }
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的到期快照，不额外发请求）。
     // 已有逐包明细缓存时不再覆盖——明细信息量更大，别把它降级成快照。
     if ($('expBox') && !lastPackages) renderExpirySnapshot(d);
@@ -1579,7 +1588,11 @@ const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'prompt_identity_ove
 // 故切换只控制可见性、不丢字段。
 let cfgRealmFilter = 'all';
 function applyCfgRealmFilter() {
+  // 只切**字段**的可见性，跳过导航本身：#cfgRealmTabs 就在 #cfgForm 里，三个 tab 按钮
+  // 自己也带 data-realm —— 全选会把它们一起 display:none，选「国际版」时「全部」「国内版」
+  // 两个 tab 直接消失、tab 栏塌成只剩一个（图上看像整页塌了，实际只有导航被隐藏）。
   document.querySelectorAll('#cfgForm [data-realm]').forEach(el => {
+    if (el.closest('#cfgRealmTabs')) return;
     const r = el.getAttribute('data-realm');
     el.style.display = (cfgRealmFilter === 'all' || cfgRealmFilter === r) ? '' : 'none';
   });

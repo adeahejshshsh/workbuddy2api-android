@@ -17,18 +17,23 @@ func TestAppJSLoadOverviewNeverSwallowsError(t *testing.T) {
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf('async function loadOverview(');
+// 切片起点必须提前到 overviewSig 的声明行：loadOverview 现在引用它（轮询指纹跳过），
+// 从函数体开始切会让该变量在沙箱里 undefined → 抛错，用例把「正常路径」也数成 err。
+const start = src.indexOf("let overviewSig = ''");
 const end = src.indexOf("$('accBody').addEventListener(");
 if (start < 0 || end < 0) throw new Error('loadOverview not found');
 
 const errLog = [], toasts = [];
 let failRender = true;
+// call 让每次响应体**不同**：轮询指纹跳过生效后，同载荷不会再走 renderAccounts，
+// 渲染错误自然也不会出现（设计行为，不是漏报）。用变载荷模拟「真的需要重渲染」。
+let call = 0;
 const ctx = {
   Math, Number, Promise,
   console: { error: (...a) => errLog.push(a.join(' ')), log() {}, warn() {} },
   toast: (...a) => toasts.push(a.join(' ')),
   api: async () => ({ total: 1, healthy: 1, cooling: 0, disabled: 0, paused: 0,
-    accounts: [], credits: 0, credits_total: 0, sticky_sessions: 0, version: '1.2.3',
+    accounts: [{ uid: 'u' + (++call) }], credits: 0, credits_total: 0, sticky_sessions: 0, version: '1.2.3',
     redis_mode: 'memory', uptime_sec: 60, in_flight_full: 0 }),
   $: id => (id === 'expBox' ? null : {}),
   renderAccounts: () => { if (failRender) throw new Error('boom: 渲染炸了'); },

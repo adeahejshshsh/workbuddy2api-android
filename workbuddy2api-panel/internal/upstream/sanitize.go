@@ -262,6 +262,38 @@ func sanitizeToolCalls(v any) bool {
 	return changed
 }
 
+// sanitizeTools 净化 tools[].function.description。
+//
+// 工具描述由客户端作者撰写（Claude Code / Codex 这类会把身份句写进 description），
+// 只洗 messages 时它整段原样出站 —— 工具描述与 system prompt 同源、都是固定模板句，
+// 属同一类黑名单高发区（上游 issue #395）。DSH 的 @ 路径说明段就藏在工具描述里，
+// 命中即 400 11‑-128。
+//
+// shortcut: 只洗 OpenAI 形状的 function.description；Anthropic 形状的顶层
+// description 与 parameters 里的 schema 描述不洗（那两类在我们的入站适配里
+// 会被转成 function 形状，最终仍走到这里）。
+func sanitizeTools(v any) {
+	tools, ok := v.([]any)
+	if !ok {
+		return
+	}
+	for _, t := range tools {
+		tm, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := tm["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if d, ok := fn["description"].(string); ok {
+			if s := sanitizeText(d); s != d {
+				fn["description"] = s
+			}
+		}
+	}
+}
+
 // sanitizeMessages 净化 messages 中的 content 与 tool_calls；任一命中返回 true。
 func sanitizeMessages(messages []any) bool {
 	changed := false

@@ -20,6 +20,9 @@ type Snapshot struct {
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
+	// WatermarkStripEnabled 去水印（裁白边）端点与 MCP 工具的总开关
+	// （features.watermark_strip_enabled，缺省 false）。热生效。
+	WatermarkStripEnabled bool
 	// RecordContext 请求事件是否记录会话上下文（system + messages / 出图 prompt）。
 	// 比 IP/UA 敏感得多（是用户的实际对话内容），所以单独一个开关、缺省关闭。
 	RecordContext bool

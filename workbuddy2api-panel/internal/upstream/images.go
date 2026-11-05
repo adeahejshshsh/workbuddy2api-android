@@ -244,14 +244,28 @@ var imageDeadModels = map[string]bool{
 }
 
 // GenerationModels 最近一次目录解析留存的出图/出视频模型（空 = 尚未探测过该域）。
-// 目录把这些模型从**对话**列表剔掉（客户端拿它发对话会 11102），留存只供 /v1/models
-// 与面板以 image_generation 标记列出（视频不列：网关没有视频端点）。
+// 目录把这些模型从**对话**列表剔掉（客户端拿它发对话会 11102），留存供 /v1/models
+// 与面板以 image_generation / video_generation 标记单列。
 func (c *Client) GenerationModels(realm string) []ModelInfo {
 	c.imageMu.Lock()
 	defer c.imageMu.Unlock()
 	src := c.imageModels[realm]
 	out := make([]ModelInfo, 0, len(src))
 	for _, m := range src {
+		if m.GenerationKind == "video" {
+			// 视频：与图片同一套「只写实测路由」口径（videoRouteRealm/videoDeadModels
+			// 在 videos.go，视频有独立端点 /v1/videos/generations）。
+			// videoRouteRealm 当前是 nil（实测两域都有视频路由，见其注释）——
+			// 读 nil map 返回零值，语义就是「没有单域模型」。
+			if videoDeadModels[m.ID] {
+				continue
+			}
+			if r, known := videoRouteRealm[m.ID]; known && r != realm {
+				continue
+			}
+			out = append(out, m)
+			continue
+		}
 		// 已下架的模型不列（见 imageDeadModels）。
 		if imageDeadModels[m.ID] {
 			continue
