@@ -195,7 +195,9 @@ func applyEffortPolicy(obj map[string]any, model string, supported []string, pol
 		// 客户端没发档位：补网关默认档（客户端优先模式下同样补——补的是缺失值，
 		// 不是覆盖客户端意图）。目标档为 off 时补「关闭思考」。
 		if target == EffortOff {
-			disableThinking(obj)
+			if !applyOffEffort(obj, model) {
+				return ""
+			}
 			log.Printf("thinking policy: 补网关默认档 model=%s -> off（关闭思考）", model)
 			return EffortOff
 		}
@@ -211,7 +213,9 @@ func applyEffortPolicy(obj map[string]any, model string, supported []string, pol
 		if policy.OverrideScope != OverrideScopeAll {
 			return ""
 		}
-		disableThinking(obj)
+		if !applyOffEffort(obj, model) {
+			return ""
+		}
 		log.Printf("thinking policy: 网关优先（scope=all）目标 off model=%s 改写关闭思考（client=%s）", model, value)
 		return EffortOff
 	}
@@ -223,6 +227,21 @@ func applyEffortPolicy(obj map[string]any, model string, supported []string, pol
 	stripEffort(obj)
 	obj[key] = target
 	return target
+}
+
+// applyOffEffort 把「关闭思考」写进请求体；模型不支持 thinking 开关时**不改写**。
+//
+// 为什么必须门控：面板把网关默认档设成 off 时，此前会**对所有模型**塞
+// `thinking:{"type":"disabled"}` —— 不接受该字段的上游直接 400，落 ErrBadParams
+// （请求级错误：不罚号、不轮转），日志里只有上游原文，完全看不出是网关自己塞的。
+// 门控判据与 starved.go:54 同一份（ThinkingSwitchSupported）。
+func applyOffEffort(obj map[string]any, model string) bool {
+	if !ThinkingSwitchSupported(model) {
+		log.Printf("thinking policy: model=%s 不支持 thinking 开关，跳过「关闭思考」改写（保持原样）", model)
+		return false
+	}
+	disableThinking(obj)
+	return true
 }
 
 // disableThinking 把请求体写成「关闭思考」形态：删掉档位字段（snake/camel 双删），

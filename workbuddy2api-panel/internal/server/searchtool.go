@@ -265,13 +265,17 @@ func (h *Handler) probeOnce(ctx context.Context, realm, model string, body []byt
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < webSearchPickTries; i++ {
-		a := h.cfg.Pool.PickExcludingForRealm(tried, model, realm)
+		// 必须占在途名额（与 chat 同口径）：这是**一次真实的上游 chat 调用**，不占名额
+		// 就等于单号并发突破 max_in_flight，而探测/检索是「一次用户请求里额外打 1~4 次
+		// 上游」的那条路径 —— 不占名额时它最能悄悄压垮一个号。
+		a := h.cfg.Pool.PickAcquireExcludingForRealm(tried, model, realm)
 		if a == nil {
 			break
 		}
 		tried[a.UID] = true
 		// AgentType=auxiliary：web_search 工具的内部探测调用（非用户主对话）。
 		rc, _, _, err := h.cfg.Upstream.ChatStreamContext(ctx, a, body, "", upstream.ChatMeta{AgentType: upstream.AgentTypeAuxiliary})
+		h.cfg.Pool.Release(a.UID)
 		if err != nil {
 			lastErr = err
 			var ue *upstream.Error
@@ -285,6 +289,15 @@ func (h *Handler) probeOnce(ctx context.Context, realm, model string, body []byt
 		if aerr != nil {
 			lastErr = aerr
 			continue
+		}
+		// 探测是**一次真实的上游 chat 调用**，会真扣积分：把它记进日预算，
+		// 否则「一次 /v1/messages 带 web_search」实际打 1~4 次上游、只有最后一次进
+		// usage/budget，成本止损线被系统性低估。只记 budget（成本闸），不写逐条
+		// 请求台账 —— 那是主请求的语义，探测只是它的内部实现细节。
+		if u, ok := obj["usage"].(map[string]any); ok {
+			if credit, ok := u["credit"].(float64); ok && credit > 0 {
+				h.budget.add(credit, true)
+			}
 		}
 		if m := firstChoiceMessage(obj); m != nil {
 			return m, nil
@@ -311,12 +324,14 @@ func firstChoiceMessage(obj map[string]any) map[string]any {
 func (h *Handler) searchText(ctx context.Context, realm, model, query string) (string, []upstream.SearchResult, bool) {
 	tried := map[string]bool{}
 	for i := 0; i < webSearchPickTries; i++ {
-		a := h.cfg.Pool.PickExcludingForRealm(tried, model, realm)
+		// 同上：检索也是一次真实上游调用，必须占在途名额。
+		a := h.cfg.Pool.PickAcquireExcludingForRealm(tried, model, realm)
 		if a == nil {
 			break
 		}
 		tried[a.UID] = true
 		raw, err := h.cfg.Upstream.Search(ctx, a, query, upstream.WebSearchDefaultMaxResults)
+		h.cfg.Pool.Release(a.UID)
 		if err != nil {
 			var ue *upstream.Error
 			if errors.As(err, &ue) {

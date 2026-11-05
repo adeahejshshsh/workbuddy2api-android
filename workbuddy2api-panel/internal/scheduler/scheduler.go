@@ -5,6 +5,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"log"
@@ -1089,11 +1090,19 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 		// `cur != logged` 恒假，「暂停中显示 0s」那条日志永远打不出来，
 		// 与注释描述相反。用 -1 保证第一次一定打。
 		logged := time.Duration(-1)
+		balRound := 0 // 余额刷新的轮次计数（只用于抖动 key，见下）
 		for {
 			cur := time.Duration(s.balanceInterval.Load())
 			// 人味化抖动：间隔在 ±frac×interval 内偏移（每轮重取，进程种子稳定），
 			// 不再精确固定间隔打卡。基准间隔不变（热改/暂停语义不受影响）。
-			delay := cur + periodicJitter(cur, s.balanceJitterFrac(), "bal")
+			// key 必须**随轮次变化**：jitterFrac 的散列输入是「key + 进程种子」，
+			// key 恒为 "bal" 时每轮算出的偏移完全相同 —— 那不是「间隔在抖」，而是
+			// 「恒定间隔 + 一个固定相位」，防机械节拍的目标根本没达成（只是把 5 分钟
+			// 变成了 5 分 47 秒这种新的恒定值）。用「第几轮」进 key：同一轮内稳定
+			// （重排/热改不会跳），跨轮才变。
+			balRound++
+			delay := cur + periodicJitter(cur, s.balanceJitterFrac(),
+				fmt.Sprintf("bal:%d", balRound))
 			if delay < 0 {
 				delay = 0
 			}

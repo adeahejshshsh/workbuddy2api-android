@@ -491,7 +491,10 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h := req.Header
 	h.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	h.Set("Content-Type", "application/json")
-	h.Set("Accept", "text/event-stream")
+	// 与主 chat 路径同口径：**不**在请求头里声明 event-stream —— 官方即便走 SSE 也
+	// 只发 application/json（那由 body 的 stream:true 决定，响应是否分块与 Accept 无关）。
+	// 这条打的是同一个 /v2/chat/completions，头不一致本身就是可判别的指纹差。
+	h.Set("Accept", "application/json")
 	h.Set("User-Agent", c.defaultWorkBuddyUAFor(a))
 	h.Set("X-Domain", c.desktopDomain(a))
 	h.Set("X-Product", "SaaS")
@@ -504,7 +507,10 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-IDE-Type", "WorkBuddy")
 	h.Set("X-IDE-Version", c.clientVersionFor(a))
 	// 官方桌面端还带这一项（解包实测），此前漏发。
-	h.Set("X-Private-Data", "false") // 5.9.3 真机真值是 false（此前为 true）
+	// 取值按**发行版**分档（privateDataFor）：国内 5.9.3 真机是 false、国际 5.9.4 是 true。
+	// 此前硬编码 "false" —— 同一个 global 号，主 chat 路径发 true、这条专家路径发 false，
+	// 两条路径对同一个上游端点给出互相矛盾的指纹头。
+	h.Set("X-Private-Data", privateDataFor(a))
 	// 必须用与 headers.go 完全相同的拼写（bug #9）：Go 会把头名规范化成
 	// X-Codebuddy-Request，而全仓其它地方是 X-CodeBuddy-Request —— 同一个风控闸门头
 	// 以两种拼写出站，按字面匹配头的上游实现会漏，排障时也容易误以为没加。

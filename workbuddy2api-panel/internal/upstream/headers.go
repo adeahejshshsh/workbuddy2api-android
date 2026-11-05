@@ -516,8 +516,16 @@ func (c *Client) injectBaggage(req *http.Request, meta ChatMeta) {
 	// codebuddy.session_id / codebuddy.conversation_request_id。此前多塞的
 	// x-agent-runtime / x-agent-intent 客户端从不发 —— baggage 是 OTel 传播器序列化的
 	// 整体串，成员集合本身可比对，多一个就是另一种形态。
-	req.Header.Set("baggage", "buddyId=,buddyName=,codebuddy.session_id="+conv+
-		",codebuddy.conversation_request_id="+reqID)
+	// conv / reqID 必须过 HeaderSafe —— 与同函数族的 X-Conversation-ID /
+	// X-Conversation-Request-ID / X-Root-Request-ID / X-Trace-ID 同一口径。
+	// 这两个值来自**客户端请求体**（conversationId / conversationRequestId），
+	// 客户端把格式化串塞进去（`"abc\r\nX-Whatever: 1"`）就会让
+	// net/http 在写头阶段报 `invalid header field value for "Baggage"` →
+	// ChatStreamContext 走传输错误分支（清连接池）→ handler 判「网络抖动」→
+	// NoteFailures → 单账号池连续 5 次即降权出池 10 分钟，期间全 503。
+	// 一次畸形输入打穿整池，而症状看起来是网络问题。
+	req.Header.Set("baggage", "buddyId=,buddyName=,codebuddy.session_id="+HeaderSafe(conv)+
+		",codebuddy.conversation_request_id="+HeaderSafe(reqID))
 }
 
 func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
