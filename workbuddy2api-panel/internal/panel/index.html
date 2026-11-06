@@ -194,6 +194,16 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .acc.md .mark { display: none; }
 /* 操作列用 width:1px + nowrap 的经典技巧：列宽恰为内容宽，其余列按内容自适应 */
 .acc .c-acts { width: 1px; white-space: nowrap; }
+/* 「消耗/到账」两行单元格（fmtFlowCell 的 td.num.fl：上行今日、下行本月）。
+   对齐上游：两行必须 display:block 才会真的分行，副行降到 11.5px 灰字 ——
+   缺这两条时两行并成一行、且按表格的 13px 继承，扫读时主次不分。 */
+.acc td.fl { line-height: 1.35; }
+.acc td.fl .fl-row { display: block; font-variant-numeric: tabular-nums; }
+.acc td.fl .fl-sub { font-size: 11.5px; color: var(--ink-3); }
+.fl-v { color: var(--ink-2); }
+.fl-dim { opacity: .62; }
+.fl-zero { color: var(--ink-3); }
+.fl-na { color: var(--ink-3); }
 /* 档位标签列：允许换行在标签之间（不拆字），并给足最小宽度 */
 .acc .efs { min-width: 150px; }
 .acc .efs .tag { margin: 1px 0; }
@@ -205,7 +215,7 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 #taskTable .who .nm, #taskTable .who .id { white-space: normal; word-break: break-all; }
 .who .nm { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who .id { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.realm-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 4px; font: 500 10px/1 var(--sans); color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); vertical-align: 1px; }
+.realm-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 4px; font: 500 10px/1.1 var(--sans); color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); white-space: nowrap; vertical-align: middle; }
 .realm-row { display: flex; align-items: center; gap: 14px; padding: 4px 0 10px; }
 .realm-opt { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
 .realm-opt input { accent-color: var(--accent); margin: 0; }
@@ -270,13 +280,13 @@ td.acts { display: table-cell; vertical-align: middle; text-align: right; }
 /* 统一盒模型：primary 与 ghost 的边框/行高不同会让「解冻」行比「暂停选号」行高 2~3px，
    行线因此参差。固定高度 + border-box 后每行等高、按钮底边对齐。 */
 /* 账号备注：有备注时原标识降为浅色虚体，备注本身用正文色。 */
-.rm-ghost { color: var(--ink-3); font-size: .92em; margin-left: 6px; }
+.rm-ghost { color: var(--ink-3); font-weight: 400; margin-left: .35em; }
 .rm-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
-.rm-who { flex: 0 0 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.rm-who { flex: 0 0 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 12.5px; }
 .rm-row input { flex: 1 1 auto; min-width: 0; }
 
 /* 模型行内：网关档位下拉与下游可见开关；被隐藏的行整体降透明，开关仍可点。 */
-.gw select { height: 24px; font-size: 12px; padding: 0 4px; background: var(--bg-2); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; }
+.gw select { height: 24px; font-size: 12.5px; padding: 0 4px; background: var(--bg-2); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; }
 .vis label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .md-off { opacity: .5; }
 
@@ -412,6 +422,10 @@ body.veil-open { overflow: hidden; }
     border-bottom: 1px solid var(--line-soft); font-size: 12px; }
   .uschart-hd .lb { color: var(--ink-2); font-weight: 600; }
   .uschart-hd .legend { color: var(--ink-3); font-size: 11.5px; display: flex; align-items: center; gap: 6px; }
+  /* 图例里的账号名：超长名（如「汪羽杰（工作相关内容不要发v）」）会挤压整个卡头，
+     按 12em 截断 + 省略号，完整名放 title 悬浮可见。 */
+  .uschart-hd .legend .lg-name { display: inline-block; max-width: 12em; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
   .uschart-hd .legend .sep { width: 1px; height: 11px; background: var(--line); margin: 0 3px; }
   .uschart-hd .sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
   .uschart-hd .sw-p { background: var(--accent); }
@@ -546,6 +560,7 @@ body.veil-open { overflow: hidden; }
   .acc.req { min-width: 1080px; }
   .acc.req th, .acc.req td { padding: 8px 10px; }
   .acc.req tbody tr { cursor: default; }
+  .acc.req td.sample { max-width: 380px; overflow: hidden; text-overflow: ellipsis; }
   /* 请求记录最多可读 1000 条，不限高会把下面的「运行日志」推到很远的地方。
      限高 + 表头吸顶：滚动区域内始终能看到列名。 */
   .req-wrap { max-height: 460px; overflow: auto; }
