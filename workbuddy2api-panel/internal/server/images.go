@@ -17,6 +17,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
@@ -100,42 +102,21 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 			tr.context = archiveContext(raw)
 		}
 	}
+	// 上游一次只出一张（2026-11-05 实测 n=2 仍只回 1 条），按规范明确拒绝而不是静默少给。
+	if n, ok := numberToInt(req["n"]); ok && n > 1 {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+			"n>1 暂不支持：上游一次只出一张，请逐次请求（每次一张）")
+		return
+	}
 	prompt, _ := req["prompt"].(string)
 	if strings.TrimSpace(prompt) == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
 			`prompt is required（例：{"model":"`+defaultImageModel+`","prompt":"一只猫"}）`)
 		return
 	}
-	model, _ := req["model"].(string)
-	named := strings.TrimSpace(model) != "" // 客户端是否显式点名了模型
-	if !named {
-		model = defaultImageModel
-	}
-	realm, bare := resolveModel(model)
-	// models.allowed 白名单（issue #68）：与 chat 入口同款拒绝，不打上游、不占选号。
-	// 未点名模型时先做白名单内兜底（设计决策 4）：默认模型不在白名单时改选
-	// 白名单内第一个可用出图模型；白名单内无出图模型则维持默认名落入拒绝
-	//（不做隐式放行）。文案与 chat 侧同口径，避免枚举探测。
-	if !h.modelAllowed(realm, bare) {
-		if !named {
-			if fr, fb, ok := h.firstAllowedGenerationImage(); ok {
-				realm, bare = fr, fb
-			} else {
-				writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
-					"model is not in the gateway allowlist, try another model")
-				return
-			}
-		} else {
-			writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
-				"model is not in the gateway allowlist, try another model")
-			return
-		}
-	}
-	// models.hidden 同一份黑名单也管出图入口：列表里已经隐藏的模型不该还能直接调。
-	// （白名单兜底选出的模型也在此受检：白名单∩黑名单交集语义，隐藏的不例外。）
-	if h.modelHidden(realm, bare) {
-		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
-			"model is hidden by gateway configuration, try another model")
+	realm, bare, merr := h.imageModel(asString(req["model"]))
+	if merr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable", merr.Error())
 		return
 	}
 	req["model"] = bare
@@ -201,6 +182,9 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 		}
 		lastErr = nil
 		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, req, start)
+		if asString(req["response_format"]) == "b64_json" {
+			data = b64JSONImages(r.Context(), data)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(data)
 		return
@@ -219,6 +203,106 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	st.outcome = ""
 	log.Printf("images model=%s realm=%s: 全部尝试失败（%d 个账号）：%v", bare, realm, len(tried), lastErr)
 	writeOpenAIError(w, status, code, lastErr.Error())
+}
+
+// imageModel 出图入口的模型口径：缺省 defaultImageModel，再按 models.allowed /
+// models.hidden 双名单裁定，返回 (realm, 裸模型名)。错误文案与 chat 侧同口径，
+// 避免枚举探测。
+//
+// models.allowed 白名单（issue #68）：与 chat 入口同款拒绝，不打上游、不占选号。
+// 未点名模型时先做白名单内兜底（设计决策 4）：默认模型不在白名单时改选白名单内
+// 第一个可用出图模型；白名单内无出图模型则维持默认名落入拒绝（不做隐式放行）。
+// models.hidden 同一份黑名单也管出图入口：列表里已经隐藏的模型不该还能直接调
+// （白名单兜底选出的模型也在此受检：白名单∩黑名单交集语义，隐藏的不例外）。
+func (h *Handler) imageModel(model string) (string, string, error) {
+	named := strings.TrimSpace(model) != "" // 客户端是否显式点名了模型
+	if !named {
+		model = defaultImageModel
+	}
+	realm, bare := resolveModel(model)
+	if !h.modelAllowed(realm, bare) {
+		if named {
+			return "", "", errors.New("model is not in the gateway allowlist, try another model")
+		}
+		fr, fb, ok := h.firstAllowedGenerationImage()
+		if !ok {
+			return "", "", errors.New("model is not in the gateway allowlist, try another model")
+		}
+		realm, bare = fr, fb
+	}
+	if h.modelHidden(realm, bare) {
+		return "", "", errors.New("model is hidden by gateway configuration, try another model")
+	}
+	return realm, bare, nil
+}
+
+// imageGenerate 网关侧出一次图：选号 → 出图 → 记账，返回上游原始回执（图片链接在
+// data[].url 里）。托管 image_generation 工具的执行器走这里（见 imagetool.go），
+// 与 HTTP 入口共享模型口径、选号重试与记账口径。
+//
+// 流水行自成一行，带该 Responses 请求的 rid/IP/UA 以便对账；不碰 tr.stat（那是对话
+// 本身的统计对象，归 chatCompletions）。客户端断连后不再起新的出图尝试；已经发出去的
+// 那次不取消——上游多半照扣，取消只会让回执丢失、账本少记。
+func (h *Handler) imageGenerate(ctx context.Context, req map[string]any) ([]byte, error) {
+	realm, bare, err := h.imageModel(asString(req["model"]))
+	if err != nil {
+		return nil, err
+	}
+	req["model"] = bare
+	out, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	st := &chatStat{start: time.Now(), model: bare, mode: "sync", toks: -1, budget: h.budget}
+	if tr, _ := ctx.Value(requestTraceKey{}).(*requestTrace); tr != nil {
+		st.requestID = tr.id
+		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
+	}
+	defer st.done()
+	modelRate := ""
+	if h.cfg.Upstream != nil {
+		modelRate = h.cfg.Upstream.ModelRate(realm, bare)
+	}
+	tried := map[string]bool{}
+	var lastErr error
+	for attempt := 0; attempt < imageAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			lastErr = err
+			break
+		}
+		a := h.cfg.Pool.PickExcludingForRealm(tried, bare, realm)
+		if a == nil {
+			break
+		}
+		tried[a.UID] = true
+		st.uid, st.nick, st.attempts = a.UID, a.Nickname, attempt+1
+		data, ierr := h.cfg.Upstream.ImageGenerations(a, json.RawMessage(out))
+		if ierr != nil {
+			lastErr = ierr
+			var ue *upstream.Error
+			if errors.As(ierr, &ue) {
+				h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, bare, ue)
+				if requestLevelFailFastKind(ue.Kind) {
+					// 与账号无关的错误：换号必然同样失败
+					st.status, st.outcome = max(ue.Status, http.StatusBadRequest), "http_error"
+					return nil, ierr
+				}
+			}
+			log.Printf("images %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), bare, attempt+1, ierr)
+			continue
+		}
+		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, req, st.start)
+		return data, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("没有可用的 %s 账号", realm)
+	}
+	if ctx.Err() != nil {
+		st.status, st.outcome = 499, reqlog.OutcomeInterrupted // 客户端走了，不算上游故障
+	} else {
+		st.status = http.StatusBadGateway
+	}
+	return nil, lastErr
 }
 
 // imageMode 流水行的 mode 列。
@@ -385,6 +469,47 @@ func fileToDataURL(fh *multipart.FileHeader) (string, error) {
 		ct = "image/png"
 	}
 	return "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(b), nil
+}
+
+// b64JSONImages 把 data[].url 换成 data[].b64_json（OpenAI images 的 response_format）。
+//
+// 上游无视这个参数、永远回签名直链（2026-11-05 实测 response_format=b64_json 仍回 url），
+// 所以只能在网关这一层转。取图失败就保留 url：图已经出了、也已经扣费，不能因为转码失败
+// 把成品丢掉。回读走 media_fetch.go 的收口（只认产物域、不跟重定向、超限报错不截断），
+// 这些都归入「取图失败」。
+func b64JSONImages(ctx context.Context, data []byte) []byte {
+	var obj map[string]any
+	if json.Unmarshal(data, &obj) != nil {
+		return data
+	}
+	items, _ := obj["data"].([]any)
+	changed := false
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		u, _ := m["url"].(string)
+		if u == "" {
+			continue
+		}
+		raw, err := fetchMedia(ctx, u, mediaFetchMax)
+		if err != nil {
+			log.Printf("images: response_format=b64_json 取图失败，保留直链: %v", err)
+			continue
+		}
+		m["b64_json"] = base64.StdEncoding.EncodeToString(raw)
+		delete(m, "url") // 规范里两者二选一，给了 b64 就不该再给 url
+		changed = true
+	}
+	if !changed {
+		return data
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return data
+	}
+	return out
 }
 
 // boundaryOf 从 Content-Type 里取 multipart boundary。

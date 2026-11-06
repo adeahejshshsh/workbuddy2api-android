@@ -389,22 +389,26 @@ func TestResponsesWithoutHostedSearchSkipsProbe(t *testing.T) {
 	}
 }
 
-// TestSplitHostedSearch 只摘托管检索（无 name 的 web_search*），其余原样留下。
-func TestSplitHostedSearch(t *testing.T) {
-	kept, srv := splitHostedSearch([]any{
+// TestSplitHostedTools 只摘托管工具（无 name 的 web_search* / image_generation*），其余原样留下。
+func TestSplitHostedTools(t *testing.T) {
+	kept, srv, imageTool := splitHostedTools([]any{
 		map[string]any{"type": "web_search"},
 		map[string]any{"type": "web_search_preview", "max_uses": float64(2)},
 		map[string]any{"type": "web_search", "name": "web_search"}, // 带 name：客户端自己的函数工具
+		map[string]any{"type": "image_generation"},
 		map[string]any{"type": "code_interpreter"},
 		map[string]any{"type": "function", "name": "f"},
 	})
+	if !imageTool {
+		t.Fatal("声明了 image_generation 却没被识别")
+	}
 	if len(srv) != 2 || srv[0].Name != webSearchToolName || srv[0].MaxUses != 0 || srv[1].MaxUses != 2 {
 		t.Fatalf("srv=%v", srv)
 	}
 	if len(kept) != 3 {
 		t.Fatalf("kept=%v", kept)
 	}
-	if _, srv2 := splitHostedSearch([]any{map[string]any{"type": "function", "name": "f"}}); len(srv2) != 0 {
+	if _, srv2, img2 := splitHostedTools([]any{map[string]any{"type": "function", "name": "f"}}); len(srv2) != 0 || img2 {
 		t.Fatal("普通 function 工具被误摘")
 	}
 }

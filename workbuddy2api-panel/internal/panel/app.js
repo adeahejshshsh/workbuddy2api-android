@@ -412,8 +412,77 @@ function formatRate(rate) {
   return n.toFixed(1) + 'tok/s';
 }
 
+/* ── 弹窗键盘可达性 ─────────────────────────────────────────────────
+   五个 .veil 弹窗此前只有鼠标能关：Esc 无效、Tab 会跑到背景页面上（背景没被
+   禁用，键盘用户能一路 Tab 到背后的按钮）、关掉后焦点落回 body。这里统一收口，
+   各弹窗自己的关闭逻辑（停轮询、清状态）一律不动，只在外面包一层。
+   keyVeil 例外：它是鉴权门，按一下 Esc 就进不了面板，所以只做焦点圈定、不响应 Esc。 */
+const VEIL_CLOSERS = {
+  taskVeil: () => closeTasks(),
+  addVeil: () => closeAdd(),
+  remarkVeil: () => closeRemarks(),
+  evCtxVeil: () => { $('evCtxVeil').classList.remove('on'); restoreFocus('evCtxVeil'); },
+  keyVeil: () => { $('keyVeil').classList.remove('on'); restoreFocus('keyVeil'); },
+};
+const VEIL_ESC_LOCKED = new Set(['keyVeil']);
+const veilOpener = new Map(); // veil id -> 打开它的控件（关闭后焦点还回去）
+
+// focusables 弹窗里可 Tab 到的控件（按 DOM 顺序，跳过 disabled / 不可见的）。
+function focusables(root) {
+  return [...root.querySelectorAll('a[href],button,input,select,textarea,[tabindex]')]
+    .filter(el => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length > 0);
+}
+// openVeil 打开弹窗：记住是谁打开的，把焦点送进弹窗（focusSel 缺省取第一个可聚焦控件）。
+function openVeil(id, focusSel) {
+  const veil = $(id);
+  if (!veil) return;
+  const opener = document.activeElement;
+  if (opener && opener !== document.body) veilOpener.set(id, opener);
+  veil.classList.add('on');
+  syncVeilScroll();
+  const dlg = veil.querySelector('.dlg') || veil;
+  const target = (focusSel && dlg.querySelector(focusSel)) || focusables(dlg)[0];
+  if (target) setTimeout(() => target.focus(), 0);
+}
+// restoreFocus 关闭后把焦点还回打开它的控件（该控件可能已被重绘掉，那就留在原地）。
+function restoreFocus(id) {
+  syncVeilScroll();
+  const opener = veilOpener.get(id);
+  veilOpener.delete(id);
+  if (opener && opener.isConnected && typeof opener.focus === 'function') {
+    setTimeout(() => opener.focus(), 0);
+  }
+}
+// syncVeilScroll 有弹窗打开时锁住背景滚动。手机上手势会穿透到背后的页面：
+// 弹窗开着还能把列表滑走，看起来像「弹窗飘在别的内容上」。
+function syncVeilScroll() {
+  document.body.classList.toggle('veil-open', document.querySelectorAll('.veil.on').length > 0);
+}
+// topVeil 最上层（最后打开）的弹窗。
+function topVeil() {
+  const on = document.querySelectorAll('.veil.on');
+  return on.length ? on[on.length - 1] : null;
+}
+function closeVeil(id) {
+  const close = VEIL_CLOSERS[id];
+  if (close) close();
+}
+document.addEventListener('keydown', ev => {
+  const veil = topVeil();
+  if (!veil) return;
+  if (ev.key === 'Escape' && !VEIL_ESC_LOCKED.has(veil.id)) { ev.preventDefault(); closeVeil(veil.id); return; }
+  if (ev.key !== 'Tab') return;
+  const list = focusables(veil.querySelector('.dlg') || veil);
+  if (!list.length) { ev.preventDefault(); return; }
+  const first = list[0], last = list[list.length - 1], cur = document.activeElement;
+  const inside = list.includes(cur);
+  if (ev.shiftKey) {
+    if (!inside || cur === first) { ev.preventDefault(); last.focus(); }
+  } else if (!inside || cur === last) { ev.preventDefault(); first.focus(); }
+});
+
 /* ── 密钥门 ───────────────────────────────────────────────────────── */
-function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
+function openKey() { openVeil('keyVeil', '#keyInput'); }
 $('btnKey').onclick = async () => {
   const v = $('keyInput').value.trim();
   if (!v) return;
@@ -421,7 +490,7 @@ $('btnKey').onclick = async () => {
   try {
     await api('overview');
     $('keyErr').hidden = true;
-    $('keyVeil').classList.remove('on');
+    closeVeil('keyVeil');
     start();
   } catch (e) { $('keyErr').hidden = false; }
 };
@@ -1409,11 +1478,11 @@ if ($('reqBody')) $('reqBody').onclick = ev => {
   // 标题带上请求身份：弹窗遮住表格后，否则看不出打开的是哪一条。
   $('evCtxHint').textContent = [e.time ? fmtLocalDateTime(e.time) : '', e.path, e.model].filter(Boolean).join(' · ');
   $('evCtxBody').innerHTML = renderEventContext(e.context);
-  $('evCtxVeil').classList.add('on');
+  openVeil('evCtxVeil', '#btnEvCtxClose');
 };
-if ($('btnEvCtxClose')) $('btnEvCtxClose').onclick = () => $('evCtxVeil').classList.remove('on');
+if ($('btnEvCtxClose')) $('btnEvCtxClose').onclick = () => closeVeil('evCtxVeil');
 // 点遮罩关闭（与其它弹窗一致：只在点在 veil 自身时关，点内容不关）。
-if ($('evCtxVeil')) $('evCtxVeil').onclick = ev => { if (ev.target === $('evCtxVeil')) $('evCtxVeil').classList.remove('on'); };
+if ($('evCtxVeil')) $('evCtxVeil').onclick = ev => { if (ev.target === $('evCtxVeil')) closeVeil('evCtxVeil'); };
 
 /* 请求记录筛选控件。搜索框防抖 150ms：最多 1000 行重渲染，不必每键一次。
    这段顶层绑定放在 requestLogText 之前，是为了让"纯函数切片"式前端测试
@@ -1782,7 +1851,7 @@ $('cfgForm').onsubmit = async ev => {
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
 function openAdd() {
-  $('addVeil').classList.add('on');
+  openVeil('addVeil');
   // 重置到登录标签
   switchAddTab('login');
   $('addPick').hidden = false;
@@ -1849,7 +1918,7 @@ async function pollLogin() {
     $('addErr').textContent = e.message + '（关闭后重新添加）';
   }
 }
-function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); }
+function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); restoreFocus('addVeil'); }
 $('btnCloseAdd').onclick = closeAdd;
 $('btnStartLogin').onclick = startAddLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
@@ -1979,11 +2048,11 @@ function autoTaskLabel(code) {
 function openTasks(uid) {
   taskUID = uid;
   $('taskWho').textContent = uid.slice(0, 16);
-  $('taskVeil').classList.add('on');
+  openVeil('taskVeil', '#btnCloseTask');
   $('btnTaskReload').hidden = false;
   loadTasks();
 }
-function closeTasks() { $('taskVeil').classList.remove('on'); taskUID = null; }
+function closeTasks() { $('taskVeil').classList.remove('on'); taskUID = null; restoreFocus('taskVeil'); }
 $('btnCloseTask').onclick = closeTasks;
 $('btnTaskReload').onclick = loadTasks;
 
@@ -4504,9 +4573,9 @@ function renderRemarkBody(onlyUID) {
 }
 function openRemarks(onlyUID) {
   renderRemarkBody(typeof onlyUID === 'string' ? onlyUID : '');
-  if ($('remarkVeil')) $('remarkVeil').classList.add('on');
+  openVeil('remarkVeil');
 }
-function closeRemarks() { if ($('remarkVeil')) $('remarkVeil').classList.remove('on'); }
+function closeRemarks() { if ($('remarkVeil')) $('remarkVeil').classList.remove('on'); restoreFocus('remarkVeil'); }
 function saveRemarkForm() {
   // 在现有映射上合并：单账号编辑器里只有一行，整体替换会把其它号的备注全清掉。
   const map = Object.assign({}, remarksAll());

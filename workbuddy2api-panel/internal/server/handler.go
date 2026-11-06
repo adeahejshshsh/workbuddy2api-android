@@ -245,8 +245,12 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) }))
 	// 出视频（异步任务）：提交后可 wait=true 阻塞到出片，或拿 task_id 走查询端点。
 	// 任务只对**提交它的账号**可见（见 videos.go 的台账）。
+	// POST /v1/videos 与 GET /v1/videos/{id}/content 是 OpenAI Videos 资源的标准路径，
+	// 与下面三条自解释路径共用同一份实现（OpenAI 那套已于 2026-09-24 关停，形状仍在 SDK 里）。
+	h.mux.HandleFunc("POST /v1/videos", h.withAuth(h.videos))
 	h.mux.HandleFunc("POST /v1/videos/generations", h.withAuth(h.videos))
 	h.mux.HandleFunc("POST /v1/videos/tasks", h.withAuth(h.videoTasks))
+	h.mux.HandleFunc("GET /v1/videos/{task_id}/content", h.withAuth(h.videoContent))
 	h.mux.HandleFunc("GET /v1/videos/{task_id}", h.withAuth(h.videoTask))
 	// 去水印（裁白边）：默认关闭（features.watermark_strip_enabled）。
 	// 关着时回 403，MCP 的 strip_watermark 工具也不出现。
@@ -1118,11 +1122,18 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 	return dynamicModelsCache.ids
 }
 
+// budgetAdmittedKey 上游入口（/v1/responses 的托管出图）已经过了积分闸：同一请求后面的对话环节不再判。
+// 否则出图入账后累计越过上限，对话一步就会被拒——图扣了钱却交不出去。代价是最多超支一次对话。
+type budgetAdmittedKey struct{}
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 积分闸（在鉴权之后、读体之前）：四个会真烧积分的入口在这里或各自的 handler
 	// 开头判一次。放在鉴权之后是硬要求 —— 拒绝文案会暴露成本水位，不能让未鉴权
 	// 请求拿到；也不能让外部请求把 budget.rejected 计数打脏。
-	if !h.admitBudget(w, r) {
+	//
+	// 上游入口（/v1/responses 的托管出图）已经放行过的请求在 ctx 里打了标记：出图入账
+	// 会把累计推高，这里不能再按新累计把整个请求拒掉（见 budgetAdmittedKey）。
+	if admitted, _ := r.Context().Value(budgetAdmittedKey{}).(bool); !admitted && !h.admitBudget(w, r) {
 		return
 	}
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；

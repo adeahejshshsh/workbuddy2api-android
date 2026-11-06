@@ -697,6 +697,24 @@ http://127.0.0.1:7863/panel/
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
 
+### 媒体端点（图 / 视频 / MCP）
+
+| 端点 | 说明 |
+|---|---|
+| `POST /v1/images/generations` | 文生图 |
+| `POST /v1/images/edits` | 改图；`image` 可传公网 URL、`data:` URL 或 multipart 文件 |
+| `POST /v1/images/strip-watermark` | 裁掉底部纯白留白（顺带去水印），默认关闭 |
+| `POST /v1/videos` · `POST /v1/videos/generations` | 提交视频任务（同一份实现）。缺省 `wait=true` 阻塞到出片回 200，`wait=false` 秒回 `task_id` |
+| `GET /v1/videos/{task_id}` · `POST /v1/videos/tasks` | 查任务（`queued` / `in_progress` / `completed` / `failed`） |
+| `GET /v1/videos/{task_id}/content` | 取成品字节：流式转发签名直链、不落盘；任务没出片回 409，成品超限回 502 而不是截断 |
+| `POST /mcp` | MCP（JSON-RPC 2.0，Streamable HTTP 形态） |
+
+视频回执按 OpenAI Videos 的 Video 资源出（`object:"video"`、`status` 四态、`seconds` 是**字符串**、`progress` 只有 0/100、`error` 是 `{code,message}` 对象），另带 `data[].url` / `videos[].url` / `usage.credit` 这几个自解释字段 —— OpenAI 的 Videos API 已于 2026-09-24 关停，这里对齐的是它还留在各家 SDK 里的形状。
+
+图片侧 `response_format:"b64_json"` 由网关取直链后转 base64（上游无视该参数）；`n>1` 直接回 400 —— 上游一次只出一张，宁可拒绝也不静默少给。所有「网关主动回读上游直链」的路径（b64 转换、`image_generation` 工具、视频 `/content`）统一走 `media_fetch.go`：只认产物域、不跟随重定向、绑定请求 ctx、超限报错不截断、同时最多 4 路、错误文本不含签名 URL。
+
+Responses 的托管出图（`{"type":"image_generation"}`）也在这套端点上：客户端只声明工具，网关先让模型自己写提示词（探测），再走与 `/v1/images/generations` 同口径的出图管道（选号 / 白名单 / 记账），成品以 `image_generation_call` 输出项交付（`result` 是 base64）。单请求只出一张。
+
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 
 ```json
