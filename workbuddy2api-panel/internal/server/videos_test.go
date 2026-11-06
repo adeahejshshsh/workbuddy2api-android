@@ -249,7 +249,8 @@ func TestVideosSyncWaitsForCompletion(t *testing.T) {
 	if u, _ := videos[0].(map[string]any)["url"].(string); u != "https://cos.example/v.mp4?sig=x" {
 		t.Fatalf("成品 URL 不对：%v", videos[0])
 	}
-	if got["size"] != "768P" || got["seconds"] != float64(4) {
+	// seconds 按 OpenAI Videos 定义成字符串（不是数字）。
+	if got["size"] != "768P" || got["seconds"] != "4" {
 		t.Fatalf("size/seconds 应透出：%v", got)
 	}
 	usage, _ := got["usage"].(map[string]any)
@@ -469,7 +470,7 @@ func TestVideoRepeatPollKeepsUsage(t *testing.T) {
 	if use2 == nil || use2["credit"] != 57.14 {
 		t.Fatalf("重复查询仍应带 credit（上游这次没回 usage）：%v", second)
 	}
-	if second["size"] != "768P" || second["seconds"] != float64(4) {
+	if second["size"] != "768P" || second["seconds"] != "4" {
 		t.Fatalf("重复查询应从台账补齐 size/seconds：%v", second)
 	}
 	// 只该记一次账

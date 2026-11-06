@@ -318,6 +318,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 /* ── 弹层 ─────────────────────────────────────────────────────────── */
 .veil { position: fixed; inset: 0; background: rgba(6,8,13,.62); backdrop-filter: blur(2px); display: none; z-index: 60; }
 .veil.on { display: flex; align-items: center; justify-content: center; padding: 20px; }
+/* 弹窗打开时锁住背景滚动（openVeil / restoreFocus 维护）：否则手机上手势会穿透，
+   弹窗开着还能把背后的列表滑走。 */
+body.veil-open { overflow: hidden; }
 .dlg {
   background: var(--surface); border: 1px solid var(--line); border-radius: 13px;
   width: 560px; max-width: 100%; max-height: 86vh; display: flex; flex-direction: column;
@@ -1412,9 +1415,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
 <!-- 积分任务 -->
 <div class="veil" id="taskVeil">
-  <div class="dlg" style="width:940px">
+  <div class="dlg" style="width:940px" role="dialog" aria-modal="true" aria-labelledby="taskVeilTitle">
     <header>
-      <h3>积分任务 <span class="hint" id="taskWho"></span></h3>
+      <h3 id="taskVeilTitle">积分任务 <span class="hint" id="taskWho"></span></h3>
       <div class="hint">查询上游任务进度；「接受」为报名（幂等），「领取」在进度达标后可用。所有操作走网关，无需外部脚本。</div>
     </header>
     <div class="body">
@@ -1439,9 +1442,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
 <!-- 添加账号 -->
 <div class="veil" id="addVeil">
-  <div class="dlg">
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="addVeilTitle">
     <header>
-      <h3>添加账号</h3>
+      <h3 id="addVeilTitle">添加账号</h3>
       <div class="tabs" id="addTabs">
         <button class="tab on" data-tab="login">浏览器登录</button>
         <button class="tab" data-tab="import">导入 JSON</button>
@@ -1487,9 +1490,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
 <!-- 密钥 -->
 <div class="veil" id="keyVeil" data-lock="1">
-  <div class="dlg" style="width:420px">
+  <div class="dlg" style="width:420px" role="dialog" aria-modal="true" aria-labelledby="keyVeilTitle">
     <header>
-      <h3>需要访问密钥</h3>
+      <h3 id="keyVeilTitle">需要访问密钥</h3>
       <div class="hint">该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。</div>
     </header>
     <div class="body">
@@ -1504,9 +1507,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 </div>
 
 <div class="veil" id="remarkVeil">
-  <div class="dlg" style="width:460px">
+  <div class="dlg" style="width:460px" role="dialog" aria-modal="true" aria-labelledby="remarkVeilTitle">
     <header>
-      <h3>账号备注与分组</h3>
+      <h3 id="remarkVeilTitle">账号备注与分组</h3>
       <div class="hint">备注只存在这台设备的浏览器里（localStorage），不写回服务端；<b>分组写回服务端</b>（state.json），用于账号池按组筛选与组内批量。两者都不参与选号。</div>
     </header>
     <div class="body">
@@ -1521,14 +1524,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   </div>
 </div>
 
-<div id="toasts"></div>
+<div id="toasts" role="status" aria-live="polite"></div>
 
 <!-- 请求上下文：从请求记录表点行打开。内容可能很长，交给 .dlg .body 滚动，
      不挤占表格高度（内嵌展开会把整张表往下推）。 -->
 <div class="veil" id="evCtxVeil">
-  <div class="dlg" style="width:880px">
+  <div class="dlg" style="width:880px" role="dialog" aria-modal="true" aria-labelledby="evCtxVeilTitle">
     <header>
-      <h3>请求上下文</h3>
+      <h3 id="evCtxVeilTitle">请求上下文</h3>
       <div class="hint" id="evCtxHint"></div>
     </header>
     <div class="body" id="evCtxBody"></div>

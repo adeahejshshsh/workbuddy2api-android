@@ -204,8 +204,9 @@ func TestVideoRateLimitedServedFromCache(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("回程不是 JSON：%s", rec.Body)
 	}
-	if got["status"] != "running" {
-		t.Fatalf("缓存状态应是 running：%v", got)
+	// 上游 running 在回执里归一成 OpenAI 的 in_progress（见 openAIVideoStatus）。
+	if got["status"] != "in_progress" {
+		t.Fatalf("缓存状态应是 in_progress：%v", got)
 	}
 	calls := f.count("/v2/videos/tasks")
 	// 冷却窗口内的再次查询：直接回快照，不再打上游（否则等于自己揍自己）。
