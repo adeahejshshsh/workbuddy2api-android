@@ -1487,8 +1487,8 @@ body.veil-open { overflow: hidden; }
       </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
-        <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
+        <div class="hint" style="margin-bottom:8px">选择 JSON 文件批量导入账号。支持三种：cockpit tools 导出（账号数组，snake_case）、本仓 <code>auths/workbuddy-&lt;uid&gt;.json</code> 单个凭据文件（camelCase，可一次选一个、也可自己拼成数组）、以及 <code>{"accounts":[…]}</code> 包装。凭据含 refresh token，导入后无需重新登录。</div>
+        <input type="file" id="importFile" accept=".json" multiple style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>

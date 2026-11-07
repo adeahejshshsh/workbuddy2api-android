@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +40,11 @@ type cockpitAccount struct {
 	CheckinStreak     int    `json:"checkin_streak"`
 	CreatedAt         int64  `json:"created_at"`
 	LastUsed          int64  `json:"last_used"`
+	// DeviceToken 设备风控 token（X-Device-Token）。cockpit 导出与本仓 auths/*.json
+	// 都可能带；丢了它，导入的号在风控维度上等于「换了台设备」，指纹会漂。
+	DeviceToken string `json:"device_token"`
+	// Realm 显式 realm（本仓 auths/*.json 的 auth.realm）。空 = 按 domain 推断。
+	Realm string `json:"realm"`
 }
 
 // postImportActivate 导入后的后置动作（异步执行，bug #23）：注册激活 / 领 trial /
@@ -121,9 +127,9 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var accounts []cockpitAccount
-	if err := json.Unmarshal(raw, &accounts); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+	accounts, perr := parseImportPayload(raw)
+	if perr != nil {
+		writeErr(w, http.StatusBadRequest, perr.Error())
 		return
 	}
 	if len(accounts) == 0 {
@@ -151,8 +157,9 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// 按 domain 推断 realm：workbuddy.ai 家族 → global，否则 cn。
-		realm := auth.ResolveRealm("", acc.Domain)
+		// realm：本仓 auths/*.json 里带 auth.realm 的按它走（国际版号否则会被判回 cn）；
+		// 没带就按 domain 推断 —— workbuddy.ai 家族 → global，否则 cn。
+		realm := auth.ResolveRealm(acc.Realm, acc.Domain)
 
 		// cockpit tools 的 expires_at 为毫秒时间戳，转为秒。
 		//
@@ -198,6 +205,11 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			a.EnterpriseID = ent
 		} else if ent := strings.TrimSpace(acc.EnterpriseIDCamel); ent != "" {
 			a.EnterpriseID = ent
+		}
+		// 设备风控 token 同样带过去：本仓 auths/*.json 里存着它，丢了下游会按「新设备」
+		// 重新算指纹（等于自己把风控线索断了）。
+		if dt := strings.TrimSpace(acc.DeviceToken); dt != "" {
+			a.DeviceToken = dt
 		}
 
 		if realm == "global" {
@@ -252,6 +264,128 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		"skipped":  skipped,
 		"errors":   errs,
 	})
+}
+
+// parseImportPayload 解析导入文件，支持三种形状（用户手上有什么就能导什么）：
+//
+//  1. cockpit tools 导出：[{id,uid,access_token,refresh_token,expires_at,domain,…}, …]（snake_case）
+//  2. 本仓 auths/*.json 单个文件：{"auth":{accessToken,refreshToken,expiresAt,domain,realm},
+//     "account":{uid,enterpriseId,nickname},"device_token":…}（camelCase，嵌套形）
+//  3. 上面两种的数组，或 {"accounts":[…] } 包装
+//
+// 为什么加 2：换包名后旧包的私有目录搬不过来（/data/data 非 root 读不到），用户能拿到
+// 的就是 auths/*.json 这些文件本身；只认 cockpit 形状等于逼人手工改键名。
+func parseImportPayload(raw []byte) ([]cockpitAccount, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty file")
+	}
+	var items []json.RawMessage
+	switch trimmed[0] {
+	case '[':
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return nil, fmt.Errorf("invalid json: %w", err)
+		}
+	case '{':
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &probe); err != nil {
+			return nil, fmt.Errorf("invalid json: %w", err)
+		}
+		if accs, ok := probe["accounts"]; ok {
+			if err := json.Unmarshal(accs, &items); err != nil {
+				return nil, fmt.Errorf("accounts: %w", err)
+			}
+		} else {
+			items = []json.RawMessage{trimmed}
+		}
+	default:
+		return nil, fmt.Errorf("不是 JSON 对象或数组")
+	}
+	out := make([]cockpitAccount, 0, len(items))
+	for i, it := range items {
+		acc, err := decodeImportItem(it)
+		if err != nil {
+			return nil, fmt.Errorf("第 %d 条: %w", i+1, err)
+		}
+		out = append(out, acc)
+	}
+	return out, nil
+}
+
+// decodeImportItem 单条：靠键名区分 cockpit（snake_case）与本仓 auths（camelCase）。
+func decodeImportItem(raw json.RawMessage) (cockpitAccount, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return cockpitAccount{}, fmt.Errorf("不是对象: %w", err)
+	}
+	if _, ok := probe["auth"]; ok {
+		return decodeNativeAuth(raw)
+	}
+	if _, ok := probe["accessToken"]; ok {
+		return decodeNativeAuth(raw)
+	}
+
+	var c cockpitAccount
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// decodeNativeAuth 本仓 auths/*.json：嵌套形与扁平形都认（与 auth.Parse 同口径）。
+func decodeNativeAuth(raw json.RawMessage) (cockpitAccount, error) {
+	var n struct {
+		Auth struct {
+			AccessToken  string `json:"accessToken"`
+			RefreshToken string `json:"refreshToken"`
+			ExpiresAt    int64  `json:"expiresAt"`
+			Domain       string `json:"domain"`
+			Realm        string `json:"realm"`
+		} `json:"auth"`
+		Account struct {
+			UID          string `json:"uid"`
+			EnterpriseID string `json:"enterpriseId"`
+			Nickname     string `json:"nickname"`
+		} `json:"account"`
+		// 扁平形（手写/旧版）
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresAt    int64  `json:"expiresAt"`
+		Domain       string `json:"domain"`
+		Realm        string `json:"realm"`
+		UID          string `json:"uid"`
+		EnterpriseID string `json:"enterpriseId"`
+		Nickname     string `json:"nickname"`
+		DeviceToken  string `json:"device_token"`
+	}
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return cockpitAccount{}, err
+	}
+	c := cockpitAccount{
+		UID:          firstNonEmpty(n.Account.UID, n.UID),
+		Nickname:     firstNonEmpty(n.Account.Nickname, n.Nickname),
+		EnterpriseID: firstNonEmpty(n.Account.EnterpriseID, n.EnterpriseID),
+		AccessToken:  firstNonEmpty(n.Auth.AccessToken, n.AccessToken),
+		RefreshToken: firstNonEmpty(n.Auth.RefreshToken, n.RefreshToken),
+		ExpiresAt:    n.Auth.ExpiresAt,
+		Domain:       firstNonEmpty(n.Auth.Domain, n.Domain),
+		Realm:        firstNonEmpty(n.Auth.Realm, n.Realm),
+		DeviceToken:  n.DeviceToken,
+	}
+	if c.ExpiresAt == 0 {
+		c.ExpiresAt = n.ExpiresAt
+	}
+	return c, nil
+}
+
+// firstNonEmpty 取第一个非空（trim 后）值。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // validImportUID 校验导入 uid 是否可用于拼文件名（同 login.go validUID 口径）。

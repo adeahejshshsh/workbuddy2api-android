@@ -1925,11 +1925,29 @@ $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
 $('importFile').onchange = async () => {
-  const file = $('importFile').files[0];
-  if (!file) return;
+  const files = Array.from($('importFile').files || []);
+  if (!files.length) return;
   $('importDone').hidden = true; $('importErr').hidden = true;
   const fd = new FormData();
-  fd.append('file', file);
+  if (files.length === 1) {
+    fd.append('file', files[0]);
+  } else {
+    // 多选（迁移场景：auths/ 下有几十个 workbuddy-<uid>.json）：后端只收一个 file 字段，
+    // 这里逐个 parse 拼成数组再上传。任何一份不是合法 JSON 就整体中止 —— 半份导入比
+    // 不导入更难收拾（用户不知道哪几个进去了）。
+    const merged = [];
+    for (const f of files) {
+      let v;
+      try { v = JSON.parse(await f.text()); }
+      catch (e) {
+        $('importErr').hidden = false;
+        $('importErr').textContent = '文件 ' + f.name + ' 不是合法 JSON：' + e.message;
+        return;
+      }
+      if (Array.isArray(v)) merged.push(...v); else merged.push(v);
+    }
+    fd.append('file', new Blob([JSON.stringify(merged)], { type: 'application/json' }), 'merged.json');
+  }
   const h = {};
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
