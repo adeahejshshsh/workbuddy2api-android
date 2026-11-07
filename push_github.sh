@@ -330,10 +330,13 @@ body = (changes or f"APK v{ver}") + """
 ---
 
 ### 安装
-1. 下载下方 `WorkBuddy2API-v<版本>-<构建时间>.apk` 覆盖安装即升级（账号与 api_key 保留）
+1. 下载下方 `WorkBuddy2API-v<版本>-<构建时间>.apk` 安装。
+   **v1.35.10 起包名是 `com.workbuddy.api`**：与旧包 `com.dsh.wb2api` 可共存，但**不能覆盖升级**
+   （签名也换了）。账号迁移走「旧包面板 → 导出已登录账号 → 新包面板 → 导入 JSON」，不需要 root
 2. 打开 App → 顶栏点「省电白名单」允许
 3. 国产 ROM 再放行：自启动 / 省电策略无限制 / 任务列表锁定后台
-4. 客户端接入：Base URL `http://<手机IP>:7863/v1`，Key 用面板里的（点「复制密钥」）
+4. 客户端接入：Base URL `http://<手机IP>:7863/v1`，Key 用面板里的（点「复制密钥」）。
+   换包后是新生成的 key，可在面板「配置」里改回旧值
 
 ### 说明
 - 包名 `com.workbuddy.api`，minSdk 24 / targetSdk 34；本包用作者自备密钥签名
