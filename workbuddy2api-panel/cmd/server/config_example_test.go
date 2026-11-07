@@ -33,4 +33,9 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if c.Pool.ModelFallback == nil {
 		t.Error("pool.model_fallback 示例应存在（空对象即可），否则用户不知道有这张表")
 	}
+	// 11140 连坐暂停是「出事才知道存在」的配置项：示例里必须给出来，否则用户只能
+	// 从 README 反推，而这条恰恰是风控扫荡时最该知道能不能关的开关。
+	if c.Upstream.RestrictionHoldSeconds != 1800 {
+		t.Errorf("upstream.restriction_hold_seconds 示例值应为 1800，实际 %d", c.Upstream.RestrictionHoldSeconds)
+	}
 }

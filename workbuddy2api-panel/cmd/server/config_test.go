@@ -992,3 +992,43 @@ func TestScheduleHumanizeConfig(t *testing.T) {
 		t.Fatalf("env 未生效：%+v", c.Schedule)
 	}
 }
+
+// upstream.restriction_hold_seconds：缺省 1800s；0 = 只停手不暂停；负值 fail fast。
+//
+// 为什么单独钉：这个值决定「一轮风控扫荡里要不要停手 30 分钟」。静默钳到别的数
+// 会让运维以为配上了其实没配上；负值更是无意义，必须在启动时就报错。
+func TestRestrictionHoldConfig(t *testing.T) {
+	c := Default()
+	if c.Upstream.RestrictionHoldSeconds != 1800 {
+		t.Fatalf("缺省 restriction_hold_seconds=%d want 1800", c.Upstream.RestrictionHoldSeconds)
+	}
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.RestrictionHoldDur != 30*time.Minute {
+		t.Fatalf("RestrictionHoldDur=%v want 30m", c.RestrictionHoldDur)
+	}
+
+	// 0 = 关闭全池暂停（只保留命中即停手）
+	off, err := ParseConfig([]byte(`{"upstream":{"restriction_hold_seconds":0}}`))
+	if err != nil {
+		t.Fatalf("0 应合法: %v", err)
+	}
+	if off.RestrictionHoldDur != 0 {
+		t.Fatalf("0 应解析为 0，实际 %v", off.RestrictionHoldDur)
+	}
+
+	// 自定义值
+	custom, err := ParseConfig([]byte(`{"upstream":{"restriction_hold_seconds":90}}`))
+	if err != nil {
+		t.Fatalf("90 应合法: %v", err)
+	}
+	if custom.RestrictionHoldDur != 90*time.Second {
+		t.Fatalf("90s 解析成 %v", custom.RestrictionHoldDur)
+	}
+
+	// 负值无意义：启动即报错，不静默钳
+	if _, err := ParseConfig([]byte(`{"upstream":{"restriction_hold_seconds":-1}}`)); err == nil {
+		t.Fatal("负值应报错")
+	}
+}
