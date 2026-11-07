@@ -1977,17 +1977,42 @@ $('btnExportAccounts').onclick = async () => {
     ta.rows = Math.min(14, Math.max(5, txt.split('\n').length));
     ta.hidden = false;
     $('btnCopyExport').hidden = false;
-    $('exportHint').hidden = false;
-    $('exportHint').textContent = arr.length
-      ? '已导出 ' + arr.length + ' 个账号（含 refresh token，注意保管）。点「复制」后可直接粘到上面的输入框，或存成 .json 备份。'
-      : '池里没有可导出的账号（需要账号带 refresh token）。';
-    // 浏览器里给个下载链接；WebView 里点了没反应，所以只当附加项
+
     const cd = r.headers.get('Content-Disposition') || '';
     const m = cd.match(/filename="([^"]+)"/);
+    const fname = m ? m[1] : 'workbuddy-accounts.json';
+
+    // 先交给壳写进系统「下载」文件夹（JS 桥，见 MainActivity.PanelBridge）。
+    // 网页自己下载在 WebView 里是不生效的：<a download> 要宿主实现 DownloadListener，
+    // 而 blob: URL 宿主读不到内容 —— 所以「导出为文件」必须由壳来写。
+    let savedPath = '', saveErr = '';
+    if (arr.length && window.WB2API && typeof window.WB2API.saveJson === 'function') {
+      try {
+        const res = String(window.WB2API.saveJson(fname, txt) || '');
+        if (res.indexOf('ok|') === 0) savedPath = res.slice(3);
+        else saveErr = (res.indexOf('err|') === 0 ? res.slice(4) : res) || '未知错误';
+      } catch (e) { saveErr = String(e && e.message ? e.message : e); }
+    }
+
+    $('exportHint').hidden = false;
+    if (!arr.length) {
+      $('exportHint').textContent = '池里没有可导出的账号（需要账号带 refresh token）。';
+    } else if (savedPath) {
+      $('exportHint').textContent = '已导出 ' + arr.length + ' 个账号，并保存到「下载」文件夹：'
+        + savedPath.split('/').pop() + '（含 refresh token，注意保管）。';
+    } else if (saveErr) {
+      $('exportHint').textContent = '已导出 ' + arr.length + ' 个账号，但写文件失败（' + saveErr
+        + '）。请点「复制」后自行保存。';
+    } else {
+      $('exportHint').textContent = '已导出 ' + arr.length
+        + ' 个账号（含 refresh token）。点「复制」后可直接粘到上面的输入框，或点下面的链接下载。';
+    }
+
+    // 只有没落盘时（桌面浏览器 / 桥不可用）才给下载链接
     const a = $('exportDownload');
     a.href = URL.createObjectURL(new Blob([txt], { type: 'application/json' }));
-    a.download = m ? m[1] : 'workbuddy-accounts.json';
-    a.hidden = false;
+    a.download = fname;
+    a.hidden = !!savedPath;
   } catch (e) {
     $('exportHint').hidden = false;
     $('exportHint').textContent = '导出失败：' + e.message;

@@ -152,6 +152,60 @@ public class MainActivity extends Activity {
         return name;
     }
 
+    /**
+     * 面板 → 壳的 JS 桥：把导出的凭据写进系统「下载」文件夹。
+     *
+     * 为什么必须由壳来写：WebView 的 {@code <a download>} 要宿主实现 DownloadListener，
+     * 而面板拿到的是 blob: URL —— 宿主读不到内容，点下载链接只会毫无反应。API 29+ 用
+     * MediaStore 写 Download 集合**不需要任何权限**，这是唯一稳的路子。
+     *
+     * 安全边界：只暴露一个方法，且限制扩展名（.json）、前缀（workbuddy-）、大小（8MB），
+     * 不提供通用「写任意文件」能力。WebView 只加载 127.0.0.1 的面板（外链走系统浏览器）。
+     */
+    public class PanelBridge {
+        @android.webkit.JavascriptInterface
+        public String saveJson(String filename, String content) {
+            try {
+                if (content == null) return "err|内容为空";
+                if (content.length() > 8 * 1024 * 1024) return "err|内容超过 8MB";
+                String name = (filename == null ? "" : filename).trim();
+                name = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+                if (name.isEmpty()) name = "workbuddy-accounts.json";
+                if (!name.toLowerCase().endsWith(".json")) name = name + ".json";
+                if (!name.startsWith("workbuddy-")) name = "workbuddy-" + name;
+
+                if (Build.VERSION.SDK_INT >= 29) {
+                    android.content.ContentValues v = new android.content.ContentValues();
+                    v.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name);
+                    v.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/json");
+                    v.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                            android.os.Environment.DIRECTORY_DOWNLOADS);
+                    Uri uri = getContentResolver().insert(
+                            android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                    if (uri == null) return "err|系统拒绝了写入（MediaStore 返回空）";
+                    try (java.io.OutputStream os = getContentResolver().openOutputStream(uri)) {
+                        if (os == null) return "err|打不开输出流";
+                        os.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        os.flush();
+                    }
+                    return "ok|" + android.os.Environment.DIRECTORY_DOWNLOADS + "/" + name;
+                }
+                // API < 29：公共 Download 需要 WRITE_EXTERNAL_STORAGE（还得走运行时权限），
+                // 为一个边缘版本加整套权限流程不值当 —— 退回应用自己的外部目录。
+                File dir = getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS);
+                if (dir == null) return "err|外部存储不可用";
+                if (!dir.exists() && !dir.mkdirs()) return "err|创建目录失败";
+                File f = new File(dir, name);
+                try (java.io.FileOutputStream fo = new java.io.FileOutputStream(f)) {
+                    fo.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+                return "ok|" + f.getAbsolutePath();
+            } catch (Throwable t) {
+                return "err|" + t.getClass().getSimpleName() + ": " + t.getMessage();
+            }
+        }
+    }
+
     // ── 设计令牌（= 面板 :root / [data-theme="dark"]）
     static final int BG       = 0xFF0C0E14;   // --bg
     static final int SURFACE  = 0xFF14171F;   // --surface
@@ -276,6 +330,12 @@ public class MainActivity extends Activity {
         // 外部资源留下降级口子。
         web.setBackgroundColor(BG);
         web.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        // 面板 → 壳的最小桥（只暴露 saveJson）：导出凭据要落到系统「下载」文件夹。
+        // WebView 的 <a download> 需要宿主实现 DownloadListener，而 blob: URL 宿主读不到
+        // 内容；用 MediaStore 由壳写入是唯一稳的路子（API 29+ 写 Download 无需权限）。
+        // 安全边界：WebView 只加载 127.0.0.1 的面板，外链一律交给系统浏览器
+        // （见 shouldOverrideUrlLoading），所以这里注入的接口不会被第三方页面拿到。
+        web.addJavascriptInterface(new PanelBridge(), "WB2API");
         web.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView v, String url) {
                 panelLoading = false;   // 本次加载结束（成功或错误页都算结束，bug #1）

@@ -1612,3 +1612,88 @@ catch (e) { console.log('LOAD FAIL: ' + (e && e.stack ? e.stack : e)); process.e
 		t.Fatalf("导出流程未通过:\n%s", out)
 	}
 }
+
+// TestAppJSExportSavesToDownloads 「导出已登录账号」要真的落到系统「下载」文件夹。
+//
+// 为什么要走 JS 桥：WebView 里 <a download> 不生效（宿主没实现 DownloadListener），
+// 而 blob: URL 宿主读不到内容 —— 网页自己下载这条路在 App 内根本走不通。所以判据是
+// 「调用了 WB2API.saveJson，并把返回的落盘路径显示给用户」。
+func TestAppJSExportSavesToDownloads(t *testing.T) {
+	nodeBin(t)
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; }, apply() { return inert; }, construct() { return inert; }, has() { return true; },
+});
+const els = {};
+function el(id, init) {
+  if (!els[id]) els[id] = Object.assign({ id, hidden: false, disabled: false, textContent: '', value: '',
+    rows: 6, files: null, href: '', download: '', style: {}, className: '',
+    focus() {}, select() {}, setAttribute() {}, getAttribute() { return null; },
+    addEventListener() {}, appendChild() {} }, init || {});
+  return els[id];
+}
+['btnExportAccounts','btnCopyExport','exportDownload','exportHint','exportOut'].forEach(el);
+el('btnCopyExport', { hidden: true }); el('exportDownload', { hidden: true });
+el('exportHint', { hidden: true }); el('exportOut', { hidden: true });
+
+const exported = JSON.stringify([{ uid: 'u-1', refresh_token: 'RT-1' }], null, 2);
+let savedName = '', savedBody = '';
+const bridge = {
+  saveJson: (name, content) => { savedName = name; savedBody = content; return 'ok|Download/' + name; },
+};
+const sandbox = new Proxy({
+  location: { hash: '#accounts' }, history: { replaceState() {} },
+  localStorage: { getItem: () => 'k', setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { getElementById: id => (els[id] ? els[id] : inert),
+    querySelectorAll: () => [], querySelector: () => inert, addEventListener() {},
+    documentElement: inert, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  fetch: (u) => String(u).indexOf('/panel/api/export/accounts') < 0
+    ? new Promise(() => {})
+    : Promise.resolve({ ok: true, text: () => Promise.resolve(exported),
+        headers: { get: () => 'attachment; filename="workbuddy-accounts-20261107.json"' } }),
+  URL: { createObjectURL: () => 'blob:fake' },
+  Blob: function (p) { this.parts = p; },
+  WB2API: bridge,
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, WeakMap, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+try { vm.runInContext("'use strict';\n" + src, sandbox, { filename: 'app.js' }); }
+catch (e) { console.log('LOAD FAIL: ' + (e && e.stack ? e.stack : e)); process.exit(2); }
+
+(async () => {
+  function fail(m) { console.log('FAIL: ' + m); process.exit(1); }
+  await els.btnExportAccounts.onclick();
+  if (!savedName) fail('没有调用 JS 桥 saveJson（文件不会落到下载文件夹）');
+  if (savedName.indexOf('workbuddy-accounts-') < 0) fail('传给桥的文件名不对: ' + savedName);
+  if (String(savedBody).indexOf('u-1') < 0) fail('传给桥的内容不是导出结果');
+  if (String(els.exportHint.textContent).indexOf('下载') < 0)
+    fail('提示里没有告诉用户存到哪了：' + els.exportHint.textContent);
+  if (!els.exportDownload.hidden) fail('已落盘时不该再显示网页下载链接');
+  console.log('OK');
+  process.exit(0);
+})().catch(e => { console.log('FAIL: ' + (e && e.stack ? e.stack : e)); process.exit(1); });
+`
+	f, err := os.CreateTemp(t.TempDir(), "exportsave-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("导出落盘测试失败: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("OK")) {
+		t.Fatalf("导出落盘未通过:\n%s", out)
+	}
+}
