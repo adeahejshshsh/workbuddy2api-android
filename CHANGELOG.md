@@ -1,5 +1,66 @@
 # 变更记录
 
+## v1.35.10（当前）
+
+> 换签名 + 换包名的一版：旧签名密钥永久丢失，新包 `com.workbuddy.api` 可与旧包共存。
+> 同时把上游 11-07 的两批提交（13 条）吃完，并补上「导出 → 导入凭据」这条迁移闭环
+> —— 旧包私有目录搬不过来时，这是唯一不依赖 root 的路。
+
+### 破坏性变更：换签名 + 换包名
+
+- 包名 `com.dsh.wb2api` → **`com.workbuddy.api`**，应用名 `WorkBuddy API`
+- 新签名密钥（keystore 与口令都在 `.gitignore` + 推送排除清单里，永不入库）；
+  旧包**无法覆盖升级**，但两个包可以同时安装，便于过渡
+- 旧包的账号/配置在私有目录里（`allowBackup=false`、无导出端点、非 debuggable），
+  换包后搬不过来 —— 用下面的「导出 / 导入」闭环
+
+### 新能力：凭据迁移闭环
+
+- **导出**：`GET /panel/api/export/accounts`（走 Bearer 鉴权）。输出与导入**同构**的
+  snake_case 数组，含 `refresh_token` / `device_token` / `realm` / 企业标识；
+  只导有 refresh token 的号，`Cache-Control: no-store`，日志不记 token
+- **落文件**：面板「导出已登录账号」由壳写进系统「下载」文件夹（MediaStore，
+  API 29+ 免权限），文件名 `workbuddy-accounts-<时间>.json`；桥不可用时退回剪贴板
+- **导入**：认三种形状 —— cockpit 导出（snake_case 数组）、本仓 `auths/*.json`
+  （嵌套/扁平）、`{"accounts":[…]}` 包装；文件框支持多选（前端合并成一次上传），
+  另有「粘贴 JSON」兜底
+- **覆盖前求证**：导入会盖掉同名凭据，所以先跑一次 refresh 三态判定 ——
+  只有 alive 才覆盖，dead / inconclusive 保留原凭据（上游 `e36ad07`）
+
+### 上游 11-07 两批（13 条，合 8 条）
+
+- 🃏 **`/v1/search` 卡片改写**：上游把答案引擎的富文本卡片混在 results 里（`url` 为空），
+  DSH 插件一条不合法就整包作废；现在改写成同词检索链接（`29d9879`）
+- 🚧 **11140 风控连坐**：中文「账号存在异常行为」此前只落软冷却 10 分钟、请求继续换号，
+  一个请求能把整池送进风控；现在命中即停手，15 分钟窗内 ≥2 个号被限制则全池暂停
+  （`upstream.restriction_hold_seconds`，默认 1800s）（`b494426`）
+- 📦 **超限 413 前排空**：换成自己数字节的包装，超限先把剩余上传读掉再回 413 ——
+  否则客户端还在上传，只看到 connection reset（`b494426`）
+- 🐌 **慢上传告警**：读体 >3s 记一条 WARN（方法/路径/字节数/耗时），不含 body
+  （`c6f953a`）
+- 🎭 **兜底 system 去身份**：global 兜底 system 从「You are a helpful assistant.」改成
+  只写行为约定 —— 身份句会被模型当成注入而拒绝执行（`e4e6f5c` / issue #187）
+- 📄 README 补「Windows 常驻运行」章节（`df988aa`）；面板余额趋势控件接线用例（`f6335ce`）
+- 不移植 5 条（在途名额用例 / 盲盒与 10105 自救 / `$wbEncrypted` 解密 / 两条 autobot
+  清单），理由记在 `UPSTREAM-MERGE-LEDGER.txt`
+
+### 修掉的坑
+
+- 📎 **面板「选择文件」唤不起选择器**：WebView 需要宿主实现 `onShowFileChooser`；
+  选完仍显示「未选择文件」则是 `content://` 读权限问题 —— 现在先复制进 App cache
+  再交给 WebView
+- 🧭 **导入页 UI**：底部不再挂「获取授权链接」；选文件与导入拆成两步（先看「已选 N 个」）；
+  粘贴框纳入面板配色（原来是浏览器默认白底）
+- 🛠 **脚本硬编码路径**：`build_apk.sh` / `rebuild.sh` / `run.sh` / `apply_panel_mobile.sh`
+  改成按脚本位置相对定位
+- 📝 README 两处过时说明（`max_body_mb` 早已加回，文档还写着「已移除」）
+
+### 工具链
+
+- 环境重置后 Java/Android 侧的恢复步骤写进 `AGENT.md` §3.1：`apt-get install` 会因 dpkg
+  失败但包已下到缓存，直接 `dpkg-deb -x`；**`android.jar` 必须 API 36**
+  （`GatewayService` 覆盖的 `onTimeout(int,int)` 是 API 36 的）
+
 ## v1.35.9
 
 > 这一版是「把审查和上游一起吃干净」：上游 8 个提交（出视频 / MCP / 去水印）、
