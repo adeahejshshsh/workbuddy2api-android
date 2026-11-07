@@ -483,6 +483,8 @@ func main() {
 		SoftCooldown:   cfg.SoftRateDur,
 		MaxBodyMB:      cfg.ServerMaxBodyMB,
 		MetricsEnabled: cfg.MetricsEnabled,
+		// 11140 连坐全池暂停（upstream.restriction_hold_seconds，启动时读取）。
+		RestrictionHold: cfg.RestrictionHoldDur,
 		// 运维接口（手动补跑排程）+ 操作审计：整段缺省关闭。
 		AdminEnabled:                  cfg.Admin.Enabled,
 		AdminAPIKey:                   cfg.AdminAPIKey,

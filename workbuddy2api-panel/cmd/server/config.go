@@ -289,6 +289,13 @@ type Config struct {
 		// 长会话把 tools 定义排在几百条 messages 之后，256 KB 常在中途截断，
 		// 排障时看不到工具声明（issue #44 的反馈）。0 = 用默认值。
 		DumpMaxBytes int `json:"dump_max_bytes"`
+		// RestrictionHoldSeconds 11140 风控连坐的全池暂停时长（秒），缺省 1800。
+		// 上游把「账号存在异常行为」判在设备/出口上：一个请求顺着换号打下去会把
+		// 一串账号送进风控（hub #422：一次任务 7 个号全封）。命中 11140 网关一律就地
+		// 停手（不换号）；同一 15 分钟窗内出现 2 个不同账号被限制时，再全池暂停这么久
+		// （期间 503 + Retry-After）。0 = 关掉全池暂停，只保留「命中即停手」。
+		// 改动需重启进程。
+		RestrictionHoldSeconds int `json:"restriction_hold_seconds"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -411,6 +418,8 @@ type Config struct {
 	ShutdownTimeoutDur time.Duration `json:"-"`
 	// ServerMaxBodyMB 所有入站读体端点的请求体上限（MB）；0 = 用 32MB 安全上限。
 	ServerMaxBodyMB int `json:"-"`
+	// RestrictionHoldDur 解析后的 11140 连坐全池暂停时长；0 = 只停手不暂停。
+	RestrictionHoldDur time.Duration `json:"-"`
 	// BudgetStateFile 解析后的积分闸落盘路径（空 = 只存内存）。
 	BudgetStateFile string `json:"-"`
 	// MetricsEnabled 暴露 GET /metrics（Prometheus 文本 0.0.4）。缺省关闭：
@@ -509,6 +518,8 @@ func Default() *Config {
 	c.Server.ShutdownTimeout = "30s"
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
+	// 11140 连坐暂停缺省 30 分钟：一个请求顺着换号把整池送进风控的代价远高于停半小时。
+	c.Upstream.RestrictionHoldSeconds = 1800
 	// 人味化开关缺省关闭：旧部署行为逐字不变，要开的人显式配。
 	c.Schedule.BalanceRefreshJitterPermill = 0
 	c.Upstream.TimeoutSeconds = 120
@@ -978,6 +989,11 @@ func (c *Config) normalize() error {
 	default:
 		c.ServerMaxBodyMB = *c.Server.MaxBodyMB // 0 = 由 handler 回落 32MB 安全上限
 	}
+	// 11140 连坐暂停时长：0 = 关闭（只保留命中即停手），负值无意义。
+	if c.Upstream.RestrictionHoldSeconds < 0 {
+		return fmt.Errorf("upstream.restriction_hold_seconds: 负值 %d 无意义（0 = 关闭）", c.Upstream.RestrictionHoldSeconds)
+	}
+	c.RestrictionHoldDur = time.Duration(c.Upstream.RestrictionHoldSeconds) * time.Second
 	// 积分闸落盘路径：空字符串显式表示「只存内存」（测试/无盘部署），不回落默认。
 	c.BudgetStateFile = c.Budget.StateFile
 	if c.ServerReadTimeoutDur < 0 {

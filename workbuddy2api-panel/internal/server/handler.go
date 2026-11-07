@@ -136,6 +136,10 @@ type Config struct {
 	GrowthRunner func()
 	// Audit /admin 操作审计日志（可选；nil = 不记）。见 admin_audit.go。
 	Audit *AuditLog
+
+	// RestrictionHold 11140 风控连坐的全池暂停时长（upstream.restriction_hold_seconds，
+	// 默认 1800s；0 = 只保留「命中即停手」）。见 restrict.go。启动时读取。
+	RestrictionHold time.Duration
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -203,6 +207,9 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// restrict 11140 风控连坐保护（restrict.go）：同一窗口内多个账号被上游判
+	// 「异常行为」就全池暂停派发。与 wafIP 是两个信号源（见 restrict.go 文件头）。
+	restrict restrictionGate
 }
 
 // NewHandler 构建 handler。
@@ -1296,6 +1303,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer st.done()
 
+	// 11140 风控连坐暂停（restrict.go）：同一窗口里已经有多个账号被上游判「异常行为」，
+	// 说明这轮扫荡是冲设备/出口来的。此时再拿账号去试只会扩大损失，直接快速失败。
+	if d := h.restrict.remaining(); d > 0 {
+		secs := int(d.Seconds() + 0.999)
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "account_restricted_hold",
+			fmt.Sprintf("upstream restricted several accounts recently (403 / code 11140); dispatch paused for %ds to avoid further bans — do not rotate accounts or retry in a loop", secs),
+			"wait for the restriction hold to expire or appeal to WorkBuddy; rotating accounts during a restriction wave gets more of them banned")
+		st.status = http.StatusServiceUnavailable
+		st.outcome = reqlog.OutcomeHTTPError
+		return
+	}
+
 	tried := map[string]bool{}
 	var lastErr error
 	// slotWaited 本次请求是否已经为「号都在途占满」等过一轮名额（issue #117）。
@@ -1890,8 +1910,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
-			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+			restricted := h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
+			// 11140 风控连坐（restrict.go）：上游判的是设备/出口而不是单个账号，换号等于
+			// 把下一个号也送进去 → 就地停手，并把这次限制喂给全池暂停判定。
+			if restricted {
+				h.restrict.note(acct.UID, h.cfg.RestrictionHold)
+				break
+			}
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
 			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
 			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
@@ -2840,7 +2866,10 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 // body 仅在 ErrSoftRate/ErrAccountFault 分支用于解析重置时间/分野；model 为请求
 // 携带的模型名。uerr 是 ChatStreamContext 返回的分类信封（可携带 RetryAfter）；
 // 零值/防御路径下为 nil，冷却时长回落既有计算。
-func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) {
+//
+// 返回值 restricted 只在 11140（账号被判异常行为）时为 true：这一类错误的判据在上游
+// 是设备/出口级，调用方据此终止轮转（见 restrict.go）。
+func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) (restricted bool) {
 	// 11158「该模型不允许当前账号类型」：上游目录不提供权限字段，只能从报文里学事实
 	// ——记下 (账号 → 等级) 与 (等级 → 不能用该模型)，供 /v1/models 与面板模型页把
 	// "这个池子根本用不了的模型"从列表里摘掉（用户实测：号不能用却照样显示）。
@@ -2997,7 +3026,17 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 这里再用 code+文案双条件兜一层。
 		if upstream.IsAccountRestricted(body) {
 			h.cfg.Pool.Disable(uid, "account restricted by upstream (11140 request illegal); appeal in WorkBuddy to lift it")
-			return
+			return true
+		}
+		// 11140 的中文风控文书（「账号存在异常行为，已被限制使用」/ "unusual activity"）：
+		// 与上面的英文形态同一判据、同一处置 —— 禁用该号 + 通知调用方停手（restrict.go）。
+		//
+		// 此前这类只落到最后那行 CoolSoft（600s）：号只是"睡十分钟"，请求立刻换下一个号
+		// 继续打；而上游把这条判在设备/出口上，于是同一个请求能顺着轮转把池子挨个送进
+		// 风控（hub #422：一次任务 7 个号全封）。
+		if upstream.IsRestricted(body) {
+			h.cfg.Pool.Disable(uid, "account restricted by upstream (11140 unusual activity); appeal in WorkBuddy to lift it")
+			return true
 		}
 		if strings.Contains(strings.ToLower(body), "request illegal") {
 			// 有文案但 code 不是 11140：多半是 11‑-128 通道校验，不罚账号
@@ -3046,6 +3085,8 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			h.cfg.Pool.NoteFailures(uid)
 		}
 	}
+	// 命名返回值恒 false：只有 11140 风控分支会显式 return true。
+	return false
 }
 
 // ---------------------------------------------------------------------------
