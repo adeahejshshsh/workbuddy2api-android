@@ -1426,3 +1426,92 @@ process.exit(0);
 		t.Fatalf("导入页两步流未通过:\n%s", out)
 	}
 }
+
+// TestAppJSSwitchAddTabHidesLoginCTA 「添加账号」的底部按钮必须跟页签走。
+//
+// 现场（截图反馈）：切到「导入 JSON」页，底部仍挂着「获取授权链接」——用户会以为导入
+// 也得先走一遍 OAuth。底部三个按钮里只有「关闭」是两条流程共用的。
+func TestAppJSSwitchAddTabHidesLoginCTA(t *testing.T) {
+	nodeBin(t)
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; }, apply() { return inert; }, construct() { return inert; }, has() { return true; },
+});
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { id, hidden: false, disabled: false, textContent: '', value: '', files: null,
+    style: {}, className: '', setAttribute() {}, getAttribute() { return null; },
+    addEventListener() {}, appendChild() {}, querySelectorAll() { return []; } };
+  return els[id];
+}
+['addTabLogin','addTabImport','btnStartLogin','btnCopyUrl','btnOpenUrl','btnCloseAdd'].forEach(el);
+// 与 index.html 的初始状态对齐：复制/打开链接默认隐藏（否则「链接已就绪」判定会反）
+els.btnCopyUrl.hidden = true; els.btnOpenUrl.hidden = true;
+const tabs = [
+  { dataset: { tab: 'login' }, classList: { toggle() {} } },
+  { dataset: { tab: 'import' }, classList: { toggle() {} } },
+];
+const sandbox = new Proxy({
+  location: { hash: '#accounts' }, history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { getElementById: id => (els[id] ? els[id] : inert),
+    querySelectorAll: sel => (sel === '#addTabs .tab' ? tabs : []),
+    querySelector: () => inert, addEventListener() {},
+    documentElement: inert, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, WeakMap, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+try { vm.runInContext("'use strict';\n" + src, sandbox, { filename: 'app.js' }); }
+catch (e) { console.log('LOAD FAIL: ' + (e && e.stack ? e.stack : e)); process.exit(2); }
+
+function fail(m) { console.log('FAIL: ' + m); process.exit(1); }
+if (typeof sandbox.switchAddTab !== 'function') fail('switchAddTab 未定义');
+
+sandbox.switchAddTab('login');
+if (els.btnStartLogin.hidden) fail('登录页应显示「获取授权链接」');
+if (els.addTabLogin.hidden) fail('登录页应可见');
+if (!els.addTabImport.hidden) fail('导入页此时应隐藏');
+
+sandbox.switchAddTab('import');
+if (!els.btnStartLogin.hidden) fail('导入页仍显示「获取授权链接」（截图里的问题）');
+if (els.addTabImport.hidden) fail('导入页应可见');
+if (!els.addTabLogin.hidden) fail('登录页此时应隐藏');
+
+// 链接已就绪（复制链接可见）时，回到登录页不该再冒出「获取授权链接」
+els.btnCopyUrl.hidden = false;
+sandbox.switchAddTab('login');
+if (!els.btnStartLogin.hidden) fail('链接已就绪时仍显示「获取授权链接」，会重复发起授权');
+
+// 没有链接时回到登录页要能重新发起
+els.btnCopyUrl.hidden = true;
+sandbox.switchAddTab('import');
+sandbox.switchAddTab('login');
+if (els.btnStartLogin.hidden) fail('没有链接时回到登录页应恢复「获取授权链接」');
+console.log('OK');
+process.exit(0);
+`
+	f, err := os.CreateTemp(t.TempDir(), "addtab-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("页签按钮联动测试失败: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("OK")) {
+		t.Fatalf("页签按钮联动未通过:\n%s", out)
+	}
+}

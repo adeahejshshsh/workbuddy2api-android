@@ -1866,6 +1866,13 @@ function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('addTabLogin').hidden = tab !== 'login';
   $('addTabImport').hidden = tab !== 'import';
+  // 底部「获取授权链接」属于浏览器登录这条流程：留在导入页上会让人以为导入也得先走
+  // 一遍 OAuth（截图反馈）。链接已就绪时（复制链接可见）本来就不该再显示它。
+  if (tab === 'login') {
+    $('btnStartLogin').hidden = !$('btnCopyUrl').hidden;
+  } else {
+    $('btnStartLogin').hidden = true;
+  }
 }
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);

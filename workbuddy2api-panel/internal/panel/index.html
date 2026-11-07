@@ -134,11 +134,14 @@ button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; white-spa
    header 里若不收窄会把同行 note 挤到换行——收成内容宽并压小外观，与 button.xs 同款。 */
 select.xs { width: auto; padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
 button.icon { padding: 7px 9px; }
-input, select {
+input, select, textarea {
   font: inherit; color: var(--ink); background: var(--surface-2);
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; width: 100%;
 }
-input:focus, select:focus { outline: none; border-color: var(--accent); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+textarea { box-sizing: border-box; resize: vertical; line-height: 1.5; }
+textarea.mono { font-family: var(--mono); font-size: 12px; }
+textarea::placeholder, input::placeholder { color: var(--ink-3); }
 input.invalid { border-color: var(--bad); background: var(--bad-soft); }
 input.invalid:focus { border-color: var(--bad); }
 input[type=checkbox] { width: auto; accent-color: var(--accent); }
@@ -1503,7 +1506,7 @@ body.veil-open { overflow: hidden; }
 
         <details style="margin:12px 0 6px">
           <summary class="hint" style="cursor:pointer">选择文件打不开？直接粘贴 JSON 内容</summary>
-          <textarea id="importPaste" rows="6" placeholder='单个凭据 {"auth":{…},"account":{…}}，或数组，或 {"accounts":[…]}' style="width:100%;margin-top:8px;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+          <textarea id="importPaste" class="mono" rows="6" style="margin-top:8px" placeholder='单个凭据 {"auth":{…},"account":{…}}，或数组，或 {"accounts":[…]}'></textarea>
           <button id="btnImportPaste" style="margin:6px 0 8px">导入粘贴的 JSON</button>
         </details>
 
