@@ -24,7 +24,9 @@ export GOPROXY="file://$PREFIX/lib/workbuddy2api/goproxy,off"   # 本地模块�
 # 用 dirname "$0" 相对路径在 cd 之后必然指错（bug-02：版本号一直注入成 dev）。
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-REPO="/storage/emulated/0/新建文件夹/workbuddy2api/workbuddy2api-panel"
+# 仓库根 = 脚本所在目录（本脚本在仓库根），panel 子目录相对它定位。
+# 此前硬编码 /storage/emulated/0/新建文件夹/workbuddy2api —— 改名/换机即失效。可用 REPO=… 覆盖。
+REPO="${REPO:-$SELF_DIR/workbuddy2api-panel}"
 OUT="$PREFIX/lib/workbuddy2api"
 mkdir -p "$OUT"
 cd "$REPO" || exit 1

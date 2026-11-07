@@ -8,7 +8,9 @@ set -u
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
-APP_DIR="/storage/emulated/0/新建文件夹/workbuddy2api/workbuddy2api-panel"
+# 工作目录 = 脚本所在仓库根的 panel 子目录（相对定位；此前硬编码 /sdcard 绝对路径，
+# 改名/换机就起不来）。可用 APP_DIR=… 覆盖。
+APP_DIR="${APP_DIR:-$(cd "$(dirname "$SELF")" && pwd)/workbuddy2api-panel}"
 BIN_DIR="$PREFIX/lib/workbuddy2api"
 BIN="$BIN_DIR/server"
 LOG="$APP_DIR/data/server.log"

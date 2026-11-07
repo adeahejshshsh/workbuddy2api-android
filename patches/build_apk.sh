@@ -22,7 +22,10 @@ export GOPROXY="file://$PREFIX/lib/workbuddy2api/goproxy,off"
 
 # 脚本目录（绝对路径）：脚本中途会 cd 到构建目录，$0 的相对路径到那时就失效了。
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WS="/storage/emulated/0/新建文件夹/workbuddy2api"
+# 仓库根 = 脚本所在目录的上一级（本脚本在 patches/ 里）。
+# 此前硬编码 /storage/emulated/0/新建文件夹/workbuddy2api —— 目录一改名或换机，
+# 第一行读 VERSION 就报「缺 VERSION」，看着像仓库坏了。可用 WS=… 覆盖。
+WS="${WS:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # 版本号集中在这里：aapt2 路径写进清单；无 aapt2 的降级路径就地把旧清单里的版本串
 # 等长改写（AXML 字符串池是 UTF-16LE，等长替换不破坏结构）。
 # 单一版本源（issue ISSUE-05）：仓库根 VERSION 文件。

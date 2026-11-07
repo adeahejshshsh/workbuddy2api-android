@@ -56,6 +56,66 @@ bash patches/patch_source.sh        # 打源码补丁
 Java 侧同理用 `dpkg-deb -x` 解 openjdk-17，并手动补 `libandroid-shmem` 与
 `$PREFIX/bin/{java,javac,keytool,jar,javap,jarsigner}` 软链。
 
+#### 3.1 实测可用的恢复路径（2026-11-07 重走一遍，含几个坑）
+
+```bash
+# ① 先让 apt 把 deb 下到缓存里（它会因 dpkg 报 'sh' not found 而失败，但包已经下完）
+apt-get update
+apt-get install -y --no-install-recommends openjdk-21 d8 apksigner aapt2
+ls $PREFIX/var/cache/apt/archives/*.deb     # ← 这些就是全部依赖，直接解包，绕开 dpkg
+
+# ② 逐个解包进 $PREFIX（不装 dpkg 数据库，也不需要 root）
+cd $PREFIX/tmp && mkdir -p x
+for d in $PREFIX/var/cache/apt/archives/{openjdk-21,d8,apksigner,aapt2,abseil-cpp,fmt,libpng,libprotobuf,libzopfli,libandroid-shmem,libjpeg-turbo,littlecms}_*.deb; do
+  [ -f "$d" ] && dpkg-deb -x "$d" x
+done
+cp -a x/data/data/com.termux/files/usr/* $PREFIX/
+
+# ③ JDK 不装 dpkg 就没有 postinst 建的软链，手动补（少了它 java 不在 PATH 里）
+J=$PREFIX/lib/jvm/java-21-openjdk/bin
+for b in java javac keytool jar javap jarsigner; do ln -sf "$J/$b" "$PREFIX/bin/$b"; done
+java -version    # 报 dlopen libandroid-shmem.so not found → 就是 ② 少解了那个包
+```
+
+**android.jar 要 API 36，不是 34**：`GatewayService` 里 `@Override public void onTimeout(int, int)`
+是 API 36 的 `Service.onTimeout(int,int)`（API 34 的 stub 里只有 `onTimeout(int)`，javac 直接
+报 `method does not override`）。清单里的 `targetSdkVersion 34` 与它无关。
+
+```bash
+curl -sSL -o plat36.zip https://dl.google.com/android/repository/platform-36_r02.zip   # 63 MB，2 秒
+unzip -o -j -q plat36.zip android-36/android.jar -d $PREFIX/lib/wbapi-tools/          # build_apk.sh 认这个路径
+```
+
+自检四件套（都过了才谈出包）：
+
+```bash
+java -version && javac -version && aapt2 version
+java -cp $PREFIX/share/java/d8.jar com.android.tools.r8.D8 --version
+java -jar $PREFIX/share/java/apksigner.jar version
+```
+
+> ⚠ **绝不要在 node/JVM 正在运行时原地覆盖 `$PREFIX/lib/libc++_shared.so` 之类的共享库**。
+> 已经 mmap 的库被替换会让进程立刻 `SIGBUS (BUS_ADRERR)` 崩掉（不是内存不足 ——
+> 当时 MemAvailable 还有 4.5GB）。升级共享库要么换路径，要么先停进程。
+
+#### 3.2 Go 模块下载（DNS 坏掉时的绕法）
+
+Go 自己的 resolver 读不到可用的 resolv.conf（回落到 `[::1]:53` → connection refused），
+`GODEBUG=netdns=cgo` 也救不了；而 curl 走系统解析是好的。所以：用 curl 把模块灌进缓存，
+再 `GOPROXY=off` 离线构建。
+
+```bash
+C=$($GOROOT/bin/go env GOMODCACHE)/cache/download
+for mv in "github.com/andybalholm/brotli v1.2.7" "github.com/redis/go-redis/v9 v9.18.0" \
+          "github.com/refraction-networking/utls v1.8.2" "golang.org/x/crypto v0.36.0" \
+          "golang.org/x/sys v0.31.0" "github.com/klauspost/compress v1.17.4" \
+          "github.com/cespare/xxhash/v2 v2.3.0" "go.uber.org/atomic v1.11.0" \
+          "github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f"; do
+  set -- $mv; mkdir -p "$C/$1/@v"
+  for e in info mod zip; do curl -fsSL -o "$C/$1/@v/$2.$e" "https://goproxy.cn/$1/@v/$2.$e"; done
+done
+```
+
 > ⚠ **绝不要在 node/JVM 正在运行时原地覆盖 `$PREFIX/lib/libc++_shared.so` 之类的共享库**。
 > 已经 mmap 的库被替换会让进程立刻 `SIGBUS (BUS_ADRERR)` 崩掉（不是内存不足 ——
 > 当时 MemAvailable 还有 4.5GB）。升级共享库要么换路径，要么先停进程。

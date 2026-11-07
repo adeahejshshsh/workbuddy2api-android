@@ -5,7 +5,7 @@
 # 想还原成上游原样：git -C <仓库> checkout internal/panel/index.html
 set -eu
 
-REPO="${1:-/storage/emulated/0/新建文件夹/workbuddy2api/workbuddy2api-panel}"
+REPO="${1:-$(cd "$(dirname "$0")/.." && pwd)/workbuddy2api-panel}"
 CSS="$(cd "$(dirname "$0")" && pwd)/panel-mobile.css"
 
 REPO="$REPO" CSS="$CSS" python3 - <<'PY'
