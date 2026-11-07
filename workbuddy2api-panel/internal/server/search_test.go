@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -270,5 +271,147 @@ func TestSearchDeepRoutesToAgentic(t *testing.T) {
 		strings.NewReader(`{"query":"玉林 电梯 维保"}`)))
 	if len(f2.paths) != 1 || f2.paths[0] == "/agenttool/v1/agentic_search" {
 		t.Fatalf("默认应走 snippet 检索，实际 %v", f2.paths)
+	}
+}
+
+// searchCardBody 复刻线上实测响应：第 2 条是上游「结构化卡片」——有标题、有摘要
+// （表格）、有 site/favicon，唯独 url 是空串。DSH 官方插件对每条硬校验 url 非空，
+// 一条不合规整包作废（"DeepSeek returned an invalid response body"）。
+const searchCardBody = `{"query":"宁德时代 股价","type":"text2text","provider":"0","results":[` +
+	`{"title":"宁德时代 300750","url":"https://quote.example/300750","snippet":"实时行情"},` +
+	`{"title":"港股行情指标(货币-港元) | A股行情指标(货币-人民币)","url":"",` +
+	`"site":"腾讯自选股","favicon":"https://search.imtt.qq.com/x.png",` +
+	`"snippet":"## 港股行情指标\n| hk03750 | 宁德时代 | 380.00 | 2026-11-06 |"},` +
+	`{"title":"宁德时代 年报","url":"https://x.example/2","snippet":"..."}],` +
+	`"total_results":3,"response_time_ms":512}`
+
+// TestSearchCompatCardRewrite 上游卡片（url 为空）在 DSH 兼容层里改写成等价检索链接。
+//
+// 为什么这条比「字段比对」重要：DSH 的插件是一条不合法就整包抛，所以真正要钉的是
+// 「改完之后整包一定能被客户端接受」，用官方插件的谓词（assertDSHAcceptsResults）断言。
+func TestSearchCompatCardRewrite(t *testing.T) {
+	postRaw := func(ua, body string) *httptest.ResponseRecorder {
+		f := &searchFake{status: 200, body: body}
+		h := NewHandler(Config{
+			Pool: testPoolWith(
+				&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+			),
+			Upstream: f.client(),
+		})
+		req := httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"宁德时代 股价","count":8}`))
+		req.Header.Set("User-Agent", ua)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// ① 有 query：卡片 url 改写成「同词检索」，snippet/title 原样，条数不变
+	rec := postRaw(dshUA, searchCardBody)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Results      []map[string]any `json:"results"`
+		TotalResults int              `json:"total_results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应不是 JSON: %v (%s)", err, rec.Body.String())
+	}
+	if len(got.Results) != 3 || got.TotalResults != 3 {
+		t.Fatalf("条数不应变化: len=%d total=%d", len(got.Results), got.TotalResults)
+	}
+	wantURL := cardSearchBase + url.QueryEscape("宁德时代 股价")
+	if got.Results[1]["url"] != wantURL {
+		t.Fatalf("卡片 url 应被改写为 %q，得到 %v", wantURL, got.Results[1]["url"])
+	}
+	if !strings.Contains(got.Results[1]["snippet"].(string), "hk03750") {
+		t.Fatalf("卡片的表格摘要必须保留: %v", got.Results[1]["snippet"])
+	}
+	if got.Results[1]["title"] != "港股行情指标(货币-港元) | A股行情指标(货币-人民币)" {
+		t.Fatalf("卡片标题应原样保留: %v", got.Results[1]["title"])
+	}
+	if got.Results[0]["url"] != "https://quote.example/300750" {
+		t.Fatalf("正常条目的 url 不应被改: %v", got.Results[0]["url"])
+	}
+	// 官方插件的校验谓词：改完之后每一条都必须能过，否则整包还是会被作废
+	assertDSHAcceptsResults(t, rec.Body.Bytes())
+
+	// ② 响应里没有 query：退回卡片标题取词（上游 deep 形态等可能不带 query）
+	rec = postRaw(dshUA, `{"results":[{"title":"广西-录取分数线","url":"","snippet":"| 省份 |"}]}`)
+	var fb struct {
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fb); err != nil {
+		t.Fatalf("响应不是 JSON: %v (%s)", err, rec.Body.String())
+	}
+	wantTitleURL := cardSearchBase + url.QueryEscape("广西-录取分数线")
+	if len(fb.Results) != 1 || fb.Results[0]["url"] != wantTitleURL {
+		t.Fatalf("无 query 时应按标题取词，期望 %q，得到 %v", wantTitleURL, fb.Results)
+	}
+
+	// ③ 连取词都没有（query 与 title 皆空）：丢弃该条并修正 total_results
+	rec = postRaw(dshUA, `{"query":"","results":[`+
+		`{"title":"","url":"","snippet":"x"},`+
+		`{"title":"正常","url":"https://x.example/1","snippet":"y"}],`+
+		`"total_results":2}`)
+	var dropped struct {
+		Results      []map[string]any `json:"results"`
+		TotalResults int              `json:"total_results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &dropped); err != nil {
+		t.Fatalf("响应不是 JSON: %v (%s)", err, rec.Body.String())
+	}
+	if len(dropped.Results) != 1 || dropped.TotalResults != 1 {
+		t.Fatalf("无法改写的条目应被丢弃且 total_results 同步: %v total=%d",
+			dropped.Results, dropped.TotalResults)
+	}
+	assertDSHAcceptsResults(t, rec.Body.Bytes())
+
+	// ④ 非 DSH 客户端：逐字节透传，卡片保持原样（兼容层不介入）
+	rec = postRaw("curl/8.23.0", searchCardBody)
+	if got := rec.Body.String(); got != searchCardBody {
+		t.Fatalf("非 DSH 响应应逐字节透传，得到 %s", got)
+	}
+}
+
+// assertDSHAcceptsResults 用 DSH 官方插件（@deepseek-ai/dsh-web-deepseek-api）的校验
+// 谓词检查一份 /v1/search 响应，等价于它的 mapSearchResponse：
+//
+//	item 是对象；url 是非空 string；title 是 string；snippet 是 string；
+//	date 是 null 或 string（字段缺失即 undefined，会被判非法）。
+//
+// 任一条不满足，插件抛 invalidResponse，整次检索作废——所以这条断言比逐字段比对
+// 更能钉住“客户端不会再整包失败”。
+func assertDSHAcceptsResults(t *testing.T, body []byte) {
+	t.Helper()
+	var payload struct {
+		Results []map[string]json.RawMessage `json:"results"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	for i, it := range payload.Results {
+		if it == nil {
+			t.Fatalf("results[%d] 不是对象", i)
+		}
+		var s string
+		if err := json.Unmarshal(it["url"], &s); err != nil || s == "" {
+			t.Fatalf("results[%d].url 必须是非空 string：%s", i, it["url"])
+		}
+		if err := json.Unmarshal(it["title"], &s); err != nil {
+			t.Fatalf("results[%d].title 必须是 string：%s", i, it["title"])
+		}
+		if err := json.Unmarshal(it["snippet"], &s); err != nil {
+			t.Fatalf("results[%d].snippet 必须是 string：%s", i, it["snippet"])
+		}
+		raw, has := it["date"]
+		if !has {
+			t.Fatalf("results[%d] 缺 date 字段（官方插件判 invalidResponse）", i)
+		}
+		if string(raw) != "null" {
+			if err := json.Unmarshal(raw, &s); err != nil {
+				t.Fatalf("results[%d].date 必须是 null 或 string：%s", i, raw)
+			}
+		}
 	}
 }

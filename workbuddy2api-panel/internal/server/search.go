@@ -3,8 +3,9 @@
 // 非对话端点，与 images 同一套取号与失败处置：单次取号、失败换号上限 3、
 // 请求级错误（参数/内容/模型）fail-fast 不烧全池。回程默认把上游原文原样写出
 // （{query,type,provider,results,total_results,response_time_ms}），不做二次包装；
-// 仅当请求来自 DSH（UA 含 deepseek-harness）时，额外补 DeepSeek Search API
-// 需要的 date:null / title/snippet 字符串，并接受 count 作为条数。
+// 仅当请求来自 DSH（UA 含 deepseek-harness）时，额外补成 DeepSeek Search API
+// 需要的形状：date:null / title/snippet 字符串、空 url 的卡片改写为等价检索链接，
+// 并接受 count 作为条数。
 //
 // 选号域：请求可带 "model":"cn:x" 只用其 realm 前缀，或直接 "realm":"global"；都没有 → cn。
 //
@@ -20,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -55,14 +57,29 @@ func deepSeekSearchClient(ua string) bool {
 	return strings.Contains(strings.ToLower(ua), "deepseek-harness")
 }
 
+// cardSearchBase 卡片改写落点。
+//
+// 上游 /agenttool/v1/search 会把「网页」和「结构化卡片」混在同一个 results 里：卡片
+// 是答案引擎直接生成的富文本（股价表、分数线表…），有 title/snippet/site/favicon，
+// 唯独 **url 为空**——它不是网页。DSH 的 deepseek-search-api 要求 url 是非空字符串
+// （`typeof item.url !== "string" || item.url.length === 0` 即抛 invalidResponse），
+// 而且一条不合法就整包作废，表现为 "DeepSeek returned an invalid response body"。
+//
+// 这里改写而不是丢弃：卡片的 snippet 往往就是用户要的答案，改写后模型仍读得到、
+// 用户仍点得开。用 var 便于测试替换落点。
+var cardSearchBase = "https://cn.bing.com/search?q="
+
 // compatDeepSeekSearch 把上游原文补成 DeepSeek Search API 兼容形状（仅 DSH）。
 //
-// 只做一件事：results[] 里缺 date 时补 `null`。上游（WorkBuddy /agenttool）不返回
-// 发布日期，而按 DeepSeek Search API 接的客户端校验很硬——DSH 的
-// deepseek-search-api 用 `item.date !== null && typeof item.date !== 'string'`
-// 判定，字段**缺失**（undefined）会直接抛 invalidResponse（"invalid response body"）。
-// 其余字段（title/url/snippet）上游本来就有。调用方只在
-// deepSeekSearchClient(UA) 为真时走到这里。
+// 三件事：
+//  1. 空 url 的条目按上游卡片处理，改写成一次同词检索的链接（见 cardSearchBase）；
+//     query 与 title 皆空、无从取词的才丢弃，并同步修正 total_results。
+//  2. results[] 里缺 date 时补 `null`。上游（WorkBuddy /agenttool）不返回发布日期，
+//     而 DSH 用 `item.date !== null && typeof item.date !== 'string'` 判定，字段
+//     **缺失**（undefined）会直接抛 invalidResponse（"invalid response body"）。
+//  3. title/snippet 缺失或为 null 时补空串：DSH 要求是 string，空串合法。
+//
+// 调用方只在 deepSeekSearchClient(UA) 为真时走到这里；其余客户端逐字节透传。
 func compatDeepSeekSearch(raw []byte) []byte {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -76,7 +93,32 @@ func compatDeepSeekSearch(raw []byte) []byte {
 	if err := json.Unmarshal(rawResults, &items); err != nil || len(items) == 0 {
 		return raw
 	}
+
+	// 卡片改写的取词：优先本次检索词（上游响应自带 query），空则退回卡片标题。
+	// 用检索词而不是标题：卡片的 title 常是表头（如「港股行情指标(货币-港元) |
+	// A股行情指标(货币-人民币)」），拿去搜没有意义；检索词才是用户真正想找的东西。
+	var query string
+	if q, has := obj["query"]; has {
+		_ = json.Unmarshal(q, &query)
+	}
+	query = strings.TrimSpace(query)
+
+	kept := items[:0]
 	for _, it := range items {
+		if strings.TrimSpace(jsonString(it, "url")) == "" {
+			term := query
+			if term == "" {
+				term = strings.TrimSpace(jsonString(it, "title"))
+			}
+			if term == "" {
+				continue // 无取词可改写：发非法条目比丢掉更糟
+			}
+			patch, err := json.Marshal(cardSearchBase + url.QueryEscape(term))
+			if err != nil {
+				continue
+			}
+			it["url"] = patch
+		}
 		if _, has := it["date"]; !has {
 			it["date"] = json.RawMessage("null")
 		}
@@ -84,8 +126,15 @@ func compatDeepSeekSearch(raw []byte) []byte {
 		// 时补空串，避免同一类 invalidResponse 再出现一次。
 		ensureJSONString(it, "title")
 		ensureJSONString(it, "snippet")
+		kept = append(kept, it)
 	}
-	patchedResults, err := json.Marshal(items)
+	if len(kept) != len(items) {
+		// 有条目被丢弃：total_results 跟着修正，避免「说 8 条只回 7 条」。
+		if n, err := json.Marshal(len(kept)); err == nil {
+			obj["total_results"] = n
+		}
+	}
+	patchedResults, err := json.Marshal(kept)
 	if err != nil {
 		return raw
 	}
@@ -95,6 +144,19 @@ func compatDeepSeekSearch(raw []byte) []byte {
 		return raw
 	}
 	return out
+}
+
+// jsonString 取字符串字段；缺失、null 或类型不符一律按空串处理。
+func jsonString(item map[string]json.RawMessage, key string) string {
+	v, has := item[key]
+	if !has {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		return ""
+	}
+	return s
 }
 
 // ensureJSONString 把缺失或 null 的字段补成空串；已是字符串则原样保留。
