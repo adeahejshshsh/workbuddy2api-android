@@ -67,6 +67,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
+| 🚧 **11140 风控连坐保护** | 上游把「账号存在异常行为」判在设备/出口上：命中即**就地停手不换号**（原来的「禁用该号 + 立刻换下一个」会让一个请求顺着轮转把整池送进风控），同一 15 分钟窗内 ≥2 个不同账号被限制则全池暂停派发（`upstream.restriction_hold_seconds`，默认 30 分钟） |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题，七个视图）：账号运维 / 用量与积分分析 / 模型档位条件查询 / 在线改配置（热生效）/ 运行日志（含**调用来源 IP·UA** 与时间区间）/ 积分任务，见 [Web 管理面板](#-web-管理面板) |
 
@@ -383,6 +384,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
+| `upstream.restriction_hold_seconds` | `1800` | 11140 风控连坐的全池暂停时长（秒）。命中 11140 一律就地停手不换号；同一 15 分钟窗内 ≥2 个不同账号被限制 → 全池暂停派发这么久（期间 `503 account_restricted_hold` + `Retry-After`）。`0` = 只停手不暂停 |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
@@ -845,6 +847,63 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 - Session 失效账号被禁用（`disabled_reason` 透出在 `/status`）后，可用 `./login.sh` 重新登录覆盖凭证；已持久化 `disabled=true` 的账号可在源码侧调用 `Pool.ReviveDisabled(uid)` 复活（`state.json` 中清除 `disabled` 标志）
 - 备份 = `auths/`（凭证）+ `data/state.json`（池状态：积分 / 冷却 / 计数）；配置 Upstash 后状态另镜像至 Redis（7 天 TTL）
 
+### Windows 常驻运行（开机自启 + 崩溃重启）
+
+二进制**不自带守护**：进程退出后不会自己回来，也没有内置服务（SCM）模式。把面板当本地网关用时（上游客户端写死 `127.0.0.1:<端口>`），进程不在等于该 provider 整体不可用——客户端立刻拿到 `connection refused`，不会重试。所以「开机自启 + 退出即重启」得由系统侧提供，下面两种任选一种。
+
+本仓不发布 Windows 二进制，需要自己交叉编译（纯 Go，关 CGO）：
+
+```powershell
+$env:GOOS='windows'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'
+go build -buildvcs=false -trimpath -o wb2api.exe ./cmd/server
+```
+
+先确认三件事：`wb2api.exe` 的绝对路径（工作目录就是放 `config.json` 的地方）；配置里 `listen` 默认只绑 `127.0.0.1:7863`，不用额外放通防火墙；手动跑一次能起（首次会自动生成含随机 `api_key` 的 `config.json`），再交给常驻项。
+
+#### 方案 A：NSSM（推荐，真正的服务）
+
+NSSM 按「进程退出」拉起，不看退出码——面板无论因何退出都会回来，日志也一起接管：
+
+```powershell
+nssm install wb2api-panel 'C:\wb2api\wb2api.exe'
+nssm set wb2api-panel AppDirectory 'C:\wb2api'
+nssm set wb2api-panel Start SERVICE_AUTO_START
+nssm set wb2api-panel AppExit Default Restart
+nssm set wb2api-panel AppStdout 'C:\wb2api\service.log'
+nssm set wb2api-panel AppStderr 'C:\wb2api\service.log'
+nssm start wb2api-panel
+```
+
+WinSW 同理（`<startmode>Automatic</startmode>` + `<onfailure action="restart"/>`），不另举例。
+
+#### 方案 B：任务计划程序（系统自带，不需要装东西）
+
+管理员 PowerShell 执行，把路径换掉：
+
+```powershell
+$exe = 'C:\wb2api\wb2api.exe'
+$act = New-ScheduledTaskAction -Execute $exe -WorkingDirectory (Split-Path $exe)
+$trg = New-ScheduledTaskTrigger -AtStartup
+$set = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+       -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+Register-ScheduledTask -TaskName 'wb2api-panel' -Action $act -Trigger $trg -Settings $set -RunLevel Highest
+Start-ScheduledTask -TaskName 'wb2api-panel'
+```
+
+两个坑：
+
+- `-ExecutionTimeLimit 0`：默认任务跑满 3 天会被结束掉，常驻进程必须关掉这个限制；
+- 这里的「失败后重启」**只对非零退出码生效**——进程自己正常退出（码 0）或被人 `taskkill` 掉，任务不会重来。所以要做到「任何原因退出都拉起」，用方案 A。
+
+#### 更新时的注意事项
+
+「一键更新」的设计是**先停旧进程 → 换二进制 → 起新进程**，中间有几秒端口空窗，这期间的请求会失败一次（客户端一般不重试）。两件事别忘：
+
+1. 常驻项若在旧进程退出后立刻拉起，可能抢在 updater 起新进程之前占住端口——更新完确认只有一个进程在跑：`Get-Process wb2api` 与 `netstat -ano | findstr :7863` 的 PID 要对得上；
+2. 更新前后各打一次 `curl http://127.0.0.1:7863/healthz`，确认新进程确实起来了（面板右下角也会显示版本号）。
+
+> 内置服务模式（`wb2api.exe install-service` 走 SCM）没有做：更新重启要连带重写服务控制逻辑，且 CI 只有 Linux 构建机，Windows 服务生命周期没法做回归。用上面两种效果等价。
+
 ## 安全与合规
 
 ### 1. 凭据管理（auths）
@@ -886,10 +945,10 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 多图会话请求体超限怎么办？
 
-网关**不再设请求体上限**（`server.max_body_mb` 已移除，对齐上游）：任意大小的请求体都会完整读入并转发上游，超限类问题由上游自然返回错误——其响应信息量更大（能看到上游的真实策略），网关不再以 413 提前拦截。
+网关有一条**只挡内存炸弹**的上限：`server.max_body_mb`（缺省 64 MB，`0` = 回落到 32 MB 硬上限）。它不是「大请求预拦截」——上限远高于任何真实会话（多图/长上下文 base64 实测几 MB 量级），正常请求不会撞到；超限时回 `413` 并**先把剩余上传读掉**再回（直接关连接的话，客户端还在上传，只看到 `connection reset` 而读不到那份 413）。
 
-- 多图/长上下文会话（历史图片每轮以 base64 重发，编码再膨胀约 37%）不会再撞网关侧 413
-- 若上游真的返回 413/超限错误，网关按既有错误分类链路如实透传（不打码、不罚号——超限是请求侧问题）
+- 多图/长上下文会话（历史图片每轮以 base64 重发，编码再膨胀约 37%）在默认上限下不会撞 413
+- 若上游真的返回超限错误，网关按既有错误分类链路如实透传（不打码、不罚号——超限是请求侧问题）
 - 客户端中途断流导致的半截 body 在读入阶段即报 `400 invalid_request`，不会把截断 JSON 喂给上游（issue #41 语义保留在读错误路径）
 
 ### Docker 部署登录后报「写入 auths/…json.tmp 失败： permission denied」？
@@ -928,7 +987,7 @@ sudo chown -R 10001:10001 ./auths ./data ./config.json
 | 断言 | 出处 |
 |---|---|
 | `prompt.mode` 默认 `custom` | `cmd/server/config.go:148` |
-| 请求体无网关侧上限（max_body_mb 已移除） | `internal/server/handler.go` chatCompletions 读 body 段 |
+| 请求体上限 `server.max_body_mb`（缺省 64 MB，0 = 32 MB 兜底；超限回 413 且先排空） | `internal/server/bodylimit.go`、五条读体入口的 `bodyTooLarge` 分支 |
 | 出站强制 `stream:true` | `internal/upstream/payload.go:28` |
 | DeepSeek 思维链注入（`thinking.type=enabled`） | `internal/upstream/thinking.go:110` |
 | 默认 `reasoning_effort` 档位 = `high` | `internal/upstream/thinking.go:32` |
