@@ -58,6 +58,25 @@ public class MainActivity extends Activity {
     }
     static final String LS_KEY = "wb2api.key";
 
+    // ── 文件选择（WebView 的 <input type="file">）
+    // WebView 不自带选择器：壳必须在 onShowFileChooser 里发 Intent，并在
+    // onActivityResult 里把结果回填给 WebView，否则点击「选择文件」毫无反应。
+    private static final int REQ_FILE_CHOOSER = 0x5F11;
+    private android.webkit.ValueCallback<Uri[]> fileChooserCb;
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_FILE_CHOOSER) {
+            if (fileChooserCb != null) {
+                // parseResult 同时处理「取消」（回 null）与多选（ClipData）
+                fileChooserCb.onReceiveValue(
+                        WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+                fileChooserCb = null;
+            }
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
+    }
+
     // ── 设计令牌（= 面板 :root / [data-theme="dark"]）
     static final int BG       = 0xFF0C0E14;   // --bg
     static final int SURFACE  = 0xFF14171F;   // --surface
@@ -244,6 +263,38 @@ public class MainActivity extends Activity {
             @Override public void onProgressChanged(WebView v, int p) {
                 progress.setProgress(p);
                 progress.setVisibility(p >= 100 ? View.GONE : View.VISIBLE);
+            }
+
+            // 面板里的 <input type="file">（导入凭据）必须由壳接住：
+            // WebView 自己不会弹系统选择器，不实现这个回调就是「点了没反应」。
+            @Override public boolean onShowFileChooser(WebView v,
+                                                       android.webkit.ValueCallback<Uri[]> cb,
+                                                       FileChooserParams params) {
+                // 上一次选择还没回值就再点：先把它取消，否则那个 input 永久卡死
+                if (fileChooserCb != null) {
+                    fileChooserCb.onReceiveValue(null);
+                    fileChooserCb = null;
+                }
+                fileChooserCb = cb;
+                Intent intent = null;
+                try {
+                    intent = params.createIntent();   // 带上 accept / multiple
+                } catch (Throwable ignored) {}
+                // accept=".json" 这类非标准 MIME 在部分 ROM 上解析不到 Activity，
+                // 落回「任意文件」，否则用户看到的还是「点了没反应」。
+                if (intent == null || intent.resolveActivity(getPackageManager()) == null) {
+                    intent = new Intent(Intent.ACTION_GET_CONTENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("*/*");
+                }
+                try {
+                    startActivityForResult(intent, REQ_FILE_CHOOSER);
+                } catch (Throwable t) {
+                    fileChooserCb = null;
+                    toast("打不开文件选择器：" + t.getMessage());
+                    return false;
+                }
+                return true;
             }
         });
         root.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));

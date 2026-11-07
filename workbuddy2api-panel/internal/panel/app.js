@@ -1924,6 +1924,33 @@ $('btnStartLogin').onclick = startAddLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
+// 粘贴导入（WebView 里 <input type=file> 唤不起选择器时的兜底）：
+// 与选文件走同一个后端接口，只是 body 由 textarea 内容构造。
+$('btnImportPaste').onclick = async () => {
+  const txt = ($('importPaste').value || '').trim();
+  $('importDone').hidden = true; $('importErr').hidden = true;
+  if (!txt) { $('importErr').hidden = false; $('importErr').textContent = '请先粘贴 JSON'; return; }
+  try { JSON.parse(txt); }
+  catch (e) { $('importErr').hidden = false; $('importErr').textContent = '不是合法 JSON：' + e.message; return; }
+  const fd = new FormData();
+  fd.append('file', new Blob([txt], { type: 'application/json' }), 'pasted.json');
+  const h = {};
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  try {
+    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    $('importDone').hidden = false;
+    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
+    if (d.errors && d.errors.length) console.warn('import errors:', d.errors);
+    $('importPaste').value = '';
+  } catch (e) {
+    $('importErr').hidden = false;
+    $('importErr').textContent = '导入失败：' + e.message;
+  }
+};
+
 $('importFile').onchange = async () => {
   const files = Array.from($('importFile').files || []);
   if (!files.length) return;
