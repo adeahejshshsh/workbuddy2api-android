@@ -244,9 +244,17 @@ shell 的管道）关掉了读端，网关立刻 141 退出，日志上看不出
     （`1.35.0` → `1.35.1`），不发 minor。
   - `VERSION` 与 `apk-src/AndroidManifest.xml` 的 `versionName`/`versionCode` 必须同步
     （`versionCode = major*10000 + minor*100 + patch`）。
-* **每次改动都必须提交**（2026-10-23 起，用户明确要求）：改完立刻
-  `bash push_github.sh "(fix) 说明"`，不要攒着等下次；**Release 仍然只在需要可安装包时才发**
-  （下面两档里的第一档就是默认动作，第二档必须显式加 `release` 参数）。
+* **每次改动都必须提交**（2026-10-23 起）：改完立刻提交，不要攒着等下次。
+* **提交走 PR，CI 绿了才合并**（2026-11-07 起，用户明确要求）。**main 不再接受直推**：
+  - 在分支上提交并推送：`BRANCH=feat/xxx bash push_github.sh "(fix) 说明"`
+    （脚本的分支模式只推分支、不碰 main）；
+  - 开 PR（base=main），标题沿用同一条类型前缀；
+  - 等 `.github/workflows/ci.yml` 的两步都绿：`ci / test`（`go test ./...`）与
+    `official-head parity`（`WB2A_PARITY=1 go test ./internal/upstream -run TestOfficialParity`）；
+  - 绿了再合并（squash），合并后删分支。
+  - 绕过 PR 直推 main = 绕过门禁；线上事故的代价远高于多一次点击。
+  - **CI 不覆盖 APK 链路**（aapt2 / javac / d8 / apksigner 只在本地有）：动过
+    `apk-src/**` 或面板资源时，本地仍要跑 `bash patches/test.sh all` + `bash patches/build_apk.sh`。
 * 发布分两档（**默认只提交，不发版**）：
   - **日常改 bug / 小改动 → 只推源码**：`bash push_github.sh`
     （提交并推到 main，**不建 Release、不上传 APK**）。
