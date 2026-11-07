@@ -336,7 +336,7 @@ body = (changes or f"APK v{ver}") + """
 4. 客户端接入：Base URL `http://<手机IP>:7863/v1`，Key 用面板里的（点「复制密钥」）
 
 ### 说明
-- 包名 `com.dsh.wb2api`，minSdk 24 / targetSdk 34；本包用作者自备密钥签名
+- 包名 `com.workbuddy.api`，minSdk 24 / targetSdk 34；本包用作者自备密钥签名
 - 不含任何账号凭据、签名密钥与本机运行数据（见 `.gitignore`）
 - 移植细节（撞过的墙 / 验证记录 / 踩过的坑）都在仓库 `AGENT.md`
 """

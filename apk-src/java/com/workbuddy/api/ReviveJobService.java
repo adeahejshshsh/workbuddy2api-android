@@ -1,4 +1,4 @@
-package com.dsh.wb2api;
+package com.workbuddy.api;
 
 import android.app.job.JobInfo;
 import android.app.job.JobParameters;

@@ -1,4 +1,4 @@
-package com.dsh.wb2api;
+package com.workbuddy.api;
 
 import android.app.AlarmManager;
 import android.app.Notification;
@@ -59,8 +59,8 @@ import java.util.UUID;
  *      看门狗线程和 Go 里的定时器全被冻住，症状正是「只有 App 在前台时才生效」。
  */
 public class GatewayService extends Service {
-    public static final String ACTION_STOP = "com.dsh.wb2api.action.STOP";
-    public static final String ACTION_WATCH = "com.dsh.wb2api.action.WATCH";
+    public static final String ACTION_STOP = "com.workbuddy.api.action.STOP";
+    public static final String ACTION_WATCH = "com.workbuddy.api.action.WATCH";
     public static final String EXTRA_RESTART = "restart";
     static final String CH_ID = "wb2api";
     static final int NOTIF_ID = 0x1001;

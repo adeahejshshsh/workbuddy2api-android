@@ -230,8 +230,8 @@ if [ -f "$AJ" ]; then
   # R.java 只有 aapt2 link 才会生成（--java gen）。降级路径下没有它，而 apk-src/java
   # 里引用的都是 android.R.*（系统资源），所以按存在与否决定要不要带上。
   RJAVA=""
-  [ -f gen/com/dsh/wb2api/R.java ] && RJAVA="gen/com/dsh/wb2api/R.java"
-  javac -J-Xmx512m --release 11 -encoding UTF-8 -cp "$AJ" -d classes $RJAVA "$SRC"/java/com/dsh/wb2api/*.java
+  [ -f gen/com/workbuddy/api/R.java ] && RJAVA="gen/com/workbuddy/api/R.java"
+  javac -J-Xmx512m --release 11 -encoding UTF-8 -cp "$AJ" -d classes $RJAVA "$SRC"/java/com/workbuddy/api/*.java
   # 看门狗退避序列自检：宿主 JVM 就能跑，不需要真机（打进 dex 就不必了，单独放 test-out）
   rm -rf test-out && mkdir -p test-out
   javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$SRC"/test/WatchdogSelfCheck.java

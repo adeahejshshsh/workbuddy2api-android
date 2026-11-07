@@ -7,13 +7,13 @@ public class WatchdogSelfCheck {
     public static void main(String[] a) {
         long[] want = {2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000};
         for (int n = 1; n <= want.length; n++) {
-            long got = com.dsh.wb2api.GatewayService.backoffMs(n);
+            long got = com.workbuddy.api.GatewayService.backoffMs(n);
             if (got != want[n - 1]) {
                 System.out.println("FAIL n=" + n + " got=" + got + " want=" + want[n - 1]);
                 System.exit(1);
             }
         }
-        if (com.dsh.wb2api.GatewayService.backoffMs(0) != 2000) {
+        if (com.workbuddy.api.GatewayService.backoffMs(0) != 2000) {
             System.out.println("FAIL n=0 应退化为 2s");
             System.exit(1);
         }

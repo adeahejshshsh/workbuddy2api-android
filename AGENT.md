@@ -227,7 +227,7 @@ shell 的管道）关掉了读端，网关立刻 141 退出，日志上看不出
 
 ## 五、本机专属的部署事实
 
-* 网关数据在 `/data/data/com.dsh.wb2api/files/gateway/`（`config.json`、`auths/`、
+* 网关数据在 `/data/data/com.workbuddy.api/files/gateway/`（`config.json`、`auths/`、
   `data/state.json`、`data/server.log`）—— 这个 uid 读不到，只能 `adb`/`run-as` 取。
 * 面板与 API 都在 `:7863`；默认监听 `127.0.0.1`，对外必须显式改 `listen` + 配 `api_key`。
 * 端口上如果已经有一个不是本服务拉起的实例，服务会判成「运行中（外部）」并**不抢端口**。

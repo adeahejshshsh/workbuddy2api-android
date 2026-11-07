@@ -82,7 +82,7 @@ fi
 
 # ---------- 3) net 包：resolv.conf 路径改成「环境变量优先」----------
 # ⚠ 这一条是 APK 工况的命门，别再丢：
-#   APK 里的 Go 进程跑在 com.dsh.wb2api 下，读不到 DSH 的 $PREFIX；GatewayService
+#   APK 里的 Go 进程跑在 com.workbuddy.api 下，读不到 DSH 的 $PREFIX；GatewayService
 #   通过环境变量 WB2API_RESOLV_CONF 把它自己写的 files/gateway/resolv.conf 传进来。
 #   若只做上一步的硬编码路径替换，App 内 DNS 全挂 → 上游全失败 → 全 503 + 连败降权
 #   （v1.24.0 真实踩过：两版 .so 对照，旧版含 WB2API_RESOLV_CONF 1 处，新版 0 处）。
@@ -103,7 +103,7 @@ func wb2apiResolvConfPath() string {
 		return p
 	}
 	for _, p := range []string{
-		"/data/data/com.dsh.wb2api/files/gateway/resolv.conf",
+		"/data/data/com.workbuddy.api/files/gateway/resolv.conf",
 		"/data/data/com.dsharnessmobile.shell/files/usr/etc/resolv.conf",
 	} {
 		if _, err := os.Stat(p); err == nil {
