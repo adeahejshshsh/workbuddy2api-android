@@ -274,6 +274,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.loginPoll)
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.loginRegions)
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.importCockpit)
+	// 导出凭据：与导入同构，导出的文件可直接粘回「导入 JSON」页签（见 export.go）。
+	p.mux.HandleFunc("GET /panel/api/export/accounts", p.exportAccounts)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.accountRevive)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remark", p.accountRemark)
 	// 账号分组标签（issue #159）：纯管理维度，落 state.json，供面板按组筛选与组内批量。

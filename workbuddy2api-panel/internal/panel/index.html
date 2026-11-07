@@ -1510,6 +1510,14 @@ body.veil-open { overflow: hidden; }
           <button id="btnImportPaste" style="margin:6px 0 8px">导入粘贴的 JSON</button>
         </details>
 
+        <div class="imp-row" style="margin-top:16px">
+          <button id="btnExportAccounts">导出已登录账号</button>
+          <button id="btnCopyExport" hidden>复制</button>
+          <a id="exportDownload" class="hint" hidden download style="cursor:pointer">下载 .json</a>
+        </div>
+        <div id="exportHint" class="hint" hidden style="margin-top:6px"></div>
+        <textarea id="exportOut" class="mono" rows="6" readonly hidden style="margin-top:8px"></textarea>
+
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>

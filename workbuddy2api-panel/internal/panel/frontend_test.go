@@ -1515,3 +1515,100 @@ process.exit(0);
 		t.Fatalf("页签按钮联动未通过:\n%s", out)
 	}
 }
+
+// TestAppJSExportAccountsFlow 导出已登录账号：拿到 JSON 后要能看见、能复制。
+//
+// 为什么主路径是「复制」而不是下载：WebView 里 <a download> 不生效（宿主没实现
+// DownloadListener），点下载链接毫无反应 —— 和之前文件选择器那个坑同源。所以判据是
+// 「textarea 里有内容 + 复制按钮出现 + 提示写明条数」，下载链接只当附加项。
+func TestAppJSExportAccountsFlow(t *testing.T) {
+	nodeBin(t)
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; }, apply() { return inert; }, construct() { return inert; }, has() { return true; },
+});
+const els = {};
+function el(id, init) {
+  if (!els[id]) els[id] = Object.assign({ id, hidden: false, disabled: false, textContent: '', value: '',
+    rows: 6, files: null, href: '', download: '', style: {}, className: '',
+    focus() {}, select() { this.selected = true; },
+    setAttribute() {}, getAttribute() { return null; }, addEventListener() {}, appendChild() {} }, init || {});
+  return els[id];
+}
+['btnExportAccounts','btnCopyExport','exportDownload','exportHint','exportOut'].forEach(el);
+el('btnCopyExport', { hidden: true });
+el('exportDownload', { hidden: true });
+el('exportHint', { hidden: true });
+el('exportOut', { hidden: true });
+
+const exported = JSON.stringify([{ uid: 'u-1', refresh_token: 'RT-1' }, { uid: 'u-2', refresh_token: 'RT-2' }], null, 2);
+let calls = 0;
+const sandbox = new Proxy({
+  location: { hash: '#accounts' }, history: { replaceState() {} },
+  localStorage: { getItem: () => 'k', setItem() {} },
+  navigator: { clipboard: { writeText: (t) => { sandbox.__copied = t; return Promise.resolve(); } } },
+  document: { getElementById: id => (els[id] ? els[id] : inert),
+    querySelectorAll: () => [], querySelector: () => inert, addEventListener() {},
+    documentElement: inert, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  fetch: (u) => {
+    // 只数导出请求：页面加载时还会打 /panel/api/overview，混在一起断言会误判
+    if (String(u).indexOf('/panel/api/export/accounts') < 0) return new Promise(() => {});
+    calls++;
+    return Promise.resolve({
+      ok: true,
+      text: () => Promise.resolve(exported),
+      headers: { get: () => 'attachment; filename="workbuddy-accounts-x.json"' },
+    });
+  },
+  URL: { createObjectURL: () => 'blob:fake' },
+  Blob: function (parts) { this.parts = parts; },
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, WeakMap, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+try { vm.runInContext("'use strict';\n" + src, sandbox, { filename: 'app.js' }); }
+catch (e) { console.log('LOAD FAIL: ' + (e && e.stack ? e.stack : e)); process.exit(2); }
+
+(async () => {
+  function fail(m) { console.log('FAIL: ' + m); process.exit(1); }
+  if (typeof els.btnExportAccounts.onclick !== 'function') fail('「导出已登录账号」没有绑定 click');
+
+  await els.btnExportAccounts.onclick();
+  if (calls !== 1) fail('没有请求导出接口');
+  if (els.exportOut.hidden) fail('导出后文本框仍隐藏');
+  if (String(els.exportOut.value).indexOf('u-1') < 0) fail('文本框里没有导出内容：' + els.exportOut.value);
+  if (els.btnCopyExport.hidden) fail('复制按钮没有出现');
+  if (String(els.exportHint.textContent).indexOf('2 个账号') < 0) fail('提示没写条数：' + els.exportHint.textContent);
+  if (els.exportDownload.href !== 'blob:fake') fail('下载链接没设上');
+  if (String(els.exportDownload.download).indexOf('workbuddy-accounts-') < 0) fail('下载文件名没取到');
+
+  // 复制：把 textarea 内容写进剪贴板
+  await els.btnCopyExport.onclick();
+  if (String(sandbox.__copied || '').indexOf('u-2') < 0) fail('复制的内容不对');
+
+  console.log('OK');
+  process.exit(0);
+})().catch(e => { console.log('FAIL: ' + (e && e.stack ? e.stack : e)); process.exit(1); });
+`
+	f, err := os.CreateTemp(t.TempDir(), "exportflow-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("导出流程测试失败: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("OK")) {
+		t.Fatalf("导出流程未通过:\n%s", out)
+	}
+}

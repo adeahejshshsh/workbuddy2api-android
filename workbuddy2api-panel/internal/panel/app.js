@@ -1958,6 +1958,55 @@ $('btnImportPaste').onclick = async () => {
   }
 };
 
+// 导出已登录账号：把池里的凭据导成 JSON（与导入同构，可原样粘回去）。
+// WebView 里 <a download> 不生效（宿主没实现 DownloadListener），所以主路径是
+// 「导出 → 复制 → 粘贴/存文件」；下载链接只在桌面浏览器里有用。
+$('btnExportAccounts').onclick = async () => {
+  const h = {};
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  $('exportHint').hidden = true; $('exportOut').hidden = true;
+  $('btnCopyExport').hidden = true; $('exportDownload').hidden = true;
+  try {
+    const r = await fetch('/panel/api/export/accounts', { headers: h });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const txt = await r.text();
+    const arr = JSON.parse(txt);
+    const ta = $('exportOut');
+    ta.value = txt;
+    ta.rows = Math.min(14, Math.max(5, txt.split('\n').length));
+    ta.hidden = false;
+    $('btnCopyExport').hidden = false;
+    $('exportHint').hidden = false;
+    $('exportHint').textContent = arr.length
+      ? '已导出 ' + arr.length + ' 个账号（含 refresh token，注意保管）。点「复制」后可直接粘到上面的输入框，或存成 .json 备份。'
+      : '池里没有可导出的账号（需要账号带 refresh token）。';
+    // 浏览器里给个下载链接；WebView 里点了没反应，所以只当附加项
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const a = $('exportDownload');
+    a.href = URL.createObjectURL(new Blob([txt], { type: 'application/json' }));
+    a.download = m ? m[1] : 'workbuddy-accounts.json';
+    a.hidden = false;
+  } catch (e) {
+    $('exportHint').hidden = false;
+    $('exportHint').textContent = '导出失败：' + e.message;
+  }
+};
+$('btnCopyExport').onclick = async () => {
+  const ta = $('exportOut');
+  const txt = ta.value || '';
+  if (!txt) return;
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast('已复制到剪贴板', 'ok');
+  } catch (e) {
+    // 剪贴板不可用（老 WebView / 无权限）时退化成「全选，用户手动复制」
+    ta.focus(); ta.select();
+    toast('自动复制失败，已全选，请手动复制', 'err');
+  }
+};
+
 // 导入页：先「选文件」（只选择与展示），再点「导入所选文件」提交。
 // 拆成两步是为了让「到底选没选中」看得见：此前选完就直接上传，WebView 若没把文件
 // 交给页面，用户只看到「未选择文件」，完全不知道是选择器的问题还是导入失败。
