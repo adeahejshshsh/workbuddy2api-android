@@ -176,7 +176,15 @@ pat = re.compile(rb"(?:(?:[0-9]\x00)+\.\x00(?:[0-9]\x00)+\.\x00(?:[0-9]\x00)+)")
 ### 5. 签名口令存放
 
 优先级：`WB2API_KS_PASS` 环境变量 → `$PREFIX/etc/wbapi.kspass`（0600，私有目录）→
-工作区 `.kspass`（`/sdcard` 上 chmod 无效，仅兜底）。仓库里**不放**口令。
+工作区 `.kspass`（`/sdcard` 上 chmod 无效，仅兜底）。**公开仓里不放**口令。
+
+**私钥与口令的备份在私有仓 `adeahejshshsh/workbuddy2api-signing`**（2026-11-07 建，
+`private`）：`wb2api.keystore` + `wb2api.kspass` + `cert.pem`，恢复步骤见该仓 README。
+
+为什么单开一个仓：v1.35.10 之前的旧密钥与口令**永久丢失**过（不在设备、不在任何备份），
+代价是换签名 + 换包名 + 所有用户手工迁移账号。同一件事不能再发生第二次 ——
+换机器、环境重置（见 §1.3）、重装系统之后，第一件事就是从那里把两个文件拿回来，
+**不要**跑 `build_apk.sh --new-keystore`（那是换签名的意思）。
 
 ---
 
