@@ -41,6 +41,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if bodyTooLarge(err) {
+			drainBody(w, r, limit)
 			writeAnthropicError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", bodyLimitText(limit))
 			return
 		}
@@ -80,6 +81,7 @@ func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		if bodyTooLarge(err) {
+			drainBody(w, r, limit)
 			writeAnthropicError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", bodyLimitText(limit))
 			return
 		}

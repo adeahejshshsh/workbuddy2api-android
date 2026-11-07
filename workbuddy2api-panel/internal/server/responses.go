@@ -31,6 +31,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if bodyTooLarge(err) {
+			drainBody(w, r, limit)
 			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", bodyLimitText(limit))
 			return
 		}

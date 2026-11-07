@@ -8,6 +8,7 @@ package server
 // 是测不出来的，必须让 body 真的超过上限并确认状态码是 413。
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -83,5 +84,48 @@ func TestLimitBodyFallbackWhenUnlimited(t *testing.T) {
 	got2 := h2.limitBody(httptest.NewRecorder(), httptest.NewRequest("POST", "/x", strings.NewReader("")))
 	if want := int64(7) << 20; got2 != want {
 		t.Fatalf("configured limit=%d want %d", got2, want)
+	}
+}
+
+// countingReader 记录被读走的字节数，用来判断「超限后有没有排空」。
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// TestBodyLimitDrainsBefore413 超限时先把剩余上传读掉再回 413。
+//
+// 为什么要这一步：直接 return 会让 net/http 关连接，客户端还在上传，只看到
+// connection reset 而看不到那份 413（hub #799 的同款坑）。判据是「读掉的字节数」：
+// 上限 1MB、body 3MB → 读体 1MB+1、排空再读 1MB，合计约 2MB；
+// 既不能只读 1MB（没排空），也不能把 3MB 全读进来（那就失去了上限的意义）。
+func TestBodyLimitDrainsBefore413(t *testing.T) {
+	const mb = 1
+	limit := int64(mb) << 20
+	body := `{"model":"glm-5.2","messages":[{"role":"user","content":"` +
+		strings.Repeat("x", 3<<20) + `"}]}`
+
+	h := NewHandler(Config{
+		Pool:      testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+		MaxBodyMB: mb,
+	})
+	cr := &countingReader{r: strings.NewReader(body)}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", cr))
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("code=%d want 413 body=%.120s", rec.Code, rec.Body.String())
+	}
+	if cr.n < 2*limit {
+		t.Fatalf("413 之前应排空剩余上传（至少读掉 2×上限 = %d 字节），实际只读了 %d", 2*limit, cr.n)
+	}
+	if cr.n > 2*limit+(64<<10) {
+		t.Fatalf("不该把整个 3MB body 读进来（上限的意义就在这里），实际读了 %d 字节", cr.n)
 	}
 }

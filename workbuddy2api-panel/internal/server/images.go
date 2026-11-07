@@ -85,6 +85,7 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		if bodyTooLarge(err) {
+			drainBody(w, r, limit)
 			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", bodyLimitText(limit))
 			return
 		}

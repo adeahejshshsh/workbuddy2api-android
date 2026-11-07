@@ -1155,6 +1155,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// 体积超限：413 而不是 400 —— 客户端据此知道该缩小请求，而不是重试。
 		if bodyTooLarge(err) {
+			drainBody(w, r, limit)
 			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", bodyLimitText(limit))
 			return
 		}
