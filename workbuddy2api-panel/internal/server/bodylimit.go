@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 )
@@ -39,18 +40,48 @@ const drainDeadline = 2 * time.Second
 // 区别只在于超限后底层 body 仍可读——排空要用到这一点。
 var errBodyTooLarge = errors.New("http: request body too large")
 
+// slowUploadThreshold 读体慢到值得告警的阈值。
+//
+// 为什么是「异常才记」而不是每请求一行（上游 c6f953a / hub #818）：正常请求是毫秒级，
+// 秒级已经异常；而 CDN 前置时慢上传发生在到达网关之前 —— 日志里「没有它」不是采集
+// 缺陷而是位置缺陷，不测量就分不清「上传慢」和「没到达」。var 便于测试注入。
+var slowUploadThreshold = 3 * time.Second
+
 // bodyLimiter 数着字节读的 body 包装：多读的那一个字节就是「超限」的证据
 // （不看 Content-Length——头可以撒谎，读进去的字节不会）。
 type bodyLimiter struct {
-	rc    io.ReadCloser
-	limit int64
-	read  int64
-	over  bool
+	rc     io.ReadCloser
+	req    *http.Request // 只用于慢上传告警里的方法/路径/声明长度
+	limit  int64
+	read   int64
+	over   bool
+	start  time.Time
+	logged bool
+}
+
+// noteSlow 读完后判断这次读体是否慢到该告警（每个请求最多记一次，且不含 body 内容）。
+func (b *bodyLimiter) noteSlow() {
+	if b.logged {
+		return
+	}
+	b.logged = true
+	if b.start.IsZero() || b.req == nil {
+		return
+	}
+	d := time.Since(b.start)
+	if d < slowUploadThreshold {
+		return
+	}
+	log.Printf("WARN: [server] slow upload: %s %s read %d bytes in %s (Content-Length: %d)",
+		b.req.Method, b.req.URL.Path, b.read, d.Round(time.Millisecond), b.req.ContentLength)
 }
 
 func (b *bodyLimiter) Read(p []byte) (int, error) {
 	if b.over {
 		return 0, errBodyTooLarge
+	}
+	if b.start.IsZero() {
+		b.start = time.Now() // 懒设：只统计真正开始读的时刻
 	}
 	// 只读到「上限 + 1」为止：多一个字节即可判定超限，不必把整段读进来。
 	if remaining := b.limit - b.read + 1; int64(len(p)) > remaining {
@@ -60,7 +91,11 @@ func (b *bodyLimiter) Read(p []byte) (int, error) {
 	b.read += int64(n)
 	if b.read > b.limit {
 		b.over = true
+		b.noteSlow()
 		return n, errBodyTooLarge
+	}
+	if err == io.EOF {
+		b.noteSlow()
 	}
 	return n, err
 }
@@ -85,7 +120,7 @@ func (h *Handler) limitBody(w http.ResponseWriter, r *http.Request) int64 {
 		limit = int64(h.cfg.MaxBodyMB) << 20
 	}
 	if _, ok := r.Body.(*bodyLimiter); !ok {
-		r.Body = &bodyLimiter{rc: r.Body, limit: limit}
+		r.Body = &bodyLimiter{rc: r.Body, req: r, limit: limit}
 	}
 	return limit
 }

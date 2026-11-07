@@ -8,11 +8,15 @@ package server
 // 是测不出来的，必须让 body 真的超过上限并确认状态码是 413。
 
 import (
+	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -127,5 +131,78 @@ func TestBodyLimitDrainsBefore413(t *testing.T) {
 	}
 	if cr.n > 2*limit+(64<<10) {
 		t.Fatalf("不该把整个 3MB body 读进来（上限的意义就在这里），实际读了 %d 字节", cr.n)
+	}
+}
+
+// slowReader 每次 Read 先睡 delay，用来模拟慢上传（CDN 前置 / 手机弱网）。
+type slowReader struct {
+	data  []byte
+	delay time.Duration
+	off   int
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	time.Sleep(r.delay)
+	if r.off >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.off:])
+	r.off += n
+	return n, nil
+}
+
+// TestSlowUploadLogsWarning 慢上传要留痕（上游 c6f953a / hub #818）。
+//
+// 判据是「日志里有一行 WARN 且带方法/路径/字节数/耗时」，不是每请求一行 —— 正常请求
+// 是毫秒级，逐条记录只会把日志刷成噪音，而慢上传是低频异常。
+func TestSlowUploadLogsWarning(t *testing.T) {
+	old := slowUploadThreshold
+	slowUploadThreshold = 10 * time.Millisecond
+	t.Cleanup(func() { slowUploadThreshold = old })
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	h := NewHandler(Config{MaxBodyMB: 1})
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		&slowReader{data: []byte(`{"model":"glm-5.2","messages":[]}`), delay: 6 * time.Millisecond})
+	rec := httptest.NewRecorder()
+	h.limitBody(rec, req)
+	if _, err := io.ReadAll(req.Body); err != nil {
+		t.Fatalf("读体失败: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "slow upload") {
+		t.Fatalf("慢上传没有告警：%q", out)
+	}
+	if !strings.Contains(out, "/v1/chat/completions") {
+		t.Fatalf("告警里没有路径：%q", out)
+	}
+	if strings.Contains(out, "glm-5.2") {
+		t.Fatalf("告警里不该出现 body 内容：%q", out)
+	}
+}
+
+// TestFastUploadDoesNotLog 正常请求（毫秒级）不该刷日志。
+func TestFastUploadDoesNotLog(t *testing.T) {
+	old := slowUploadThreshold
+	slowUploadThreshold = 3 * time.Second
+	t.Cleanup(func() { slowUploadThreshold = old })
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	h := NewHandler(Config{MaxBodyMB: 1})
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	h.limitBody(httptest.NewRecorder(), req)
+	if _, err := io.ReadAll(req.Body); err != nil {
+		t.Fatalf("读体失败: %v", err)
+	}
+	if strings.Contains(buf.String(), "slow upload") {
+		t.Fatalf("正常请求被记成慢上传：%q", buf.String())
 	}
 }
