@@ -1951,8 +1951,32 @@ $('btnImportPaste').onclick = async () => {
   }
 };
 
-$('importFile').onchange = async () => {
-  const files = Array.from($('importFile').files || []);
+// 导入页：先「选文件」（只选择与展示），再点「导入所选文件」提交。
+// 拆成两步是为了让「到底选没选中」看得见：此前选完就直接上传，WebView 若没把文件
+// 交给页面，用户只看到「未选择文件」，完全不知道是选择器的问题还是导入失败。
+let importPicked = [];
+function renderImportPick() {
+  const el = $('importPick'), btn = $('btnImportFiles');
+  if (!el) return;
+  if (!importPicked.length) {
+    el.textContent = '还没有选择文件';
+    if (btn) { btn.disabled = true; btn.textContent = '导入所选文件'; }
+    return;
+  }
+  const names = importPicked.map(f => f.name);
+  el.textContent = '已选 ' + names.length + ' 个：' + names.slice(0, 5).join('、') +
+    (names.length > 5 ? ' 等' : '');
+  if (btn) { btn.disabled = false; btn.textContent = '导入所选 ' + names.length + ' 个文件'; }
+}
+renderImportPick();
+if ($('btnPickFiles')) $('btnPickFiles').onclick = () => $('importFile').click();
+$('importFile').onchange = () => {
+  importPicked = Array.from($('importFile').files || []);
+  $('importDone').hidden = true; $('importErr').hidden = true;
+  renderImportPick();
+};
+$('btnImportFiles').onclick = async () => {
+  const files = importPicked.slice();
   if (!files.length) return;
   $('importDone').hidden = true; $('importErr').hidden = true;
   const fd = new FormData();
@@ -1982,22 +2006,22 @@ $('importFile').onchange = async () => {
     const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
     const d = await r.json();
     if (!r.ok) {
-    // 带上状态码（BUG-14）：调用方要区分「state 真失效（4xx）」与「网络抖动/5xx（可重试）」
-    const e = new Error(d.error || ('HTTP ' + r.status));
-    e.status = r.status;
-    throw e;
-  }
-    $('importDone').hidden = false;
-    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
-    if (d.errors && d.errors.length) {
-      console.warn('import errors:', d.errors);
+      const e = new Error(d.error || ('HTTP ' + r.status));
+      e.status = r.status;
+      throw e;
     }
+    $('importDone').hidden = false;
+    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' +
+      (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
+    if (d.errors && d.errors.length) console.warn('import errors:', d.errors);
+    importPicked = [];
+    $('importFile').value = '';
+    renderImportPick();
     loadOverview(true);
   } catch (e) {
     $('importErr').hidden = false;
     $('importErr').textContent = '导入失败：' + e.message;
   }
-  $('importFile').value = '';
 };
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */

@@ -145,6 +145,11 @@ input[type=checkbox] { width: auto; accent-color: var(--accent); }
 label.fld { display: block; margin-bottom: 14px; }
 label.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
 label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
+/* 导入页：选文件/导入按钮并排，窄屏自动换行；已选列表用等宽字体便于核对文件名 */
+.imp-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.imp-row button { flex: 0 0 auto; }
+#importPick { font-family: ui-monospace, monospace; font-size: 11.5px; word-break: break-all; }
+#importPaste { box-sizing: border-box; }
 .inline { display: flex; align-items: center; gap: 9px; }
 
 /* ── 统计条（观测区）──────────────────────────────────────────────── */
@@ -1487,11 +1492,21 @@ body.veil-open { overflow: hidden; }
       </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 JSON 文件批量导入账号。支持三种：cockpit tools 导出（账号数组，snake_case）、本仓 <code>auths/workbuddy-&lt;uid&gt;.json</code> 单个凭据文件（camelCase，可一次选一个、也可自己拼成数组）、以及 <code>{"accounts":[…]}</code> 包装。凭据含 refresh token，导入后无需重新登录。</div>
-        <input type="file" id="importFile" accept=".json" multiple style="margin-bottom:8px">
-        <div class="hint" style="margin:10px 0 6px">或者直接把 JSON 内容粘贴进来（WebView 里选文件打不开时的兜底）：</div>
-        <textarea id="importPaste" rows="6" placeholder='单个凭据 {"auth":{…},"account":{…}}，或数组，或 {"accounts":[…]}' style="width:100%;font-family:ui-monospace,monospace;font-size:12px"></textarea>
-        <button id="btnImportPaste" style="margin:6px 0 8px">导入粘贴的 JSON</button>
+        <div class="hint" style="margin-bottom:10px">凭据文件（<code>auths/workbuddy-&lt;uid&gt;.json</code>）或 cockpit tools 导出的 JSON 都能导；导入后账号直接可用，不需要重新登录。</div>
+
+        <div class="imp-row">
+          <button id="btnPickFiles" class="primary">选择 JSON 文件…</button>
+          <button id="btnImportFiles" disabled>导入所选文件</button>
+          <input type="file" id="importFile" accept=".json,application/json" multiple hidden>
+        </div>
+        <div id="importPick" class="hint" style="margin:6px 0 10px">还没有选择文件</div>
+
+        <details style="margin:12px 0 6px">
+          <summary class="hint" style="cursor:pointer">选择文件打不开？直接粘贴 JSON 内容</summary>
+          <textarea id="importPaste" rows="6" placeholder='单个凭据 {"auth":{…},"account":{…}}，或数组，或 {"accounts":[…]}' style="width:100%;margin-top:8px;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+          <button id="btnImportPaste" style="margin:6px 0 8px">导入粘贴的 JSON</button>
+        </details>
+
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>

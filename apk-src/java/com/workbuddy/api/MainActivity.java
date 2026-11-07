@@ -65,16 +65,91 @@ public class MainActivity extends Activity {
     private android.webkit.ValueCallback<Uri[]> fileChooserCb;
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == REQ_FILE_CHOOSER) {
-            if (fileChooserCb != null) {
-                // parseResult 同时处理「取消」（回 null）与多选（ClipData）
-                fileChooserCb.onReceiveValue(
-                        WebChromeClient.FileChooserParams.parseResult(resultCode, data));
-                fileChooserCb = null;
-            }
+        if (requestCode != REQ_FILE_CHOOSER) {
+            super.onActivityResult(requestCode, resultCode, data);
             return;
         }
-        super.onActivityResult(requestCode, resultCode, data);
+        android.webkit.ValueCallback<Uri[]> cb = fileChooserCb;
+        fileChooserCb = null;
+        if (cb == null) return;     // 已被 onShowFileChooser 取消过
+
+        Uri[] picked = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+        if (picked == null || picked.length == 0) picked = collectPickedUris(data);
+        // 关键一步：把选中的文件**复制进自己的 cache**，再交给 WebView。
+        // 直接把 content:// 交出去在部分 ROM / 第三方选择器（网盘、微信文件、QQ 文件）
+        // 上会读不到：选择器没带 FLAG_GRANT_READ_URI_PERMISSION 时，WebView 打开就失败，
+        // 于是 input 里永远显示「未选择文件」—— 这就是本次要修的症状。
+        Uri[] local = cachePickedFiles(picked);
+        if (local != null && local.length > 0) {
+            toast("已选择 " + local.length + " 个文件");
+        } else if (resultCode == RESULT_OK) {
+            toast("没读到文件（选择器没给可读的 URI）");
+        }
+        cb.onReceiveValue((local != null && local.length > 0) ? local : null);
+    }
+
+    /** 兜底取 URI：有些选择器只填 ClipData，或只给 data 不给 dataString。 */
+    private Uri[] collectPickedUris(Intent data) {
+        if (data == null) return null;
+        java.util.ArrayList<Uri> out = new java.util.ArrayList<>();
+        if (data.getClipData() != null) {
+            for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                Uri u = data.getClipData().getItemAt(i).getUri();
+                if (u != null) out.add(u);
+            }
+        }
+        if (out.isEmpty() && data.getData() != null) out.add(data.getData());
+        return out.isEmpty() ? null : out.toArray(new Uri[0]);
+    }
+
+    /**
+     * 把选中的 URI 逐个复制到 getCacheDir()，返回 file:// URI 列表。
+     *
+     * 为什么不用原 URI：WebView 读 content:// 依赖选择器给的临时读权限，第三方选择器
+     * 经常漏掉那个 flag，表现为「选完了但 input 还是未选择文件」。复制成自己的文件后，
+     * 读权限问题彻底消失（面板要的也只是 JSON 内容）。
+     * 文件名沿用 DISPLAY_NAME（去掉不安全字符），这样 input 里显示的还是用户认得的名字。
+     */
+    private Uri[] cachePickedFiles(Uri[] src) {
+        if (src == null || src.length == 0) return null;
+        java.util.ArrayList<Uri> out = new java.util.ArrayList<>();
+        for (int i = 0; i < src.length; i++) {
+            Uri u = src[i];
+            if (u == null) continue;
+            String name = displayName(u, i);
+            File dst = new File(getCacheDir(), name);
+            try (java.io.InputStream in = getContentResolver().openInputStream(u);
+                 java.io.OutputStream fo = new java.io.FileOutputStream(dst)) {
+                if (in == null) throw new java.io.IOException("openInputStream 返回 null");
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) fo.write(buf, 0, n);
+                out.add(Uri.fromFile(dst));
+            } catch (Throwable t) {
+                android.util.Log.w("wb2api", "复制所选文件失败: " + u, t);
+                // 复制失败也把原 URI 交回去：能读的 ROM 上仍然可用，总比直接吞掉好
+                out.add(u);
+            }
+        }
+        return out.isEmpty() ? null : out.toArray(new Uri[0]);
+    }
+
+    /** 取选择器里的显示名；取不到就退化成 import-<时间>-<序号>.json。 */
+    private String displayName(Uri u, int idx) {
+        String name = null;
+        try (android.database.Cursor c = getContentResolver()
+                .query(u, new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) name = c.getString(0);
+        } catch (Throwable ignored) {}
+        if (name == null || name.trim().isEmpty()) {
+            name = u.getLastPathSegment();
+        }
+        if (name == null || name.trim().isEmpty()) {
+            name = "import-" + SystemClock.elapsedRealtime() + "-" + idx + ".json";
+        }
+        name = name.replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
+        if (!name.toLowerCase().endsWith(".json")) name = name + ".json";
+        return name;
     }
 
     // ── 设计令牌（= 面板 :root / [data-theme="dark"]）
@@ -185,6 +260,10 @@ public class MainActivity extends Activity {
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
+        // 文件选择回填用的是「复制到 cache 再给 file://」这条路（见 cachePickedFiles）：
+        // 必须显式允许文件访问，否则 WebView 打不开那些 cache 文件，input 依旧显示
+        // 「未选择文件」。默认值就是 true，这里写死是为了别被将来的加固误关。
+        s.setAllowFileAccess(true);
         s.setUseWideViewPort(true);
         // 面板自带 viewport meta，按设备宽度 1:1 渲染即可；overview 模式会把整页缩小
         // （宽表一多就变成"字小得看不清"，手机上看就是"没适配"）。

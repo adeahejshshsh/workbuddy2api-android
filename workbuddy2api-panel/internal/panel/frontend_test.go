@@ -1343,3 +1343,86 @@ process.exit(0);
 		t.Fatalf("余额趋势控件接线未通过:\n%s", out)
 	}
 }
+
+// TestAppJSImportPickFlow 导入页「先选文件、再导入」的两步流：选没选中必须看得见。
+//
+// 为什么要有这条：换包名后用户要拿 auths/*.json 迁账号，而 WebView 的 <input type=file>
+// 依赖壳实现 onShowFileChooser。壳那边一旦没把文件交回来，页面只会显示「未选择文件」，
+// 用户完全分不清是选择器坏了还是导入失败。所以 UI 必须把「已选 N 个」显式渲染出来，
+// 并且导入按钮在没有文件时是禁用的。
+func TestAppJSImportPickFlow(t *testing.T) {
+	nodeBin(t)
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; }, apply() { return inert; }, construct() { return inert; }, has() { return true; },
+});
+// 只给导入页这几个控件真对象，其余照旧 inert。
+const els = {};
+function el(id, init) {
+  if (!els[id]) els[id] = Object.assign({ id, textContent: '', value: '', files: null,
+    hidden: false, disabled: false, style: {}, className: '',
+    click() { this.clicked = (this.clicked || 0) + 1; },
+    setAttribute() {}, getAttribute() { return null; }, addEventListener() {}, appendChild() {} }, init || {});
+  return els[id];
+}
+el('importPick'); el('btnImportFiles'); el('importFile', { files: null }); el('btnPickFiles');
+const sandbox = new Proxy({
+  location: { hash: '#accounts' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { getElementById: id => (els[id] ? els[id] : inert),
+    querySelectorAll: () => [], querySelector: () => inert, addEventListener() {},
+    documentElement: inert, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, WeakMap, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+try { vm.runInContext("'use strict';\n" + src, sandbox, { filename: 'app.js' }); }
+catch (e) { console.log('LOAD FAIL: ' + (e && e.stack ? e.stack : e)); process.exit(2); }
+
+function fail(m) { console.log('FAIL: ' + m); process.exit(1); }
+const pick = els.importPick, btn = els.btnImportFiles, input = els.importFile;
+
+// ① 初始态：按钮禁用 + 明确说「还没有选择文件」
+if (btn.disabled !== true) fail('没有文件时导入按钮应禁用，实际 disabled=' + btn.disabled);
+if (String(pick.textContent).indexOf('还没有选择文件') < 0) fail('初始提示不对：' + pick.textContent);
+
+// ② 选两个文件后：按钮解禁、文案给出数量与文件名（用户据此确认真的选中了）
+input.files = [{ name: 'workbuddy-u1.json' }, { name: 'workbuddy-u2.json' }];
+if (typeof input.onchange !== 'function') fail('#importFile 没有绑定 onchange');
+input.onchange();
+if (btn.disabled !== false) fail('选了文件后按钮应可用');
+if (String(pick.textContent).indexOf('已选 2 个') < 0) fail('未显示已选数量：' + pick.textContent);
+if (String(pick.textContent).indexOf('workbuddy-u1.json') < 0) fail('未显示文件名：' + pick.textContent);
+if (String(btn.textContent).indexOf('2') < 0) fail('按钮文案没跟上数量：' + btn.textContent);
+
+// ③ 「选择文件」按钮要把点击转给隐藏的 input（WebView 里只能靠它唤起选择器）
+els.btnPickFiles.click();
+if (!els.btnPickFiles.clicked) fail('「选择文件」按钮没有绑定 click');
+console.log('OK');
+process.exit(0);
+`
+	f, err := os.CreateTemp(t.TempDir(), "impflow-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("导入页两步流测试失败: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("OK")) {
+		t.Fatalf("导入页两步流未通过:\n%s", out)
+	}
+}
