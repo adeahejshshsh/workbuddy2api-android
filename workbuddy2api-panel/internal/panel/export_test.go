@@ -6,7 +6,10 @@ package panel
 // 导出或解析里丢了，导入后账号能显示但第一次刷新就掉线，用户要到第二天才发现。
 
 import (
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -130,5 +133,91 @@ func TestExportAccountsOmitsPlaceholders(t *testing.T) {
 	p.exportAccounts(rec, httptest.NewRequest("GET", "/panel/api/export/accounts", nil))
 	if strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Fatalf("占位号不该被导出，实际: %s", rec.Body.String())
+	}
+}
+
+// TestExportThenImportEndToEnd 端到端：面板导出的文件，原样上传给导入接口能不能吃下。
+//
+// 这是「导出的文件能直接被本应用导入吗」的验收判据 —— 之前的往返用例只验证了
+// parseImportPayload（解析器），没有经过真正的 handler（multipart、字段校验、
+// 落盘路径、入池）。这两层之间最容易出的岔子是「解析器认、handler 不认」。
+func TestExportThenImportEndToEnd(t *testing.T) {
+	src, _ := exportFixture(t)
+
+	// ① 导出
+	rec := httptest.NewRecorder()
+	src.exportAccounts(rec, httptest.NewRequest("GET", "/panel/api/export/accounts", nil))
+	if rec.Code != 200 {
+		t.Fatalf("导出失败 code=%d", rec.Code)
+	}
+	exported := rec.Body.Bytes()
+
+	// ② 原样当成文件上传给导入接口（用户实际就是这么做的：从「下载」里选那个 json）
+	dir2 := t.TempDir()
+	dst := New(Config{Version: "test", Pool: pool.New(""), AuthDir: dir2})
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("file", "workbuddy-accounts-20261107.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(exported); err != nil {
+		t.Fatal(err)
+	}
+	mw.Close()
+
+	req := httptest.NewRequest("POST", "/panel/api/import/cockpit", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec2 := httptest.NewRecorder()
+	dst.importCockpit(rec2, req)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("导入被拒 code=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	var res struct {
+		Imported int      `json:"imported"`
+		Skipped  int      `json:"skipped"`
+		Errors   []string `json:"errors"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &res); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	if res.Imported != 2 || res.Skipped != 0 {
+		t.Fatalf("导入结果 imported=%d skipped=%d errors=%v", res.Imported, res.Skipped, res.Errors)
+	}
+
+	// ②b 再导一次（用户手滑重复导入）：同名覆盖，不能变成 4 个号
+	body.Reset()
+	mw = multipart.NewWriter(&body)
+	if fw, err = mw.CreateFormFile("file", "workbuddy-accounts-20261107.json"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = fw.Write(exported)
+	mw.Close()
+	req2 := httptest.NewRequest("POST", "/panel/api/import/cockpit", &body)
+	req2.Header.Set("Content-Type", mw.FormDataContentType())
+	dst.importCockpit(httptest.NewRecorder(), req2)
+	if n := len(dst.cfg.Pool.List()); n != 2 {
+		t.Fatalf("重复导入后池里应有 2 个号（同名覆盖），实际 %d", n)
+	}
+
+	// ③ 新池子里的号必须带着完整凭据（能直接干活，不用重新登录）
+	loaded, err := auth.LoadDir(dir2)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if len(loaded) != 2 {
+		t.Fatalf("落盘 %d 个账号", len(loaded))
+	}
+	for _, a := range loaded {
+		if a.UID == "u-1" {
+			if a.RefreshToken != "RT-1" || a.DeviceToken != "dt-1" || a.EnterpriseID != "ent-9" {
+				t.Fatalf("u-1 导入后凭据不全: %+v", a)
+			}
+		}
+		if a.UID == "u-2" && a.Realm() != "global" {
+			t.Fatalf("u-2 realm 丢了: %q", a.Realm())
+		}
 	}
 }
