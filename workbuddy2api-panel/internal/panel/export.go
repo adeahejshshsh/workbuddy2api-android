@@ -32,6 +32,7 @@ type exportAccount struct {
 	Domain       string `json:"domain"`
 	Realm        string `json:"realm"`
 	EnterpriseID string `json:"enterprise_id"`
+	Type         string `json:"type"` // 上游 account.type（personal/ultimate/exclusive）
 	DeviceToken  string `json:"device_token"`
 	// 观测字段：导入侧忽略（encoding/json 会丢掉未知键），但导出的文件里能看出
 	// 「当时哪些号是被禁用的」，迁移后好对照。
@@ -76,6 +77,7 @@ func (p *Panel) exportAccounts(w http.ResponseWriter, r *http.Request) {
 			Domain:         strings.TrimSpace(a.DomainValue()),
 			Realm:          a.Realm(),
 			EnterpriseID:   strings.TrimSpace(a.EnterpriseID),
+			Type:           strings.TrimSpace(a.AccountType),
 			DeviceToken:    strings.TrimSpace(a.DeviceToken),
 			Disabled:       st.Disabled,
 			DisabledReason: st.DisabledReason,

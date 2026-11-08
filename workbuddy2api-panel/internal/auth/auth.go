@@ -37,7 +37,13 @@ type Auth struct {
 	realm        string
 	UID          string
 	EnterpriseID string
-	Nickname     string
+	// AccountType 上游 account.type（personal / ultimate / exclusive / …）。
+	// 企业版判定的**权威判据**：官方 CLI 的 isPersonalAccount 只看这一项，
+	// isEnterpriseEditionAccount 则是「type ∈ {ultimate, exclusive} **或** enterpriseId 非空」。
+	// 本仓曾只看 enterpriseId，于是把「带 enterpriseId 但 type=personal」的国服个人号
+	// 判成企业版（签到/成长任务被门控掉）。空 = 旧文件没有该字段，回落到 enterpriseId。
+	AccountType string
+	Nickname    string
 	FilePath     string // 来源文件；refresh 后原子写回此处
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
@@ -232,9 +238,44 @@ func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 // 不受影响的能力：选号派发、保活（token 刷新）、额度查询（企业额度改走
 // /v2/billing/meter/get-enterprise-user-usage，见 upstream.enterpriseResource）。
 //
-// 直读字段（EnterpriseID 自 Parse 后不再改写，与 upstream 读取方式一致），
+// 判据顺序（与官方 CLI 对齐）：
+//  1. type = personal → **个人号**，即使带了 enterpriseId 也不算企业版。
+//     国服个人号常带一个 enterpriseId（个人空间/默认租户），只认它会把任意账号判成企业版；
+//  2. type = ultimate / exclusive → 企业版（官方 isEnterpriseEditionAccount 的同款白名单）；
+//  3. type 缺失（旧 auth 文件）→ 回落到 enterpriseId 非空（且不是占位值）。
+//
+// 直读字段（EnterpriseID/AccountType 自 Parse 后不再改写，与 upstream 读取方式一致），
 // 无需加锁——Realm() 加锁是因为 realm/Domain 会被 RefreshToken 在锁内改写。
-func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) != "" }
+func (a *Auth) IsEnterprise() bool {
+	if a == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(a.AccountType)) {
+	case "personal":
+		return false
+	case "ultimate", "exclusive":
+		return true
+	}
+	return NormalizeEnterpriseID(a.EnterpriseID) != ""
+}
+
+// enterpriseIDPlaceholders 上游/插件把「没有企业」写成过这些值，一律按空处理。
+var enterpriseIDPlaceholders = map[string]bool{
+	"0": true, "-": true, "null": true, "nil": true, "none": true, "undefined": true,
+	"false": true, "personal": true, "个人": true, "无": true,
+}
+
+// NormalizeEnterpriseID 归一企业 ID：去空白；占位值（"0"/"null"/"personal"…）视为没有。
+//
+// 为什么要归一：这些值非空，直接判 `!= ""` 会把个人号算成企业版 —— 面板显示「企业版」
+// 且签到/成长任务被门控，用户看到的就是「所有号都成了企业版」。
+func NormalizeEnterpriseID(raw string) string {
+	v := strings.TrimSpace(raw)
+	if enterpriseIDPlaceholders[strings.ToLower(v)] {
+		return ""
+	}
+	return v
+}
 
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。
 // 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。
@@ -293,6 +334,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Account struct {
 				UID          string `json:"uid"`
 				EnterpriseID string `json:"enterpriseId"`
+				Type         string `json:"type"`
 				Nickname     string `json:"nickname"`
 			} `json:"account"`
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用；手写时无需嵌进 auth 对象）。
@@ -308,7 +350,8 @@ func Parse(raw []byte) (*Auth, error) {
 			Domain:       n.Auth.Domain,
 			realm:        n.Auth.Realm,
 			UID:          n.Account.UID,
-			EnterpriseID: n.Account.EnterpriseID,
+			EnterpriseID: NormalizeEnterpriseID(n.Account.EnterpriseID),
+			AccountType:  strings.TrimSpace(n.Account.Type),
 			Nickname:     n.Account.Nickname,
 			DeviceToken:  n.DeviceToken,
 		}
@@ -321,6 +364,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Realm        string `json:"realm"`
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`
+			Type         string `json:"type"`
 			Nickname     string `json:"nickname"`
 			DeviceToken  string `json:"device_token"`
 		}
@@ -334,7 +378,8 @@ func Parse(raw []byte) (*Auth, error) {
 			Domain:       f.Domain,
 			realm:        f.Realm,
 			UID:          f.UID,
-			EnterpriseID: f.EnterpriseID,
+			EnterpriseID: NormalizeEnterpriseID(f.EnterpriseID),
+			AccountType:  strings.TrimSpace(f.Type),
 			Nickname:     f.Nickname,
 			DeviceToken:  f.DeviceToken,
 		}
@@ -398,7 +443,8 @@ func (a *Auth) SaveAtomic() error {
 		expiresAt:    a.ExpiresAt,
 		domain:       a.Domain,
 		realm:        a.realm,
-		enterpriseID: a.EnterpriseID,
+		enterpriseID: NormalizeEnterpriseID(a.EnterpriseID),
+		accountType:  strings.TrimSpace(a.AccountType),
 		nickname:     a.Nickname,
 		deviceToken:  a.DeviceToken,
 	}
@@ -410,7 +456,8 @@ func (a *Auth) SaveAtomic() error {
 type authFileSnapshot struct {
 	path                                          string
 	uid, accessToken, refreshToken, domain, realm string
-	enterpriseID, nickname, deviceToken           string
+	enterpriseID, accountType, nickname           string
+	deviceToken                                   string
 	expiresAt                                     int64
 }
 
@@ -450,11 +497,16 @@ func writeAuthSnapshot(s authFileSnapshot) error {
 		"domain":       s.domain,
 		"realm":        s.realm,
 	})
-	putMerged("account", map[string]any{
+	account := map[string]any{
 		"uid":          s.uid,
 		"enterpriseId": s.enterpriseID,
 		"nickname":     s.nickname,
-	})
+	}
+	// type 只在已知时写回（旧文件/上游没给就别塞空串，避免与插件读写口径漂移）。
+	if s.accountType != "" {
+		account["type"] = s.accountType
+	}
+	putMerged("account", account)
 	// 扁平形遗留键必须清掉（bug 16）：把扁平文件升级成嵌套形时只 putMerged 了
 	// auth/account，顶层的 accessToken/refreshToken/... 原样留着 —— 功能上暂时正确
 	// （Parse 优先读嵌套形），但文件里永久多一份旧 token，任何按扁平键读的外部

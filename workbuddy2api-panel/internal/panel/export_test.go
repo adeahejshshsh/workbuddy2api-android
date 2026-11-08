@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -219,5 +220,58 @@ func TestExportThenImportEndToEnd(t *testing.T) {
 		if a.UID == "u-2" && a.Realm() != "global" {
 			t.Fatalf("u-2 realm 丢了: %q", a.Realm())
 		}
+	}
+}
+
+// TestExportImportKeepsAccountType 导出/导入必须带上 account.type，且导入后判定不变。
+//
+// 现场：国服个人号常带一个 enterpriseId（个人空间/默认租户）。只要 type 在导出→导入
+// 这一圈里丢了，新机器上就会按「enterpriseId 非空」把它判成企业版 —— 面板显示企业版，
+// 签到与成长任务被门控掉。所以 type 必须跟着走，并且判定以它为准。
+func TestExportImportKeepsAccountType(t *testing.T) {
+	dir := t.TempDir()
+	pl := pool.New("")
+	a := &auth.Auth{UID: "p1", AccessToken: "at", RefreshToken: "rt",
+		ExpiresAt: 1893456000, Domain: "www.codebuddy.cn",
+		AccountType: "personal", EnterpriseID: "ent-cn-default", Nickname: "国服个人号"}
+	a.FilePath = filepath.Join(dir, "workbuddy-p1.json")
+	pl.Add(a)
+
+	src := New(Config{Version: "test", Pool: pl, AuthDir: dir})
+	rec := httptest.NewRecorder()
+	src.exportAccounts(rec, httptest.NewRequest("GET", "/panel/api/export/accounts", nil))
+	if rec.Code != 200 {
+		t.Fatalf("导出失败: %d", rec.Code)
+	}
+
+	accs, err := parseImportPayload(rec.Body.Bytes())
+	if err != nil {
+		t.Fatalf("导出体解析失败: %v", err)
+	}
+	if len(accs) != 1 || accs[0].Type != "personal" {
+		t.Fatalf("type 没随导出走: %+v", accs)
+	}
+
+	// 走一遍真实导入：落盘后必须仍是个人号
+	dir2 := t.TempDir()
+	dst := New(Config{Version: "test", Pool: pool.New(""), AuthDir: dir2})
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, _ := mw.CreateFormFile("file", "export.json")
+	_, _ = fw.Write(rec.Body.Bytes())
+	_ = mw.Close()
+	req := httptest.NewRequest("POST", "/panel/api/import/cockpit", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	dst.importCockpit(httptest.NewRecorder(), req)
+
+	loaded, err := auth.LoadDir(dir2)
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("回读失败: %v n=%d", err, len(loaded))
+	}
+	if loaded[0].AccountType != "personal" {
+		t.Fatalf("导入后 type 丢失: %q", loaded[0].AccountType)
+	}
+	if loaded[0].IsEnterprise() {
+		t.Fatal("personal 账号导入后被判成企业版（本次要修的 bug）")
 	}
 }

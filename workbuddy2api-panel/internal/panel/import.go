@@ -45,6 +45,9 @@ type cockpitAccount struct {
 	DeviceToken string `json:"device_token"`
 	// Realm 显式 realm（本仓 auths/*.json 的 auth.realm）。空 = 按 domain 推断。
 	Realm string `json:"realm"`
+	// Type 上游 account.type（personal / ultimate / exclusive）。企业版判定的权威判据：
+	// 只看 enterpriseId 会把「带企业 ID 的个人号」判成企业版（签到/成长任务被门控）。
+	Type string `json:"type"`
 }
 
 // postImportActivate 导入后的后置动作（异步执行，bug #23）：注册激活 / 领 trial /
@@ -201,11 +204,13 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		}
 		// 企业标识原样带过去（两种命名取先非空者）：没有它，后续签到/成长任务
 		// 判定会把企业号当个人号。
-		if ent := strings.TrimSpace(acc.EnterpriseID); ent != "" {
+		// 归一：占位值（"0"/"null"/"personal"…）当没有企业身份，否则个人号会被判企业版。
+		if ent := auth.NormalizeEnterpriseID(acc.EnterpriseID); ent != "" {
 			a.EnterpriseID = ent
-		} else if ent := strings.TrimSpace(acc.EnterpriseIDCamel); ent != "" {
+		} else if ent := auth.NormalizeEnterpriseID(acc.EnterpriseIDCamel); ent != "" {
 			a.EnterpriseID = ent
 		}
+		a.AccountType = strings.TrimSpace(acc.Type)
 		// 设备风控 token 同样带过去：本仓 auths/*.json 里存着它，丢了下游会按「新设备」
 		// 重新算指纹（等于自己把风控线索断了）。
 		if dt := strings.TrimSpace(acc.DeviceToken); dt != "" {
@@ -361,6 +366,7 @@ func decodeNativeAuth(raw json.RawMessage) (cockpitAccount, error) {
 		Account struct {
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`
+			Type         string `json:"type"`
 			Nickname     string `json:"nickname"`
 		} `json:"account"`
 		// 扁平形（手写/旧版）
@@ -371,6 +377,7 @@ func decodeNativeAuth(raw json.RawMessage) (cockpitAccount, error) {
 		Realm        string `json:"realm"`
 		UID          string `json:"uid"`
 		EnterpriseID string `json:"enterpriseId"`
+		Type         string `json:"type"`
 		Nickname     string `json:"nickname"`
 		DeviceToken  string `json:"device_token"`
 	}
@@ -381,6 +388,7 @@ func decodeNativeAuth(raw json.RawMessage) (cockpitAccount, error) {
 		UID:          firstNonEmpty(n.Account.UID, n.UID),
 		Nickname:     firstNonEmpty(n.Account.Nickname, n.Nickname),
 		EnterpriseID: firstNonEmpty(n.Account.EnterpriseID, n.EnterpriseID),
+		Type:         firstNonEmpty(n.Account.Type, n.Type),
 		AccessToken:  firstNonEmpty(n.Auth.AccessToken, n.AccessToken),
 		RefreshToken: firstNonEmpty(n.Auth.RefreshToken, n.RefreshToken),
 		ExpiresAt:    n.Auth.ExpiresAt,
