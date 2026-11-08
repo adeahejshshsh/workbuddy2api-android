@@ -52,3 +52,6 @@ __pycache__/
 # workbuddy2api-panel/.gitignore 白名单放行 —— 子目录的 .gitignore 优先级更高，
 # 在这里写 !xxx 是无效的（2026-10-31 踩过：CI 的 go build 报
 # pattern defaultprompt.md: no matching files found）。
+
+# 本地对照产物（上游树 diff 用，不入库）
+.cmp/

@@ -50,6 +50,9 @@ for pkg in $pkgs; do
     printf "  %-11s PASS\n" "$pkg"
   else
     printf "  %-11s FAIL\n" "$pkg"
+    # 先报**失败的用例名**（tail 只给最后几行日志，看不出是哪个用例红，
+    # 2026-11-08 两次「panel 在 all 里红、单跑绿」都因为这条信息缺失而无法定位）。
+    printf '%s\n' "$out" | grep -E "^--- FAIL|^\s+--- FAIL" | head -5 | sed 's/^/      /'
     printf '%s\n' "$out" | tail -4 | sed 's/^/      /'
     fail=1
   fi

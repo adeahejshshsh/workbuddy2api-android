@@ -67,6 +67,13 @@ type Status struct {
 	Group        string `json:"group,omitempty"`  // 运维分组标签（空 = 未分组，issue #159）
 	Credits      int64  `json:"credits"`
 	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
+	// ReserveBlocked 是否因「保留积分」停牌（余额已知且 <= 阈值）：账号仍在池中、
+	// 照常签到/旅行，充值后自动恢复。
+	ReserveBlocked bool `json:"reserve_blocked,omitempty"`
+	// Priority / Share 账号级路由偏好（issue #62，config 的 account_priority /
+	// account_share），0 = 未配置。透出来是为了让配置能自证生效：uid 打错时这里恒 0。
+	Priority int     `json:"priority,omitempty"`
+	Share    float64 `json:"share,omitempty"`
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
 	// 的到期压力。CreditsExpiring 是配置窗口内的剩余积分；后两者是全部未来到期批次中
 	// 最早的一批及其剩余量，供 WorkDaddy 同口径的“最早到期优先”路由使用。

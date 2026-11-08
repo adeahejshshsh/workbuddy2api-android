@@ -180,6 +180,11 @@ func main() {
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetCreditFloor(cfg.Pool.CreditFloor)               // 积分保底（默认 0 = 关闭）
 	p.SetCreditFloorByRealm(cfg.Pool.CreditFloorByRealm) // 按域覆盖（issue #147）
+	p.SetCreditFloorMaxRate(cfg.Pool.CreditFloorMaxRate) // 保底放行倍率上限（0 = 严格）
+	// 保留积分（缺省 10，显式 0 = 关闭）+ 账号级路由偏好（issue #62）。
+	p.SetReserveCredits(reserveCreditsOf(cfg))
+	p.SetReserveCreditsByRealm(cfg.Pool.ReserveCreditsByRealm)
+	p.SetAccountRouting(cfg.Pool.AccountPriority, cfg.Pool.AccountShare)
 	p.SetBalanceWindow(balanceWindowOf(cfg))             // 窗口用量调度（默认 1h，"0" 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
@@ -855,6 +860,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetCreditFloor(newCfg.Pool.CreditFloor)               // 积分保底热生效（0 = 关闭）
 	p.SetCreditFloorByRealm(newCfg.Pool.CreditFloorByRealm) // 按域覆盖热生效（issue #147）
+	p.SetCreditFloorMaxRate(newCfg.Pool.CreditFloorMaxRate) // 保底放行倍率上限热生效
+	p.SetReserveCredits(reserveCreditsOf(newCfg))           // 保留积分热生效
+	p.SetReserveCreditsByRealm(newCfg.Pool.ReserveCreditsByRealm)
+	p.SetAccountRouting(newCfg.Pool.AccountPriority, newCfg.Pool.AccountShare)
 	p.SetBalanceWindow(balanceWindowOf(newCfg))             // 窗口用量调度热生效
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
@@ -1038,4 +1047,16 @@ func balanceWindowOf(cfg *Config) time.Duration {
 		return 0
 	}
 	return d
+}
+
+// reserveCreditsOf 把 config 的保留积分指针解成生效值（nil 已在 normalize 补默认 10，
+// 这里再兜一次 0 = 关闭；负值不可达 —— normalize 已钳）。
+func reserveCreditsOf(cfg *Config) int64 {
+	if cfg.Pool.ReserveCredits == nil {
+		return 10
+	}
+	if v := *cfg.Pool.ReserveCredits; v > 0 {
+		return v
+	}
+	return 0
 }

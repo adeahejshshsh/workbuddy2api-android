@@ -156,7 +156,7 @@ type Config struct {
 		// WebActivityEnabled 国际版「网页通道」每日活跃腿（issue #111）。缺省 **false**：
 		// 上游实测每日 30 积分的判据是活跃上报本身，网页会话不是必要条件；而这条腿每天
 		// 为每个国际号建一条真实会话、占一条活跃名额（上限 10，漏收尾就永久少一条）。
-		WebActivityEnabled bool `json:"web_activity_enabled"`
+		WebActivityEnabled    bool `json:"web_activity_enabled"`
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
 
@@ -321,7 +321,7 @@ type Config struct {
 		// EmbeddingsEnabled 实验特性 /v1/embeddings 总开关。默认**关**：上游嵌入只注册了
 		// bge-m3 一个模型（1024 维），可用性随账号/租户变化；默认放开等于把实验端点
 		// 暴露给所有客户端。关着回 403 embeddings_disabled（不是 404）。
-		EmbeddingsEnabled bool `json:"embeddings_enabled"`
+		EmbeddingsEnabled     bool `json:"embeddings_enabled"`
 		WatermarkStripEnabled bool `json:"watermark_strip_enabled"`
 	} `json:"features"`
 
@@ -387,6 +387,25 @@ type Config struct {
 		// 参与选号——防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
 		// tier 0（免费）/ tier 1（无观测）不受限；签到回血越过 floor 自动恢复。
 		// 默认 0 = 关闭；负值钳 0。
+		// ReserveCredits 保留积分阈值：余额**已知**且 <= 该值的账号停止接单（仍在池中、
+		// 照常跑定时任务，充值后自动恢复）。上游余额耗尽会发提醒短信，设阈值即避免被用到 0。
+		// 未配置（键缺席）→ 默认 10；显式写 0 = 关闭；从未查到余额的账号不受影响。
+		// 指针类型用于区分「未配置」（nil → 默认 10）与「显式 0」（关闭）。
+		ReserveCredits *int64 `json:"reserve_credits"`
+		// ReserveCreditsByRealm 按域覆盖上面的阈值（键 "cn"/"global"，0 = 该域关闭）；
+		// 未写的域回落全局值。
+		ReserveCreditsByRealm map[string]int64 `json:"reserve_credits_by_realm"`
+		// AccountPriority / AccountShare 账号级路由偏好（issue #62），键 = uid。
+		//   account_priority: {"<uid>": 1} 小 = 先消耗；配了的号构成「先烧层」，层内可用时
+		//     其余号不接单，层内烧空/冷却/停牌后自动让位给下一层。
+		//   account_share: {"<uid>": 70, "<uid2>": 30} 同层内按归一化比例分流量。
+		// 非正值由 normalize 剔除（等价未配置）。
+		AccountPriority map[string]int     `json:"account_priority"`
+		AccountShare    map[string]float64 `json:"account_share"`
+		// CreditFloorMaxRate 保底兜底允许的目录倍率上限（issue #30 / PR #2）：
+		// 0.2 = 触底号上放行 x0.11 这类便宜模型、x1.62 仍拦；0 = 严格模式；负值钳 0。
+		CreditFloorMaxRate float64 `json:"credit_floor_max_rate"`
+
 		CreditFloor int64 `json:"credit_floor"`
 		// CreditFloorByRealm 积分保底按域覆盖（issue #147）：键只认 "cn"/"global"，
 		// 未写的域回落 CreditFloor，写 0 = 该域关闭保底。
@@ -426,7 +445,7 @@ type Config struct {
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	// TaskSweepInterval 解析后的补领清扫间隔；0 = 不启动（task_sweep_enabled=false）。
 	TaskSweepInterval time.Duration `json:"-"`
-	ExpiringSoonDur        time.Duration `json:"-"`
+	ExpiringSoonDur   time.Duration `json:"-"`
 	// KeepaliveRefreshWindowDur 解析后的周期保活临期窗口；空回落 168h，<=0 报错。
 	KeepaliveRefreshWindowDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
@@ -1130,6 +1149,38 @@ func (c *Config) normalize() error {
 	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
 	if c.Pool.CreditFloor < 0 {
 		c.Pool.CreditFloor = 0
+	}
+	if c.Pool.CreditFloorMaxRate < 0 {
+		c.Pool.CreditFloorMaxRate = 0
+	}
+	// 保留积分（issue #147 同族）：nil = 未配置 → 默认 10；显式 0 = 关闭。
+	switch {
+	case c.Pool.ReserveCredits == nil:
+		v := int64(10)
+		c.Pool.ReserveCredits = &v
+	case *c.Pool.ReserveCredits < 0:
+		*c.Pool.ReserveCredits = 0
+	}
+	for k, v := range c.Pool.ReserveCreditsByRealm {
+		if k != "cn" && k != "global" {
+			delete(c.Pool.ReserveCreditsByRealm, k)
+			continue
+		}
+		if v < 0 {
+			c.Pool.ReserveCreditsByRealm[k] = 0
+		}
+	}
+	// 账号优先级/占比（issue #62）：非正值视为「未配置」直接剔除——0 在这里不是有意义的
+	// 配置（既不是「最低优先级」也不是「零占比」），留着会让语义有两种解释。
+	for uid, pr := range c.Pool.AccountPriority {
+		if pr <= 0 {
+			delete(c.Pool.AccountPriority, uid)
+		}
+	}
+	for uid, sh := range c.Pool.AccountShare {
+		if sh <= 0 {
+			delete(c.Pool.AccountShare, uid)
+		}
 	}
 	// 按域覆盖表：剔非法键（只认 cn/global）、负值归零；清空后留 nil（= 全部回落全局）。
 	if len(c.Pool.CreditFloorByRealm) > 0 {
