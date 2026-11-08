@@ -304,3 +304,25 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 - 面板：模型列降级时显示 `请求 ⤳ 实际`（hover 说明）、搜索纳入 `model_eff`；
   **复制/导出的纯文本保持单列** —— 改格式会破坏既有复制习惯（有测试钉着），
   而排障要的是「看到」不是「导出」。
+
+## 第八批：账号级后台任务作业记录（`taskjobs.go` 的增量版）
+
+上游 `panel/taskjobs.go`（750 行）是一套**独立作业服务**：per-account 作业、结果数组、
+跨重启恢复、自建 goroutine 与并发信号量，执行体也搬进去了。本仓 `taskcenter.go` 的
+队列执行体已有账号内串行 / 账号间并发 / per-account 锁 / 跳过名单 / 回读判定，
+整体替换的收益不抵风险 —— 所以按「增量加一层作业历史」落地：
+
+- `internal/panel/taskjobs.go`：`TaskJob`（job_id/status/current_task/完成·失败·跳过数 /
+  逐项 results）+ 每账号最新一条（与上游同口径）+ 落盘 `<state 同目录>/task-jobs.json`；
+- **启动时把上次停在 running 的作业标 interrupted**（并写 finished_at、清 current_task）：
+  不标就等于告诉运维「它还在跑」，而进程早换了；
+- 与执行体只有三处 hook（`jobBegin` / `jobItem` / `jobEnd`），且用同一个 `mark()`
+  同时写队列条目与作业结果 —— 两套视图口径必须一致（分开写迟早出现「队列说 done、
+  作业说 error」这种最难查的分歧）；
+- 路由与上游同名同路径：`GET /panel/api/tasks/jobs`、`GET /panel/api/accounts/{uid}/tasks/job`
+  （未知账号回 `job:null` 而不是 404：前端用它判「没跑过」）；
+- 落盘节流 2s（逐项写盘没必要），停机时 `StopTaskJobs` 强制 flush；损坏文件按空表启动。
+
+**未做**：上游那套「作业驱动执行 + 跨重启继续跑」的语义。本仓作业记录是**观测层**，
+重启后中断的作业不会续跑（如实显示 interrupted）。理由：续跑要在上游动作层面幂等
+（对话、领奖、接受任务各接口的幂等性并未全部取证），错误续跑会重复动作或重复领奖。
