@@ -1266,6 +1266,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		return to
 	}
+	// st 在 applyFallback 之后才创建（见下），但降级发生在其后的轮转循环里；
+	// 用「先声明、后赋值」让闭包能记录「实际用的模型」，而不必把记录点散到各出口。
+	var st *chatStat
 	// applyFallback 把本轮模型切到等价模型，并重写出站 body 的顶层 model。
 	// 只改 curModel —— bareModel 保持原模型，供冷却记账使用。
 	applyFallback := func(to string) bool {
@@ -1275,6 +1278,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		fallbackTried[to] = true
 		log.Printf("model fallback: %s -> %s (6004 model rate limit, uid pending)", curModel, to)
 		curModel = to
+		// 请求记录要能区分「请求的模型」与「实际用的模型」：不记这一位，面板上
+		// 明明成功了却显示原模型，6004 降级这条路径在事后完全不可见。
+		if st != nil {
+			st.modelEff = to
+		}
 		// 出站 body 重写：上游必须收到等价模型名。与上方 models.aliases 同一手法
 		// （解析 → 改顶层 model → 重序列化），保持单一路径、避免两套改写逻辑漂移。
 		// 解析失败时不动 body —— 那说明请求体本就不是合法 JSON，后续会按原样失败。
@@ -1294,7 +1302,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 算一次常量会让降级流量按原模型的倍率记账（见 recordAttempt 内的现取）。
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
-	st := newChatStat(time.Now(), body, peek.Stream, h.budget)
+	st = newChatStat(time.Now(), body, peek.Stream, h.budget)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 补 requestID（bug B1）：全仓没有任何一处给 st.requestID 赋值，于是

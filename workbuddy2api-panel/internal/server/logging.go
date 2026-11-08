@@ -46,6 +46,8 @@ func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 type chatStat struct {
 	start            time.Time
 	model            string
+	// modelEff 降级后实际发往上游的模型（applyFallback 写入）；空 = 未降级。
+	modelEff string
 	mode             string // "stream" | "sync"
 	uid              string // 完整 uid，展示时只取前 8 位
 	nick             string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
@@ -653,6 +655,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		s := t.stat
 		e.Account = logfmt.Label(s.uid, s.nick)
 		e.Model = s.model
+		e.ModelEff = s.modelEff
 		e.Outcome = s.outcome
 		e.TTFBMs = s.ttfb.Milliseconds()
 		e.Attempts = s.attempts

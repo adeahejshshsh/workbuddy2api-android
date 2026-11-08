@@ -70,6 +70,10 @@ type Event struct {
 	Path             string    `json:"path"`
 	Account          string    `json:"account,omitempty"`
 	Model            string    `json:"model,omitempty"`
+	// ModelEff 模型降级（pool.model_fallback）后**实际**发往上游的模型名；
+	// 与 Model 不同才填充。记录的是出站线协议原值（通常裸名），不造域前缀——
+	// 造前缀会让「面板显示的名字」与「上游真正收到的名字」不一致，排障时对不上。
+	ModelEff string `json:"model_eff,omitempty"`
 	Status           int       `json:"status"`
 	OK               bool      `json:"ok"`
 	Outcome          string    `json:"outcome"`
@@ -870,7 +874,8 @@ func (f Filter) match(e Event) bool {
 	if !containsFold(e.Account, f.Account) {
 		return false
 	}
-	if !containsFold(e.Model, f.Model) {
+	// 同时匹配请求模型与降级后实际模型：请求 A 实际用 B 成功时，按任一搜索都该命中。
+	if !containsFold(e.Model, f.Model) && !containsFold(e.ModelEff, f.Model) {
 		return false
 	}
 	if !containsFold(e.ClientIP, f.ClientIP) {
