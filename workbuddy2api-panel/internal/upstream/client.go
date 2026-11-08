@@ -45,7 +45,7 @@ const (
 	ErrPromptTooLong                    // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                     // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrModelParamInvalid                // 11133「模型供应商拒绝参数」（缺/空 messages、模型不支持图片等）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
-	ErrUpstreamBusy                     // 6021 queue.full 渠道级容量满载 → 不罚号、不轮转，末端 503 upstream_busy
+	ErrUpstreamBusy                     // 6020/6021 排队满、11134 供应商过载 → 容量信号：不罚号、保留会话粘性，末端 429 + Retry-After
 	ErrChannelRefused                   // 11‑-128 request illegal 通道校验失败（上游认为非官方客户端）→ 不罚账号
 	ErrModelBusy                        // 14003「模型繁忙」（间歇）→ (账号,模型) 10s 起短冷却，封顶 1m
 	ErrClient                           // 其他 4xx / 业务错误
@@ -534,11 +534,22 @@ func parseQueueRetryAfter(body []byte) (time.Duration, bool) {
 		Data struct {
 			RetryAfter int64 `json:"retry_after"`
 		} `json:"data"`
+		// 11134 供应商过载的等待口径在 retry_policy.retry_after（上游 4830686）
+		RetryPolicy struct {
+			RetryAfter int64 `json:"retry_after"`
+		} `json:"retry_policy"`
 	}
-	if err := json.Unmarshal(body, &env); err != nil || env.Data.RetryAfter <= 0 {
+	if err := json.Unmarshal(body, &env); err != nil {
 		return 0, false
 	}
-	d := time.Duration(env.Data.RetryAfter) * time.Second
+	secs := env.Data.RetryAfter
+	if secs <= 0 {
+		secs = env.RetryPolicy.RetryAfter
+	}
+	if secs <= 0 {
+		return 0, false
+	}
+	d := time.Duration(secs) * time.Second
 	if d > retryAfterSanity {
 		d = retryAfterSanity
 	}
@@ -726,6 +737,17 @@ func Classify(status int, body string) ErrKind {
 	if isQueueBody(body, lower) {
 		return ErrUpstreamBusy
 	}
+	if hasBusinessCode(body, "11134") {
+		return ErrUpstreamBusy
+	}
+	// 11134「the model provider is temporarily unavailable, please retry later or
+	// switch to another model」：模型供应商侧过载，与账号健康无关（上游 2026-11-07
+	// 生产实测：15 分钟内跨 6 个不同账号同时返回）。
+	//
+	// 落 ErrServer 的代价是双向的：①按 5xx 喂熔断（threshold 3 → 30m）把整片健康号在
+	// 高峰期打进冷却；②换号重试撞的是同一个 provider，白耗在途名额，且换号会打断
+	// 会话粘性的账号级前缀缓存（同号命中 97–99% vs 换号 0–12%）。
+	// 只认结构化 code，不认「temporarily unavailable」文案 —— 没有业务码的 5xx 仍是 ErrServer。
 	if status == http.StatusTooManyRequests {
 		return ErrSoftRate
 	}
@@ -1592,7 +1614,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			}
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
-				logfmt.Label(a.UID, a.NicknameValue()), resp.StatusCode, kind, truncate(string(raw), 200))
+				logfmt.Label(a.UID, a.NicknameValue()), resp.StatusCode, kind, truncate(string(raw), 512))
+			// 日志 body 截断用 512（上游 7297824）：200 正好切在
+			// `"retry_policy":{"retry":true,"retry_af…` 的值前面，判断不了 retry_after
+			// 是秒还是毫秒。Error.Msg 仍按 200 截断（它会透传给客户端）。
 			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链）。
 			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析）：
 			// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
