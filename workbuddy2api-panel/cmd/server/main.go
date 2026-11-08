@@ -384,6 +384,7 @@ func main() {
 		APIKey:                 cfg.APIKey,
 		SoftCooldown:           cfg.SoftRateDur,
 		SanitizeFingerprints:   cfg.Features.SanitizeBlacklistFingerprints,
+		EmbeddingsEnabled:      cfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled:  cfg.Features.WatermarkStripEnabled,
 		RecordClientInfo:       cfg.Logging.RequestClientInfo,
 		RecordContext:          cfg.Logging.RequestArchiveContext,
@@ -467,6 +468,9 @@ func main() {
 	// "成长任务自动推进"。panel 构造晚于 scheduler，所以在这里补挂。
 	// 队列内部已按账号串行、账号间并发、并遵守跳过名单与尝试型开关。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
+	// 国际版网页活跃腿（缺省关）：这条腿每天给每个国际号建一条真实会话、占一条活跃
+	// 名额（上限 10），默认开就是替用户做决定。
+	sch.SetWebActivityDisabled(!cfg.Schedule.WebActivityEnabled)
 	// 补领清扫执行器（issue #174）：分钟级只 accept/claim，不跑行为链路。
 	// 与按钮共用同一执行体（panel.RunTaskSweepNow → sweepAccount），口径不会漂移。
 	sch.SetSweepRunner(pn.RunTaskSweepNow)
@@ -499,6 +503,7 @@ func main() {
 		AdminEnabled:                  cfg.Admin.Enabled,
 		AdminAPIKey:                   cfg.AdminAPIKey,
 		WatermarkStripEnabled:         cfg.Features.WatermarkStripEnabled,
+		EmbeddingsEnabled:             cfg.Features.EmbeddingsEnabled,
 		Tasks:                         sch,
 		GrowthRunner:                  pn.RunGrowthQueueOnce,
 		Audit:                         auditLog,
@@ -822,6 +827,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		APIKey:                newCfg.APIKey,
 		SoftCooldown:          newCfg.SoftRateDur,
 		SanitizeFingerprints:  newCfg.Features.SanitizeBlacklistFingerprints,
+		EmbeddingsEnabled:     newCfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
 		RecordClientInfo:      newCfg.Logging.RequestClientInfo,
 		RecordContext:         newCfg.Logging.RequestArchiveContext,
@@ -866,6 +872,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)                // 补领清扫间隔热生效
 	sch.SetTaskSweepJitter(newCfg.Schedule.TaskSweepJitterPermill)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
+	sch.SetWebActivityDisabled(!newCfg.Schedule.WebActivityEnabled)
 
 	// 比对前把 prev 也规范化（bug #12）：prev 是**原始文件**反序列化结果，而 merged
 	// 是规范化后的结构。配置文件里缺省某个键时规范化会补默认值，

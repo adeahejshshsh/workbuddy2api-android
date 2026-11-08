@@ -1075,3 +1075,41 @@ func TestTaskSweepDefaultsAndDisable(t *testing.T) {
 		t.Error("task_sweep_jitter_permill=501 应被拒绝")
 	}
 }
+
+// 两个「缺省关」的开关必须真的缺省关：
+//   - features.embeddings_enabled：实验端点，默认放开等于把 /v1/embeddings 暴露给所有客户端；
+//   - schedule.web_activity_enabled：网页活跃腿每天给每个国际号占一条活跃名额（上限 10）。
+func TestExperimentalSwitchesDefaultOff(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Features.EmbeddingsEnabled {
+		t.Error("features.embeddings_enabled 缺省应为 false")
+	}
+	if c.Schedule.WebActivityEnabled {
+		t.Error("schedule.web_activity_enabled 缺省应为 false")
+	}
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"features":{"embeddings_enabled":true},"schedule":{"web_activity_enabled":true}}`), 0o600)
+	c2, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c2.Features.EmbeddingsEnabled || !c2.Schedule.WebActivityEnabled {
+		t.Errorf("显式打开没生效：embeddings=%v web_activity=%v",
+			c2.Features.EmbeddingsEnabled, c2.Schedule.WebActivityEnabled)
+	}
+
+	// 环境变量也要能开（与其它 features.* 同口径）。
+	t.Setenv("WB2A_EMBEDDINGS", "true")
+	c3, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c3.Features.EmbeddingsEnabled {
+		t.Error("WB2A_EMBEDDINGS=true 没生效")
+	}
+}

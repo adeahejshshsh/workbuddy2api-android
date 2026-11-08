@@ -117,6 +117,8 @@ type Config struct {
 	// 来自 logging.request_archive_context（缺省 false）：比 IP/UA 敏感得多——那是
 	// 用户的实际对话内容，所以缺省不开。
 	RecordContext bool
+	// EmbeddingsEnabled /v1/embeddings 总开关（features.embeddings_enabled），缺省关闭。
+	EmbeddingsEnabled bool
 	// WatermarkStripEnabled 去水印（裁白边）端点与 MCP 工具的总开关，缺省关闭。
 	// 关着时端点回 403、MCP 工具不出现在 tools/list 里，其它生成接口不受影响。
 	WatermarkStripEnabled bool
@@ -154,6 +156,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		RecordContext:    h.cfg.RecordContext,
 
 		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
+		EmbeddingsEnabled:     h.cfg.EmbeddingsEnabled,
 	}
 }
 

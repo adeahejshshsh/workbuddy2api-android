@@ -153,6 +153,10 @@ type Config struct {
 
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
+		// WebActivityEnabled 国际版「网页通道」每日活跃腿（issue #111）。缺省 **false**：
+		// 上游实测每日 30 积分的判据是活跃上报本身，网页会话不是必要条件；而这条腿每天
+		// 为每个国际号建一条真实会话、占一条活跃名额（上限 10，漏收尾就永久少一条）。
+		WebActivityEnabled bool `json:"web_activity_enabled"`
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
 
@@ -314,6 +318,10 @@ type Config struct {
 		// 默认关的理由：这条链路要把成品图回读、解码、再 base64 回传（1024x1536 PNG 约
 		// 2.5MB → base64 3.4MB），只在真要彻底去水印时划算；而且它依赖提示词真的留出
 		// 白边（实测模型只肯给 25~38%），不适合当默认行为。热生效。
+		// EmbeddingsEnabled 实验特性 /v1/embeddings 总开关。默认**关**：上游嵌入只注册了
+		// bge-m3 一个模型（1024 维），可用性随账号/租户变化；默认放开等于把实验端点
+		// 暴露给所有客户端。关着回 403 embeddings_disabled（不是 404）。
+		EmbeddingsEnabled bool `json:"embeddings_enabled"`
 		WatermarkStripEnabled bool `json:"watermark_strip_enabled"`
 	} `json:"features"`
 
@@ -854,6 +862,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
+		}
+	}
+	if v := os.Getenv("WB2A_EMBEDDINGS"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Features.EmbeddingsEnabled = b
 		}
 	}
 	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {

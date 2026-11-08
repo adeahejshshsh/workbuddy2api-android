@@ -1121,6 +1121,10 @@ body.veil-open { overflow: hidden; }
                 <label class="fld"><span class="lb">上报时点（小时，逗号分隔）</span>
                   <input name="activity_hours" placeholder="10">
                   <span class="hint">点亮连登 + 解锁领养前置</span></label>
+                <div class="switch"><span class="lb">国际版网页活跃腿</span>
+                  <input type="checkbox" name="web_activity_enabled"></div>
+                <div class="hint">缺省关。打开后国际号每天额外建一条真实网页会话（占活跃名额，上限 10 条，
+                  漏收尾就永久少一条）；每日 30 积分的判据是活跃上报本身，不改这条也能拿到。</div>
               </div>
             </div>
             <div class="hr"></div>
@@ -1324,6 +1328,10 @@ body.veil-open { overflow: hidden; }
             <div class="hr"></div>
             <div class="switch"><span class="lb">出站请求指纹脱敏</span>
               <input type="checkbox" name="sanitize_blacklist_fingerprints"></div>
+            <div class="switch"><span class="lb">OpenAI 兼容嵌入端点 /v1/embeddings</span>
+              <input type="checkbox" name="embeddings_enabled"></div>
+            <div class="hint">实验特性，缺省关闭（关着回 403 embeddings_disabled）。上游嵌入只注册了
+              bge-m3 一个模型（1024 维），可用性随账号/租户变化。改动即时生效。</div>
             <div class="switch"><span class="lb">会话粘性路由</span>
               <input type="checkbox" name="session_sticky_enabled"></div>
             <div class="hint" style="margin-top:10px">Upstash Redis 镜像、凭证目录与状态文件路径需手工编辑配置文件（判为重启项）。</div>

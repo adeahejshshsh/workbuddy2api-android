@@ -65,6 +65,11 @@ type Config struct {
 	KeepaliveDisabled bool
 	// GrowthDisabled 显式关闭成长任务自动排程（schedule.growth_enabled=false）。
 	GrowthDisabled bool
+	// WebActivityDisabled 显式关闭国际版「网页通道」每日活跃腿
+	// （schedule.web_activity_enabled=false 为缺省）。上游实测每日 30 积分的判据是
+	// 活跃上报本身，网页会话不是必要条件；而这条腿每天为每个国际号建一条真实会话、
+	// 占一条活跃名额（上限 10，漏收尾永久少一条）——所以缺省关，要开才开。
+	WebActivityDisabled bool
 
 	// IncludeDisabledInTasks 让「保号类」四任务（签到 / 活跃上报 / token 保活 / 余额刷新）
 	// 对已禁用（disabled）的账号也执行（schedule.include_disabled_in_tasks）。
@@ -852,8 +857,24 @@ func (s *Scheduler) runActivity(ctx context.Context, spread bool) {
 		// 「跑完的网页 agent 会话」。**放在上报之外** —— 上报偶发失败不该连带丢掉当日
 		// 积分（两条腿在上游是各自独立的判据）。国内版在 runWebActivityLeg 内部按
 		// IsGlobal 直接返回，零上游调用。
-		s.runWebActivityLeg(ctx, a)
+		if !s.webActivityDisabled() {
+			s.runWebActivityLeg(ctx, a)
+		}
 	}
+}
+
+// SetWebActivityDisabled 热改国际版网页活跃腿开关（面板保存配置后调用）。
+func (s *Scheduler) SetWebActivityDisabled(disabled bool) {
+	s.schedMu.Lock()
+	s.cfg.WebActivityDisabled = disabled
+	s.schedMu.Unlock()
+}
+
+// webActivityDisabled 读开关（schedMu 保护：Reconfigure 可热改）。
+func (s *Scheduler) webActivityDisabled() bool {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	return s.cfg.WebActivityDisabled
 }
 
 // checkActivityStreak 上报成功后回读连登天数（只读 oracle，发现静默失败）。
