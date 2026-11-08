@@ -133,3 +133,31 @@ Go 工具链被重置（`$PREFIX/lib/go` 整个消失）。**正确修法在 `AG
 `4830686` 与 `84a48d9` 是同一类问题的两面：**上游的「非账号故障」不能按账号故障处置**
 （11134 别罚号、别换号），**上游的「没有终态」不能当成功**（断流补 length）。
 以后碰到 `status>=500` 的新形态，先问一句「这是不是供应商/通道层面的，换号有没有用」。
+
+---
+
+# 上游 2026-11-08 第二批（`12d9ea6..771c887`，8 条）
+
+## 已合（3 条）
+
+| 上游 | 内容 | 落地 |
+|---|---|---|
+| `771c887` | 正文里漏出的 `<think:SUF>` 拆回 thinking 块（issue #194） | 整文件移植 `internal/upstream/thinktag.go`（+ 上游用例）；`messages.go` 三条路径接上：非流式 `chatCompletionToMessage`、流式 `handleChunk`（跨片维护半个标签）、`closeAndStop` 收尾 flush |
+| `2b9b773` | 输出预算下限：高档位思考吃光额度导致正文断在半句 | `internal/upstream/output_budget.go`（按档位抬 max_tokens 下限 4k/6k/8k/12k/16k）+ `payload.go` 在档位归一之后调用。**未搬**上游的「目录 maxOutputTokens 封顶」——本仓没有 `injectCatalogMaxTokens` 那条注入 |
+| `b42712c` | `WB2API_PPROF` 环境变量打开独立 pprof 监听 | `cmd/server/main.go` 原样（默认不设环境变量就没有这个监听） |
+
+## 本批不移植
+
+- `34a3ae6` / `29db878` / `e54c6e0`（续写闸门 / length 处自动续接 / 救援段继承预算）：
+  三条都改 `internal/server/continue.go`，**本仓没有该文件**（续写能力整体未移植）。
+- `fe51fd6`（指纹预检去 RE2 大小写折叠，省 ~20ms CPU）：改的是 `sanitize.go` 的预检
+  实现，而本仓 sanitize 表已按自己的指纹集改过（DSH / 11‑-128 那几条），照搬会与现有
+  规则打架；等有压测基线再单独做。
+- `4b0a3b4`（请求体只解析一次 + 新增 `internal/jsonscan` 447 行）：热路径大重构，
+  收益是省一次 JSON 解析；本仓 handler 的解析点与上游不完全一致，先不动。
+
+## 顺手修的测试脚手架
+
+`patches/test.sh` 判定从 `tail -1 == PASS` 改成「输出里有一行恰好是 PASS」：包里的后台
+goroutine（导入后的 `postImportActivate`）可能在 PASS 之后补一行日志，旧判据会把绿的
+判成红的 —— 本批 panel 包实测误报过一次。

@@ -1,0 +1,118 @@
+// output_budget.go 输出预算下限：客户端挡不住「高档位思考把自己那份额度吃光」的
+// 组合错误，网关兜住它（上游 2b9b773）。
+//
+// 现象（上游 2026-11-08 生产实测，cn:deepseek-v4.1-flash，要求写 3000+ 字长文档）：
+//
+//	effort=high + max_tokens=2048 → total=4096 think=2048 正文=2048 finish=length
+//	effort=high + 不给额度        → total=16720 think=2998 正文=13722 finish=stop
+//
+// 即：思考与正文在**同一份额度**里结算时，客户端给的 2048 先被思考吃掉一半，正文
+// 只剩 1024 token 就断在句子中间 —— 用户看到的就是「回答写到一半停住」。客户端不知道
+// 模型的思考要花多少，只能拍一个数；这个组合错误只能由网关修。
+//
+// 抬的是**上限**不是目标长度：模型写完自然停（实测 high+大额度收尾在 13722 token，
+// 不会因为上限变大而多写一个字），所以不改变答案长度、不额外计费。
+package upstream
+
+import (
+	"encoding/json"
+	"log"
+	"strconv"
+	"strings"
+)
+
+// minBudgetByEffort 各思考档位下「正文还能写得出来」的最小输出预算。
+// 取值依据见文件头：下限按该档思考的上界再留一倍给正文（4k/8k/16k）。
+var minBudgetByEffort = map[string]int64{
+	"minimal": 4096,
+	"low":     4096,
+	"medium":  6144,
+	"high":    8192,
+	"xhigh":   12288,
+	"max":     16384,
+}
+
+// minOutputBudgetProbe 低于这个额度一律不动：官方客户端用 max_tokens=1 做 key 探活，
+// 抬上去没有意义，还会让探活变慢。
+const minOutputBudgetProbe = 16
+
+// ensureMinOutputBudget 在「客户端显式给了 max_tokens」且「低于该档下限」时抬到下限。
+//
+// 不动的四种情形（都不猜）：
+//   - 没有显式额度（客户端没给，交给上游默认）；
+//   - 额度是探活级（< 16）；
+//   - 关闭思考（thinking.type=disabled / effort=off/none/disabled）；
+//   - 档位为空或未知。
+func ensureMinOutputBudget(obj map[string]any) {
+	effort := effortValue(obj)
+	if effort == "" {
+		return
+	}
+	if effort == "off" || effort == "none" || effort == "disabled" {
+		return
+	}
+	if th, ok := obj["thinking"].(map[string]any); ok {
+		if t, _ := th["type"].(string); strings.EqualFold(strings.TrimSpace(t), "disabled") {
+			return
+		}
+	}
+	floor, ok := minBudgetByEffort[effort]
+	if !ok {
+		return
+	}
+	cur, ok := maxTokensValue(obj)
+	if !ok || cur <= 0 || cur < minOutputBudgetProbe {
+		return
+	}
+	if cur >= floor {
+		return
+	}
+	setMaxTokensValue(obj, floor)
+	log.Printf("WARN: [upstream] output budget floor: max_tokens %d → %d (effort=%s；否则思考会吃掉正文额度，回答断在半句)", cur, floor, effort)
+}
+
+// effortValue 取最终生效的思考档位（snake/camel 双字段，小写归一）。
+func effortValue(obj map[string]any) string {
+	for _, k := range []string{"reasoning_effort", "reasoningEffort"} {
+		if v, ok := obj[k].(string); ok {
+			if s := strings.ToLower(strings.TrimSpace(v)); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// maxTokensValue 取客户端显式给的输出额度（数字或数字字符串）。
+func maxTokensValue(obj map[string]any) (int64, bool) {
+	for _, k := range []string{"max_tokens", "max_completion_tokens"} {
+		v, has := obj[k]
+		if !has {
+			continue
+		}
+		switch n := v.(type) {
+		case json.Number:
+			if i, err := n.Int64(); err == nil {
+				return i, true
+			}
+		case float64:
+			return int64(n), true
+		case string:
+			var i int64
+			if err := json.Unmarshal([]byte(n), &i); err == nil {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// setMaxTokensValue 写回同一个键（客户端用哪个键就改哪个，不擅自换字段名）。
+func setMaxTokensValue(obj map[string]any, v int64) {
+	lit := json.Number(strconv.FormatInt(v, 10))
+	if _, has := obj["max_tokens"]; has {
+		obj["max_tokens"] = lit
+		return
+	}
+	obj["max_completion_tokens"] = lit
+}

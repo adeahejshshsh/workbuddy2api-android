@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 func (h *Handler) withAnthropicAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -607,10 +608,15 @@ func chatCompletionToMessage(obj map[string]any) map[string]any {
 	if msg != nil {
 		// 上游 reasoning_content 无 signature，作为 thinking 块下发（Claude Code 展示用）；
 		// 客户端回传的 thinking 块在 blocksToMessages 里被丢弃，不会触发签名校验。
-		if rc, ok := msg["reasoning_content"].(string); ok && rc != "" {
-			content = append(content, map[string]any{"type": "thinking", "thinking": rc})
+		rc, _ := msg["reasoning_content"].(string)
+		// reasoning parser 偶发把整段 CoT 当正文下发（上游 issue #194）：正文里的
+		// <think:SUF>…</think:SUF> 归到同一个 thinking 块，别把控制 token 当正文发出去
+		// —— Anthropic 客户端只认 content_block.type=thinking，内联标签一律当文本显示。
+		inline, text := upstream.SplitThinkTags(messageText(msg["content"]))
+		if rc != "" || inline != "" {
+			content = append(content, map[string]any{"type": "thinking", "thinking": rc + inline})
 		}
-		if text := messageText(msg["content"]); text != "" {
+		if text != "" {
 			content = append(content, map[string]any{"type": "text", "text": text})
 		}
 		if tcs, ok := msg["tool_calls"].([]any); ok {
@@ -782,6 +788,9 @@ type messagesWriter struct {
 	// 只能在 message_start 之后、正文之前落地，且占用正文之前的内容块下标。
 	prelude []any
 	x       anthState
+	// tt 正文里漏出的 <think:SUF> 标签拆分（上游 issue #194）：只在 content 以
+	// "<think:" 开头时启用，正文中间聊到这几个字不重写。
+	tt upstream.ThinkTag
 }
 
 type anthState struct {
@@ -958,14 +967,30 @@ func (w *messagesWriter) handleChunk(obj map[string]any) error {
 			}
 		}
 		if s, ok := d["content"].(string); ok && s != "" {
-			if err := w.ensureText(); err != nil {
-				return err
+			// 上游 reasoning parser 偶发把整段 CoT 当正文下发（issue #194）：
+			// 拆开后控制 token 不进 text_delta，思考部分归 thinking 块。
+			think, body := w.tt.Feed(s)
+			if think != "" {
+				if err := w.ensureThinking(); err != nil {
+					return err
+				}
+				if err := w.emit("content_block_delta", map[string]any{
+					"index": w.x.thinkIdx,
+					"delta": map[string]any{"type": "thinking_delta", "thinking": think},
+				}); err != nil {
+					return err
+				}
 			}
-			if err := w.emit("content_block_delta", map[string]any{
-				"index": w.x.textIdx,
-				"delta": map[string]any{"type": "text_delta", "text": s},
-			}); err != nil {
-				return err
+			if body != "" {
+				if err := w.ensureText(); err != nil {
+					return err
+				}
+				if err := w.emit("content_block_delta", map[string]any{
+					"index": w.x.textIdx,
+					"delta": map[string]any{"type": "text_delta", "text": body},
+				}); err != nil {
+					return err
+				}
 			}
 		}
 		if tcs, ok := d["tool_calls"].([]any); ok {
@@ -1151,6 +1176,31 @@ func (w *messagesWriter) openTool(acc *anthTool) error {
 func (w *messagesWriter) closeAndStop() error {
 	if w.x.done || w.x.failed {
 		return nil
+	}
+	// 先把 ThinkTag 的尾部残留吐出去（流结束时不 flush，最后几个字符会丢）。
+	if think, body := w.tt.Flush(); think != "" || body != "" {
+		if think != "" {
+			if err := w.ensureThinking(); err != nil {
+				return err
+			}
+			if err := w.emit("content_block_delta", map[string]any{
+				"index": w.x.thinkIdx,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": think},
+			}); err != nil {
+				return err
+			}
+		}
+		if body != "" {
+			if err := w.ensureText(); err != nil {
+				return err
+			}
+			if err := w.emit("content_block_delta", map[string]any{
+				"index": w.x.textIdx,
+				"delta": map[string]any{"type": "text_delta", "text": body},
+			}); err != nil {
+				return err
+			}
+		}
 	}
 	w.x.done = true
 	if !w.x.started {

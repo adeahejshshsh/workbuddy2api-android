@@ -111,6 +111,8 @@ func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, 
 	applyEffortPolicy(obj, modelName, efforts[modelName], policy, realm)
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
 	normalizeReasoningEffort(obj, efforts)
+	// 档位定下来之后再兜输出预算：高档位思考会把同一份额度吃掉，正文断在半句（2b9b773）。
+	ensureMinOutputBudget(obj)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)
