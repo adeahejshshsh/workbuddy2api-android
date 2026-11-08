@@ -1131,6 +1131,15 @@ body.veil-open { overflow: hidden; }
                 <label class="fld"><span class="lb">成长任务时点（小时，逗号分隔）</span>
                   <input name="growth_hours" placeholder="10"></label>
               </div>
+              <div>
+                <div class="switch"><span class="lb">补领清扫</span>
+                  <input type="checkbox" name="task_sweep_enabled"></div>
+                <label class="fld"><span class="lb">清扫间隔（分钟）</span>
+                  <input name="task_sweep_minutes" type="number" min="1" placeholder="15"></label>
+                <label class="fld"><span class="lb">清扫间隔抖动（‰）</span>
+                  <input name="task_sweep_jitter_permill" type="number" min="0" max="500" placeholder="0">
+                  <span class="hint">0 = 关闭。周期只 accept 待接受的、只 claim 已达标未领的（不跑行为链路），兜住「达标那一刻没人点按钮」的奖励</span></label>
+              </div>
             </div>
             <div class="hr"></div>
             <div class="grid2">

@@ -1557,6 +1557,8 @@ const CFG_MAP = {
   keepalive_refresh_window: ['schedule', 'keepalive_refresh_window'],
   balance_refresh_enabled: ['schedule', 'balance_refresh_enabled'], balance_refresh_minutes: ['schedule', 'balance_refresh_minutes'],
   balance_refresh_jitter_permill: ['schedule', 'balance_refresh_jitter_permill'],
+  task_sweep_enabled: ['schedule', 'task_sweep_enabled'], task_sweep_minutes: ['schedule', 'task_sweep_minutes'],
+  task_sweep_jitter_permill: ['schedule', 'task_sweep_jitter_permill'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
   // 补齐缺失键（报告 #20）：这些字段此前在配置页既回显不了也改不了。
   growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],

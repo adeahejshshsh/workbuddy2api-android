@@ -163,6 +163,15 @@ type Config struct {
 		// 最好认的机器人形状。>0 时下一轮间隔在该比例内稳定抖动，账号遍历同时摊开到
 		// 同量级窗口（见 internal/scheduler/humanize.go）。
 		BalanceRefreshJitterPermill int `json:"balance_refresh_jitter_permill"`
+
+		// TaskSweepEnabled 补领清扫周期（上游 issue #174）：分钟级只做 accept/claim，
+		// 不跑行为链路。缺省 true（不配就生效）；false = 关闭后台周期（面板按钮仍可用）。
+		TaskSweepEnabled bool `json:"task_sweep_enabled"`
+		// TaskSweepMinutes 清扫间隔分钟（缺省 15；<=0 回落 15）。只在该开关打开时生效。
+		TaskSweepMinutes int `json:"task_sweep_minutes"`
+		// TaskSweepJitterPermill 清扫间隔抖动（千分比 0-500，缺省 0）：与余额刷新同理，
+		// 精确固定间隔是最容易辨认的机器人节拍。
+		TaskSweepJitterPermill int `json:"task_sweep_jitter_permill"`
 	} `json:"schedule"`
 
 	Global struct {
@@ -407,6 +416,8 @@ type Config struct {
 	SessionTTL             time.Duration `json:"-"`
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
+	// TaskSweepInterval 解析后的补领清扫间隔；0 = 不启动（task_sweep_enabled=false）。
+	TaskSweepInterval time.Duration `json:"-"`
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// KeepaliveRefreshWindowDur 解析后的周期保活临期窗口；空回落 168h，<=0 报错。
 	KeepaliveRefreshWindowDur time.Duration `json:"-"`
@@ -518,6 +529,10 @@ func Default() *Config {
 	c.Server.ShutdownTimeout = "30s"
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
+	// 补领清扫缺省开：它是唯一能兜住「达标那一刻没人点按钮」的通路，关掉等于让奖励
+	// 一直挂着直到下次有人手动执行同一任务（可能几天后）。
+	c.Schedule.TaskSweepEnabled = true
+	c.Schedule.TaskSweepMinutes = 15
 	// 11140 连坐暂停缺省 30 分钟：一个请求顺着换号把整池送进风控的代价远高于停半小时。
 	c.Upstream.RestrictionHoldSeconds = 1800
 	// 人味化开关缺省关闭：旧部署行为逐字不变，要开的人显式配。
@@ -1199,6 +1214,13 @@ func (c *Config) normalize() error {
 	if len(c.Schedule.GrowthHours) == 0 {
 		c.Schedule.GrowthHours = []int{1}
 	}
+	// 补领清扫：启用时 minutes<=0 回落默认 15；关闭时 interval 保持 0（不启动）。
+	if c.Schedule.TaskSweepEnabled {
+		if c.Schedule.TaskSweepMinutes <= 0 {
+			c.Schedule.TaskSweepMinutes = 15
+		}
+		c.TaskSweepInterval = time.Duration(c.Schedule.TaskSweepMinutes) * time.Minute
+	}
 	// 余额后台刷新：启用时 minutes<=0 回落默认 5；关闭时 interval 保持 0（不启动）。
 	if c.Schedule.BalanceRefreshEnabled {
 		if c.Schedule.BalanceRefreshMinutes <= 0 {
@@ -1255,6 +1277,9 @@ func (c *Config) normalizePrompt() error {
 func (c *Config) validateScheduleHumanize() error {
 	if v := c.Schedule.BalanceRefreshJitterPermill; v < 0 || v > 500 {
 		return fmt.Errorf("schedule.balance_refresh_jitter_permill 必须在 0-500（千分比，500 = ±50%%），当前 %d", v)
+	}
+	if v := c.Schedule.TaskSweepJitterPermill; v < 0 || v > 500 {
+		return fmt.Errorf("schedule.task_sweep_jitter_permill 必须在 0-500（千分比，500 = ±50%%），当前 %d", v)
 	}
 	return nil
 }

@@ -367,6 +367,12 @@ func main() {
 	case cfg.BalanceRefreshInterval > 0:
 		log.Printf("余额后台刷新：每 %s（签到时点照常额外刷新）", cfg.BalanceRefreshInterval)
 	}
+	switch {
+	case !cfg.Schedule.TaskSweepEnabled:
+		log.Printf("补领清扫已禁用（schedule.task_sweep_enabled=false）")
+	case cfg.TaskSweepInterval > 0:
+		log.Printf("补领清扫：每 %s（只 accept 待接受的、只 claim 已达标未领的）", cfg.TaskSweepInterval)
+	}
 	if cfg.Schedule.IncludeDisabledInTasks {
 		log.Printf("保号任务覆盖禁用账号（schedule.include_disabled_in_tasks=true）：禁用号仍签到 / 活跃 / 保活 / 刷新余额，但不参与选号")
 	}
@@ -461,6 +467,9 @@ func main() {
 	// "成长任务自动推进"。panel 构造晚于 scheduler，所以在这里补挂。
 	// 队列内部已按账号串行、账号间并发、并遵守跳过名单与尝试型开关。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
+	// 补领清扫执行器（issue #174）：分钟级只 accept/claim，不跑行为链路。
+	// 与按钮共用同一执行体（panel.RunTaskSweepNow → sweepAccount），口径不会漂移。
+	sch.SetSweepRunner(pn.RunTaskSweepNow)
 
 	// /admin 操作审计（缺省关闭）：开一次失败就 Fatal —— 审计开不起来还继续跑，
 	// 等于承诺了「操作有据可查」却拿不出证据。
@@ -538,6 +547,9 @@ func main() {
 	// 人味化参数（缺省 0 = 旧行为）：抖动比例先设，StartBalanceRefresh 每轮现读。
 	sch.SetBalanceJitter(cfg.Schedule.BalanceRefreshJitterPermill)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
+	// 补领清扫（缺省 15 分钟）：人工不点按钮时，达标未领的奖励也照样被领掉。
+	sch.SetTaskSweepJitter(cfg.Schedule.TaskSweepJitterPermill)
+	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)
 
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
 	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，
@@ -851,6 +863,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetBalanceJitter(newCfg.Schedule.BalanceRefreshJitterPermill) // 人味化抖动热生效
+	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)                // 补领清扫间隔热生效
+	sch.SetTaskSweepJitter(newCfg.Schedule.TaskSweepJitterPermill)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
 	// 比对前把 prev 也规范化（bug #12）：prev 是**原始文件**反序列化结果，而 merged

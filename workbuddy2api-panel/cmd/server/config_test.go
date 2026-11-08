@@ -1032,3 +1032,46 @@ func TestRestrictionHoldConfig(t *testing.T) {
 		t.Fatal("负值应报错")
 	}
 }
+
+// 补领清扫（schedule.task_sweep_*）：缺省开、间隔 15 分钟；关掉后 interval 必须是 0
+// （main 只在 >0 时启动 ticker，否则会每 0 秒跑一轮）。
+func TestTaskSweepDefaultsAndDisable(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Schedule.TaskSweepEnabled || c.Schedule.TaskSweepMinutes != 15 ||
+		c.TaskSweepInterval != 15*time.Minute {
+		t.Fatalf("缺省应为 开启/15 分钟：enabled=%v minutes=%v interval=%v",
+			c.Schedule.TaskSweepEnabled, c.Schedule.TaskSweepMinutes, c.TaskSweepInterval)
+	}
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+
+	// 自定义间隔
+	os.WriteFile(fp, []byte(`{"schedule":{"task_sweep_minutes":3}}`), 0o600)
+	c2, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.TaskSweepInterval != 3*time.Minute {
+		t.Errorf("interval=%v want 3m", c2.TaskSweepInterval)
+	}
+
+	// 关闭 → interval 保持 0（不启动）
+	os.WriteFile(fp, []byte(`{"schedule":{"task_sweep_enabled":false}}`), 0o600)
+	c3, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.TaskSweepInterval != 0 {
+		t.Errorf("关闭时 interval=%v want 0", c3.TaskSweepInterval)
+	}
+
+	// 抖动越界必须 fail-fast（与余额刷新同口径，别把配错的数字悄悄夹紧）
+	os.WriteFile(fp, []byte(`{"schedule":{"task_sweep_jitter_permill":501}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Error("task_sweep_jitter_permill=501 应被拒绝")
+	}
+}
