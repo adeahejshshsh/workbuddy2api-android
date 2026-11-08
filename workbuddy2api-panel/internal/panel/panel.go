@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -59,6 +60,11 @@ type Config struct {
 	// nil 时配置页返回 501。
 	ConfigPath string
 	LoadConfig func() (any, error)
+
+	// GrowthConcurrency 排程成长队列的账号间并发（schedule.growth_concurrency，
+	// 缺省 1，上限 4）。与面板「执行队列」按钮同一个并发语义：调高更快，代价是
+	// 上游风控暴露面。0 当作 1。
+	GrowthConcurrency int
 	// SaveConfig 校验并落盘配置，返回需要重启才能生效的字段列表；随后由 main 注入的
 	// ApplyConfig 闭包完成热生效（池参数/排程/密钥/脱敏）。error 时配置不写盘。
 	SaveConfig func(raw []byte) (restartRequired []string, err error)
@@ -94,6 +100,10 @@ type Panel struct {
 	mux     *http.ServeMux
 	started time.Time
 	logs    *Ring
+
+	// growthConc 排程成长队列的账号间并发（schedule.growth_concurrency 热改）。
+	// atomic 而非 cfg 字段：面板保存配置后立刻生效，不用重启；0 = 回落 1。
+	growthConc atomic.Int64
 
 	// idxOnce/idxBody/idxETag 版本化 index.html 的实例级缓存（review #24）：
 	// 此前是包级单例，进程内构造第二个 Panel（测试/嵌入/多实例）会拿到第一个
@@ -187,8 +197,20 @@ func New(cfg Config) *Panel {
 		logs:    NewRing(500),
 		logins:  map[string]*loginSession{},
 	}
+	p.growthConc.Store(int64(cfg.GrowthConcurrency))
 	p.routes()
 	return p
+}
+
+// SetGrowthConcurrency 热改排程成长队列的并发（面板保存配置后调用；<=0 回落 1）。
+func (p *Panel) SetGrowthConcurrency(n int) {
+	if n <= 0 {
+		n = 1
+	}
+	if n > 4 {
+		n = 4
+	}
+	p.growthConc.Store(int64(n))
 }
 
 // Logs 返回日志环形缓冲（main 经 MultiWriter 镜像 log 与 chat 表格日志进来）。

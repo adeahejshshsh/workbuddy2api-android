@@ -270,3 +270,22 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
   工具描述恒身份口径、旧公开入口保持 all。
 
 至此「会改变出站报文」的上游缺口只剩 `jsonscan` 的性能等价重构（不改语义）。
+
+## 第六批：两个旋钮 + 一个假红修复
+
+| 上游 | 内容 | 落地 |
+|---|---|---|
+| `schedule.growth_concurrency` | 排程成长队列的账号间并发（缺省 1，上限 4） | `Panel.growthConc` atomic + `SetGrowthConcurrency` 热生效；`RunGrowthQueueOnce` 不再硬编码 1（队列本体早已支持 1..4） |
+| `panel.poll_interval_sec` | 面板自动刷新间隔（0 = 5s，负值 = 关闭） | 配置钳 ±3600 + 面板输入框；前端 `pollIntervalMs()` 统一取值，`loadConfig` 后按新值重建定时器（改完不必刷页面） |
+
+**不移植**：`schedule.jitter_minutes`（整点摊平）——本地已有账号级摊开（`account_spread_*`）
+与人味抖动（`periodicJitter`），两者叠加会让触发时刻不可预期；`schedule.makeup_cards_per_round`
+——本地 `makeupYesterday` 只补**昨天**一天，一轮天然最多 1 张卡，这个上限没有语义。
+
+## 顺手修的假红
+
+`panel/import_verify_test.go::TestImportCockpitNewAccountSkipsVerify` 的 `refreshCalls`
+把**任意**上游请求都算进去，而导入后的异步激活（`postImportActivate`：注册激活 / 领 trial）
+走同一台假服务 —— 整包连跑时它可能抢在断言前跑完，断言看到 1 次调用就假红（单跑必绿）。
+改成只数 `/v2/plugin/auth/token/refresh`。这条从 2026-11-08 起红过三次「panel 在 all 里红、
+单跑绿」，此前一直以为是无害抖动，实际是测试自己的竞态。

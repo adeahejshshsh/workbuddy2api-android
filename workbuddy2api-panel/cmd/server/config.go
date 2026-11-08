@@ -34,6 +34,9 @@ type Config struct {
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
+		// PollIntervalSec 面板自动刷新间隔（秒）：0 = 缺省 5s；负值 = 关闭自动刷新
+		// （只想把面板当监控看、或账号很多时的省电选项）。
+		PollIntervalSec int `json:"poll_interval_sec"`
 	} `json:"panel"`
 
 	Logging struct {
@@ -117,6 +120,9 @@ type Config struct {
 		ActivityHours              []int `json:"activity_hours"`  // [10]
 		KeepaliveHours             []int `json:"keepalive_hours"` // [22]
 		GrowthHours                []int `json:"growth_hours"`    // [1] 成长任务队列（Sequential 族每日零点解锁，01:00 自动扫描执行）
+		// GrowthConcurrency 排程轮次的账号间并发（缺省 1，上限 4）：与面板「执行队列」
+		// 同一个并发语义；调高更快的代价是上游风控暴露面。
+		GrowthConcurrency int `json:"growth_concurrency"`
 		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled 显式禁用开关（缺省 true）。
 		//
 		// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：
@@ -1306,6 +1312,20 @@ func (c *Config) normalize() error {
 	// 一个配错的数字藏起来，用户以为开了抖动其实配的是 5000‰）。
 	if err := c.normalizeBrandScope(); err != nil {
 		return err
+	}
+	// 排程/面板旋钮的钳制：并发是上游风控暴露面（上限 4），刷新间隔填大值会把浏览器
+	// 打爆（±3600s 封顶，负值语义是「关闭自动刷新」，方向要保留）。
+	switch {
+	case c.Schedule.GrowthConcurrency <= 0:
+		c.Schedule.GrowthConcurrency = 1
+	case c.Schedule.GrowthConcurrency > 4:
+		c.Schedule.GrowthConcurrency = 4
+	}
+	if c.Panel.PollIntervalSec > 3600 {
+		c.Panel.PollIntervalSec = 3600
+	}
+	if c.Panel.PollIntervalSec < -3600 {
+		c.Panel.PollIntervalSec = -3600
 	}
 	if err := c.validateScheduleHumanize(); err != nil {
 		return err

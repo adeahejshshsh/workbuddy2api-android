@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -185,7 +186,7 @@ func main() {
 	p.SetReserveCredits(reserveCreditsOf(cfg))
 	p.SetReserveCreditsByRealm(cfg.Pool.ReserveCreditsByRealm)
 	p.SetAccountRouting(cfg.Pool.AccountPriority, cfg.Pool.AccountShare)
-	p.SetBalanceWindow(balanceWindowOf(cfg))             // 窗口用量调度（默认 1h，"0" 关停）
+	p.SetBalanceWindow(balanceWindowOf(cfg)) // 窗口用量调度（默认 1h，"0" 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
 
@@ -458,8 +459,9 @@ func main() {
 		ProbeFile:     stateSibling(cfg.StateFile, "output_probes.json"),
 		// 任务跳过名单（v1.22.0）：attempt 开关 + 反复无效的 (账号,任务码)。
 		// 与 state 同目录，容器/自托管部署跟着 state 卷一起走。
-		SkipFile:   stateSibling(cfg.StateFile, "task_skip.json"),
-		ConfigPath: *cfgPath,
+		SkipFile:          stateSibling(cfg.StateFile, "task_skip.json"),
+		ConfigPath:        *cfgPath,
+		GrowthConcurrency: cfg.Schedule.GrowthConcurrency,
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)
 		},
@@ -467,6 +469,7 @@ func main() {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
 		},
 	})
+	livePanel.Store(pn)
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
@@ -728,6 +731,10 @@ func panelListenPath(listen string) string {
 // 并互相覆盖结果（review P1-12）。面板是单用户场景，一把包级锁足够。
 var saveConfigMu sync.Mutex
 
+// livePanel 面板实例的进程级引用：面板「保存配置」这条路径在 panel.New 的参数闭包里
+// 就要能回调面板自身（成长队列并发热生效），而那时 pn 还没赋值。
+var livePanel atomic.Pointer[panel.Panel]
+
 func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
 	saveConfigMu.Lock()
 	defer saveConfigMu.Unlock()
@@ -867,7 +874,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetReserveCredits(reserveCreditsOf(newCfg))           // 保留积分热生效
 	p.SetReserveCreditsByRealm(newCfg.Pool.ReserveCreditsByRealm)
 	p.SetAccountRouting(newCfg.Pool.AccountPriority, newCfg.Pool.AccountShare)
-	p.SetBalanceWindow(balanceWindowOf(newCfg))             // 窗口用量调度热生效
+	p.SetBalanceWindow(balanceWindowOf(newCfg)) // 窗口用量调度热生效
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
@@ -883,6 +890,11 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetBalanceJitter(newCfg.Schedule.BalanceRefreshJitterPermill) // 人味化抖动热生效
 	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)                // 补领清扫间隔热生效
 	sch.SetTaskSweepJitter(newCfg.Schedule.TaskSweepJitterPermill)
+	// 成长队列并发热生效：saveConfig 先于面板构造可用（面板内部保存配置），
+	// 所以走一个构造后才填充的引用，而不是加参数（那会与 panel.New 的参数闭包成环）。
+	if pp := livePanel.Load(); pp != nil {
+		pp.SetGrowthConcurrency(newCfg.Schedule.GrowthConcurrency)
+	}
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 	sch.SetWebActivityDisabled(!newCfg.Schedule.WebActivityEnabled)
 

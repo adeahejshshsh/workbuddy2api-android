@@ -1550,6 +1550,7 @@ $('btnLogPin').onclick = () => {
 const CFG_MAP = {
   listen: ['listen'], api_key: ['api_key'],
   package_detail_limit: ['panel', 'package_detail_limit'],
+  poll_interval_sec: ['panel', 'poll_interval_sec'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], 
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
@@ -1720,6 +1721,12 @@ async function loadConfig() {
       else if (Array.isArray(v)) el.value = v.join(', ');
       else el.value = v == null ? '' : v;
     }
+    // 刷新间隔可能变了：按新值重建定时器（否则改完要刷新页面才生效）。
+    if (refTimer) { clearInterval(refTimer); refTimer = null; }
+    {
+      const ms = pollIntervalMs();
+      if (ms > 0) refTimer = setInterval(refreshVisible, ms);
+    }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
     updateIdentityOverrideInputs();
     $('cfgNote').textContent = '';
@@ -1731,7 +1738,7 @@ async function loadConfig() {
    "cannot unmarshal string into Go struct field ... of type int"，网关起不来。
    这份集合是**第二道保险**：控件类型写错也仍然发数字。 */
 const NUMERIC_CFG = new Set([
-  'request_retention_days', 'request_archive_max_mb', 'package_detail_limit',
+  'request_retention_days', 'request_archive_max_mb', 'package_detail_limit', 'poll_interval_sec',
   'max_in_flight', 'max_in_flight_global', 'breaker_threshold', 'degrade_threshold',
   'credit_floor', 'balance_refresh_minutes', 'prompt_keep_recent_rounds', 'account_spread_seconds',
   'balance_refresh_jitter_permill',
@@ -2144,10 +2151,22 @@ function refreshVisible() {
   // 所以停在这一屏时也要跟着刷新，否则显示的是打开那一刻的账号状态。
   else if (view === 'balhist') loadOverview(true);
 }
+// pollIntervalMs 面板自动刷新间隔（毫秒）；<=0 表示不自动刷新。
+function pollIntervalMs() {
+  const v = cfgLoaded && cfgLoaded.panel ? cfgLoaded.panel.poll_interval_sec : undefined;
+  const secs = Number(v);
+  if (Number.isFinite(secs) && secs < 0) return 0;
+  if (Number.isFinite(secs) && secs > 0) return secs * 1000;
+  return 5000; // 未配置 = 5s（旧行为）
+}
+
 function start() {
   loadOverview(true);
   if (refTimer) clearInterval(refTimer);
-  refTimer = setInterval(refreshVisible, 5000);
+  // 自动刷新间隔（panel.poll_interval_sec）：0 = 缺省 5s；负值 = 关闭自动刷新
+  // （只想把面板当监控看、账号很多时的省电选项）。定时器在 loadConfig 之后按新值重建。
+  const ms = pollIntervalMs();
+  refTimer = ms > 0 ? setInterval(refreshVisible, ms) : null;
   checkAuthGate();
 }
 async function checkAuthGate() {
