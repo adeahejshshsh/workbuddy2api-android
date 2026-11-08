@@ -1599,6 +1599,7 @@ const CFG_MAP = {
   prompt_identity_override_enabled: ['prompt', 'identity_override_enabled'],
   prompt_identity_override_text: ['prompt', 'identity_override_text'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
+  sanitize_brand_scope: ['features', 'sanitize_brand_scope'],
   embeddings_enabled: ['features', 'embeddings_enabled'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],

@@ -314,6 +314,12 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// SanitizeBrandScope 身份类规则（品牌词 / 身份句式）的作用域：
+		//   "all"      = 所有消息角色（缺省，与旧行为逐字节一致）；
+		//   "identity" = 仅 system/developer，其余角色按用户数据原样透传
+		//               （实测 user 里的品牌词不触发上游 11‑-128，改它只是不可见的
+		//                数据损坏）。
+		SanitizeBrandScope string `json:"sanitize_brand_scope"`
 		// WatermarkStripEnabled 去水印（裁白边）端点与 MCP 工具的总开关。缺省 false。
 		// 默认关的理由：这条链路要把成品图回读、解码、再 base64 回传（1024x1536 PNG 约
 		// 2.5MB → base64 3.4MB），只在真要彻底去水印时划算；而且它依赖提示词真的留出
@@ -573,6 +579,7 @@ func Default() *Config {
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
+	c.Features.SanitizeBrandScope = "all"
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	// 身份首句替换缺省关闭（老配置无该键 → false），但文本预置默认值，
 	// 面板勾选后无需再填。
@@ -882,6 +889,9 @@ func applyEnv(c *Config) {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
 		}
+	}
+	if v := os.Getenv("WB2A_SANITIZE_BRAND_SCOPE"); v != "" {
+		c.Features.SanitizeBrandScope = v
 	}
 	if v := os.Getenv("WB2A_EMBEDDINGS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -1294,6 +1304,9 @@ func (c *Config) normalize() error {
 	}
 	// 人味化参数：越界 fail-fast（与 validateScheduleHours 同口径 —— 静默夹紧会把
 	// 一个配错的数字藏起来，用户以为开了抖动其实配的是 5000‰）。
+	if err := c.normalizeBrandScope(); err != nil {
+		return err
+	}
 	if err := c.validateScheduleHumanize(); err != nil {
 		return err
 	}
@@ -1338,6 +1351,21 @@ func (c *Config) normalizePrompt() error {
 // validateScheduleHumanize 校验人味化参数（抖动千分比 / 夜间参与上限）。
 // 越界直接报错而不是夹紧：静默夹紧会把配错的数字藏起来（配 5000‰ 以为开了强抖动，
 // 实际被夹到 500 也仍然是 50%，用户永远发现不了自己写错）。
+// normalizeBrandScope 归一身份类规则作用域：空 → "all"（缺省，旧行为）；
+// 大小写/空白归一；未知取值 fail-fast —— 静默回退会把用户明确写的 "identity"
+// 悄悄变成 "all"（前者是为了不改用户数据，后者会改，语义相反）。
+func (c *Config) normalizeBrandScope() error {
+	switch v := strings.ToLower(strings.TrimSpace(c.Features.SanitizeBrandScope)); v {
+	case "", "all":
+		c.Features.SanitizeBrandScope = "all"
+	case "identity":
+		c.Features.SanitizeBrandScope = "identity"
+	default:
+		return fmt.Errorf("features.sanitize_brand_scope: %q 非法（all = 所有消息角色；identity = 仅 system/developer）", c.Features.SanitizeBrandScope)
+	}
+	return nil
+}
+
 func (c *Config) validateScheduleHumanize() error {
 	if v := c.Schedule.BalanceRefreshJitterPermill; v < 0 || v > 500 {
 		return fmt.Errorf("schedule.balance_refresh_jitter_permill 必须在 0-500（千分比，500 = ±50%%），当前 %d", v)

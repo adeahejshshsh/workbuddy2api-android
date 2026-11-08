@@ -1165,3 +1165,41 @@ func TestPoolRoutingPolicyConfig(t *testing.T) {
 		t.Errorf("global 负值应归零，got %v", c3.Pool.ReserveCreditsByRealm)
 	}
 }
+
+// features.sanitize_brand_scope：缺省 all（旧行为），identity 放行，未知取值 fail-fast
+// ——静默回退会把用户明确写的 identity 悄悄变成 all（前者不改用户数据，后者会改）。
+func TestSanitizeBrandScopeConfig(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Features.SanitizeBrandScope != "all" {
+		t.Fatalf("缺省应为 all，got %q", c.Features.SanitizeBrandScope)
+	}
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+
+	os.WriteFile(fp, []byte(`{"features":{"sanitize_brand_scope":" IDENTITY "}}`), 0o600)
+	c2, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Features.SanitizeBrandScope != "identity" {
+		t.Fatalf("大小写/空白应归一为 identity，got %q", c2.Features.SanitizeBrandScope)
+	}
+
+	os.WriteFile(fp, []byte(`{"features":{"sanitize_brand_scope":"identity-only"}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Error("未知取值应 fail-fast")
+	}
+
+	t.Setenv("WB2A_SANITIZE_BRAND_SCOPE", "identity")
+	c3, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.Features.SanitizeBrandScope != "identity" {
+		t.Errorf("环境变量应能覆盖，got %q", c3.Features.SanitizeBrandScope)
+	}
+}

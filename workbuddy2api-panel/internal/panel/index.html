@@ -1334,6 +1334,14 @@ body.veil-open { overflow: hidden; }
             <div class="hr"></div>
             <div class="switch"><span class="lb">出站请求指纹脱敏</span>
               <input type="checkbox" name="sanitize_blacklist_fingerprints"></div>
+            <label class="fld"><span class="lb">身份类规则作用域</span>
+              <select name="sanitize_brand_scope">
+                <option value="all">all — 所有消息角色（缺省）</option>
+                <option value="identity">identity — 仅 system/developer</option>
+              </select>
+              <span class="hint">品牌词 / 身份句式是否也改写 user 与 assistant 的内容。
+                identity 下用户自己写的内容逐字保留（实测 user 里的品牌词不触发上游拦截），
+                工具描述与 system 仍照常改写。改动即时生效。</span></label>
             <div class="switch"><span class="lb">OpenAI 兼容嵌入端点 /v1/embeddings</span>
               <input type="checkbox" name="embeddings_enabled"></div>
             <div class="hint">实验特性，缺省关闭（关着回 403 embeddings_disabled）。上游嵌入只注册了

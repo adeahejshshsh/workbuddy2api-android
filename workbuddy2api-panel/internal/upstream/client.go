@@ -950,6 +950,10 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	// 面板保存配置热改 + chat 热路径并发读写，用 atomic.Bool 消除数据竞争。
 	SanitizeFingerprints atomic.Bool
+	// SanitizeBrandIdentityOnly features.sanitize_brand_scope=identity：身份类规则（品牌词 /
+	// 身份句式）只作用于 system/developer 消息。零值 false = "all"（所有角色，旧行为），
+	// 所以老代码/不设该开关的部署行为逐字节不变。
+	SanitizeBrandIdentityOnly atomic.Bool
 	// effortPolicy 网关思考档位策略（config thinking 节，热更新用 atomic.Pointer）。
 	effortPolicy atomic.Pointer[EffortPolicy]
 	// TLSFingerprint 出站 TLS ClientHello 指纹档位（node = 复刻官方 Node/OpenSSL，
@@ -1139,7 +1143,8 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID, cacheKeyID
 	// CN Kimi 不接受 parameters 里的 $ref/#/$defs：出站前把本地 $ref 展开成内联定义。
 	// 只展开、不裁剪任何工具（裁剪某部署的工具名会让其它用户的 MCP 工具静默消失）。
 	body = prepareKimiTools(body, realm)
-	body = PrepareBodyOptWithEffortPolicy(body, c.SanitizeFingerprints.Load(), efforts, defs, realm, c.effortPolicy.Load())
+	body = prepareBodyOptFull(body, c.SanitizeFingerprints.Load(), efforts, defs, realm,
+		c.effortPolicy.Load(), !c.SanitizeBrandIdentityOnly.Load())
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	// 缓存槽会话段：优先网关派生的 CacheKeyID（sessKey 或内容派生键），

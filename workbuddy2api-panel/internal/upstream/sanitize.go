@@ -138,19 +138,48 @@ var sanitizeRewrites = [][2]string{
 	//   审查时看不出改了什么，也没法 grep。）
 	// 按短语全局替换而非只认开头 —— 同一品牌词在长提示词正文里还会出现多次。
 	// 依据：misakano7545/workbuddy2api-panel `4f60a4c6`（DSH 身份句改按品牌词表驱动）。
+	// **本项属身份类规则**：sanitize_brand_scope=identity 时不作用于 user/assistant 消息
+	// （实测 user 里的品牌词不触发 11‑-128），见 sanitizeIdentityRewrites。
 	{"DeepSeek Harness", "DeepSeek\u200BHarness"},
 	// 数字错误码（11-128 / 11-128）不在这张表里：子串替换会篡改 base64/ID 里的
 	// 同形片段，改由 sanitizeCodeRe 的边界正则单独处理（见其注释）。
 }
 
-// sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
-func sanitizeText(text string) string {
+// identityRewrites 身份类改写表（品牌词 → 变体）：只在应用身份类规则时生效。
+// 用左值指针表而不是另抄一份字符串：两份表迟早漂移，且「抄错一个字就静默失效」。
+var identityRewrites = map[string]bool{
+	"DeepSeek Harness": true,
+	claudeIdentity:     true, // "You are Claude Code…" 身份句
+}
+
+// isIdentityRewrite 报告某条改写是否属身份类（供 sanitizeTextWith 按作用域跳过）。
+func isIdentityRewrite(rw [2]string) bool { return identityRewrites[rw[0]] }
+
+// sanitizeText 单段文本净化（**所有角色**都套身份类规则）：预检不中 → 返回原串（零分配）。
+// 这是 features.sanitize_brand_scope=all（缺省）的口径，也是本仓此前唯一的口径。
+func sanitizeText(text string) string { return sanitizeTextWith(text, true) }
+
+// sanitizeTextIdentity 身份消息（system/developer）专用：始终套身份类规则。
+func sanitizeTextIdentity(text string) string { return sanitizeTextWith(text, true) }
+
+// sanitizeTextWith 按「是否应用身份类规则」净化单段文本。
+//
+// brand=true：身份句式 + 品牌词 + 其余全局规则（= 旧行为逐字节一致）；
+// brand=false：只跑全局规则（数字错误码 / header / kv / DSH @ 路径段 / 三条模板句），
+// 品牌词与身份句式原样透传 —— 实测 user 消息里的品牌词不触发上游 11‑-128，
+// 而把用户自己写的内容改掉是不可见的数据损坏。
+func sanitizeTextWith(text string, brand bool) string {
 	if !hasFingerprint(text) {
 		return text
 	}
-	// 身份句式先于品牌词替换：正则要匹配原文里的品牌全名。
-	text = sanitizeIdentitySentenceRe.ReplaceAllString(text, sanitizeIdentitySentenceReplacement)
+	if brand {
+		// 身份句式先于品牌词替换：正则要匹配原文里的品牌全名。
+		text = sanitizeIdentitySentenceRe.ReplaceAllString(text, sanitizeIdentitySentenceReplacement)
+	}
 	for _, rw := range sanitizeRewrites {
+		if !brand && isIdentityRewrite(rw) {
+			continue
+		}
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
 	// 数字错误码单独走边界正则（见 sanitizeCodeRe 注释）
@@ -203,10 +232,10 @@ func hasFingerprint(text string) bool {
 
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
 // 返回净化后的值及是否发生变化。
-func sanitizeContent(v any) (any, bool) {
+func sanitizeContent(v any, brand bool) (any, bool) {
 	switch c := v.(type) {
 	case string:
-		s := sanitizeText(c)
+		s := sanitizeTextWith(c, brand)
 		return s, s != c
 	case []any:
 		changed := false
@@ -219,7 +248,7 @@ func sanitizeContent(v any) (any, bool) {
 			if !ok {
 				continue
 			}
-			if s := sanitizeText(text); s != text {
+			if s := sanitizeTextWith(text, brand); s != text {
 				m["text"] = s
 				changed = true
 			}
@@ -235,7 +264,7 @@ func sanitizeContent(v any) (any, bool) {
 // 这块长期是盲区：工具调用消息的 content 通常是 null，而旧版 sanitizeMessages
 // 在 content 缺失时直接 continue，整条消息连 tool_calls 一起被跳过——
 // 于是历史里任何写进工具参数的被拦字符串（文件名、命令、写入内容）都会原样漏出。
-func sanitizeToolCalls(v any) bool {
+func sanitizeToolCalls(v any, brand bool) bool {
 	callList, ok := v.([]any)
 	if !ok {
 		return false
@@ -254,7 +283,7 @@ func sanitizeToolCalls(v any) bool {
 		if !ok {
 			continue
 		}
-		if s := sanitizeText(args); s != args {
+		if s := sanitizeTextWith(args, brand); s != args {
 			fn["arguments"] = s
 			changed = true
 		}
@@ -272,7 +301,7 @@ func sanitizeToolCalls(v any) bool {
 // shortcut: 只洗 OpenAI 形状的 function.description；Anthropic 形状的顶层
 // description 与 parameters 里的 schema 描述不洗（那两类在我们的入站适配里
 // 会被转成 function 形状，最终仍走到这里）。
-func sanitizeTools(v any) {
+func sanitizeTools(v any, brandGlobal bool) {
 	tools, ok := v.([]any)
 	if !ok {
 		return
@@ -286,8 +315,12 @@ func sanitizeTools(v any) {
 		if !ok {
 			continue
 		}
+		// 工具描述与 system prompt 同源（都是客户端作者写的固定模板句），因此按
+		// **身份消息**口径处理：无论作用域如何都套身份类规则 —— 否则 identity 模式
+		// 下工具描述里的品牌词会原样出站，正是 11‑-128 的高发面。
+		_ = brandGlobal
 		if d, ok := fn["description"].(string); ok {
-			if s := sanitizeText(d); s != d {
+			if s := sanitizeTextIdentity(d); s != d {
 				fn["description"] = s
 			}
 		}
@@ -295,17 +328,26 @@ func sanitizeTools(v any) {
 }
 
 // sanitizeMessages 净化 messages 中的 content 与 tool_calls；任一命中返回 true。
-func sanitizeMessages(messages []any) bool {
+// sanitizeMessages 净化 messages 中的 content、reasoning 与 tool_calls；任一命中返回 true。
+//
+// brandGlobal 来自 features.sanitize_brand_scope：true（缺省 "all"）时身份类规则对所有
+// 消息角色生效，与旧行为逐字节一致；false（"identity"）时只对 system/developer 生效，
+// 其余角色的同名文本按用户数据原样透传（实测 user 里的品牌词不触发 11‑-128）。
+func sanitizeMessages(messages []any, brandGlobal bool) bool {
 	changed := false
 	for _, msg := range messages {
 		m, ok := msg.(map[string]any)
 		if !ok {
 			continue
 		}
+		role, _ := m["role"].(string)
+		identity := strings.EqualFold(strings.TrimSpace(role), "system") ||
+			strings.EqualFold(strings.TrimSpace(role), "developer")
+		brand := brandGlobal || identity
 		// content 与 tool_calls 各自独立判断：content 可以为 null（工具调用轮），
 		// 早期版本在此 continue，导致这类消息的 tool_calls 完全不被净化。
 		if c, ok := m["content"]; ok {
-			if nc, ch := sanitizeContent(c); ch {
+			if nc, ch := sanitizeContent(c, brand); ch {
 				m["content"] = nc
 				changed = true
 			}
@@ -313,7 +355,7 @@ func sanitizeMessages(messages []any) bool {
 		// reasoning_content（思维链回填字段，见 thinking.go/sse.go）实测同样
 		// 携带指纹，与 content 同等净化。string 形态直接走 sanitizeText。
 		if rc, ok := m["reasoning_content"].(string); ok {
-			if s := sanitizeText(rc); s != rc {
+			if s := sanitizeTextWith(rc, brand); s != rc {
 				m["reasoning_content"] = s
 				changed = true
 			}
@@ -323,13 +365,13 @@ func sanitizeMessages(messages []any) bool {
 		// reasoning_content / tool_calls —— 镜像进 reasoning 的指纹原样出站，
 		// 裸 "11128" 这种反探测串同样致命。
 		if r, ok := m["reasoning"].(string); ok {
-			if s := sanitizeText(r); s != r {
+			if s := sanitizeTextWith(r, brand); s != r {
 				m["reasoning"] = s
 				changed = true
 			}
 		}
 		if tc, ok := m["tool_calls"]; ok {
-			if sanitizeToolCalls(tc) {
+			if sanitizeToolCalls(tc, brand) {
 				changed = true
 			}
 		}
