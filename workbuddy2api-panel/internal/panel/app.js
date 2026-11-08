@@ -1352,13 +1352,23 @@ function renderRequestMetrics(m, entries) {
   renderRequestTable();
 }
 
+/* reqModelCell 模型列：降级过就显示「请求模型 ⤳ 实际模型」，hover 给出完整说明。
+   model_eff 记的是出站线协议原值（通常裸名），不造域前缀——造了就和上游实际收到的
+   名字对不上，排障时会被误导。 */
+function reqModelCell(e) {
+  const want = e && e.model || '';
+  const eff = e && e.model_eff || '';
+  if (!eff || eff === want) return esc(want || '—');
+  return esc(want || '—') + ' <span class="muted" title="' + esc('6004 模型级限流 → 已改用 ' + eff) + '">⤳</span> ' + esc(eff);
+}
+
 /* reqMatch 请求记录筛选：q 对 IP/UA/模型/账号/请求 ID 做空格分词的 AND 包含匹配，
    outcome 精确匹配。两者都在已拉取的条目上做（最多 1000 条），不发新请求。 */
 function reqMatch(e, f) {
   f = f || reqFilter;
   if (f.outcome && String(e && e.outcome || '') !== f.outcome) return false;
   if (f.q) {
-    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.account, e && e.request_id]
+    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.model_eff, e && e.account, e && e.request_id]
       .filter(Boolean).join(' ').toLowerCase();
     for (const kw of f.q.toLowerCase().split(/\s+/).filter(Boolean)) {
       if (!text.includes(kw)) return false;
@@ -1406,7 +1416,7 @@ function renderRequestTable() {
         : ' title="' + esc(requestLogText(e)) + '"') + '>' +
       '<td class="num">' + esc(when) + '</td>' +
       '<td>' + reqOutcomeTag(e) + '</td>' +
-      '<td>' + esc(e && e.model || '—') + '</td>' +
+      '<td>' + reqModelCell(e) + '</td>' +
       '<td>' + esc(e && e.account || '—') + '</td>' +
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
@@ -1515,6 +1525,8 @@ function requestLogText(e) {
   return [
     when,
     String(e && e.status || '—') + ' ' + (outcomeLabel[e && e.outcome] || (e && e.outcome) || '—'),
+    // 复制/导出只保留一列模型：降级信息在表格里用「⤳ 实际模型」呈现，
+    // 塞进纯文本会改变既有的复制格式（有测试钉着），而排障需要的是「看到」不是「导出」。
     e && e.model || '—',
     e && e.account || '—',
     e && e.client_ip || '—',
