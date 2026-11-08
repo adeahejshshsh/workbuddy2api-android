@@ -71,6 +71,59 @@ func ensureMinOutputBudget(obj map[string]any) {
 	log.Printf("WARN: [upstream] output budget floor: max_tokens %d → %d (effort=%s；否则思考会吃掉正文额度，回答断在半句)", cur, floor, effort)
 }
 
+// MinOutputBudget 该思考档位下「正文还能写得出来」的最小输出预算；档位未知返回 0。
+//
+// 供续写/救援段复用（continue.go / starved.go）：那些段是从**客户端原始 body**
+// 重建的（不含首段被抬过的 max_tokens），而它们往往关掉思考，prepareBody 的下限逻辑
+// 会跳过（没有思考就不存在「思考吃光预算」）。若不显式带上，续写段会继续用客户端
+// 那个装不下正文的小额度——线上实测正是这样：首段 8192 全被思考吃掉 → 救援段只拿到
+// 1024 → 正文 1946 字就断。
+func MinOutputBudget(effort string) int64 {
+	return minBudgetByEffort[strings.ToLower(strings.TrimSpace(effort))]
+}
+
+// EnsureMinBudget 把 obj 的 max_tokens 抬到不低于 floor（floor<=0 或当前额度是
+// 探活级时不动）。返回是否改动。
+func EnsureMinBudget(obj map[string]any, floor int64) bool {
+	if floor <= 0 {
+		return false
+	}
+	v, ok := maxTokensValue(obj)
+	if !ok || v <= 0 || v < minOutputBudgetProbe || v >= floor {
+		return false
+	}
+	obj["max_tokens"] = json.Number(strconv.FormatInt(floor, 10))
+	return true
+}
+
+// BudgetFloorFor 从**客户端原始请求体**推算本轮生效档位对应的输出预算下限
+// （续写/救援段用；见 MinOutputBudget）。
+//
+// 为什么不直接把 prepareBody 里抬额的那个值回传：那条管线在 upstream 内部，返回值
+// 是改写后的 bytes，档位已经埋在 JSON 里。这里按同一条顺序（策略 → injectThinking
+// → 档位降级）在**副本**上重算一遍档位——纯函数、无副作用，且与出站时用的档位同源，
+// 不会出现「首段按 high 抬额、续写段按客户端原发 low 算下限」的漂移。
+func (c *Client) BudgetFloorFor(body []byte, realm string) int64 {
+	if len(body) == 0 {
+		return 0
+	}
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return 0
+	}
+	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
+	if realmKey(realm) == "global" {
+		efforts, defs = globalEffortMap(efforts, defs)
+	} else {
+		efforts, defs = cnEffortMap(efforts, defs)
+	}
+	modelName, _ := obj["model"].(string)
+	applyEffortPolicy(obj, modelName, efforts[modelName], c.effortPolicy.Load(), realm)
+	injectThinking(obj, lookupDefaultEffort(defs, modelName))
+	normalizeReasoningEffort(obj, efforts)
+	return MinOutputBudget(effortValue(obj))
+}
+
 // effortValue 取最终生效的思考档位（snake/camel 双字段，小写归一）。
 func effortValue(obj map[string]any) string {
 	for _, k := range []string{"reasoning_effort", "reasoningEffort"} {

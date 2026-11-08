@@ -14,6 +14,10 @@ PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
 export GOROOT="$PREFIX/lib/go"
 export PATH="$GOROOT/bin:$PATH"
 export GOFLAGS="-toolexec=/system/bin/linker64 -buildvcs=false"
+# CGO 必须关：本机没有可 exec 的 aarch64-linux-android-clang（私有目录 + SELinux），
+# 任何 cgo 包都会在编译期报 "fork/exec ... permission denied"。build_apk.sh 与
+# rebuild.sh 早已这么设，只有本脚本漏了 —— 表现为「一半包 PASS、一半包编译失败」。
+export CGO_ENABLED=0
 
 ALL_PKGS="server upstream panel pool scheduler auth session reqlog usage redisstore credithist prompt loginsite httpauth alert media"
 

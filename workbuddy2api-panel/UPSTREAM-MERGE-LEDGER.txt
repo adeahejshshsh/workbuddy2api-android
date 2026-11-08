@@ -161,3 +161,49 @@ Go 工具链被重置（`$PREFIX/lib/go` 整个消失）。**正确修法在 `AG
 `patches/test.sh` 判定从 `tail -1 == PASS` 改成「输出里有一行恰好是 PASS」：包里的后台
 goroutine（导入后的 `postImportActivate`）可能在 PASS 之后补一行日志，旧判据会把绿的
 判成红的 —— 本批 panel 包实测误报过一次。
+
+---
+
+# 上游 2026-11-08 第三批：续写能力（`continue.go`，9 条）
+
+上一批把 `continue.go` 三条记成「本仓没有该文件，整体未移植」。这批兑现：按上游
+`771c887` 的**终态**整体移植该子系统（含中间那批修正），而不是逐条 cherry-pick——
+续写是个多段状态机，逐条搬会把「先修 A 再修 B 覆盖 A」的中间态带进来。
+
+## 已合（9 条 + 2 处本仓改写）
+
+| 上游 | 内容 | 落地 |
+|---|---|---|
+| `562d0d8` | 思考吃光预算时也自动续写 | `continue.go` 全量（`continueThinkingShare` + 续写段关思考） |
+| `e54c6e0` | 续写/救援段继承输出预算下限 | `upstream.MinOutputBudget` / `EnsureMinBudget` / `Client.BudgetFloorFor`；`starvedRetryBodyWithFloor` |
+| `34a3ae6` | 抬过额度的请求在 length 处自动续接 | `budgetWasRaised` + `canContinue` 的例外分支 |
+| `29db878` | 续写闸门从「最多 3 段」改成「累计输出上限」 | `maxContinueSegments=8` + `continueTotalCapRatio=4` |
+| `cb7a2aa` | 主段断流也自动续写一次 | `canContinue` 的 `cutNoFinish` 分支（不再限定 `seg>0`） |
+| `b5960e7` | 续写段断流盲重试一次 | `blindRetried` |
+| `1a88271` | 续写接缝消静默（正文未开始时放行思考 + 空帧补 keepalive） | `frame()` 的 reasoning 分支 + `maybeKeepalive` |
+| `a8be846` | 客户端断开不再被记成上游断流 | `clientGone()` |
+| `66e5344` | 只按客户端请求 ctx 判断开（看门狗掐断仍算上游断流） | `clientGone()` 只看 `r.ctx` |
+
+两处**与上游不同**的地方（本仓特有约束，改回去会立刻打红既有用例）：
+
+1. **读错误冒泡**：上游 `continueReader` 把读错误整个吞掉。本仓 `StreamHint` 靠这个
+   错误走「首帧否决 → 换号重试 / 502 JSON」（`stream_truncation_test.go` 两条核心用例）。
+   现在只在「本请求一个字节都没写出去」时冒泡（`wrote` 标志），写过字节仍就地降级成
+   截断终态——两条语义都保住。
+2. **下限的取法**：上游把生效档位挂在 `ChatTiming` 结构里、从 `prepareBody` 回传；本仓
+   `ChatStreamContext` 没有 timing 参数。改为 `Client.BudgetFloorFor(body, realm)` 在
+   副本上重跑同一条档位管线（策略 → injectThinking → 降级）算下限，与出站同源。
+
+## 未搬（与本批相关但属其它子系统）
+
+- `b08e606`（上游心跳帧吞掉紧随的 Responses 事件）/ `e5afc3f`（注释行与 data 帧粘连
+  的测试）：本批已在 `step()` 里保留「非 data 行补一个空行恢复帧边界」这条修复，
+  但上游那两条改的是 `responses.go` 的适配器解析，等单独一轮。
+- `de76fa5` / `0d5926f` / `a8be846` 之外的 stream 归因条目：本仓早前已按自己的口径
+  落地（`TruncationFinishReason` + `StreamErrorFrame`）。
+
+## 顺手修的测试脚手架
+
+`patches/test.sh` 补 `CGO_ENABLED=0`。此前只有 `build_apk.sh` / `rebuild.sh` 设了它，
+`test.sh` 不带 → 本机没有可 exec 的 `aarch64-linux-android-clang`，表现为「一半包
+PASS、一半包编译失败（cgo: permission denied）」，与改动无关却极易误判。
