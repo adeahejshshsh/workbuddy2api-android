@@ -1580,6 +1580,7 @@ const CFG_MAP = {
   degrade_cooldown_max: ['pool', 'degrade_cooldown_max'],
   cost_explore_interval: ['pool', 'cost_explore_interval'],
   credit_floor: ['pool', 'credit_floor'],
+  credit_floor_max_rate: ['pool', 'credit_floor_max_rate'], reserve_credits: ['pool', 'reserve_credits'],
   prefer_expiring: ['pool', 'prefer_expiring'], expiring_soon: ['pool', 'expiring_soon'],
   soft_rate: ['cooldown', 'soft_rate'], soft_rate_max: ['cooldown', 'soft_rate_max'],
   thinking_enabled: ['thinking', 'enabled'],

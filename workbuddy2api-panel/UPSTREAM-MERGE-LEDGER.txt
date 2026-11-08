@@ -207,3 +207,45 @@ goroutine（导入后的 `postImportActivate`）可能在 PASS 之后补一行�
 `patches/test.sh` 补 `CGO_ENABLED=0`。此前只有 `build_apk.sh` / `rebuild.sh` 设了它，
 `test.sh` 不带 → 本机没有可 exec 的 `aarch64-linux-android-clang`，表现为「一半包
 PASS、一半包编译失败（cgo: permission denied）」，与改动无关却极易误判。
+
+---
+
+# 上游「配置面缺口」第四批：清扫 / 两个缺省关的开关 / 账号级路由
+
+来源：逐项对照上游 `771c887` 的整棵树（文件清单、包清单、面板路由、配置结构体字段、
+main 装配点）后按性价比排序补齐。**代理池不移植**（用户明确排除）。
+
+## 已合
+
+| 上游 | 内容 | 落地 |
+|---|---|---|
+| `sweep.go` + `tasksweep.go`（issue #174） | 分钟级补领清扫：只 accept 待接受的、只 claim 已达标未领的 | 整文件移植 + 本地化：任务族锁 `TaskSweep`、起步 interval=0 不提前 return、panic 兜底；`ClaimSweepOnce` 与周期任务合并为同一 `sweepAccount`（原先是两份实现） |
+| `features.embeddings_enabled` | `/v1/embeddings` 总开关，缺省关，关着回 403 | livecfg 热生效 + `WB2A_EMBEDDINGS`；本地此前只有注释没有闸 |
+| `schedule.web_activity_enabled`（issue #111） | 国际版网页活跃腿缺省关 | `SetWebActivityDisabled` 热生效；本地此前无条件跑（每天每国际号占一条活跃名额） |
+| `pool.reserve_credits` / `..._by_realm` | 余额已知且 <= 阈值即停单（免费档豁免），充值自动恢复 | `reserveBlocked` + `modelFreeOf`，接入选号与**兜底**路径、`/status` 透出 `reserve_blocked` |
+| `pool.account_priority` / `account_share`（issue #62） | 分层先烧 + 同层按占比分流 | `prioritizeLocked` / `sharePoolLocked` / `pickByShare` / `drawWeighted`，插入本地 pick 的既有层次（成本分层之前、top5 截断之前） |
+| `pool.credit_floor_max_rate`（#30 / PR #2） | 触底号放行倍率 <= 该值的便宜模型 | `floorBlockedForRealmModel` 的 tier 1 分支改为 `v > maxRate`（0 = 严格模式） |
+
+面板配置页同步加了五个控件（补领清扫三项、网页活跃腿、嵌入端点、保底放行倍率、
+保留积分），全部热生效或注明需重启。
+
+## 仍未移植（按优先级排列）
+
+1. **任务中心持久化作业**（`panel/taskjobs.go` 750 行 + `tasksweep.go` 的作业侧）：
+   本仓 `taskcenter.go` 是进程内队列，重启丢历史；要换架构，单独一轮。
+2. `features.sanitize_brand_scope`（身份类品牌词只改 system/developer）：需要把
+   「身份消息 / 普通消息」两个作用域贯穿 sanitize 的调用点，改签名面较大。
+3. `schedule.growth_concurrency` / `jitter_minutes` / `makeup_cards_per_round` /
+   `panel.poll_interval_sec`：都是排程/前端的小旋钮，本地已有等价机制（账号摊开、
+   人味抖动、补签逻辑），边际收益低。
+4. `internal/jsonscan`（请求体只解析一次）+ `internal/upstream/timing.go`（prep/do
+   分段耗时）：性能与观测，功能等价。
+5. `reqlog model_eff` 全链路、盲盒消费 + 10105 会话自救：前者是观测维度新增，后者
+   需要新接 `buddy/quota` + `buddy/open`。
+6. `internal/updater`（原生二进制自更新，APK 不适用）、`wbencrypted`（需桌面
+   at-rest 密钥）、`cmd/signin`（本地有 `signin.sh`）。
+
+## 顺手
+
+`patches/test.sh` 失败分支改为先打印失败用例名：此前只 tail 四行日志，
+「panel 在 all 里红、单跑绿」这类抖动无法定位（2026-11-08 遇到两次）。

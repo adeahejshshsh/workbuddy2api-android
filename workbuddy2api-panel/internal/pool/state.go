@@ -6,6 +6,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -193,6 +194,34 @@ func (p *Pool) NoteError(uid string) {
 		p.recordBreakerFailureLocked(e)
 		p.dirty.Store(true)
 	}
+}
+
+// reserveBlocked 报告账号是否因「保留积分」停牌（不再接单）。调用方须持锁。
+//
+// 「余额已知」用 creditsTotal > 0 判定（UserResource 聚合值）：从未查到余额的账号
+// 不受影响 —— 否则新导入、还没刷过余额的号会被 0 值直接停掉。
+func (p *Pool) reserveBlocked(e *entry, modelFree bool) bool {
+	if modelFree {
+		return false
+	}
+	t := p.reserveThreshold(e.a.Realm())
+	return t > 0 && e.creditsTotal > 0 && e.credits <= t
+}
+
+// modelFreeOf 报告 (账号域, 模型) 是否免费档：上游目录倍率数值为 0。
+// 与 floorBlockedForRealmModel 同一查表，两条保号判据对「收费/免费」的口径必然一致。
+// model 为空 / 目录未覆盖 / 倍率异常 → false（保守：当付费处理，免费豁免宁可不发）。
+// 调用方须持锁。
+func (p *Pool) modelFreeOf(e *entry, model string) bool {
+	if model == "" || p.modelRateOf == nil {
+		return false
+	}
+	rate := p.modelRateOf(e.a.Realm(), model)
+	if rate == "" {
+		return false
+	}
+	v, err := strconv.ParseFloat(rate, 64)
+	return err == nil && v == 0
 }
 
 // NoteSuccess 成功请求累加成功计数、刷新 lastSuccess，并清空连续失败与熔断运行态。
@@ -655,6 +684,9 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Nickname:                 e.a.NicknameValue(),
 		Credits:                  e.credits,
 		CreditsTotal:             e.creditsTotal,
+		ReserveBlocked:           p.reserveBlocked(e, p.modelFreeOf(e, "")),
+		Priority:                 p.priorityOf(uid),
+		Share:                    p.shareOf(uid),
 		CreditsExpiring:          e.creditsExpiring,
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,

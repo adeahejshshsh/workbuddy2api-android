@@ -59,6 +59,24 @@ type Pool struct {
 	// creditFloorByRealm 按域覆盖 creditFloor（issue #147；键 "cn"/"global"）。
 	// nil/空表 = 全部回落全局阈值。
 	creditFloorByRealm map[string]int64
+	// creditFloorMaxRate 积分保底允许的**目录倍率上限**（issue #30 / PR #2）：
+	// 触底号上只放行倍率 <= 该值的便宜模型（0.2 → x0.11 放行、x1.62 仍拦），
+	// 0 = 严格模式（任何已知正倍率都拦）。只影响 tier 1（无本地实测）判定。
+	creditFloorMaxRate float64
+	// reserveCredits 保留积分阈值（SetReserveCredits 注入；0 = 关闭）：余额已知且
+	// <= 该值的账号停止接单（仍在池中、照常签到/旅行，充值后自动恢复）。
+	// 上游余额耗尽会发提醒短信，设阈值即避免被用到 0。免费模型不受限（见 modelFreeOf）。
+	reserveCredits int64
+	// reserveByRealm 按域覆盖 reserveCredits（issue #147；键 "cn"/"global"）。
+	// nil/空表 = 全部回落全局阈值。
+	reserveByRealm map[string]int64
+	// accountPriority 账号优先级（uid → 正整数，小 = 先消耗；issue #62）。
+	// 配了的号构成「先烧层」，层内有号可用时其余号不接单；层内烧空/冷却/停牌后自动
+	// 让位给下一层。空表 = 未配置，选号行为与旧版完全一致。
+	accountPriority map[string]int
+	// accountShare 账号占比（uid → 正权重）：同层内配了占比的号独占抽签，按归一化
+	// 比例分流量（70/30 与 7/3 同义）。空表 = 未配置。
+	accountShare map[string]float64
 	// balanceWindow 窗口用量调度的窗口长度（issue #112）：>0 时按 (账号, 模型) 本窗口
 	// 已花的 token 反比降权；0 = 关停（行为与旧版逐字节一致）。
 	balanceWindow time.Duration
@@ -261,6 +279,58 @@ func (p *Pool) SetCreditFloorByRealm(m map[string]int64) {
 	defer p.mu.Unlock()
 	p.creditFloorByRealm = m
 }
+
+// SetCreditFloorMaxRate 注入积分保底的目录倍率上限（0 = 严格模式）。
+func (p *Pool) SetCreditFloorMaxRate(v float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if v < 0 {
+		v = 0
+	}
+	p.creditFloorMaxRate = v
+}
+
+// SetReserveCredits 注入保留积分阈值（0 = 关闭）。
+func (p *Pool) SetReserveCredits(v int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if v < 0 {
+		v = 0
+	}
+	p.reserveCredits = v
+}
+
+// SetReserveCreditsByRealm 注入按域覆盖表（键 "cn"/"global"）。
+func (p *Pool) SetReserveCreditsByRealm(m map[string]int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reserveByRealm = m
+}
+
+// SetAccountRouting 注入账号级路由偏好（issue #62）：优先级（小 = 先烧）与占比。
+// 空/nil = 未配置，选号行为与旧版完全一致。
+func (p *Pool) SetAccountRouting(priority map[string]int, share map[string]float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.accountPriority = priority
+	p.accountShare = share
+}
+
+// reserveThreshold 该域的保留积分阈值：按域覆盖优先，未写回落全局值。
+// 调用方须持锁；realm 为空当 "cn"（与 creditFloorFor 同口径）。
+func (p *Pool) reserveThreshold(realm string) int64 {
+	if realm == "" {
+		realm = "cn"
+	}
+	if v, ok := p.reserveByRealm[realm]; ok {
+		return v
+	}
+	return p.reserveCredits
+}
+
+// priorityOf / shareOf 读账号级路由偏好，未配置 → 0。调用方须持锁。
+func (p *Pool) priorityOf(uid string) int  { return p.accountPriority[uid] }
+func (p *Pool) shareOf(uid string) float64 { return p.accountShare[uid] }
 
 // creditFloorFor 该域的积分保底阈值：按域覆盖优先，未写回落全局值。
 // 调用方须持锁；realm 为空当 "cn"（与 Auth.Realm 的归一化口径一致）。

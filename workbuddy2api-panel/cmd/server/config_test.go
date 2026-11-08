@@ -1113,3 +1113,55 @@ func TestExperimentalSwitchesDefaultOff(t *testing.T) {
 		t.Error("WB2A_EMBEDDINGS=true 没生效")
 	}
 }
+
+// 账号级路由策略的三组键（保留积分 / 优先级与占比 / 保底放行倍率）：
+// 缺省值、非法值剔除、指针语义（nil=默认 10、显式 0=关闭）。
+func TestPoolRoutingPolicyConfig(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.ReserveCredits == nil || *c.Pool.ReserveCredits != 10 {
+		t.Fatalf("reserve_credits 缺省应为 10，got %v", c.Pool.ReserveCredits)
+	}
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+
+	// 显式 0 = 关闭（指针必须能区分「没写」与「写了 0」）。
+	os.WriteFile(fp, []byte(`{"pool":{"reserve_credits":0}}`), 0o600)
+	c2, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Pool.ReserveCredits == nil || *c2.Pool.ReserveCredits != 0 {
+		t.Fatalf("显式 0 应保留为关闭，got %v", c2.Pool.ReserveCredits)
+	}
+
+	// 非法值：负的倍率钳 0；非正的优先级/占比剔除；非法域键剔除。
+	os.WriteFile(fp, []byte(`{"pool":{
+		"credit_floor_max_rate":-1,
+		"account_priority":{"a":1,"b":0,"c":-2},
+		"account_share":{"a":70,"b":0,"c":-1},
+		"reserve_credits_by_realm":{"cn":100,"eu":50,"global":-5}
+	}}`), 0o600)
+	c3, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.Pool.CreditFloorMaxRate != 0 {
+		t.Errorf("负倍率应钳 0，got %v", c3.Pool.CreditFloorMaxRate)
+	}
+	if len(c3.Pool.AccountPriority) != 1 || c3.Pool.AccountPriority["a"] != 1 {
+		t.Errorf("优先级应只留 a，got %v", c3.Pool.AccountPriority)
+	}
+	if len(c3.Pool.AccountShare) != 1 || c3.Pool.AccountShare["a"] != 70 {
+		t.Errorf("占比应只留 a，got %v", c3.Pool.AccountShare)
+	}
+	if len(c3.Pool.ReserveCreditsByRealm) != 2 {
+		t.Errorf("非法域键应剔除且 global 负值归零，got %v", c3.Pool.ReserveCreditsByRealm)
+	}
+	if v, ok := c3.Pool.ReserveCreditsByRealm["global"]; !ok || v != 0 {
+		t.Errorf("global 负值应归零，got %v", c3.Pool.ReserveCreditsByRealm)
+	}
+}

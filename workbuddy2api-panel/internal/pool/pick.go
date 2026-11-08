@@ -88,6 +88,9 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 		if floorBlocked(e) {
 			continue // 积分保底：触底号不接实测收费模型（tier 0/1 不受限）
 		}
+		if p.reserveBlocked(e, p.modelFreeOf(e, reqModel)) {
+			continue // 保留积分：余额已知且 <= 阈值 → 停单（免费模型豁免）
+		}
 		if p.inFlightFull(e) {
 			continue // 在途占满：跳过（max=0 不限时不触发）
 		}
@@ -109,6 +112,12 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 		e.inFlight.Add(1)
 		return a
 	}
+	// 账号优先级（issue #62）：配了优先级的号构成「先烧层」，层内有号可用时其余号一律
+	// 不接单——「优先消耗某个账号的余额」是一条硬语义，加权排序做不到（排序只改抽签
+	// 次序，高优先级号仍会被抽到）。放在成本分层之前：人的显式配置压过自动启发式。
+	// 零配置时 prioritizeLocked 原样返回，本行无副作用。冷却/停牌/在途满/保留积分停牌
+	// 的号已在上面的候选循环里被逐出，所以层内号烧空/冻结后本层自动让位给下一层。
+	cands = p.prioritizeLocked(cands)
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
 	// maxCredits 统一用**全集口径**（tier 过滤前的全部 healthy 候选）：截断排序与
@@ -274,6 +283,15 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 		cands = cands[:5]
 	}
 	var e *entry
+	// 账号占比（issue #62）：本层内配了占比的号独占抽签，按 share 归一化分流量
+	// （70/30 与 7/3 同义）。两条次序要求：
+	//   1. 先于「加权抽签」——后者是自动启发式，显式占比压在它之前；
+	//   2. 不走 top5 截断——截断按权重取前 5，低占比号会永远进不了短名单，占比无从生效。
+	// 配了占比的号全不可用（冷却/在途满/停牌已被逐出）时本分支自动让位，回到既有
+	// 加权路由：占比是分配偏好，不是排他锁，不会把请求饿死。
+	if sp := p.sharePoolLocked(candsAll); len(sp) > 0 {
+		e = p.pickByShare(sp)
+	}
 	// 防并发撞号：在持锁内基于「上次选中时刻」过滤，但同一批并发 goroutine 会串行进入
 	// 本函数（写锁），每个进入者都把 lastUsed 置为 now —— 于是同一瞬间的第 2..N 个
 	// 进入者看到前一个账号 lastUsed==now（距今 0 < minPickGap），被自然挤向其他账号。
@@ -284,7 +302,9 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 			eligible = append(eligible, c)
 		}
 	}
-	if len(eligible) == 0 {
+	if e != nil {
+		// 占比抽签已选中：跳过加权/LRU 路径（它自己的语义就是按比例分流量）。
+	} else if len(eligible) == 0 {
 		// top5 全部刚被用过：LRU 兜底，在**全候选 candsAll**（非仅 top5）里选最旧者。
 		// 用 usedSeq 单调序号而非 lastUsed 墙钟比较：Windows 等平台 time.Now() 精度
 		// ~0.5ms，快速连续选号时所有 lastUsed 完全相等，Before 全 false 会恒选
@@ -368,7 +388,87 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 	if err != nil {
 		return false // 倍率非数值（异常形态）：不据此惩罚账号
 	}
-	return v > 0
+	// 保底兜底允许的倍率上限（credit_floor_max_rate）：0 = 严格模式（任何已知正倍率
+	// 都拦）；0.2 = 触底号上放行 x0.11 这类便宜模型、x1.62 仍拦。只影响 tier 1
+	// （无本地实测）——tier 2 是**实测扣过费**，无论倍率一律拦。
+	return v > p.creditFloorMaxRate
+}
+
+// weightScale 权重定点放大：int64 累加后抽签，保持随机源注入（randInt64N）语义不变。
+const weightScale = 1_000_000
+
+// prioritizeLocked 账号优先级过滤（issue #62）：只保留「最小正整数」那一层。调用方须持锁。
+// 零配置（没有任何号配了正优先级）→ 原样返回，对既有选号零副作用。
+func (p *Pool) prioritizeLocked(cands []*entry) []*entry {
+	best := 0
+	for _, e := range cands {
+		if pr := p.priorityOf(e.a.UID); pr > 0 && (best == 0 || pr < best) {
+			best = pr
+		}
+	}
+	if best == 0 {
+		return cands
+	}
+	out := make([]*entry, 0, len(cands))
+	for _, e := range cands {
+		if p.priorityOf(e.a.UID) == best {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// sharePoolLocked 返回候选里配了占比的账号（无 → nil）。调用方须持锁。
+func (p *Pool) sharePoolLocked(cands []*entry) []*entry {
+	var out []*entry
+	for _, e := range cands {
+		if p.shareOf(e.a.UID) > 0 {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// pickByShare 在配了占比的账号里按 share 抽签（issue #62）：权重 = share，归一化后即比例。
+// 不套 minPickGap：占比的语义就是「流量按这个比例分给这几号」，硬压间隔会让比例失真；
+// 而在途上限/冷却/停牌已逐出不可用号，占满的号自动退出本次抽签，请求不会堆在单号上。
+// share 极小（< 1/weightScale）时钳到最小权重，避免整轮权重归零退化成均匀随机 ——
+// 那会让「1% 的号」和「99% 的号」一样多。
+func (p *Pool) pickByShare(cands []*entry) *entry {
+	weights := make([]int64, len(cands))
+	for i, e := range cands {
+		w := int64(p.shareOf(e.a.UID) * weightScale)
+		if w <= 0 {
+			w = 1
+		}
+		weights[i] = w
+	}
+	return p.drawWeighted(cands, weights)
+}
+
+// drawWeighted 定点权重抽签（weights 与 cands 等长、同序）。权重和 <= 0 时退化为均匀随机。
+// 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
+func (p *Pool) drawWeighted(cands []*entry, weights []int64) *entry {
+	var total int64
+	for _, w := range weights {
+		total += w
+	}
+	rnd := rand.Int64N
+	if p.randInt64N != nil {
+		rnd = p.randInt64N
+	}
+	if total <= 0 {
+		return cands[int(rnd(int64(len(cands))))]
+	}
+	r := rnd(total)
+	var acc int64
+	for i, e := range cands {
+		acc += weights[i]
+		if r < acc {
+			return e
+		}
+	}
+	return cands[len(cands)-1]
 }
 
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
@@ -394,6 +494,13 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 			// 只有 UID 没有凭证）同样必须排除（bug 2）：它带着从 state.json 恢复的
 			// 冷却截止时 expiry 非零，会被兜底选中 → handler 拿到 AccessToken=="" 的号
 			// → RefreshToken 报 no refreshToken → 熔断+轮转，整池 503。
+			continue
+		}
+		if p.reserveBlocked(e, p.modelFreeOf(e, model)) {
+			// 保留积分停牌：兜底是**最后一道**选号路径。健康候选被 reserve 全拦净后
+			// cands 为空会走到这里，兜底若不看 reserve 就会把刚停牌的号捞回来继续接付费
+			// 模型，reserve 形同虚设（且 /status 的 Servable 口径会与实际选号裂缝）。
+			// 免费档豁免复用 modelFreeOf（与正常路径同一查表）。
 			continue
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
