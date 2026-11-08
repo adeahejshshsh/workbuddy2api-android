@@ -38,18 +38,31 @@ for pkg in $pkgs; do
   # 而 go test 自带的默认 10 分钟超时也就一起没了 —— 一个挂住的用例会让脚本永久卡死，
   # 在 CI/发版流水线里表现为「一直不出结果」而不是「失败」。超时后 testing 会打印
   # 全部 goroutine 栈，比无限等待有用得多。
-  out=$(cd "$P/internal/$pkg" && /system/bin/linker64 "$PREFIX/tmp/$pkg.test" -test.timeout=180s 2>&1 | tail -1)
-  printf "  %-11s %s\n" "$pkg" "$out"
-  [ "$out" = "PASS" ] || fail=1
+  # 判定用「输出里有一行恰好是 PASS」，不用 tail -1：包里的后台 goroutine（典型是
+  # 导入后的 postImportActivate）可能在 PASS 之后补一行日志，tail -1 会把绿的判成红的
+  # —— 2026-11-08 实测 panel 包就这样误报过一次。
+  out=$(cd "$P/internal/$pkg" && /system/bin/linker64 "$PREFIX/tmp/$pkg.test" -test.timeout=180s 2>&1)
+  if printf '%s\n' "$out" | grep -qx PASS; then
+    printf "  %-11s PASS\n" "$pkg"
+  else
+    printf "  %-11s FAIL\n" "$pkg"
+    printf '%s\n' "$out" | tail -4 | sed 's/^/      /'
+    fail=1
+  fi
 done
 # cmd/* 只在全量时跑（配置类改动才需要 cmd/server；cmd/login 有 realm/登录码用例，
 # 此前一直没进过测试轮 —— 等于那批断言从来没执行过）
 if [ "${1:-}" = "all" ]; then
   for c in server login; do
     if ( cd "$P" && go test -c -o "$PREFIX/tmp/cmd$c.test" "./cmd/$c" >/dev/null 2>&1 ); then
-      out=$(cd "$P/cmd/$c" && /system/bin/linker64 "$PREFIX/tmp/cmd$c.test" 2>&1 | tail -1)
-      printf "  %-11s %s\n" "cmd/$c" "$out"
-      [ "$out" = "PASS" ] || fail=1
+      out=$(cd "$P/cmd/$c" && /system/bin/linker64 "$PREFIX/tmp/cmd$c.test" 2>&1)
+      if printf '%s\n' "$out" | grep -qx PASS; then
+        printf "  %-11s PASS\n" "cmd/$c"
+      else
+        printf "  %-11s FAIL\n" "cmd/$c"
+        printf '%s\n' "$out" | tail -4 | sed 's/^/      /'
+        fail=1
+      fi
     else
       printf "  %-11s %s\n" "cmd/$c" "编译失败"; fail=1
     fi
