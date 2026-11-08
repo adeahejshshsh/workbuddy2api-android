@@ -30,7 +30,8 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 // defaultEfforts（模型声明默认档）补档。defaultEfforts 为 nil 时与旧行为一致
 // （deepseek 缺档回退硬编码 high）。
 func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) []byte {
-	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, "", nil)
+	// 旧入口没有作用域概念：按 "all"（所有角色）处理，行为逐字节不变。
+	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, "", nil, true)
 }
 
 // PrepareBodyOptWithEffortPolicy 在 …AndDefault 之上接入网关思考档位策略
@@ -39,10 +40,12 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 // realm 用于 thinking.model_defaults 的 "realm:model" 精确匹配；policy 为 nil
 // 或未启用时与 …AndDefault 完全一致。
 func PrepareBodyOptWithEffortPolicy(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, realm string, policy *EffortPolicy) []byte {
-	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, realm, policy)
+	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, realm, policy, true)
 }
 
-func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, realm string, policy *EffortPolicy) []byte {
+// brandAll 对应 features.sanitize_brand_scope=all：true 时身份类规则（品牌词 / 身份句式）
+// 作用于所有消息角色（缺省、与旧行为一致）；false 时只作用于 system/developer。
+func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, realm string, policy *EffortPolicy, brandAll bool) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -118,11 +121,11 @@ func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, 
 	backfillReasoningContent(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
-			sanitizeMessages(msgs)
+			sanitizeMessages(msgs, brandAll)
 		}
 		// 工具描述同样要洗：客户端作者把身份句写进 description 时，只洗 messages
 		// 等于整段原样出站（见 sanitizeTools 注释）。
-		sanitizeTools(obj["tools"])
+		sanitizeTools(obj["tools"], brandAll)
 	}
 	// 用 marshalNoEscape 而不是 json.Marshal：后者会把 < > & 转成 \u003c 等，
 	// 而 Agent 流量的常态就是 XML 工具标签（<tool_use>）、HTML、&amp;、shell 重定向

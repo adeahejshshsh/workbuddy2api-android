@@ -249,3 +249,24 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 
 `patches/test.sh` 失败分支改为先打印失败用例名：此前只 tail 四行日志，
 「panel 在 all 里红、单跑绿」这类抖动无法定位（2026-11-08 遇到两次）。
+
+## 第五批：`features.sanitize_brand_scope`
+
+上游把身份类规则（品牌词 / 身份句式）从「所有消息角色」改成可配作用域。落地方式：
+
+- `sanitizeText` 拆成 `sanitizeTextWith(text, brand)`：`brand=true` 时身份句式正则 +
+  品牌词表 + 身份句改写生效；`brand=false` 只跑全局规则（数字错误码 / header / kv /
+  DSH @ 路径段 / 三条模板句）。身份类判定用「改写表左值 → 是否身份类」的映射，
+  不另抄一份字符串（两份表迟早漂移）。
+- 作用域按角色选：`sanitizeMessages(msgs, brandGlobal)` 里 system/developer 恒
+  `brand=true`，其余角色 `brand = brandGlobal`。**工具描述恒按身份口径**（与 system
+  prompt 同源，identity 模式下漏掉它就是 11‑-128 的漏口）。
+- `prepareBodyOptFull` 增加 unexported 参数 `brandAll`；旧公开入口一律传 `true`
+  —— 不配新键的部署行为逐字节不变。`Client.SanitizeBrandIdentityOnly`（零值 false =
+  all）承接热改，避免零值语义翻转老部署。
+- 配置 `features.sanitize_brand_scope`（all/identity，缺省 all，未知值 fail-fast——
+  静默回退会把「不改用户数据」悄悄变成「改」）+ `WB2A_SANITIZE_BRAND_SCOPE` + 面板下拉。
+- 测试 7 例：all/identity 两口径、system/developer 恒改、全局规则在 identity 下仍生效、
+  工具描述恒身份口径、旧公开入口保持 all。
+
+至此「会改变出站报文」的上游缺口只剩 `jsonscan` 的性能等价重构（不改语义）。

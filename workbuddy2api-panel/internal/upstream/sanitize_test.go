@@ -123,7 +123,7 @@ func TestToolCallArgumentsSanitized(t *testing.T) {
 			}},
 		}},
 	}
-	if !sanitizeMessages(msgs) {
+	if !sanitizeMessages(msgs, true) {
 		t.Fatal("sanitizeMessages 未报告任何改动，tool_calls 被跳过")
 	}
 	fn := msgs[1].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
@@ -223,7 +223,7 @@ func TestMultimodalTextPartOnly(t *testing.T) {
 		map[string]any{"type": "text", "text": ccIdentity},
 		imgPart,
 	}
-	out, changed := sanitizeContent(content)
+	out, changed := sanitizeContent(content, true)
 	if !changed {
 		t.Fatal("expected change")
 	}
@@ -410,7 +410,7 @@ func TestSanitizeMessagesScrubsReasoningField(t *testing.T) {
 		"content":   "hi",
 		"reasoning": "upstream said 11128",
 	}}
-	if !sanitizeMessages(ms) {
+	if !sanitizeMessages(ms, true) {
 		t.Fatal("reasoning 字段里的指纹未被净化")
 	}
 	got, _ := ms[0].(map[string]any)["reasoning"].(string)
