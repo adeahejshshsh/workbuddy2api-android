@@ -296,13 +296,29 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 完成：取 uid/nickname（失败不阻塞，仅缺展示名）。
+	// 两种形状都认：官方会话对象是 {account:{uid,type,enterpriseId},auth:{…}}，
+	// 而 login/account 端点部分版本直接给扁平字段。只认扁平时，嵌套形状会让 uid 为空
+	// 直接判「账号信息获取失败」；只认嵌套时同理。
 	var acct struct {
 		UID          string `json:"uid"`
 		EnterpriseID string `json:"enterpriseId"`
+		Type         string `json:"type"`
 		Nickname     string `json:"nickname"`
+		Account      struct {
+			UID          string `json:"uid"`
+			EnterpriseID string `json:"enterpriseId"`
+			Type         string `json:"type"`
+			Nickname     string `json:"nickname"`
+		} `json:"account"`
 	}
 	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+url.QueryEscape(state), tok.AccessToken, nil, site.HeadersForAccount("")); err == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
+		if acct.UID == "" {
+			acct.UID = acct.Account.UID
+			acct.Nickname = acct.Account.Nickname
+			acct.EnterpriseID = acct.Account.EnterpriseID
+			acct.Type = acct.Account.Type
+		}
 	}
 	if acct.UID == "" {
 		// 视作**终态**（bug #8）：走到这里说明 auth/token 已经成功 —— 上游已经把
@@ -363,7 +379,8 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    expiresAt,
 		Domain:       tok.Domain,
 		UID:          acct.UID,
-		EnterpriseID: acct.EnterpriseID,
+		EnterpriseID: auth.NormalizeEnterpriseID(acct.EnterpriseID),
+		AccountType:  strings.TrimSpace(acct.Type),
 		Nickname:     acct.Nickname,
 		FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", acct.UID)),
 	}
