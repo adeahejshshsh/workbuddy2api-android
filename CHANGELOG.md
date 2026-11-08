@@ -1,6 +1,48 @@
 # 变更记录
 
-## v1.35.10（当前）
+## v1.35.11（当前）
+
+> 两件事：**国服个人号被判企业版**（签到 / 成长任务全被门控）修掉了；
+> 上游 11-08 批次里「11134 供应商过载别罚号」「上游断流别伪装成正常收尾」也合了。
+
+### 修复：企业版误判（会误伤所有人）
+
+国服个人号也会带一个 `enterpriseId`（个人空间/默认租户），而旧判据是
+`enterpriseId != ""` —— 于是**任意账号**都被判企业版：面板挂「企业版」标签，
+签到 / 成长任务 / 连登管家 / 猫猫旅行全部被门控，用户看到的就是「所有号都不签到了」。
+
+判据改成官方 CLI 那套（`@tencent-ai/codebuddy-code` 2.181.0 反查）：
+
+- `account.type == personal` → **个人号**（即使带 enterpriseId）；
+- `type ∈ {ultimate, exclusive}` → 企业版；
+- `type` 缺失（旧 auth 文件）→ 回落 `enterpriseId`；
+- `enterpriseId` 的占位值（`"0"/"null"/"nil"/"none"/"false"/"undefined"/"personal"/"个人"/"无"/"-"`）
+  一律视为**没有**企业身份（读取时归一，旧文件重启即纠正）。
+
+顺带：登录时账号信息端点**两种形状都认**（扁平 与 `{account:{…}, auth:{…}}` 会话形），
+`type` 随登录 / 导入 / 导出全程携带，迁移后判定不会翻转。
+
+### 上游 11-08 批次（17 条，合 3 条）
+
+- 🛰️ **11134 供应商过载**：不再按 5xx 罚号（原来熔断 3 次就 30 分钟冷却，高峰期整片
+  健康号被打进冷却），也不再换号 —— 换号撞的是同一个 provider，还会打断会话粘性的
+  账号级前缀缓存（同号命中 97–99% vs 换号 0–12%）。等待口径取 `retry_policy.retry_after`，
+  末端 429 + `Retry-After`
+- ✂️ **上游断流不再伪装成正常收尾**：既没 `[DONE]` 也没 `finish_reason` 就 EOF 时，
+  补一帧 `finish_reason=length`（chat=length / responses=incomplete / messages=max_tokens），
+  客户端据此知道「被截断」而不是「说完了」
+- 🔍 上游错误 WARN 的 body 截断 200→512：`retry_policy` 的值不再被切掉（`Error.Msg` 仍 200）
+
+不移植 14 条（`continue.go` 续写、`wbencrypted` 加密 auth、reqlog `model_eff`、
+面板像素修补、autobot 清单），理由记在 `workbuddy2api-panel/UPSTREAM-MERGE-LEDGER.txt`。
+
+### 工程
+
+- **提交改走 PR + CI 绿了才合并**（`AGENT.md` §5）：main 不再接受直推
+- 签名身份备份到私有仓 `adeahejshshsh/workbuddy2api-signing`（keystore + 口令 + 证书 +
+  恢复步骤），避免再发生 v1.35.10 之前那种「密钥永久丢失」
+
+## v1.35.10
 
 > 换签名 + 换包名的一版：旧签名密钥永久丢失，新包 `com.workbuddy.api` 可与旧包共存。
 > 同时把上游 11-07 的两批提交（13 条）吃完，并补上「导出 → 导入凭据」这条迁移闭环
