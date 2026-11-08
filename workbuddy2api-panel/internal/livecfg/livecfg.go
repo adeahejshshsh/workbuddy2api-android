@@ -23,6 +23,10 @@ type Snapshot struct {
 	// WatermarkStripEnabled 去水印（裁白边）端点与 MCP 工具的总开关
 	// （features.watermark_strip_enabled，缺省 false）。热生效。
 	WatermarkStripEnabled bool
+	// EmbeddingsEnabled 实验特性 /v1/embeddings 总开关（features.embeddings_enabled，
+	// 缺省 false）。热生效：关着时端点回 403 embeddings_disabled——不是 404，
+	// 「功能存在、只是没开」与「上游没有这个协议」必须能区分开。
+	EmbeddingsEnabled bool
 	// RecordContext 请求事件是否记录会话上下文（system + messages / 出图 prompt）。
 	// 比 IP/UA 敏感得多（是用户的实际对话内容），所以单独一个开关、缺省关闭。
 	RecordContext bool

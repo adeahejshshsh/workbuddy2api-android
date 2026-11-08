@@ -17,7 +17,7 @@ func TestEmbeddingsEndpoint(t *testing.T) {
 	const upstreamBody = `{"code":0,"msg":"ok","model":"bge-m3","data":[{"embedding":[0.1,0.2]},{"embedding":[0.3,0.4]}],"usage":{"prompt_tokens":4,"total_tokens":4}}`
 	f := &searchFake{status: 200, body: upstreamBody}
 	p := testPoolWith(&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
-	h := NewHandler(Config{Pool: p, Upstream: f.client(), APIKey: "k"})
+	h := NewHandler(Config{Pool: p, Upstream: f.client(), APIKey: "k", EmbeddingsEnabled: true})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/embeddings",
@@ -58,7 +58,7 @@ func TestEmbeddingsModelNotFoundNoRotation(t *testing.T) {
 		&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
 		&auth.Auth{UID: "c2", AccessToken: "at2", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
 	)
-	h := NewHandler(Config{Pool: p, Upstream: f.client(), APIKey: "k"})
+	h := NewHandler(Config{Pool: p, Upstream: f.client(), APIKey: "k", EmbeddingsEnabled: true})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(`{"model":"nope","input":"x"}`))

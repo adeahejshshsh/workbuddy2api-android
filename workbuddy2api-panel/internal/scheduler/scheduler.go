@@ -65,6 +65,11 @@ type Config struct {
 	KeepaliveDisabled bool
 	// GrowthDisabled 显式关闭成长任务自动排程（schedule.growth_enabled=false）。
 	GrowthDisabled bool
+	// WebActivityDisabled 显式关闭国际版「网页通道」每日活跃腿
+	// （schedule.web_activity_enabled=false 为缺省）。上游实测每日 30 积分的判据是
+	// 活跃上报本身，网页会话不是必要条件；而这条腿每天为每个国际号建一条真实会话、
+	// 占一条活跃名额（上限 10，漏收尾永久少一条）——所以缺省关，要开才开。
+	WebActivityDisabled bool
 
 	// IncludeDisabledInTasks 让「保号类」四任务（签到 / 活跃上报 / token 保活 / 余额刷新）
 	// 对已禁用（disabled）的账号也执行（schedule.include_disabled_in_tasks）。
@@ -76,6 +81,12 @@ type Config struct {
 	// 待办并执行，与面板「执行全部待办」按钮同管线）。调度器只管时点不管实现——
 	// panel 在 scheduler 之后构造，用 SetGrowthHook 事后挂载；nil 时到点跳过。
 	GrowthHook func()
+	// SweepRunner 补领清扫执行回调（panel.RunTaskSweepNow：只 accept 待接受的、
+	// 只 claim 已达标未领的，不跑行为链路）。同样由 main 在装配期注入；nil 时跳过。
+	SweepRunner func() (int, string)
+	// TaskSweepJitterPermill 补领清扫间隔的抖动幅度（千分比，0–500）。
+	// 0 = 精确固定间隔（旧行为）；见 humanize.go 的 periodicJitter。
+	TaskSweepJitterPermill int
 	// RunStampFile 启动补跑去重记录的落盘路径（见 runstamps.go）。空 = 不持久化，
 	// 每次重启都补一轮（旧行为）。
 	RunStampFile string
@@ -107,6 +118,13 @@ type Scheduler struct {
 	schedMu       sync.Mutex
 	rearmSchedule chan struct{}
 	rearmBalance  chan struct{}
+	// rearmSweep 补领清扫间隔热改通知（面板保存配置后立刻按新值重算）。
+	rearmSweep chan struct{}
+
+	// sweepInterval 补领清扫间隔（纳秒，0=暂停）；sweepJitter 抖动幅度（千分比）。
+	// 与 balanceInterval 同口径：循环每轮现读，热改下一轮生效。
+	sweepInterval atomic.Int64
+	sweepJitter   atomic.Int64
 
 	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读当前值，
 	// SetBalanceInterval 可任意时刻热改（面板保存配置）。
@@ -150,6 +168,7 @@ func New(cfg Config) *Scheduler {
 		adoptTried:    make(map[string]string),
 		rearmSchedule: make(chan struct{}, 1),
 		rearmBalance:  make(chan struct{}, 1),
+		rearmSweep:    make(chan struct{}, 1),
 	}
 }
 
@@ -325,6 +344,8 @@ const (
 	TaskKeepalive = "keepalive"
 	TaskGrowth    = "growth"
 	TaskBalance   = "balance"
+	// TaskSweep 补领清扫族：后台 ticker 与面板按钮共用一锁，两路同时扇出会双倍打上游。
+	TaskSweep = "sweep"
 )
 
 // taskKindKey taskKind → 任务族键。
@@ -836,8 +857,24 @@ func (s *Scheduler) runActivity(ctx context.Context, spread bool) {
 		// 「跑完的网页 agent 会话」。**放在上报之外** —— 上报偶发失败不该连带丢掉当日
 		// 积分（两条腿在上游是各自独立的判据）。国内版在 runWebActivityLeg 内部按
 		// IsGlobal 直接返回，零上游调用。
-		s.runWebActivityLeg(ctx, a)
+		if !s.webActivityDisabled() {
+			s.runWebActivityLeg(ctx, a)
+		}
 	}
+}
+
+// SetWebActivityDisabled 热改国际版网页活跃腿开关（面板保存配置后调用）。
+func (s *Scheduler) SetWebActivityDisabled(disabled bool) {
+	s.schedMu.Lock()
+	s.cfg.WebActivityDisabled = disabled
+	s.schedMu.Unlock()
+}
+
+// webActivityDisabled 读开关（schedMu 保护：Reconfigure 可热改）。
+func (s *Scheduler) webActivityDisabled() bool {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	return s.cfg.WebActivityDisabled
 }
 
 // checkActivityStreak 上报成功后回读连登天数（只读 oracle，发现静默失败）。

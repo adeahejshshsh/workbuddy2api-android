@@ -126,9 +126,16 @@ func normalizeEmbeddingsResponse(raw []byte, want int) ([]byte, error) {
 }
 
 func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
-	// 本仓不单独设 embeddings 开关：路由挂了就可用（此前这里是一个 `if !true`
-	// 死分支，注释还指向一个不存在的 features.embeddings_enabled —— README 也照抄了，
-	// 运维会去 config.json 找一个永远不生效的键）。
+	// 总开关（features.embeddings_enabled，缺省 **关**）：上游嵌入只注册了 bge-m3
+	// 一个模型（1024 维），可用性随账号/租户变化，默认放开等于把实验端点暴露给
+	// 所有客户端。关着回 403 而不是 404 —— 「功能存在、只是没开」与「没有这个协议」
+	// 必须能区分。热生效（面板保存即变）。
+	if !h.loadLive().EmbeddingsEnabled {
+		writeOpenAIErrorHint(w, http.StatusForbidden, "embeddings_disabled",
+			"embeddings endpoint is disabled on this gateway (features.embeddings_enabled=false)",
+			"enable features.embeddings_enabled in config.json or the panel's config page to use /v1/embeddings")
+		return
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, (8<<20)+1))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
