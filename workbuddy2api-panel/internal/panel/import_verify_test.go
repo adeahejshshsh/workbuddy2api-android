@@ -121,7 +121,13 @@ func TestImportCockpitNewAccountSkipsVerify(t *testing.T) {
 	refreshCalls := 0
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: fakeRoundTripper(func(r *http.Request) (*http.Response, error) {
-			refreshCalls++
+			// 只数**凭据刷新**（/v2/plugin/auth/token/refresh）：导入后的异步激活
+			// （postImportActivate：注册激活 / 领 trial）走同一台假服务，会把「任意
+			// 请求」计数顶上去 —— 2026-11-08 实测这条断言在整包连跑时偶发假红，
+			// 单跑必绿，就是它抢在断言前跑完了。
+			if strings.Contains(r.URL.Path, "/auth/token/refresh") {
+				refreshCalls++
+			}
 			return &http.Response{StatusCode: http.StatusNotFound,
 				Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 		})},

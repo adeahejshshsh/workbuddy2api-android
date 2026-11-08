@@ -587,7 +587,11 @@ dispatch:
 // 每日零点解锁一环，此前只能手动扫描推进；此回调让链条每天自动走一环。
 // 异步执行（startGrowthQueue 启动 goroutine 即返），已在跑/无待办安全跳过。
 func (p *Panel) RunGrowthQueueOnce() {
-	started, total, _, _, _ := p.startGrowthQueue(context.Background(), 1, true)
+	conc := int(p.growthConc.Load())
+	if conc <= 0 {
+		conc = 1
+	}
+	started, total, _, _, _ := p.startGrowthQueue(context.Background(), conc, true)
 	if started {
 		log.Printf("panel: 定时成长任务队列已启动（%d 项）", total)
 	}

@@ -1203,3 +1203,42 @@ func TestSanitizeBrandScopeConfig(t *testing.T) {
 		t.Errorf("环境变量应能覆盖，got %q", c3.Features.SanitizeBrandScope)
 	}
 }
+
+// 两个排程/面板旋钮的归一：growth_concurrency 钳 1..4（并发是风控暴露面，要有界）、
+// poll_interval_sec 钳 ±3600（填 999999 会把浏览器打爆）。
+func TestScheduleGrowthAndPollInterval(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.GrowthConcurrency != 1 {
+		t.Fatalf("growth_concurrency 缺省应为 1，got %d", c.Schedule.GrowthConcurrency)
+	}
+	if c.Panel.PollIntervalSec != 0 {
+		t.Fatalf("poll_interval_sec 缺省应为 0（= 5s），got %d", c.Panel.PollIntervalSec)
+	}
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+
+	os.WriteFile(fp, []byte(`{"schedule":{"growth_concurrency":9},"panel":{"poll_interval_sec":999999}}`), 0o600)
+	c2, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Schedule.GrowthConcurrency != 4 {
+		t.Errorf("并发上限应钳 4，got %d", c2.Schedule.GrowthConcurrency)
+	}
+	if c2.Panel.PollIntervalSec != 3600 {
+		t.Errorf("poll 上限应钳 3600，got %d", c2.Panel.PollIntervalSec)
+	}
+
+	os.WriteFile(fp, []byte(`{"panel":{"poll_interval_sec":-10}}`), 0o600)
+	c3, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.Panel.PollIntervalSec != -10 {
+		t.Errorf("负值（关闭自动刷新）应原样保留，got %d", c3.Panel.PollIntervalSec)
+	}
+}
