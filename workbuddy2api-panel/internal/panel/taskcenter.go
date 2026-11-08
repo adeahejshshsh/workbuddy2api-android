@@ -636,6 +636,9 @@ dispatchQueue:
 		wg.Add(1)
 		go func(one queueAccount) {
 			defer wg.Done()
+			// 作业 ID 在拿到账号锁之后才分配；panic 兜底与 defer 都可能先于它执行，
+			// 所以先声明。空 ID 时 jobEnd 是空操作（见 taskjobs.go 的守卫）。
+			var jobID string
 			// 每个账号一层 panic 兜底（bug #1）：这些 goroutine 不是 net/http 起的，
 			// Go 不会替它们 recover —— 上游返回形状一变就可能 panic，死的是整个
 			// 网关进程，而不是"这次任务失败"。队列状态由外层 defer 复位。
@@ -646,6 +649,7 @@ dispatchQueue:
 						it.Status = "error"
 						it.Message = fmt.Sprintf("内部错误：%v", r)
 					})
+					p.jobEnd(one.a.UID, jobID, fmt.Sprintf("内部错误：%v", r))
 				}
 			}()
 			defer func() { <-sem }()
@@ -654,9 +658,20 @@ dispatchQueue:
 				p.queueSet(q, seq, one.a.UID, func(it *queueItem) {
 					it.Status, it.Message = "skipped", "该账号有其它任务动作在执行，跳过"
 				})
+				p.jobSkip(one.a.UID, "该账号有其它任务动作在执行，跳过")
 				return
 			}
 			defer p.unlockAccount(one.a.UID)
+			// 作业记录：本账号这一轮的待办数 + 终态（taskjobs.go）。
+			// total 用入参快照算，与下面遍历口径一致。
+			total := 0
+			for i := range items {
+				if items[i].UID == one.a.UID {
+					total++
+				}
+			}
+			jobID = p.jobBegin(one.a.UID, "growth", total)
+			defer p.jobEnd(one.a.UID, jobID, "")
 			// 开始前清掉可能残留的中止标记（bug B9）：队列路径此前不调 clearAborted，
 			// 上一轮 watchAbort 的竞态残留会让本任务在第一次 sleepAB 就退出。
 			clearAborted(one.a.UID)
@@ -677,7 +692,13 @@ dispatchQueue:
 				if uid != one.a.UID {
 					continue
 				}
-				p.queueMarkAt(seq, i, "running", "")
+				// mark 同一处写「队列条目」与「作业结果」：两套视图口径必须一致，
+				// 分开写迟早漂移（面板上队列说 done、作业历史说 error 这种最难查）。
+				mark := func(status, msg string) {
+					p.queueMarkAt(seq, i, status, msg)
+					p.jobItem(uid, jobID, code, status, msg)
+				}
+				mark("running", "")
 				var msg string
 				var progressed bool
 				var err error
@@ -686,21 +707,21 @@ dispatchQueue:
 					msg, progressed, err = p.runGrowthQueued(one.a, code)
 				}
 				if err != nil {
-					p.queueMarkAt(seq, i, "error", err.Error())
+					mark("error", err.Error())
 				} else {
-					p.queueMarkAt(seq, i, "done", msg)
+					mark("done", msg)
 				}
 				switch queueVerdictOf(err, progressed) {
 				case verdictReadbackFailed:
 					// 回读失败（bug A4）：动作已经执行过，只是拿不到执行后的进度。
 					// **既不计入跳过名单、也不清零计数** —— 上游一次 5xx/超时就白吃
 					// 1/3 次机会，三次抖动后好账号 + 可做任务被砍出待办 7 天。
-					p.queueMarkAt(seq, i, "error", msg+"；"+err.Error())
+					mark("error", msg+"；"+err.Error())
 					log.Printf("panel: 任务回读失败 uid=%s code=%s（本轮不计入跳过名单）: %v",
 						one.a.UID, code, err)
 				case verdictNotApplicable:
 					// 该账号没有这个任务：只标记，不计数（报告 #7）。
-					p.queueMarkAt(seq, i, "skipped", msg)
+					mark("skipped", msg)
 				case verdictNoProgress:
 					// 执行了但没进展 → 记一笔；连续 skipFailLimit 次就把该 (账号,任务码)
 					// 砍出待办，别再天天"做了也没用"（7 天后自动放回，或一键清空）。
@@ -719,9 +740,9 @@ dispatchQueue:
 							"或在该账号的「任务」弹窗点「清空跳过名单」立即重试）", n)
 					}
 					if err != nil {
-						p.queueMarkAt(seq, i, "error", err.Error()+note)
+						mark("error", err.Error()+note)
 					} else {
-						p.queueMarkAt(seq, i, "done", msg+note)
+						mark("done", msg+note)
 					}
 					log.Printf("panel: 任务无效 uid=%s code=%s %s（%s）", one.a.UID, code, note, why)
 				default:

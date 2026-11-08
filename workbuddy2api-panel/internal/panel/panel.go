@@ -105,6 +105,11 @@ type Panel struct {
 	// atomic 而非 cfg 字段：面板保存配置后立刻生效，不用重启；0 = 回落 1。
 	growthConc atomic.Int64
 
+	// jobMu/taskJobs 账号级后台任务作业记录（taskjobs.go）：每账号一条最新作业，
+	// 落盘到 state 同目录。nil = 未启动（测试/嵌入用法），所有 hook 自动跳过。
+	jobMu    sync.Mutex
+	taskJobs *jobStore
+
 	// idxOnce/idxBody/idxETag 版本化 index.html 的实例级缓存（review #24）：
 	// 此前是包级单例，进程内构造第二个 Panel（测试/嵌入/多实例）会拿到第一个
 	// Panel 的版本串与 ETag，导致 app.js?v= 与响应体错配。
@@ -319,6 +324,9 @@ func (p *Panel) routes() {
 	// skipClear 永远调不到，attemptAllowed() 恒 false，尝试型任务被永久锁死，
 	// 而 409 文案还指向一个不存在的界面。保留为纯 API 入口（可用 curl 开）。
 	p.mux.HandleFunc("GET /panel/api/tasks/skip", p.tasksSkipState)
+	// 账号级后台任务作业（上游 taskjobs.go 同路径）：最近一轮全账号 + 单账号最新。
+	p.mux.HandleFunc("GET /panel/api/tasks/jobs", p.taskJobsList)
+	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks/job", p.accountTaskJob)
 	p.mux.HandleFunc("POST /panel/api/tasks/skip", p.tasksSkipState)
 	// 任务中心/队列链路（issue ISSUE-15）：界面已下线，但四个 handler 一直存在且
 	// 没注册路由 —— 等于整条链路是死代码，而调度器的成长排程又依赖其中的

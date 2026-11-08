@@ -470,6 +470,12 @@ func main() {
 		},
 	})
 	livePanel.Store(pn)
+	// 账号级后台任务作业（taskjobs.go）：与 state 同目录落盘，重启后仍在。
+	// 启动失败不致命（只是没有作业历史），但必须留日志 —— 静默降级会让
+	// 「面板上作业历史一直空」变成查不出原因的现象。
+	if err := pn.StartTaskJobs(stateSibling(cfg.StateFile, "task-jobs.json")); err != nil {
+		log.Printf("WARN: [panel] 作业记录启动失败（面板作业历史不可用）: %v", err)
+	}
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
@@ -630,7 +636,8 @@ func main() {
 	}
 	go func() {
 		<-ctx.Done()
-		p.Flush() // 信号触发：先落盘再做优雅停机
+		pn.StopTaskJobs() // 作业记录：停节流循环并强制落盘
+		p.Flush()         // 信号触发：先落盘再做优雅停机
 		// 在途请求排干窗口可配（server.shutdown_timeout，缺省 30s）：长流式 SSE 的
 		// 合法时长可达分钟级，固定 5s 必然把在途对话掐成连接重置；超时也不再静默。
 		//
