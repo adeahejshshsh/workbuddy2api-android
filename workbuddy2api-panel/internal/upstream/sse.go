@@ -76,6 +76,13 @@ func IsUpstreamReadError(err error) bool { return errors.Is(err, errUpstreamRead
 // IsStreamBrokeBeforeFlush 报告错误是否为「一帧未发就断流」——调用方此时可以换号重试。
 func IsStreamBrokeBeforeFlush(err error) bool { return errors.Is(err, ErrStreamBrokeBeforeFlush) }
 
+// TruncationFinishReason 上游断流（既没 [DONE] 也没 finish_reason）时补的终态取值。
+//
+// 三边适配器都已有映射：chat 直接透出 length、/v1/responses → incomplete(max_output_tokens)、
+// /v1/messages → stop_reason=max_tokens。取 "length" 而不是 "stop" 是为了让客户端知道
+// 「这是被截断的」，从而自己决定续写/重试，而不是把半句话当完整答案。
+const TruncationFinishReason = "length"
+
 // errSilentEmptyTurn 上游以 finish_reason=stop 收尾，但整条流既没有正文也没有工具
 // 调用；配合 WithHoldUntilContent 时客户端一个字节都没收到，调用方可以重发。
 //
@@ -1040,6 +1047,23 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		return out
 	}
 
+	// finishSeen 本层是否已向客户端写出过非空 finish_reason。与 upstreamDone 合起来判
+	// 「这段流是不是被截断」：两者都没有 = 上游连接说到一半断了。
+	finishSeen := false
+	setFinishSeen := func(ch map[string]any) {
+		chs, ok := ch["choices"].([]any)
+		if !ok || len(chs) == 0 {
+			return
+		}
+		c0, ok := chs[0].(map[string]any)
+		if !ok {
+			return
+		}
+		if fr, ok := c0["finish_reason"].(string); ok && fr != "" {
+			finishSeen = true
+		}
+	}
+
 	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
 	// 只要**成功转发了一帧**就计数（bug #12）：非 JSON 的 data 帧（心跳/纯文本兼容
 	// 形态）此前不计数，若整条流都是这种帧，客户端明明收到了内容，这里仍判空流 →
@@ -1088,6 +1112,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			if werr := writeChunk(ch, ""); werr != nil {
 				return 0, werr
 			}
+			setFinishSeen(ch)
 		}
 		return 1, nil
 	}
@@ -1120,6 +1145,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	}
 	// readErr 上游读错误（非 EOF）：流中途被掐。记下来走统一收尾，绝不裸 return。
 	var readErr error
+	// upstreamDone 上游是否显式发过 data: [DONE]（正常收尾）。与 finishSeen 一起判截断。
+	var upstreamDone bool
 readLoop:
 	for {
 		line, err := br.ReadString('\n')
@@ -1133,6 +1160,7 @@ readLoop:
 				if werr := flushDataLines(); werr != nil {
 					return werr
 				}
+				upstreamDone = true
 				break readLoop
 			}
 			// 已在攒多行：拼上继续等，拼成合法 JSON 就整体写出。
@@ -1224,6 +1252,18 @@ readLoop:
 				return werr
 			}
 		}
+	}
+	// 截断兜底（上游 84a48d9）：上游既没给 finish_reason、也没发 data: [DONE] 就 EOF ——
+	// 连接说到一半断了，不是正常收尾。此前这种流只补一个 [DONE]：chat 客户端看到
+	// 「内容 + 结束」但 finish_reason 为空，responses 适配器更直接回 complete，Agent 侧
+	// 表现就是「说到一半停了、也不报错」。补一帧 finish_reason=length（三边适配器已有
+	// 映射：chat=length / responses=incomplete / messages=max_tokens），把决定权交回客户端。
+	// 只在本层一个终态都没发过时补（否则两个 finish_reason，后一个会洗掉前一个）。
+	if readErr == nil && !upstreamDone && !finishSeen && !toolFinishSent && validFrames > 0 {
+		if werr := writeChunk(finishOnlyFrame(map[string]any{}, TruncationFinishReason), ""); werr != nil {
+			return werr
+		}
+		log.Printf("WARN: [upstream] stream ended without [DONE] or finish_reason; emitting finish_reason=%s", TruncationFinishReason)
 	}
 	// 上游读错误（流中途断）：补一帧 error 再补 [DONE]。客户端因此能区分
 	// 「说完了」与「说到一半上游断了」，不会把半截答案当完整答案。

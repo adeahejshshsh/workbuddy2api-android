@@ -1912,7 +1912,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
 			restricted := h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-			fail(acct.UID)
+			if kind == upstream.ErrUpstreamBusy {
+				// 上游容量信号（6020/6021 排队满、11134 供应商过载）：账号无过错，换号撞的是
+				// 同一堵墙，而 fail() 里的 Session.Unbind 会解绑会话粘性 —— 客户端按
+				// Retry-After 重试时被重新分配到随机号，账号级前缀缓存从零重建
+				// （同号命中 97–99% vs 换号 0–12%）。这里只释放在途租约，粘性保留；
+				// 真换号成功时成功分支的 Bind 会覆盖旧绑定，粘性照样跟随（上游 4830686）。
+				releaseHeld()
+			} else {
+				fail(acct.UID)
+			}
 			// 11140 风控连坐（restrict.go）：上游判的是设备/出口而不是单个账号，换号等于
 			// 把下一个号也送进去 → 就地停手，并把这次限制喂给全池暂停判定。
 			if restricted {

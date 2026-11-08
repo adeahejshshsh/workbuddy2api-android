@@ -44,7 +44,7 @@ type Auth struct {
 	// 判成企业版（签到/成长任务被门控掉）。空 = 旧文件没有该字段，回落到 enterpriseId。
 	AccountType string
 	Nickname    string
-	FilePath     string // 来源文件；refresh 后原子写回此处
+	FilePath    string // 来源文件；refresh 后原子写回此处
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。

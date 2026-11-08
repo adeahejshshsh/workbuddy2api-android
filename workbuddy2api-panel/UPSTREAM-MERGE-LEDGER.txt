@@ -98,3 +98,38 @@ Go 工具链被重置（`$PREFIX/lib/go` 整个消失）。**正确修法在 `AG
 上游这两批都在同一个方向上加码：**「拿外部文件/外部信号盖掉本机状态」必须先求证**。
 `e36ad07` 是凭据覆盖，`b494426` 是 11140 不换号 —— 以后遇到类似路径先问一句
 「这个动作可逆吗」。
+
+---
+
+# 上游 2026-11-08 批次（`c7cc216..12d9ea6`，17 条）
+
+## 已合（3 条）
+
+| 上游 | 内容 | 落地 |
+|---|---|---|
+| `4830686` | 11134 供应商过载不再罚号/换号，保留会话粘性 | `Classify` 认 `code:11134` → `ErrUpstreamBusy`（只认 code，不认文案）；`parseQueueRetryAfter` 增 `retry_policy.retry_after`；轮转循环里 busy 走 `releaseHeld()` 而不是 `fail()`（不解绑会话粘性，保住账号级前缀缓存） |
+| `84a48d9` | 上游断流补截断终态 | `StreamHint` 记 `upstreamDone`/`finishSeen`：既没 `[DONE]` 也没 `finish_reason` 且写过有效帧时，补一帧 `finish_reason=length`（`TruncationFinishReason`）+ WARN。三边适配器既有映射：chat=length / responses=incomplete / messages=max_tokens |
+| `7297824` | 上游错误 WARN 的 body 截断 200→512 | 只放开日志那一行（`Error.Msg` 仍 200，会透传给客户端） |
+
+## 本批不移植（附理由）
+
+- `ffca1da`（默认档位 high + 只有思考没正文改 failed）：**默认档已经是 high**（`thinking.go`
+  的 `defaultDeepSeekEffort`），只剩「responses 适配器把 reasoning-only 判 failed」这半截
+  —— 82 行、改的是 responses 的完成态语义，而我们的静默回合已有 `errSilentEmptyTurn`
+  兜底重发；要动先得确认两者不打架，单独排期。
+- `562d0d8`（思考吃光预算自动续写）：改的是 `internal/server/continue.go`，**本仓没有该文件**
+  （续写能力整体未移植）。
+- `97d3f25`（`$wbEncrypted` 回写加密 / 同 uid 多文件最新胜出）：主体在 `internal/auth/wbencrypted.go`，
+  我们没移植加密 auth 文件（`c7cc216` 已判不移植），无对象可改。
+- `6671b8d` / `ee5ae70` / `efe64fd` / `b674f71`（reqlog `model_eff` 全链路）：本仓 reqlog
+  没有 `model_eff` 字段，属于「新增一条观测维度」，不是修 bug；要接得连面板列一起加。
+- `4f37ffa` / `69248a6` / `d580c95` / `1b3361a` / `865f777`（面板尺寸/错位/筛选记忆）：
+  面板已大幅分叉（自有视图与样式），这些是上游面板的像素级修补，逐条搬会与我们的排版
+  打架；等我们的面板再对齐一轮时统一处理。
+- `12d9ea6`（autobot 参考仓库清单）：本仓没有 autobot。
+
+## 判据提醒
+
+`4830686` 与 `84a48d9` 是同一类问题的两面：**上游的「非账号故障」不能按账号故障处置**
+（11134 别罚号、别换号），**上游的「没有终态」不能当成功**（断流补 length）。
+以后碰到 `status>=500` 的新形态，先问一句「这是不是供应商/通道层面的，换号有没有用」。
