@@ -1964,7 +1964,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
-			stats := newChatStatsReaderSince(rc, st.start)
+			// 截断自动续写（见 continue.go）：上游 finish_reason=length 且为纯文本/推理
+			// 段时，同账号同模型补发「已输出内容+续写指令」，多段拼成一条客户端可见流。
+			// 显式限额 / 工具参数截断 / 续写请求失败 → 自动降级为今天的截断终态。
+			// 本轮生效档位对应的输出预算下限：续写/救援段从原始 body 重建，靠它把
+			// max_tokens 补回可用值（见 upstream.MinOutputBudget 的说明）。
+			cont := newContinueReaderWithFloor(r.Context(), h.cfg.Upstream, acct, body, clientIP, chatMeta, rc,
+				h.cfg.Upstream.BudgetFloorFor(body, acct.Realm()))
+			defer cont.Close()
+			stats := newChatStatsReaderSince(cont, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
 			// 组装请求上下文做判定）。
@@ -2001,7 +2009,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 模型的选择，不该把账号记成连败（那会把健康号降权出池）。
 				recordAttempt(acct.UID, stats.Usage(), 0, false, attemptStarted, stats.TTFB())
 				releaseHeld()
-				rc.Close()
+				cont.Close()
 				forced := false
 				if rb, ok := forceToolChoiceRequired(body); ok {
 					body = rb
@@ -2064,7 +2072,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					recordAttempt(acct.UID, stats.Usage(), 0, false, attemptStarted, stats.TTFB())
 					h.cfg.Pool.NoteFailures(acct.UID)
 					fail(acct.UID)
-					rc.Close()
+					cont.Close()
 					if i+1 < h.cfg.MaxRotate {
 						log.Printf("WARN: [server] stream acct=%s model=%s: upstream broke before first frame after %s (no bytes sent) → retry on another account (%d/%d)",
 							logfmt.Label(acct.UID, acct.NicknameValue()), bareModel,
@@ -2183,7 +2191,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					h.cfg.Pool.NoteModelCost(acct.UID, curModel, credit, total)
 				}
 			}
-			rc.Close()
+			cont.Close()
 			return
 		}
 		resp, err := upstream.Aggregate(rc)
@@ -2192,7 +2200,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 非流式这一侧没有续写通道，救援在这里做 —— 同预算关思考重发一次、重新聚合。
 		// 只在客户端**显式给了**输出限额时做（没给限额的空回复另有成因，不替它决定）。
 		if err == nil && !starvedTried && aggregateStarved(resp) && bodySetsOutputLimit(body) {
-			if rb, ok := starvedRetryBody(body); ok {
+			if rb, ok := starvedRetryBodyWithFloor(body, h.cfg.Upstream.BudgetFloorFor(body, acct.Realm())); ok {
 				starvedTried = true
 				rc2, st2, _, e2 := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, rb, clientIP, chatMeta)
 				if e2 == nil && st2 < 400 && rc2 != nil {

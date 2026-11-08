@@ -133,6 +133,10 @@ cd internal/pool && PATH=/system/bin /system/bin/linker64 $PREFIX/tmp/pool.test 
 
 **cwd 必须是包目录**：测试夹具用相对路径（`app.js`、`testdata/`）。
 
+`CGO_ENABLED=0` 必须显式设（`patches/test.sh` 已带上）：本机没有可 exec 的
+`aarch64-linux-android-clang`，任何走到 cgo 的包在编译期就 `fork/exec ... permission
+denied`，表现为「一半包 PASS、一半包编译失败」，很容易误判成改动有问题。
+
 面板包有 15 个前端测试依赖 `node`。本机 `exec.LookPath("node")` 能找到，但**执行不了**
 （私有目录不能直接 exec），所以探针必须真跑一次 `node --version` 再决定 skip ——
 只看 LookPath 会让这 15 个测试全红。

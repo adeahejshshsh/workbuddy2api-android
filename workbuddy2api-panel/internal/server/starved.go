@@ -18,8 +18,10 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"log"
 	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -35,6 +37,16 @@ const minStarvedBudget = 16
 // 返回 false 的情形都是「不猜」：没有 thinking 开关的模型、已经关着思考的、
 // 额度小到不值得重发的、body 不可解析。
 func starvedRetryBody(body []byte) ([]byte, bool) {
+	return starvedRetryBodyWithFloor(body, 0)
+}
+
+// starvedRetryBodyWithFloor 同 starvedRetryBody，另外把输出预算抬到 floor。
+//
+// 救援段会关掉思考（预算全留给正文），但它是从**客户端原始 body** 重建的，拿不到
+// 首段被抬过的 max_tokens；如果客户端原本只给了 1024，救援段正文就只有 1024 空间
+// ——线上实测就是「首段 8192 全被思考吃掉 → 救援段只写 1024 个 token 就断」。
+// floor 由调用方按本轮生效档位给（见 upstream.MinOutputBudget）。
+func starvedRetryBodyWithFloor(body []byte, floor int64) ([]byte, bool) {
 	// UseNumber 保住数字原文（报告 #2）：救援重发不该顺手改写整份 body 的数字 ——
 	// 默认解码把整数落成 float64，超过 2^53 的 seed/微秒时间戳会变成近似值。
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -65,6 +77,9 @@ func starvedRetryBody(body []byte) ([]byte, bool) {
 	// 而思考管线的 disabled 分支本来就要求两者不共存（见 upstream/thinking.go）。
 	delete(obj, "reasoning_effort")
 	delete(obj, "reasoningEffort")
+	// 预算下限：救援段关思考、额度全给正文，但不能还是客户端那个小额度
+	// （见 starvedRetryBodyWithFloor 的说明）。放在删档位之后：EnsureMinBudget 只看额度。
+	upstream.EnsureMinBudget(obj, floor)
 	// 不转义 HTML：默认 Marshal 会把 < > & 变成 \u003c 等，等于改写客户端原文。
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -138,4 +153,48 @@ func bodySetsOutputLimit(body []byte) bool {
 		return false
 	}
 	return outputBudget(obj) > 0
+}
+
+// tryStarvedRetry 空截断救援：客户端显式给了输出限额（limitSet 因此本来就挡住续写），
+// 而这一段的预算全被思考吃掉——正文零字节、无工具分片、finish_reason=length。
+// 同预算重发一次、把 thinking 关掉，让正文落进客户端要的额度里。
+//
+// 与续写的分工：没有 limitSet 时这一形态由 canContinue 的续写分支接走（追加 assistant
+// 前缀要它继续写）；这里只处理「客户端限额不许续」的那一半。每请求一次，失败就按原路
+// 降级——不救援时客户端行为与接线前完全一致（finish_reason=length 的空回复）。
+func (r *continueReader) tryStarvedRetry() bool {
+	switch {
+	case r.starvedTried, r.errSeen, r.toolSeen:
+		return false
+	case r.finish != "length":
+		return false
+	case r.text.Len() > 0:
+		// 有正文的截断是额度语义的正常结果，不救。
+		return false
+	case r.seg >= maxContinueSegments-1:
+		return false
+	}
+	body, ok := starvedRetryBodyWithFloor(r.body, r.budgetFloor)
+	if !ok {
+		return false
+	}
+	r.starvedTried = true
+	rc, status, _, err := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta)
+	if err != nil || status >= 400 || rc == nil {
+		if rc != nil {
+			rc.Close()
+		}
+		log.Printf("WARN: [starved] acct=%s seg=%d 关思考重发失败（status=%d err=%v）→ 降级为截断终态",
+			r.label(), r.seg+1, status, err)
+		return false
+	}
+	r.seg++
+	r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
+	r.finish, r.tail = "", nil
+	// 上一段外泄给客户端的思考（正文尚未开始，见 frame() 的接缝策略）已经发出去、
+	// 收不回来；救援段关思考，把本地累积清掉，免得续写前缀里混进两轮思考。
+	r.reason.Reset()
+	log.Printf("[starved] acct=%s model=%s seg=%d 预算被思考吃光（正文 0B）→ 同额度关思考重发",
+		r.label(), bareModelOf(r.body), r.seg)
+	return true
 }
