@@ -50,6 +50,7 @@ const (
 	ErrModelBusy                        // 14003「模型繁忙」（间歇）→ (账号,模型) 10s 起短冷却，封顶 1m
 	ErrClient                           // 其他 4xx / 业务错误
 	ErrToolMismatch                     // 11148「tool calls and tool results do not match」→ 请求内容级配对断裂：不罚号、不轮转，末端 400 透传原文
+	ErrEmptyContent                     // 11151「a message has empty content」→ 请求内容级空段（出站已补位，这里是兜底）：不罚号、不轮转，末端 400 透传原文
 )
 
 func (k ErrKind) String() string {
@@ -76,6 +77,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrUpstreamBusy:
 		return "upstream_busy"
+	case ErrEmptyContent:
+		return "empty_content"
 	case ErrToolMismatch:
 		return "tool_mismatch"
 	case ErrChannelRefused:
@@ -786,6 +789,15 @@ func Classify(status int, body string) ErrKind {
 	if codeMarker(lower, "11148") || strings.Contains(lower, "tool results do not match") ||
 		strings.Contains(body, "工具调用与工具结果不匹配") {
 		return ErrToolMismatch
+	}
+	// 11151「a message has empty content」：空 text 段被上游判为硬 400。出站前
+	// empty_text_part.go 已经补位（含「字符串被当 parts 嗅探」那种），到这里说明补位
+	// 没覆盖的形态（例如不经 payload 管线的端点），但它是**同一请求的错**：换任何账号
+	// 都会被同一处拒绝，轮转只会白打整池并喂连败。
+	// 只认结构化 code：文案 "empty content" 可能出现在用户自己的消息里，按词判会把
+	// 正常请求误分类成「不再轮转」。
+	if hasBusinessCode(body, "11151") {
+		return ErrEmptyContent
 	}
 	if status >= 500 {
 		return ErrServer

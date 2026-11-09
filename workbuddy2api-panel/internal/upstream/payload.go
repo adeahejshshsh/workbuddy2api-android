@@ -119,6 +119,16 @@ func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, 
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)
+	// 出站前最后一道形状检查，两条都是「不可自愈的 400」：
+	//   - 空 text 段（11151）：客户端重试只会重放同一段历史，换号也救不回来；
+	//   - reasoning 镜像：Kimi/GLM/MiniMax 等按 `reasoning` 读历史，只看
+	//     reasoning_content 的话它们的多轮一致性校验会挂。
+	// 位置必须在 repack/cleanup 之后：那两步会把字符串 content 挪到别的消息上，
+	// 先补位再挪动等于漏掉被挪过去的那一段。
+	if msgs, ok := obj["messages"].([]any); ok {
+		guardEmptyTextParts(msgs)
+	}
+	mirrorUpstreamReasoning(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs, brandAll)

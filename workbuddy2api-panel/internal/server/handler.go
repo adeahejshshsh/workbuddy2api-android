@@ -1350,13 +1350,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// session.ExtractKey 的 anti-monopoly 闸）时用内容派生键——否则这些客户端的
 	// prompt_cache_key 退化成每账号一个常量槽，同账号上多段对话互相覆盖前缀缓存
 	// （issue #5：glm-5.3 大上下文周期性命中率掉到 0.2%）。
-	// 只供缓存槽使用：账号绑定仍只认 sessKey，不复活 user 维度粘性。
 	cacheKeyID := sessKey
 	if cacheKeyID == "" {
 		cacheKeyID = session.DeriveCacheKey(body)
 	}
+	// 账号粘性也认这个派生键：上游前缀缓存按账号隔离（prompt_cache_key 掺 uid），
+	// 账号一换就是全量 miss。只发 user_id 的客户端（ExtractKey 的 anti-monopoly
+	// 闸返回空）此前每轮都被轮换到新号 —— 实测同一份 3.6k body 连发两次落两个不同
+	// 账号、两轮都 miss 3634/3634；带 conversation_id 或什么都不带时第二轮命中
+	// 3456/3634（95.1%）。
+	// 派生键是 system+首条 user 的内容哈希，天然是**对话级**而非用户级：同一用户的
+	// 并行对话首条 user 不同 → 键不同 → 照旧分散，原契约想避免的「一个 user 全钉在
+	// 同一号」不会发生。代价是每条 8k 前缀从 0.02 credit 涨到 0.34（17×，见
+	// cache_key.go 的实测）—— 这是「换号必全量 miss」的对价。
+	bindKey := sessKey
+	if bindKey == "" {
+		bindKey = cacheKeyID
+	}
 	stickyUID := ""
-	if h.cfg.Session != nil && sessKey != "" {
+	if h.cfg.Session != nil && bindKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
 		//
@@ -1365,7 +1377,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 「可用」→ 粘性命中 → 下一跳按真实名判「不可用」→ 解绑回落轮换：每个请求
 		// 多一次「命中→解绑→重选」，还把 Session.Unbind + DelBind 写放大一次
 		// （限流窗口内粘性形同虚设）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, curModel); ok {
+		if uid, ok := h.cfg.Session.ResolveForModel(bindKey, curModel); ok {
 			stickyUID = uid
 		}
 	}
@@ -1399,7 +1411,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 幂等：stickyUID 已空则空操作；不会误解绑其他轮的绑定。仅当 Session != nil 时 stickyUID 才会非空。
 	unbindSticky := func() {
 		if stickyUID != "" {
-			h.cfg.Session.Unbind(sessKey)
+			h.cfg.Session.Unbind(bindKey)
 			stickyUID = ""
 		}
 	}
@@ -1873,6 +1885,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				msg := briefBodyOr(string(respBody), "request parameters were rejected by the model provider")
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "model_param_invalid", msg,
 					h.hintOf(upstream.ErrModelParamInvalid, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
+			// 11151 空 text 段（上游 f987bac）：出站前 empty_text_part.go 已补位（含
+			// 「字符串 content 被上游当 parts 数组嗅探」那种），走到这里说明补位没覆盖
+			// 该端点。它是同一请求的错：换任何账号都会被同一处拒绝，轮转只会白打整池。
+			if kind == upstream.ErrEmptyContent {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := briefBodyOr(string(respBody), "a message in the request history has empty content")
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "empty_content", msg,
+					h.hintOf(upstream.ErrEmptyContent, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
 				return
@@ -2375,8 +2400,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if sessKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(sessKey, acct.UID)
+		if bindKey != "" && h.cfg.Session != nil {
+			h.cfg.Session.Bind(bindKey, acct.UID)
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if hasCredit {
@@ -3085,6 +3110,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrImageInvalid:
 		// 图片格式/数据无效：请求的问题不是账号的问题（同一 body 换任何号都会
 		// 得到相同解析错误）。零动作，chatCompletions 已 fail-fast 透传。
+	case upstream.ErrEmptyContent:
+		// 11151 空 text 段：请求内容的问题（历史里某个 text 段是空串/缺失），同一 body
+		// 换任何账号都是同样的拒绝。零动作（不冷却/不熔断/不 NoteError/不喂连败）；
+		// 出站前 empty_text_part.go 已补位，走到这里说明补位没覆盖该端点。
 	case upstream.ErrToolMismatch:
 		// 11148 工具配对断裂：请求内容的问题（历史里 tool_calls / tool 结果对不上），
 		// 换号换模型都救不了。零动作（不冷却/不熔断/不 NoteError），只 fail-fast 回 400。

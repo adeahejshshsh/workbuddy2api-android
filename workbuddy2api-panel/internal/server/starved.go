@@ -162,11 +162,27 @@ func bodySetsOutputLimit(body []byte) bool {
 // 与续写的分工：没有 limitSet 时这一形态由 canContinue 的续写分支接走（追加 assistant
 // 前缀要它继续写）；这里只处理「客户端限额不许续」的那一半。每请求一次，失败就按原路
 // 降级——不救援时客户端行为与接线前完全一致（finish_reason=length 的空回复）。
+// emptiedByThinking 本轮是否「思考完就直接收尾、正文一个字没有」。
+//
+// 形态（线上实测，codex/droid 类客户端声明了工具、prompt 十万级）：
+// finish_reason=stop + 正文 0B + 零 tool_calls + usage 里有思考 token。
+// 上游认为这轮已经说完，客户端看到的是空回复；网关若照原样收尾，上层
+// （responses 适配器）就把它判成 empty_reasoning_only 并回 502 —— 而它本来能救：
+// 关掉思考重发一次，同一份额度全给正文，通常就有内容。
+//
+// 只认「有思考、正文 0、没工具分片」：三者缺一就可能是合法形态（真·空回复、
+// 工具轮），不猜。
+func (r *continueReader) emptiedByThinking() bool {
+	return r.finish == "stop" && r.text.Len() == 0 && r.reason.Len() > 0 && !r.toolSeen
+}
+
 func (r *continueReader) tryStarvedRetry() bool {
 	switch {
 	case r.starvedTried, r.errSeen, r.toolSeen:
 		return false
-	case r.finish != "length":
+	case r.finish != "length" && !r.emptiedByThinking():
+		// length = 额度用尽；emptiedByThinking = 上游思考完直接 stop（正文 0B）。
+		// 两者都是「这一轮什么都没产出」，救援动作相同。
 		return false
 	case r.text.Len() > 0:
 		// 有正文的截断是额度语义的正常结果，不救。
@@ -188,13 +204,18 @@ func (r *continueReader) tryStarvedRetry() bool {
 			r.label(), r.seg+1, status, err)
 		return false
 	}
+	// 成因要在重置 r.finish 之前抓：下面马上把它清空给新段用。
+	cause := "预算被思考吃光"
+	if r.finish != "length" {
+		cause = "思考完直接收尾"
+	}
 	r.seg++
 	r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
 	r.finish, r.tail = "", nil
 	// 上一段外泄给客户端的思考（正文尚未开始，见 frame() 的接缝策略）已经发出去、
 	// 收不回来；救援段关思考，把本地累积清掉，免得续写前缀里混进两轮思考。
 	r.reason.Reset()
-	log.Printf("[starved] acct=%s model=%s seg=%d 预算被思考吃光（正文 0B）→ 同额度关思考重发",
-		r.label(), bareModelOf(r.body), r.seg)
+	log.Printf("[starved] acct=%s model=%s seg=%d %s（正文 0B）→ 同额度关思考重发",
+		r.label(), bareModelOf(r.body), r.seg, cause)
 	return true
 }
