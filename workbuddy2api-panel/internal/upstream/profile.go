@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -34,20 +35,34 @@ func (c *Client) FetchAccountProfile(a *auth.Auth) (string, error) {
 	if ua := c.userAgent(a); ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
-	data, err := c.doJSON(req)
+	env, raw, err := c.doJSONRaw(req)
 	if err != nil {
 		return "", err
+	}
+	// 两种响应形态都接（实测都出现过）：
+	//   {code:0,msg:...,data:{uid,nickname}}  信封
+	//   {uid,nickname}                        顶层平铺（没有 code 字段，信封解析后 Data 为空）
+	payload := []byte(env.Data)
+	if len(payload) == 0 {
+		payload = raw
 	}
 	// 只取两个字段：敏感信息（手机号等）在这里就被丢弃，不进入任何后续路径。
 	var resp struct {
 		UID      string `json:"uid"`
 		Nickname string `json:"nickname"`
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
+	if err := json.Unmarshal(payload, &resp); err != nil {
 		return "", fmt.Errorf("profile parse: %w", err)
 	}
 	if resp.UID != "" && a.UID != "" && resp.UID != a.UID {
 		return "", fmt.Errorf("profile uid mismatch: resp=%s auth=%s", resp.UID, a.UID)
 	}
-	return resp.Nickname, nil
+	// 空昵称按失败返回：调用方（面板「刷新」同步昵称）拿空串什么也做不了 ——
+	// SetNickname 对空串直接返回 false，于是既不算「更新」也不算「失败」，
+	// 整批都拿不到昵称时日志一行都不打，看起来像什么都没发生。
+	nick := strings.TrimSpace(resp.Nickname)
+	if nick == "" {
+		return "", fmt.Errorf("profile response has no nickname")
+	}
+	return nick, nil
 }
