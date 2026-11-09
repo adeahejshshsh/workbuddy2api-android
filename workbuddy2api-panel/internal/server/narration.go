@@ -1,0 +1,144 @@
+// narration.go 「说一句预告就停」的救援续写。
+//
+// 现象（线上取证，2026-11-09 09:05/09:07 两条 stop-no-toolcall 样本）：
+// 客户端声明了 32 个工具、历史里全是工具结果，模型在正文里写完一段结论，然后
+// 用一句**预告**收尾就停了——
+//
+//	"5G 已降到 **10 dBm**（功率降低约 32 倍）。重新连接并测试下行："
+//	"验证路由器状态并做对比实验（恢复到 25dBm 看是否必然重启）："
+//
+// finish_reason=stop、零 tool_calls、零报错，上游认为这轮说完了。网关按契约
+// 原样透传，客户端就渲染成「说到一半没了」——这正是截图里那种中断：**没有任何
+// 一层报错**，日志里既没有 length 也没有断流，所以续写/救援逻辑一次都不会触发。
+//
+// 救援动作：把已输出正文作为 assistant 前缀，补一句「接着写完、需要工具就直接
+// 调用」重发一次。拿到正文就接在客户端流里（同一条 SSE），拿到工具调用就原样
+// 透传；两样都没拿到就按原样收尾，行为与接线前完全一致。
+//
+// 判据刻意窄，四层同时成立才救，避免碰正常回答：
+//  1. finish_reason=stop 且正文非空、零 tool_calls、无 error 帧；
+//  2. 请求体声明了工具，**且历史里有工具结果**（角色扮演类客户端只发纯文本、
+//     不产生工具轮，它们用冒号收尾是正常文风，不能救）；
+//  3. 正文尾部是「未说完」形态（冒号/省略号/未闭合代码块/没有句末标点）；
+//  4. 每请求最多一次（不套娃，续写段再停就按原样收尾）。
+package server
+
+import (
+	"bufio"
+	"encoding/json"
+	"log"
+	"strings"
+
+)
+
+// narrationNudge 救援续写的指令。与 continueNudge 的差别：那条针对「撞长度上限」，
+// 强调不要重复；这条针对「自己以为说完了」，必须点明「你停在一句预告上」，
+// 否则模型会以为任务已完成而再重复一遍结论。
+const narrationNudge = "你上一条回复停在一句预告（例如以冒号结尾的「……：」）上就结束了，剩余内容还没写。请紧接着把剩下的部分写完：需要查看文件、执行命令或调用工具就直接调用，不要重复已经写过的内容，不要重新开头，不要道歉或解释。"
+
+// narrationTailSuspends 正文尾部是否「话没说完」。
+//
+// 只认结构性的收尾符，不猜测语义：
+//   - 全角/半角冒号、逗号、顿号、破折号、省略号、左括号 → 后面必然还有东西；
+//   - 未闭合的 ``` 代码块 → 代码块写了一半；
+//   - 末尾既不是句末标点也不是收尾符号 → 视为未写完（英文旁白
+//     "Reading failfirst.sh mutation script" 这种就是这一形态：7 个 token
+//     的现在分词短语，没有任何标点）。
+func narrationTailSuspends(text string) bool {
+	t := strings.TrimRight(text, " \t\r\n")
+	if t == "" {
+		return false
+	}
+	if strings.Count(t, "```")%2 == 1 {
+		return true
+	}
+	rs := []rune(t)
+	last := rs[len(rs)-1]
+	if strings.ContainsRune("：:，,、—–…（(【[", last) {
+		return true
+	}
+	// 句末标点与收尾符：正常说完的形态。
+	if strings.ContainsRune("。.!！?？\"'”’）)》】]}`*~", last) {
+		return false
+	}
+	return true
+}
+
+// bodyToolShape 请求体是否「工具类请求」：声明了工具、且历史里有工具轮。
+//
+// 两个条件缺一不可：
+//   - 只声明工具不够——角色扮演/闲聊客户端常常把一堆工具挂上去却只用纯文本回答
+//     （线上取证 40 条样本里 20 条是这种），它们的「以冒号收尾」是正常文风；
+//   - 有工具轮说明这是一条 agent 会话：模型本来就该在这一步调工具或继续写。
+//
+// 解析失败按「不是工具请求」处理（不救），宁可少救不可救错。
+func bodyToolShape(body []byte) (declared, toolTurn bool) {
+	var obj struct {
+		Tools []any `json:"tools"`
+		Msgs  []struct {
+			Role       string `json:"role"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolCalls  []any  `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &obj) != nil {
+		return false, false
+	}
+	declared = len(obj.Tools) > 0
+	for _, m := range obj.Msgs {
+		if m.Role == "tool" || m.ToolCallID != "" || len(m.ToolCalls) > 0 {
+			return declared, true
+		}
+	}
+	return declared, false
+}
+
+// tryNarrationRetry 预告式收尾的救援续写（每请求一次）。
+//
+// 与另外两条救援的分工：
+//   - tryStarvedRetry：本轮正文 0B（思考吃光/思考完直接收尾）；
+//   - canContinue：finish_reason=length（撞长度上限）或无 finish 的断流；
+//   - 这里：finish_reason=stop，正文有内容，但停在预告句上。
+//
+// 返回 true 表示已换到新段继续读，调用方直接 return。
+func (r *continueReader) tryNarrationRetry() bool {
+	switch {
+	case r.narrationTried, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
+		return false
+	case r.finish != "stop":
+		return false
+	case r.text.Len() == 0:
+		return false
+	case r.seg >= maxContinueSegments-1:
+		return false
+	}
+	if !narrationTailSuspends(r.text.String()) {
+		return false
+	}
+	declared, toolTurn := bodyToolShape(r.body)
+	if !declared || !toolTurn {
+		return false
+	}
+	body, err := r.continuationBodyWithNudge(narrationNudge)
+	if err != nil {
+		return false
+	}
+	r.narrationTried = true
+	rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta)
+	if terr != nil || status >= 400 || rc == nil {
+		if rc != nil {
+			rc.Close()
+		}
+		log.Printf("WARN: [narration] acct=%s seg=%d 续写请求失败（status=%d err=%v）→ 按原样收尾",
+			r.label(), r.seg+1, status, terr)
+		return false
+	}
+	r.seg++
+	r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
+	r.finish, r.tail = "", nil
+	// 本段 usage 快照归零：下一段的思考/正文构成单独计量。
+	r.segCompletion, r.segThink = 0, 0
+	log.Printf("[narration] acct=%s model=%s seg=%d 正文停在预告句（%dB）→ 续写剩余内容",
+		r.label(), bareModelOf(r.body), r.seg, r.text.Len())
+	return true
+}

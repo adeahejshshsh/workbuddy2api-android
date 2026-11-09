@@ -75,7 +75,7 @@ func TestContinueStillBlockedForPureClientLimit(t *testing.T) {
 	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
 	r := newContinueReaderWithFloor(context.Background(), up,
 		&auth.Auth{UID: "u1", AccessToken: "at-1", ExpiresAt: 9999999999},
-		[]byte(`{"model":"cn:deepseek-v4.1-flash","max_tokens":65536,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`),
+		[]byte(`{"model":"cn:deepseek-v4.1-flash","max_tokens":8192,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`),
 		"1.2.3.4", upstream.ChatMeta{},
 		io.NopCloser(strings.NewReader(testSeg1Text)), upstream.MinOutputBudget("high"))
 	out, err := io.ReadAll(r)
@@ -87,5 +87,31 @@ func TestContinueStillBlockedForPureClientLimit(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"finish_reason":"length"`) {
 		t.Fatalf("length 终态应原样下发:\n%s", out)
+	}
+}
+
+// TestContinueWhenClientLimitIsLongAnswer 客户端额度 ≥ clientLimitLongAnswer 时必须
+// 续写：这个数是客户端随手给的上限，不是「只要这么短」。
+//
+// 实测（global:deepseek-v4.1-flash-sg，max_tokens=32000，要求「数到 20000」）：
+// completion=32000 整、finish=length、正文 47853 字符停在「9792,」之后；同一提示词
+// 不带额度能写 60660 token 自然收尾——即上游是「给多少切多少」，不是有 32000 硬上限。
+func TestContinueWhenClientLimitIsLongAnswer(t *testing.T) {
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
+	r := newContinueReaderWithFloor(context.Background(), up,
+		&auth.Auth{UID: "u1", AccessToken: "at-1", ExpiresAt: 9999999999},
+		[]byte(`{"model":"cn:deepseek-v4.1-flash","max_tokens":32000,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`),
+		"1.2.3.4", upstream.ChatMeta{},
+		io.NopCloser(strings.NewReader(testSeg1Text)), upstream.MinOutputBudget("high"))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("续写请求数=%d want 1（额度 ≥ %d 必须续接）", len(*reqs), clientLimitLongAnswer)
+	}
+	s := string(out)
+	if !strings.Contains(s, "继续") || strings.Contains(s, `"finish_reason":"length"`) {
+		t.Fatalf("客户端应看到续接后的完整收尾:\n%s", s)
 	}
 }

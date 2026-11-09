@@ -326,3 +326,34 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 **未做**：上游那套「作业驱动执行 + 跨重启继续跑」的语义。本仓作业记录是**观测层**，
 重启后中断的作业不会续跑（如实显示 interrupted）。理由：续跑要在上游动作层面幂等
 （对话、领奖、接受任务各接口的幂等性并未全部取证），错误续跑会重复动作或重复领奖。
+
+---
+
+# 上游 2026-11-09 批次（`771c887..c5ce29b`，17 条）
+
+## 已合（7 条）
+
+| 上游 | 内容 | 落地 |
+|---|---|---|
+| `c2003af` | 正文停在预告句（「……：」）就 finish=stop 时续写一次 | 移植 `narration.go`（尾部形态判定 + 「声明了工具且历史有工具轮」门控）+ `narrativeTried` 挂到 endSegment；`continuationBodyWithNudge` 让两条续写指令分开 |
+| `6e7fe62` | 客户端额度 ≥32k 时也按长文续接 | `clientLimitLongAnswer=32000`：`limitSet` 分支只对 **< 32k** 生效；`bodyOutputLimit` 带回额度值。实测依据：32000 额度切在 completion=32000 整、不带额度能写 60660 |
+| `07f8ae0` | 思考完直接收尾（正文 0B、无工具）时也救援一次 | `emptiedByThinking()` + `tryStarvedRetry` 判据从「只有 length」放宽到「length 或它」，日志区分两种成因 |
+| `f987bac` | 出站补位空 text 段（11151）+ Kimi/GLM 补 reasoning 镜像 | 整文件移植 `empty_text_part.go`（含「字符串被当 parts 嗅探」）+ `reasoning_mirror.go`；新增 `ErrEmptyContent` 走请求级 fail-fast（handler / search / hint / applyErrorPolicy 零动作） |
+| `89c9b7d` | 流式透传只在缓冲读空时 flush | `flushIfDrained()`（`br.Buffered()==0` 或只剩半行才 flush），data 帧与注释行一起换；[DONE] 前仍强制 flush |
+| `d165e6e` | 只发 user_id 的客户端也按内容派生键粘账号 | `bindKey = sessKey | DeriveCacheKey(body)`，绑定/解绑/重绑三处统一；实测同 body 两轮从「两个号、全 miss」变成 95.1% 命中 |
+
+## 未合（附理由）
+
+- `877324f`（`thinking.default_effort` 缺省统一到 high）：本仓 config 层与 policy 层
+  **本来都是 max**（不存在上游那种「config 先填值把 policy 的 high 盖掉」），改 high 是
+  行为变更（少思考、多正文），不是修 bug；要做应作为独立决策，混在合并里会让人以为是修。
+- `d78131b`（资料接口空昵称不再静默成功 + 顶层平铺形态）：需要把 `doJSON` 拆成
+  `doJSONRaw`（核心请求函数，全部调用方受影响）——单独一轮做，别和这批续写/分类混。
+- `585ae7f` / `cd88450`（导入兼容嵌套/驼峰/字典形态、信封值是对象时不把信封名当 uid）：
+  本仓导入已经支持扁平与 `{account:{…}}` 两种，再叠上游那套形态矩阵会与现有解析优先级
+  打架；单独一轮按本仓口径重写更稳。
+- `c5ce29b`（导入多文件 + 选中预览）：面板导入 UI 是本仓自有实现（两步流），上游那套
+  preview 状态机换过来等于重写页面，收益（多选文件）不抵风险。
+- `478d2aa`（debugcap 抓样本，默认关）：诊断工具，本仓没有该包。
+- `24d0b61`（scripts/cache_audit.py）/ `7028676`（local-45 dist 不入库）：脚本与仓库卫生，
+  与本仓无关。

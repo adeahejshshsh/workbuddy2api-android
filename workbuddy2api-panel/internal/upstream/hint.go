@@ -61,6 +61,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "account credits exhausted at upstream; waiting for daily check-in to restore"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
+	case ErrEmptyContent:
+		// 11151 空段：上游对「某条消息的 text 段是空串」判硬 400。出站前网关已补位，
+		// 客户端能做的是把那条空消息删掉或换新会话——重试必然复现。
+		return "request history contains an empty text block; upstream rejects it as-is — drop that message or start a new conversation"
 	case ErrToolMismatch:
 		// 11148 工具配对断裂：请求内容的问题（会话历史里的 tool_calls 与 tool 结果对不上），
 		// 换号/重试都不会好，只能新建会话。

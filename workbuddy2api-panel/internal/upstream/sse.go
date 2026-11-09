@@ -3,6 +3,7 @@ package upstream
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -816,6 +817,30 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 首次写触发），调用方仍可换号重试或回正经的 502 JSON（见 ErrStreamBrokeBeforeFlush）。
 	wroteAny := false
 	fl, _ := w.(http.Flusher)
+	// br 在下面才初始化，但写帧闭包要用它判断「上游缓冲是否已读空」→ 先声明。
+	var br *bufio.Reader
+	// flushIfDrained 只在**下一帧不在本地缓冲里**时才 flush。
+	//
+	// 上游把一条长回答按 token 切成上万帧、成批到达：每帧都 flush 就是每帧一次
+	// write 系统调用，线上 profile 里 Flush+syscall 占流式 CPU 的近一半（14470 帧/
+	// 请求的实测形态）。本地缓冲里还有完整帧时立刻就会继续写，这次 flush 纯属浪费；
+	// 只有缓冲读空（下一次读会阻塞在 socket 上）才必须把已写内容推给客户端。
+	// 缓冲里只剩半行（没有换行符）也一样会阻塞，同样要 flush——否则上游若在此停顿，
+	// 客户端会一直等一个已经生成好的帧。
+	flushIfDrained := func() {
+		if fl == nil || br == nil {
+			return
+		}
+		switch n := br.Buffered(); {
+		case n == 0:
+			fl.Flush()
+		case n < 8192:
+			// 帧很小（~200B），缓冲还有 8KB 以上时必然含完整帧，不必扫。
+			if p, _ := br.Peek(n); bytes.IndexByte(p, '\n') < 0 {
+				fl.Flush()
+			}
+		}
+	}
 
 	// toolCallSeen 跨帧记录 delta.tool_calls 里已发过首片的 index，
 	// 供逐 chunk 透传时收敛 name 为「每 index 一次」（对齐 OpenAI 官方流）。
@@ -850,9 +875,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			return clientWriteErr(werr)
 		}
 		wroteAny = true
-		if fl != nil {
-			fl.Flush()
-		}
+		flushIfDrained()
 		return nil
 	}
 
@@ -1117,7 +1140,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		return 1, nil
 	}
 
-	br := bufio.NewReaderSize(r, 64*1024)
+	br = bufio.NewReaderSize(r, 64*1024)
 	validFrames := 0
 	// dataPending 多行 data: 的累积缓冲。
 	//
@@ -1213,9 +1236,9 @@ readLoop:
 				return clientWriteErr(werr)
 			}
 			wroteAny = true
-			if fl != nil {
-				fl.Flush()
-			}
+			// 注释/心跳行同样只在缓冲读空时 flush（与 data 帧同一条理由：
+			// 成批到达时逐行 flush 是纯系统调用开销）。
+			flushIfDrained()
 		}
 		// 空行（帧分隔）吞掉：本函数自产 "\n\n"
 		if err != nil {
