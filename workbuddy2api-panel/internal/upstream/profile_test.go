@@ -1,4 +1,4 @@
-// profile_test.go 钉住账号资料拉取（issue #94）：Bearer + web 平台头可访问
+// profile_test.go 钉住账号资料拉取（issue #94 同步）：Bearer + web 平台头可访问
 // /console/account；只解析 nickname，uid 不一致防串号；业务错误原样返回。
 package upstream
 
@@ -46,5 +46,36 @@ func TestFetchAccountProfileBusinessError(t *testing.T) {
 	c.WebBaseCN = "https://web.example"
 	if _, err := c.FetchAccountProfile(&auth.Auth{UID: "u1", AccessToken: "bad"}); err == nil {
 		t.Fatal("401 应返回错误")
+	}
+}
+
+// 顶层平铺形态（没有 code/data 信封）：信封解析后 data 为空，必须回落到原始响应体。
+func TestFetchAccountProfileFlatShape(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"uid":"u1","nickname":"平铺名字","phoneNumber":"13800000000"}`), nil
+	})
+	c.WebBaseCN = "https://web.example"
+	nick, err := c.FetchAccountProfile(&auth.Auth{UID: "u1", AccessToken: "at"})
+	if err != nil || nick != "平铺名字" {
+		t.Fatalf("nick=%q err=%v, want 平铺名字 nil", nick, err)
+	}
+}
+
+// 空昵称必须报错：返回 "" 会让调用方既不记更新也不记失败，整批拿不到昵称时日志静默。
+func TestFetchAccountProfileEmptyNickname(t *testing.T) {
+	for _, body := range []string{
+		`{"code":0,"msg":"OK","data":{"uid":"u1"}}`,
+		`{"code":0,"msg":"OK","data":{"uid":"u1","nickname":"   "}}`,
+		`{"code":0,"msg":"OK","data":null}`,
+		`{"uid":"u1"}`,
+	} {
+		c := testClient(func(r *http.Request) (*http.Response, error) {
+			return jsonResp(200, body), nil
+		})
+		c.WebBaseCN = "https://web.example"
+		nick, err := c.FetchAccountProfile(&auth.Auth{UID: "u1", AccessToken: "at"})
+		if err == nil {
+			t.Fatalf("空昵称应报错，body=%s got nick=%q", body, nick)
+		}
 	}
 }

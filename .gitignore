@@ -55,3 +55,5 @@ __pycache__/
 
 # 本地对照产物（上游树 diff 用，不入库）
 .cmp/
+.up_import.go
+.up/

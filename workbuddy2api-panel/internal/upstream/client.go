@@ -1257,14 +1257,25 @@ func (c *Client) webOrigin(a *auth.Auth) string {
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
+	env, _, err := c.doJSONRaw(req)
+	return env.Data, err
+}
+
+// doJSONRaw 同 doJSON，另外把**原始响应体**一并返回。
+//
+// 为什么需要：多数接口是 {code,msg,data} 信封，doJSON 只交 data 就够了；但账号
+// 资料接口 /console/account 在实际环境里出现过两种形态（顶层平铺 uid/nickname 与
+// {code:0,data:{...}} 包装）。平铺形态没有 code 字段，信封解析后 Code=0、Data 为空，
+// 只看 data 会得到一个空对象——调用方必须能拿到原文自己判形态。
+func (c *Client) doJSONRaw(req *http.Request) (env apiEnvelope, raw []byte, err error) {
 	resp, err := c.do(req)
 	if err != nil {
-		return nil, err
+		return env, nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		return env, nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
@@ -1274,18 +1285,17 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		ra, _ := ParseRetryAfter(resp.Header)
 		// HTTPStatus 也填（review #26）：业务码分支填了它，HTTP 错误分支此前留 0，
 		// 排障时「真实 HTTP 状态」两类错误口径不一致。
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, HTTPStatus: resp.StatusCode,
+		return env, raw, &Error{Kind: kind, Status: resp.StatusCode, HTTPStatus: resp.StatusCode,
 			Msg: truncate(string(raw), 200), RetryAfter: ra}
 	}
 	// 200 + 空 body 是**成功**（报告 #6）：/v2/report、appearance/set、
 	// claim-gift、claim-compensation 这些 RPC 成功时可能回空体，
 	// 此前被 json.Unmarshal 判成 parse failed，成功记成失败。
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil, nil
+		return env, raw, nil
 	}
-	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
+		return env, raw, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
 	}
 	if env.Code != 0 {
 		// 把 code 一起交给 Classify（bug B8）：此前只传 env.Msg，而
@@ -1316,14 +1326,14 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{
+		return env, raw, &Error{
 			Kind:       kind,
 			Status:     clsStatus, // 语义状态（BUG-4）
 			HTTPStatus: resp.StatusCode,
 			Msg:        fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160)),
 		}
 	}
-	return env.Data, nil
+	return env, raw, nil
 }
 
 // RefreshToken 刷新 access token；成功时更新 a 的字段（缺省值保留旧值），

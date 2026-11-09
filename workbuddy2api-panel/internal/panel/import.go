@@ -7,7 +7,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -137,6 +139,15 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(accounts) == 0 {
 		writeErr(w, http.StatusBadRequest, "empty accounts array")
+		return
+	}
+
+	// 凭证目录必须在第一次落盘前就位。login.go / apikey.go 各自在写盘前建了目录，
+	// 唯独本文件漏了：全新部署（auths/ 还没生成、也没登录过任何账号）时，写盘用的
+	// 临时文件创建直接 ENOENT，用户看到的是「导入失败」，而服务本身完全正常
+	// —— LoadDir 用 filepath.Glob，目录不存在时返回空列表且不报错。
+	if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
 		return
 	}
 
@@ -296,6 +307,20 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 //
 // 为什么加 2：换包名后旧包的私有目录搬不过来（/data/data 非 root 读不到），用户能拿到
 // 的就是 auths/*.json 这些文件本身；只认 cockpit 形状等于逼人手工改键名。
+// importEnvelopeKeys 导出工具可能使用的信封键（值可能是数组或单个对象）。
+var importEnvelopeKeys = []string{"accounts", "data", "list", "items", "results", "auths"}
+
+// isImportEnvelopeKey 报告键名是否是信封名（不是 uid）。大小写不敏感：
+// 手写/不同工具导出的键名大小写并不统一。
+func isImportEnvelopeKey(k string) bool {
+	for _, e := range importEnvelopeKeys {
+		if strings.EqualFold(strings.TrimSpace(k), e) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseImportPayload(raw []byte) ([]cockpitAccount, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
@@ -312,13 +337,72 @@ func parseImportPayload(raw []byte) ([]cockpitAccount, error) {
 		if err := json.Unmarshal(trimmed, &probe); err != nil {
 			return nil, fmt.Errorf("invalid json: %w", err)
 		}
-		if accs, ok := probe["accounts"]; ok {
-			if err := json.Unmarshal(accs, &items); err != nil {
-				return nil, fmt.Errorf("accounts: %w", err)
+		// 信封键（accounts / data / list / items / results / auths）：值是数组时逐条解，
+		// 值是**单个账号对象**时按一条解（用户把单账号详情又包了一层）。多种导出工具
+		// 各用各的键名，用户不会区分。
+		var enveloped bool
+		for _, k := range importEnvelopeKeys {
+			sub, ok := probe[k]
+			if !ok {
+				continue
 			}
-		} else {
-			items = []json.RawMessage{trimmed}
+			if err := json.Unmarshal(sub, &items); err == nil {
+				enveloped = true
+				break
+			}
+			if acc, derr := decodeImportItem(sub); derr == nil {
+				return []cockpitAccount{acc}, nil
+			}
 		}
+		if enveloped {
+			break
+		}
+		// 嵌套单账号（cockpit 详情导出 {account,auth} / 本仓 auths/*.json）
+		if _, ok := probe["account"]; ok {
+			items = []json.RawMessage{trimmed}
+			break
+		}
+		if _, ok := probe["auth"]; ok {
+			items = []json.RawMessage{trimmed}
+			break
+		}
+		if _, ok := probe["accessToken"]; ok {
+			items = []json.RawMessage{trimmed}
+			break
+		}
+		if _, ok := probe["access_token"]; ok {
+			items = []json.RawMessage{trimmed}
+			break
+		}
+		// 字典形态 {"<uid>": {...}}：键当 uid 兜底。
+		//
+		// 信封名**不能**当 uid：`{"accounts":{"refresh_token":"r"}}` 是「信封的值是
+		// 单个对象」形态，走到这里时 accounts 这个键会命中内层，兜底就会把 uid 写成
+		// 字面量 "accounts" —— 池里从此多一个格式合法、内容垃圾的号。真实 uid 是
+		// 手机号/UUID，信封名本身不是 uid，直接跳过。
+		keys := make([]string, 0, len(probe))
+		for k := range probe {
+			if isImportEnvelopeKey(k) {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // 稳定顺序，便于前端展示与测试比对
+		out := make([]cockpitAccount, 0, len(keys))
+		for _, k := range keys {
+			acc, derr := decodeImportItem(probe[k])
+			if derr != nil {
+				continue
+			}
+			if strings.TrimSpace(acc.UID) == "" {
+				acc.UID = k
+			}
+			out = append(out, acc)
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("无法识别的 JSON 结构：既不是账号数组，也不是 {account,auth} 或 {\"<uid>\":{…}}")
+		}
+		return out, nil
 	default:
 		return nil, fmt.Errorf("不是 JSON 对象或数组")
 	}

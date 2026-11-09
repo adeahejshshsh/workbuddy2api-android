@@ -357,3 +357,15 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 - `478d2aa`（debugcap 抓样本，默认关）：诊断工具，本仓没有该包。
 - `24d0b61`（scripts/cache_audit.py）/ `7028676`（local-45 dist 不入库）：脚本与仓库卫生，
   与本仓无关。
+
+## 第九批：资料接口与导入形态（补 `d78131b` / `585ae7f` / `cd88450`）
+
+| 上游 | 内容 | 落地 |
+|---|---|---|
+| `d78131b` | 资料接口空昵称不再静默成功 + 兼容顶层平铺响应 | `doJSON` 拆出 `doJSONRaw`（多返回原始 body）；`FetchAccountProfile` 信封为空时回落原文、昵称 trim 后为空按失败返回（此前 SetNickname 对空串返回 false → 既不计数也不报错，整批拿不到昵称时日志一行都不打） |
+| `585ae7f` | cockpit 导入的嵌套/驼峰/字典形态 + 缺 auths 目录 ENOENT | 扩展 `parseImportPayload`：信封键（accounts/data/list/items/results/auths，值为数组**或单个对象**）、字典 `{"<uid>":{…}}`（键兜底 uid，输出按 key 排序稳定）；`importCockpit` 落盘前 `MkdirAll(AuthDir)`（login/apikey 都有、唯独导入漏了，全新部署首次导入必 ENOENT） |
+| `cd88450` | 信封的值是对象时别把信封名当 uid | 字典分支跳过信封键（否则 `{"accounts":{…}}` 会生成 uid="accounts" 的垃圾号） |
+
+**不搬的部分**：`585ae7f` 里的 `normalizeExpiresAtMillis` —— 本仓 import.go 已按**量级**
+判 expires_at 单位（秒/毫秒都归一，bug #6），比无条件 /1000 更稳。`c5ce29b`（多文件
+导入 + dryRun 预览）仍未搬：本仓导入页是自有两步流，改多文件要重写页面，单独一轮。
