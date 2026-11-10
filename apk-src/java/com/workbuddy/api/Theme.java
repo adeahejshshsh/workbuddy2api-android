@@ -187,8 +187,8 @@ final class Theme {
         TextView b = text(c, label, 13.5f, ON_ACCENT, 2);
         b.setGravity(Gravity.CENTER);
         b.setBackground(ripple(c, round(c, ACCENT, R_CTRL), 0x3322C55E));
-        b.setMinHeight(dp(c, 44));
-        b.setPadding(dp(c, S4), dp(c, 10), dp(c, S4), dp(c, 10));
+        b.setMinHeight(dp(c, 48));
+        b.setPadding(dp(c, S4), dp(c, 12), dp(c, S4), dp(c, 12));
         b.setClickable(true);
         b.setFocusable(true);
         return b;
@@ -199,8 +199,8 @@ final class Theme {
         TextView b = text(c, label, 13f, INK, 1);
         b.setGravity(Gravity.CENTER);
         b.setBackground(ripple(c, outlined(c, 0x14FFFFFF, R_CTRL, LINE, 1), 0x1FFFFFFF));
-        b.setMinHeight(dp(c, 44));
-        b.setPadding(dp(c, S4), dp(c, 10), dp(c, S4), dp(c, 10));
+        b.setMinHeight(dp(c, 48));
+        b.setPadding(dp(c, S4), dp(c, 12), dp(c, S4), dp(c, 12));
         b.setClickable(true);
         b.setFocusable(true);
         return b;
@@ -212,8 +212,9 @@ final class Theme {
         b.setGravity(Gravity.CENTER);
         b.setBackground(on ? round(c, ACCENT, R_PILL)
                 : ripple(c, outlined(c, 0x0DFFFFFF, R_PILL, LINE, 1), 0x1FFFFFFF));
-        b.setMinHeight(dp(c, 34));
-        b.setPadding(dp(c, S3), dp(c, 6), dp(c, S3), dp(c, 6));
+        // 视觉高度 40dp，靠上下 padding 把命中区撑到 ~48dp
+        b.setMinHeight(dp(c, 40));
+        b.setPadding(dp(c, S3), dp(c, 9), dp(c, S3), dp(c, 9));
         b.setClickable(true);
         return b;
     }
@@ -229,9 +230,9 @@ final class Theme {
         iv.setColorFilter(tint);
         iv.setContentDescription(contentDesc);
         iv.setBackground(ripple(c, round(c, 0x14FFFFFF, R_CTRL), 0x1FFFFFFF));
-        int pad = dp(c, 10);
+        int pad = dp(c, 11);
         iv.setPadding(pad, pad, pad, pad);
-        iv.setLayoutParams(new LinearLayout.LayoutParams(dp(c, 40), dp(c, 40)));
+        iv.setLayoutParams(new LinearLayout.LayoutParams(dp(c, 44), dp(c, 44)));
         iv.setClickable(true);
         iv.setFocusable(true);
         return iv;
