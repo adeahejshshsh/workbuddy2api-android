@@ -450,3 +450,36 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 
 **本仓差异**：`LoadDir` 是我们的版本（缺 uid 跳过 + 同 UID 去重），`LoadDirReport` 按它
 重构（缺 uid 也计入 ParseError，否则热重载会在「该文件本轮不可用」时删除同号）。
+
+---
+
+# 本仓增强（非上游）：账号类型人工定性 + 国际版任务入口
+
+## 1) 「是否企业版」人工覆盖
+
+自动判据看 `account.type` 与 `enterpriseId`，而国服个人号常带一个默认租户的
+`enterpriseId`（曾把整批个人号判成企业版：签到 400「企业账号不支持该操作」、成长任务
+403）。上游字段不可信时只能由人定性：
+
+- `auth.EnterpriseOverride`：`""`（自动）/ `"enterprise"` / `"personal"`，`IsEnterprise()`
+  里**优先于**自动判据；
+- 落盘 `account.enterprise_override`（**同时读**旧扁平形态的顶层键与驼峰别名；
+  清空时把两种写法都删掉，避免外部工具读成「显式设了空」）；
+- `SaveAtomic` 本来就会「读回原文件、保留未知键、把扁平文件升级成嵌套形」，
+  所以旧版本 JSON 不会因为切一次类型就丢字段（测试覆盖 `custom_note` 保留）；
+- 面板：行内「类型」按钮循环 自动 → 强制企业 → 强制个人，`POST
+  /panel/api/accounts/{uid}/enterprise`；非法值 400（不静默当自动判定）；
+- `/status` 透出 `enterprise_override`，面板显示「企业（自动）/ 企业 / 个人」。
+
+## 2) 国际版任务入口放回
+
+此前 `GET /panel/api/accounts/{uid}/tasks` 对 global 直接 501 —— 用户视角就是入口丢了。
+上游自己对国际区是「只读 schema」：能列任务，但接单/领奖/自动执行没有验证过的契约。
+
+- 查询：照常 `ListTasks`，返回 `{realm, capabilities, tasks, message}`，其中
+  `accept/claim/automate` 全 false；
+- 查询失败（上游 404/403）：仍回 **200 + 空列表 + 说明**（含错误原因），不把面板整页
+  渲染成错误；
+- 写操作（accept / accept_all / claim / auto）：保持 501 + 「国际区任务暂仅支持查询」；
+- 面板：行内「任务」按钮对国际版恢复渲染（企业版 / API Key 仍隐藏）；弹窗按
+  `capabilities` 把按钮换成「只读」标签，并把 message 显示在标题旁。

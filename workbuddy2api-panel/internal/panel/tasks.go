@@ -51,39 +51,64 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	// 国际版账号无成长任务体系（bug-01）：上游 growth 只对个人 CN 用户开放，
-	// 对 global 号必然 403。调度器侧早有 D4 门控，面板入口漏了。
-	if a.IsGlobal() {
-		writeErr(w, http.StatusNotImplemented, "国际版账号无成长任务体系（上游 growth 仅对个人 CN 用户开放）")
-		return
-	}
+	// 国际版：**保留查询入口**（上游 task 数据是只读 schema：code/task_id/status/progress），
+	// 但接单/领奖/自动执行没有验证过的契约，capabilities 里一律置 false，由前端禁用按钮。
+	// 此前这里直接 501，面板上国际号连「有哪些任务」都看不到 —— 用户视角就是入口丢了。
 	// 企业上下文（review #19）：token 是企业切换会话时，任务端点会被上游静默
 	// 丢弃/403 —— 明确拒绝比让用户看着进度不动更好。
 	if a.IsEnterpriseSession() {
 		writeErr(w, http.StatusNotImplemented, "企业上下文账号不参与成长任务（上游会静默丢弃）")
 		return
 	}
+	global := a.IsGlobal()
+	capabilities := map[string]bool{"accept": true, "claim": true, "automate": true}
+	if global {
+		capabilities["accept"], capabilities["claim"], capabilities["automate"] = false, false, false
+	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
+		if !global {
+			writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
+			return
+		}
+		// 国际版查询失败仍回 200 + 空列表 + 说明：入口在、按钮关着，比 501/502
+		// 更像「这个号现在没有可查的任务」，也不会让面板把整页渲染成错误。
+		log.Printf("WARN: [panel] 国际版任务列表查询失败 uid=%s: %v", uid, err)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":           true,
+			"realm":        a.Realm(),
+			"capabilities": capabilities,
+			"tasks":        []any{},
+			"message":      globalTaskWriteMessage + "（本次查询失败：" + err.Error() + "）",
+		})
 		return
 	}
-	// 合并小程序口径任务（school_season / Sequential_Tasks_1 等仅在 mp 头列表下发）。
-	// mp 列表是默认口径的超集（实测含常规任务），按 task_code 去重；失败静默。
-	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
-		seen := map[string]bool{}
-		for _, t := range tasks {
-			seen[t.TaskCode] = true
-		}
-		for _, t := range mpTasks {
-			if !seen[t.TaskCode] {
-				tasks = append(tasks, t)
+	if !global {
+		// 合并小程序口径任务（school_season / Sequential_Tasks_1 等仅在 mp 头列表下发）。
+		// mp 列表是默认口径的超集（实测含常规任务），按 task_code 去重；失败静默。
+		if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
+			seen := map[string]bool{}
+			for _, t := range tasks {
 				seen[t.TaskCode] = true
+			}
+			for _, t := range mpTasks {
+				if !seen[t.TaskCode] {
+					tasks = append(tasks, t)
+					seen[t.TaskCode] = true
+				}
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tasks": tasks})
+	resp := map[string]any{"ok": true, "realm": a.Realm(), "capabilities": capabilities, "tasks": tasks}
+	if global {
+		resp["message"] = globalTaskWriteMessage
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
+
+// globalTaskWriteMessage 国际版的写操作（接单/领奖/自动执行）没有验证过的契约：
+// 查询可以给，写入口一律关掉并说明原因，避免用户点了必然失败再以为网关坏了。
+const globalTaskWriteMessage = "国际区任务暂仅支持查询，请在官方客户端操作"
 
 // rejectNoGrowth 国际版账号没有成长任务体系：上游 growth 端点对 global 号一律 403，
 // 不门控就会被包成 502 "accept: ..."，让用户以为网关坏了（BUG-07）。

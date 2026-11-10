@@ -97,6 +97,9 @@ type Status struct {
 	// 企业版无个人成长体系（签到/成长任务/连登/旅行/夜猫子 上游均拒），
 	// 面板据此隐藏对应按钮；选号、保活、额度展示不受影响。
 	Enterprise bool `json:"enterprise,omitempty"`
+	// EnterpriseOverride 人工覆盖值（"" / enterprise / personal）；面板据此显示
+	// 「自动判定 / 强制企业 / 强制个人」，避免用户看不出当前是哪种。
+	EnterpriseOverride string `json:"enterprise_override,omitempty"`
 	Disabled   bool `json:"disabled"`
 	// SessionDeadFails 连续 12153 / 网关 401（ErrSessionDead）计数，即「离禁用还差
 	// 几次」的进度。运维据此判断某号是刚踩一次抖动还是真在往禁用走。

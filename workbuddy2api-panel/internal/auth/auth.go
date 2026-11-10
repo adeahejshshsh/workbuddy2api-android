@@ -37,6 +37,14 @@ type Auth struct {
 	realm        string
 	UID          string
 	EnterpriseID string
+	// EnterpriseOverride 人工覆盖「是否企业版」："" = 自动判定，否则 "enterprise" / "personal"。
+	//
+	// 为什么需要人工覆盖：自动判据依赖上游给的 type 与 enterpriseId，而国服个人号常带
+	// 一个默认租户的 enterpriseId（曾把整批个人号判成企业版，签到/成长全被门控）。
+	// 上游字段不可信时，只能由人来定性；覆盖值落盘（account.enterprise_override），
+	// 重启与热重载都保持。
+	EnterpriseOverride string
+
 	// AccountType 上游 account.type（personal / ultimate / exclusive / …）。
 	// 企业版判定的**权威判据**：官方 CLI 的 isPersonalAccount 只看这一项，
 	// isEnterpriseEditionAccount 则是「type ∈ {ultimate, exclusive} **或** enterpriseId 非空」。
@@ -250,6 +258,13 @@ func (a *Auth) IsEnterprise() bool {
 	if a == nil {
 		return false
 	}
+	// 人工覆盖优先：上游字段不可信时（个人号带默认租户 enterpriseId），只能由人定性。
+	switch NormalizeEnterpriseOverride(a.EnterpriseOverride) {
+	case "enterprise":
+		return true
+	case "personal":
+		return false
+	}
 	switch strings.ToLower(strings.TrimSpace(a.AccountType)) {
 	case "personal":
 		return false
@@ -257,6 +272,29 @@ func (a *Auth) IsEnterprise() bool {
 		return true
 	}
 	return NormalizeEnterpriseID(a.EnterpriseID) != ""
+}
+
+// NormalizeEnterpriseOverride 归一人工覆盖值：只接受 enterprise / personal，
+// 其余（含空、拼错）一律 "" = 自动判定。写错一个词不该把账号判成企业版。
+func NormalizeEnterpriseOverride(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "enterprise", "ent", "biz", "企业", "企业版":
+		return "enterprise"
+	case "personal", "person", "individual", "个人", "个人版":
+		return "personal"
+	default:
+		return ""
+	}
+}
+
+// firstNonEmptyStr 取第一个 trim 后非空的字符串（兼容同义键并存）。
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // enterpriseIDPlaceholders 上游/插件把「没有企业」写成过这些值，一律按空处理。
@@ -336,6 +374,9 @@ func Parse(raw []byte) (*Auth, error) {
 				EnterpriseID string `json:"enterpriseId"`
 				Type         string `json:"type"`
 				Nickname     string `json:"nickname"`
+				// 人工覆盖（本仓扩展键）：旧版本文件没有它 → 空 = 自动判定。
+				EnterpriseOverride  string `json:"enterprise_override"`
+				EnterpriseOverride2 string `json:"enterpriseOverride"`
 			} `json:"account"`
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用；手写时无需嵌进 auth 对象）。
 			DeviceToken string `json:"device_token"`
@@ -350,9 +391,10 @@ func Parse(raw []byte) (*Auth, error) {
 			Domain:       n.Auth.Domain,
 			realm:        n.Auth.Realm,
 			UID:          n.Account.UID,
-			EnterpriseID: NormalizeEnterpriseID(n.Account.EnterpriseID),
-			AccountType:  strings.TrimSpace(n.Account.Type),
-			Nickname:     n.Account.Nickname,
+			EnterpriseID:      NormalizeEnterpriseID(n.Account.EnterpriseID),
+			AccountType:       strings.TrimSpace(n.Account.Type),
+			Nickname:          n.Account.Nickname,
+			EnterpriseOverride: NormalizeEnterpriseOverride(firstNonEmptyStr(n.Account.EnterpriseOverride, n.Account.EnterpriseOverride2)),
 			DeviceToken:  n.DeviceToken,
 		}
 	} else {
@@ -367,6 +409,9 @@ func Parse(raw []byte) (*Auth, error) {
 			Type         string `json:"type"`
 			Nickname     string `json:"nickname"`
 			DeviceToken  string `json:"device_token"`
+			// 人工覆盖（本仓扩展键）。扁平形是旧版本/手写文件的形态，必须同口径读。
+			EnterpriseOverride  string `json:"enterprise_override"`
+			EnterpriseOverride2 string `json:"enterpriseOverride"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -378,10 +423,11 @@ func Parse(raw []byte) (*Auth, error) {
 			Domain:       f.Domain,
 			realm:        f.Realm,
 			UID:          f.UID,
-			EnterpriseID: NormalizeEnterpriseID(f.EnterpriseID),
-			AccountType:  strings.TrimSpace(f.Type),
-			Nickname:     f.Nickname,
-			DeviceToken:  f.DeviceToken,
+			EnterpriseID:      NormalizeEnterpriseID(f.EnterpriseID),
+			AccountType:       strings.TrimSpace(f.Type),
+			Nickname:          f.Nickname,
+			DeviceToken:       f.DeviceToken,
+			EnterpriseOverride: NormalizeEnterpriseOverride(firstNonEmptyStr(f.EnterpriseOverride, f.EnterpriseOverride2)),
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -445,6 +491,7 @@ func (a *Auth) SaveAtomic() error {
 		realm:        a.realm,
 		enterpriseID: NormalizeEnterpriseID(a.EnterpriseID),
 		accountType:  strings.TrimSpace(a.AccountType),
+		entOverride:  NormalizeEnterpriseOverride(a.EnterpriseOverride),
 		nickname:     a.Nickname,
 		deviceToken:  a.DeviceToken,
 	}
@@ -457,6 +504,7 @@ type authFileSnapshot struct {
 	path                                          string
 	uid, accessToken, refreshToken, domain, realm string
 	enterpriseID, accountType, nickname           string
+	entOverride                                   string
 	deviceToken                                   string
 	expiresAt                                     int64
 }
@@ -506,7 +554,20 @@ func writeAuthSnapshot(s authFileSnapshot) error {
 	if s.accountType != "" {
 		account["type"] = s.accountType
 	}
+	// 人工覆盖同理：只在设了值时写回；清空时把新旧两种写法都从 account 里删掉，
+	// 否则文件里留着 "enterprise_override": "" 会被外部工具读成「显式设了空」。
+	if s.entOverride != "" {
+		account["enterprise_override"] = s.entOverride
+	}
 	putMerged("account", account)
+	if s.entOverride == "" {
+		if m, ok := doc["account"].(map[string]any); ok {
+			delete(m, "enterprise_override")
+			delete(m, "enterpriseOverride")
+		}
+		delete(doc, "enterprise_override")
+		delete(doc, "enterpriseOverride")
+	}
 	// 扁平形遗留键必须清掉（bug 16）：把扁平文件升级成嵌套形时只 putMerged 了
 	// auth/account，顶层的 accessToken/refreshToken/... 原样留着 —— 功能上暂时正确
 	// （Parse 优先读嵌套形），但文件里永久多一份旧 token，任何按扁平键读的外部
@@ -798,3 +859,15 @@ func (a *Auth) SupportsPersonalGrowth() bool { return !a.IsEnterprise() && !a.Is
 // SupportsPersonalEndpoints 报告账号是否可调用「签到 / 任务列表」这类显式报错的个人端点。
 // 与 SupportsPersonalGrowth（执行类门控）刻意分开命名：判据相同、语义不同。
 func (a *Auth) SupportsPersonalEndpoints() bool { return !a.IsEnterprise() && !a.IsAPIKey() }
+
+// SetEnterpriseOverride 设置人工覆盖（"" = 自动判定），并落盘。
+//
+// 落盘是刻意的：覆盖值只活在内存里的话，进程重启/热重载后又会按上游字段判回去，
+// 用户会看到「我明明改过，怎么又变回企业版了」。
+func (a *Auth) SetEnterpriseOverride(v string) error {
+	norm := NormalizeEnterpriseOverride(v)
+	a.mu.Lock()
+	a.EnterpriseOverride = norm
+	a.mu.Unlock()
+	return a.SaveAtomic()
+}
