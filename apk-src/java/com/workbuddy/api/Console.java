@@ -83,7 +83,12 @@ final class Console {
         tabs.setOrientation(LinearLayout.HORIZONTAL);
         tabs.setBackgroundColor(SURFACE);
         tabs.setPadding(dp(4), dp(6), dp(4), dp(6));
-        root.addView(tabs, new LinearLayout.LayoutParams(
+        // 6 个 tab 在 360px 屏上排不下：放进可横滑容器，每项固定最小宽度
+        HorizontalScrollView tabScroll = new HorizontalScrollView(a);
+        tabScroll.setHorizontalScrollBarEnabled(false);
+        tabScroll.setBackgroundColor(SURFACE);
+        tabScroll.addView(tabs);
+        root.addView(tabScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         buildTabs();
         show("accounts");
@@ -97,6 +102,8 @@ final class Console {
         tabs.removeAllViews();
         addTab("accounts", "账号");
         addTab("overview", "概览");
+        addTab("usage", "用量");
+        addTab("models", "模型");
         addTab("logs", "日志");
         addTab("settings", "设置");
     }
@@ -112,8 +119,9 @@ final class Console {
         t.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { show(id); }
         });
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        t.setMinWidth(dp(64));
         tabs.addView(t, lp);
     }
 
@@ -122,6 +130,8 @@ final class Console {
         buildTabs();
         pageBox.removeAllViews();
         if ("overview".equals(id)) buildOverview();
+        else if ("usage".equals(id)) buildUsage();
+        else if ("models".equals(id)) buildModels();
         else if ("logs".equals(id)) buildLogs();
         else if ("settings".equals(id)) buildSettings();
         else buildAccounts();
@@ -227,6 +237,200 @@ final class Console {
         v.addView(val);
         v.addView(lab);
         return v;
+    }
+
+    // ── 用量（web 面板「用量」页）──────────────────────────────────────────
+    private int usageHours = 72;
+
+    private void buildUsage() {
+        pageBox.removeAllViews();
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout seg = new LinearLayout(a);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        seg.setPadding(dp(10), dp(8), dp(10), dp(4));
+        int[] hours = new int[]{24, 72, 168, 720};
+        String[] labels = new String[]{"近 24 小时", "近 3 天", "近 7 天", "近 30 天"};
+        for (int i = 0; i < hours.length; i++) {
+            final int h = hours[i];
+            seg.addView(chipSel(labels[i], h == usageHours, new Runnable() {
+                public void run() { usageHours = h; buildUsage(); }
+            }));
+        }
+        box.addView(seg);
+
+        final LinearLayout list = new LinearLayout(a);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(10), dp(4), dp(10), dp(12));
+        box.addView(list);
+        pageBox.addView(box);
+        pageScroll = null;
+        list.addView(empty("加载中…"));
+
+        PanelApi.get(a, "/panel/api/usage?hours=" + usageHours, new PanelApi.Cb() {
+            public void ok(JSONObject o) { renderUsage(list, o); }
+            public void fail(String msg) {
+                list.removeAllViews();
+                list.addView(empty("用量加载失败：" + msg));
+            }
+        });
+    }
+
+    private void renderUsage(LinearLayout list, JSONObject o) {
+        list.removeAllViews();
+        JSONObject t = o.optJSONObject("totals");
+        LinearLayout card = new LinearLayout(a);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(card());
+        card.setPadding(dp(13), dp(11), dp(13), dp(11));
+        list.addView(card);
+
+        String span = o.optString("window_from", "") + " ~ " + o.optString("window_to", "");
+        card.addView(kv("统计区间", span.trim()));
+        if (t != null) {
+            card.addView(kv("请求", t.optInt("requests") + "（失败 " + t.optInt("errors") + "）"));
+            card.addView(kv("Token", "总 " + t.optInt("total_tokens")
+                    + " · 入 " + t.optInt("prompt_tokens") + " · 出 " + t.optInt("completion_tokens")));
+            if (t.optDouble("cache_hit_rate", 0) > 0) {
+                card.addView(kv("前缀缓存命中率",
+                        String.format(java.util.Locale.US, "%.1f%%", t.optDouble("cache_hit_rate") * 100)));
+            }
+            card.addView(kv("平均延迟", String.format(java.util.Locale.US, "%.0f ms", t.optDouble("avg_latency_ms"))));
+            card.addView(kv("平均吐字", String.format(java.util.Locale.US, "%.1f tok/s", t.optDouble("avg_tokens_per_second"))));
+            if (t.optDouble("credits", 0) > 0) {
+                card.addView(kv("积分消耗", String.format(java.util.Locale.US, "%.2f c", t.optDouble("credits"))));
+            }
+            if (t.optDouble("credits_per_1m_tokens", 0) > 0) {
+                card.addView(kv("每百万 token 成本",
+                        String.format(java.util.Locale.US, "%.2f c", t.optDouble("credits_per_1m_tokens"))));
+            }
+        }
+
+        addAggSection(list, "按账号", o.optJSONArray("by_account"), true);
+        addAggSection(list, "按模型", o.optJSONArray("by_model"), false);
+    }
+
+    /** 用量分组行：key/extra + 请求/token/积分。最多 20 行，避免一屏几千行。 */
+    private void addAggSection(LinearLayout list, String title, JSONArray arr, boolean byAccount) {
+        if (arr == null || arr.length() == 0) return;
+        TextView h = new TextView(a);
+        h.setText(title);
+        h.setTextSize(12.5f);
+        h.setTextColor(INK3);
+        h.setPadding(dp(2), dp(10), 0, dp(4));
+        list.addView(h);
+        int n = Math.min(arr.length(), 20);
+        for (int i = 0; i < n; i++) {
+            JSONObject r = arr.optJSONObject(i);
+            if (r == null) continue;
+            LinearLayout row = new LinearLayout(a);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setPadding(dp(2), dp(5), dp(2), dp(5));
+            TextView name = new TextView(a);
+            String key = r.optString("key");
+            String extra = r.optString("extra", "");
+            name.setText((extra.isEmpty() ? key : extra) + (r.optString("realm", "").isEmpty() ? ""
+                    : " · " + r.optString("realm")));
+            name.setTextSize(12.5f);
+            name.setTextColor(INK2);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            row.addView(name, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            TextView val = new TextView(a);
+            val.setText(r.optInt("requests") + " 次 · " + r.optInt("total_tokens") + " tok"
+                    + (r.optDouble("credits", 0) > 0
+                        ? String.format(java.util.Locale.US, " · %.2fc", r.optDouble("credits")) : ""));
+            val.setTextSize(11.5f);
+            val.setTextColor(INK3);
+            row.addView(val);
+            list.addView(row);
+        }
+    }
+
+    // ── 模型与档位（web 面板「模型与档位」页）──────────────────────────────
+    private void buildModels() {
+        pageBox.removeAllViews();
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(10), dp(10), dp(10), dp(12));
+        final LinearLayout list = new LinearLayout(a);
+        list.setOrientation(LinearLayout.VERTICAL);
+        box.addView(list);
+        pageBox.addView(box);
+        pageScroll = null;
+        list.addView(empty("加载中…"));
+        PanelApi.get(a, "/panel/api/models", new PanelApi.Cb() {
+            public void ok(JSONObject o) { renderModels(list, o); }
+            public void fail(String msg) {
+                list.removeAllViews();
+                list.addView(empty("模型列表加载失败：" + msg));
+            }
+        });
+    }
+
+    private void renderModels(LinearLayout list, JSONObject o) {
+        list.removeAllViews();
+        JSONArray arr = o.optJSONArray("models");
+        if (arr == null || arr.length() == 0) {
+            list.addView(empty("没有可用模型（检查账号可用性或上游目录）"));
+            return;
+        }
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject m = arr.optJSONObject(i);
+            if (m == null) continue;
+            LinearLayout card = new LinearLayout(a);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(card());
+            card.setPadding(dp(12), dp(9), dp(12), dp(9));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.bottomMargin = dp(7);
+            card.setLayoutParams(lp);
+
+            LinearLayout r1 = new LinearLayout(a);
+            r1.setOrientation(LinearLayout.HORIZONTAL);
+            r1.setGravity(Gravity.CENTER_VERTICAL);
+            TextView name = new TextView(a);
+            name.setText(m.optString("name", m.optString("id")));
+            name.setTextSize(13.5f);
+            name.setTextColor(INK);
+            name.setTypeface(Typeface.DEFAULT_BOLD);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            r1.addView(name, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            double credits = m.optDouble("credits", 0);
+            double promo = m.optDouble("promo_credits", 0);
+            TextView price = new TextView(a);
+            if (promo > 0 && promo < credits) {
+                price.setText(String.format(java.util.Locale.US, "%.2f c", promo));
+                price.setTextColor(OK);
+            } else {
+                price.setText(credits > 0 ? String.format(java.util.Locale.US, "%.2f c", credits) : "免费");
+                price.setTextColor(INK2);
+            }
+            price.setTextSize(12.5f);
+            r1.addView(price);
+            card.addView(r1);
+
+            TextView meta = new TextView(a);
+            StringBuilder sb = new StringBuilder(m.optString("id"));
+            if (promo > 0 && promo < credits) {
+                sb.append(" · 原价 ").append(String.format(java.util.Locale.US, "%.2f c", credits));
+            }
+            String tags = m.optString("tags", "");
+            if (!tags.isEmpty()) sb.append(" · ").append(tags);
+            sb.append(m.optBoolean("supports_reasoning") ? " · 思考" : "");
+            sb.append(m.optBoolean("supports_images") ? " · 图片" : "");
+            sb.append(m.optBoolean("supports_tool_call") ? " · 工具" : "");
+            meta.setText(sb);
+            meta.setTextSize(11f);
+            meta.setTextColor(INK3);
+            meta.setPadding(0, dp(3), 0, 0);
+            card.addView(meta);
+            list.addView(card);
+        }
     }
 
     // ── 账号列表 ───────────────────────────────────────────────────────────
@@ -509,6 +713,10 @@ final class Console {
                 s.optBoolean("paused") ? "恢复选号" : "暂停选号",
                 s.optBoolean("disabled") ? "启用账号" : "禁用账号",
                 "账号类型：" + typeLabel(s),
+                "探活（只读确认是否已解封）",
+                "备注",
+                "分组",
+                "清空该账号的任务跳过名单",
                 "移除账号（不可撤销）"
         };
         new AlertDialog.Builder(a)
@@ -523,6 +731,20 @@ final class Console {
                             else hit(uid, "/disable", null);
                         } else if (which == 2) {
                             typeSheet(s);
+                        } else if (which == 3) {
+                            probeBan(uid);
+                        } else if (which == 4) {
+                            editText("备注", "只存本机（state.json），不影响上游", s.optString("remark", ""),
+                                    new TextCommit() {
+                                        public void onText(String text) { sendRemark(uid, text); }
+                                    });
+                        } else if (which == 5) {
+                            editText("分组", "用于面板筛选，仅本机保存", s.optString("group", ""),
+                                    new TextCommit() {
+                                        public void onText(String text) { sendGroup(uid, text); }
+                                    });
+                        } else if (which == 6) {
+                            clearSkip(uid);
                         } else {
                             confirmRemove(uid, s.optString("nickname", uid));
                         }
@@ -535,6 +757,80 @@ final class Console {
         if ("enterprise".equals(o)) return "强制企业版";
         if ("personal".equals(o)) return "强制个人版";
         return s.optBoolean("enterprise") ? "自动（企业）" : "自动（个人）";
+    }
+
+    /** 探活：只读探测上游是否已解封（不改池状态），结论要说清下一步。 */
+    private void probeBan(final String uid) {
+        PanelApi.post(a, "/panel/api/accounts/" + enc(uid) + "/probe_ban", null, new PanelApi.Cb() {
+            public void ok(JSONObject o) {
+                String v = o.optString("verdict", "");
+                String detail = o.optString("detail", "");
+                String msg;
+                if ("lifted".equals(v)) msg = "已解封，可以点「启用账号」恢复使用";
+                else if ("still_banned".equals(v)) msg = "仍被封禁，继续等待（勿反复启用，可能加重风控）";
+                else if ("blocked".equals(v)) msg = "会话有效但被风控拦截 —— 继续观察";
+                else if ("session_dead".equals(v)) msg = "不是封禁问题：登录态失效，需要重新登录";
+                else if ("inconclusive".equals(v)) msg = "探测无明确结论（网络/限流），稍后再试";
+                else msg = "无法探测：" + v;
+                toast(msg + (detail.isEmpty() ? "" : "（" + detail + "）"));
+            }
+            public void fail(String msg) { toast("探活失败：" + msg); }
+        });
+    }
+
+    /** 简单文本输入对话框（备注 / 分组共用）。 */
+    private interface TextCommit { void onText(String text); }
+
+    private void editText(String title, String hint, String initial, final TextCommit cb) {
+        final EditText et = new EditText(a);
+        et.setText(initial == null ? "" : initial);
+        et.setHint(hint);
+        et.setTextSize(14f);
+        et.setPadding(dp(14), dp(8), dp(14), dp(8));
+        new AlertDialog.Builder(a)
+                .setTitle(title)
+                .setView(et)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        cb.onText(et.getText() == null ? "" : et.getText().toString().trim());
+                    }
+                }).show();
+    }
+
+    private void sendRemark(final String uid, String text) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("remark", text);
+            PanelApi.post(a, "/panel/api/accounts/" + enc(uid) + "/remark", body, new PanelApi.Cb() {
+                public void ok(JSONObject o) { toast("备注已保存"); loadOverview(false); }
+                public void fail(String msg) { toast("保存失败：" + msg); }
+            });
+        } catch (Throwable t) { toast("保存失败：" + t); }
+    }
+
+    private void sendGroup(final String uid, String text) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("group", text);
+            PanelApi.post(a, "/panel/api/accounts/" + enc(uid) + "/group", body, new PanelApi.Cb() {
+                public void ok(JSONObject o) { toast("分组已保存"); loadOverview(false); }
+                public void fail(String msg) { toast("保存失败：" + msg); }
+            });
+        } catch (Throwable t) { toast("保存失败：" + t); }
+    }
+
+    /** 清空该账号的「反复无进展」跳过名单（服务端是全局表，按 uid 只清这一号）。 */
+    private void clearSkip(final String uid) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("clear", true);
+            body.put("uid", uid);
+            PanelApi.post(a, "/panel/api/tasks/skip", body, new PanelApi.Cb() {
+                public void ok(JSONObject o) { toast("已清空跳过名单"); }
+                public void fail(String msg) { toast("清空失败：" + msg); }
+            });
+        } catch (Throwable t) { toast("清空失败：" + t); }
     }
 
     private void confirmRemove(final String uid, String name) {
@@ -733,8 +1029,12 @@ final class Console {
         LinearLayout seg = new LinearLayout(a);
         seg.setOrientation(LinearLayout.HORIZONTAL);
         seg.setPadding(dp(10), dp(8), dp(10), dp(2));
-        seg.addView(chip2("运行日志", "run", logMode));
-        seg.addView(chip2("请求日志", "req", logMode));
+        seg.addView(chipSel("运行日志", "run".equals(logMode), new Runnable() {
+            public void run() { logMode = "run"; buildLogs(); }
+        }));
+        seg.addView(chipSel("请求日志", "req".equals(logMode), new Runnable() {
+            public void run() { logMode = "req"; buildLogs(); }
+        }));
         box.addView(seg);
 
         LinearLayout bar = new LinearLayout(a);
@@ -885,12 +1185,11 @@ final class Console {
         return card;
     }
 
-    private View chip2(String label, final String mode, String cur) {
+    private View chipSel(String label, boolean on, final Runnable onClick) {
         TextView t = new TextView(a);
         t.setText(label);
         t.setTextSize(12.5f);
         t.setTypeface(Typeface.DEFAULT_BOLD);
-        boolean on = mode.equals(cur);
         t.setTextColor(on ? Color.WHITE : INK3);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(on ? ACCENT : SURFACE2);
@@ -898,7 +1197,7 @@ final class Console {
         t.setBackground(bg);
         t.setPadding(dp(12), dp(6), dp(12), dp(6));
         t.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { logMode = mode; buildLogs(); }
+            public void onClick(View v) { onClick.run(); }
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
