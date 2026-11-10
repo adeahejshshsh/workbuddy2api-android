@@ -2,6 +2,7 @@ package com.workbuddy.api;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
@@ -60,27 +61,17 @@ final class Sheet {
     static PopupWindow anchor(View anchorView, String title, final String[] items,
                               final int dangerIndex, final Pick cb) {
         final Activity a = (Activity) anchorView.getContext();
+
+        // 内容卡（行）+ 外层滚动壳：条目多、屏幕放不下时必须能滑，不能截断。
         LinearLayout card = new LinearLayout(a);
         card.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(Theme.CARD_SOLID);
-        bg.setCornerRadius(Theme.dp(a, 16));
-        bg.setStroke(Theme.dp(a, 1), Theme.LINE);
-        card.setBackground(bg);
-        card.setPadding(0, Theme.dp(a, Theme.S1), 0, Theme.dp(a, Theme.S1));
-
-        final PopupWindow pw = new PopupWindow(card,
-                Theme.dp(a, 236), ViewGroup.LayoutParams.WRAP_CONTENT, true);
-        pw.setBackgroundDrawable(new ColorDrawable(0));
-        pw.setOutsideTouchable(true);
-        pw.setElevation(Theme.dp(a, 14));
-
         if (title != null && !title.isEmpty()) {
             TextView t = Theme.text(a, title, 12f, Theme.INK3, 2);
             t.setPadding(Theme.dp(a, Theme.S3), Theme.dp(a, Theme.S2),
                     Theme.dp(a, Theme.S3), Theme.dp(a, Theme.S1));
             card.addView(t);
         }
+        final PopupWindow pw = new PopupWindow(a);
         for (int i = 0; i < items.length; i++) {
             final int idx = i;
             card.addView(row(a, items[i], i == dangerIndex ? Theme.BAD : Theme.INK, null,
@@ -89,8 +80,54 @@ final class Sheet {
                     }));
             if (i < items.length - 1) card.addView(divider(a));
         }
-        pw.showAsDropDown(anchorView, 0, Theme.dp(a, 6), Gravity.END);
+
+        ScrollView sc = new ScrollView(a);
+        sc.setVerticalScrollBarEnabled(false);
+        sc.setFillViewport(false);
+        sc.addView(card);
+        sc.setBackground(glassBg(a, 16));
+
+        int margin = Theme.dp(a, Theme.S2);
+        int screenW = a.getResources().getDisplayMetrics().widthPixels;
+        int width = Math.min(Theme.dp(a, 236), screenW - margin * 2);
+        pw.setContentView(sc);
+        pw.setWidth(width);
+        pw.setBackgroundDrawable(new ColorDrawable(0));
+        pw.setOutsideTouchable(true);
+        pw.setElevation(Theme.dp(a, 14));
+
+        // 量一次内容高度：决定「向下弹还是向上弹」以及要不要限高滚动。
+        int wSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY);
+        sc.measure(wSpec, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int contentH = sc.getMeasuredHeight();
+
+        Rect r = new Rect();
+        boolean visible = anchorView.getGlobalVisibleRect(r);
+        int screenH = anchorView.getRootView().getHeight();
+        if (!visible || screenH <= 0) {
+            pw.setHeight(ViewGroup.LayoutParams.WRAP_CONTENT);
+            pw.showAsDropDown(anchorView, 0, margin, Gravity.END);
+            return pw;
+        }
+        int below = screenH - r.bottom - margin * 2;
+        int above = r.top - margin * 2;
+        boolean up = contentH > below && above > below;
+        int space = Math.max(Theme.dp(a, 132), up ? above : below);
+        int height = Math.min(contentH, Math.min(space, (int) (screenH * 0.62f)));
+        pw.setHeight(height);
+
+        // 向上弹：yoff 取负（锚点高度 + 弹层高度 + 间距），否则会盖住锚点本身。
+        int yoff = up ? -(r.height() + height + margin) : margin;
+        pw.showAsDropDown(anchorView, 0, yoff, Gravity.END);
         return pw;
+    }
+
+    private static GradientDrawable glassBg(Activity a, float radiusDp) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Theme.CARD_SOLID);
+        bg.setCornerRadius(Theme.dp(a, radiusDp));
+        bg.setStroke(Theme.dp(a, 1), Theme.LINE);
+        return bg;
     }
 
     // ── 单选 ───────────────────────────────────────────────────────────────
