@@ -104,6 +104,7 @@ final class Console {
         addTab("overview", "概览");
         addTab("usage", "用量");
         addTab("models", "模型");
+        addTab("data", "数据");
         addTab("logs", "日志");
         addTab("settings", "设置");
     }
@@ -132,6 +133,7 @@ final class Console {
         if ("overview".equals(id)) buildOverview();
         else if ("usage".equals(id)) buildUsage();
         else if ("models".equals(id)) buildModels();
+        else if ("data".equals(id)) buildData();
         else if ("logs".equals(id)) buildLogs();
         else if ("settings".equals(id)) buildSettings();
         else buildAccounts();
@@ -429,6 +431,198 @@ final class Console {
             meta.setTextColor(INK3);
             meta.setPadding(0, dp(3), 0, 0);
             card.addView(meta);
+            list.addView(card);
+        }
+    }
+
+    // ── 数据页：积分构成 / 余额趋势 ─────────────────────────────────────────
+    private String dataMode = "packages"; // packages | balance
+    private int balanceDays = 7;
+
+    private void buildData() {
+        pageBox.removeAllViews();
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout seg = new LinearLayout(a);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        seg.setPadding(dp(10), dp(8), dp(10), dp(4));
+        seg.addView(chipSel("积分构成", "packages".equals(dataMode), new Runnable() {
+            public void run() { dataMode = "packages"; buildData(); }
+        }));
+        seg.addView(chipSel("余额趋势", "balance".equals(dataMode), new Runnable() {
+            public void run() { dataMode = "balance"; buildData(); }
+        }));
+        box.addView(seg);
+
+        final LinearLayout list = new LinearLayout(a);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(10), dp(4), dp(10), dp(12));
+        box.addView(list);
+        pageBox.addView(box);
+        pageScroll = null;
+
+        if ("packages".equals(dataMode)) {
+            list.addView(empty("加载中…（逐账号向上游查积分包，账号多时要几秒）"));
+            PanelApi.get(a, "/panel/api/packages", new PanelApi.Cb() {
+                public void ok(JSONObject o) { renderPackages(list, o); }
+                public void fail(String msg) {
+                    list.removeAllViews();
+                    list.addView(empty("积分构成加载失败：" + msg));
+                }
+            });
+        } else {
+            buildBalanceControl(box, list);
+            loadBalance(list);
+        }
+    }
+
+    private void buildBalanceControl(LinearLayout box, LinearLayout list) {
+        LinearLayout seg = new LinearLayout(a);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        seg.setPadding(dp(10), 0, dp(10), dp(6));
+        int[] days = new int[]{7, 30};
+        String[] labels = new String[]{"近 7 天", "近 30 天"};
+        for (int i = 0; i < days.length; i++) {
+            final int d = days[i];
+            seg.addView(chipSel(labels[i], d == balanceDays, new Runnable() {
+                public void run() { balanceDays = d; buildData(); }
+            }));
+        }
+        box.addView(seg);
+    }
+
+    private void loadBalance(final LinearLayout list) {
+        list.addView(empty("加载中…"));
+        PanelApi.get(a, "/panel/api/balance_history?days=" + balanceDays, new PanelApi.Cb() {
+            public void ok(JSONObject o) { renderBalance(list, o); }
+            public void fail(String msg) {
+                list.removeAllViews();
+                list.addView(empty("余额趋势加载失败：" + msg));
+            }
+        });
+    }
+
+    private void renderPackages(LinearLayout list, JSONObject o) {
+        list.removeAllViews();
+        JSONArray arr = o.optJSONArray("accounts");
+        if (arr == null || arr.length() == 0) {
+            list.addView(empty("没有账号"));
+            return;
+        }
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject r = arr.optJSONObject(i);
+            if (r == null) continue;
+            LinearLayout card = new LinearLayout(a);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(card());
+            card.setPadding(dp(12), dp(9), dp(12), dp(9));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.bottomMargin = dp(8);
+            card.setLayoutParams(lp);
+
+            String nick = r.optString("nickname", "");
+            TextView head = new TextView(a);
+            head.setText((nick.isEmpty() ? r.optString("uid") : nick)
+                    + "  " + r.optInt("remain") + " / " + r.optInt("size")
+                    + ("global".equals(r.optString("realm")) ? "  · 国际" : ""));
+            head.setTextSize(13.5f);
+            head.setTextColor(INK);
+            head.setTypeface(Typeface.DEFAULT_BOLD);
+            card.addView(head);
+
+            String plan = r.optString("plan", "");
+            if (!plan.isEmpty() && !"unknown".equals(plan)) {
+                TextView pt = new TextView(a);
+                pt.setText("套餐：" + plan + (r.optString("plan_evidence", "").isEmpty() ? ""
+                        : "（" + r.optString("plan_evidence") + "）"));
+                pt.setTextSize(11f);
+                pt.setTextColor(INK3);
+                card.addView(pt);
+            }
+            if (!r.optString("error", "").isEmpty()) {
+                TextView er = new TextView(a);
+                er.setText("查询失败：" + r.optString("error"));
+                er.setTextSize(11.5f);
+                er.setTextColor(BAD);
+                card.addView(er);
+                list.addView(card);
+                continue;
+            }
+            JSONArray ps = r.optJSONArray("packages");
+            if (ps != null) {
+                for (int j = 0; j < ps.length(); j++) {
+                    JSONObject p = ps.optJSONObject(j);
+                    if (p == null) continue;
+                    String end = p.optString("end_time", "");
+                    if (end.length() > 10) end = end.substring(0, 10);
+                    TextView row = new TextView(a);
+                    row.setText("· " + p.optString("name", "积分包") + "  "
+                            + p.optInt("remain") + "/" + p.optInt("size")
+                            + (end.isEmpty() ? "" : " 到期 " + end));
+                    row.setTextSize(11.5f);
+                    row.setTextColor(INK2);
+                    row.setPadding(0, dp(2), 0, 0);
+                    card.addView(row);
+                }
+            }
+            list.addView(card);
+        }
+    }
+
+    private void renderBalance(LinearLayout list, JSONObject o) {
+        list.removeAllViews();
+        JSONArray series = o.optJSONArray("series");
+        if (series == null || series.length() == 0) {
+            list.addView(empty("还没有余额采样（网关每 30 分钟采样一次）"));
+            return;
+        }
+        for (int i = 0; i < series.length(); i++) {
+            JSONObject item = series.optJSONObject(i);
+            if (item == null) continue;
+            LinearLayout card = new LinearLayout(a);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(card());
+            card.setPadding(dp(12), dp(9), dp(12), dp(9));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.bottomMargin = dp(8);
+            card.setLayoutParams(lp);
+
+            // series 每项 = 一个账号：{uid,name,realm,points:[{t,c,d,cons,gain}]}
+            String name = item.optString("name", item.optString("uid"));
+            JSONArray pts = item.optJSONArray("points");
+            float[] vals = new float[pts == null ? 0 : pts.length()];
+            float min = Float.MAX_VALUE, max = -Float.MAX_VALUE;
+            for (int j = 0; j < vals.length; j++) {
+                JSONObject p = pts.optJSONObject(j);
+                vals[j] = p == null ? 0 : (float) p.optDouble("c", 0);
+                if (vals[j] < min) min = vals[j];
+                if (vals[j] > max) max = vals[j];
+            }
+            TextView head = new TextView(a);
+            int cur = item.optInt("current", vals.length == 0 ? 0 : (int) vals[vals.length - 1]);
+            int chg = item.optInt("change", 0);
+            head.setText(name + "   当前 " + cur
+                    + "（窗口内 " + (chg >= 0 ? "+" : "") + chg + "）");
+            head.setTextSize(13f);
+            head.setTextColor(INK);
+            card.addView(head);
+
+            TextView meta = new TextView(a);
+            meta.setText("区间 " + item.optInt("min", 0) + " ~ " + item.optInt("max", 0)
+                    + " · " + vals.length + " 个采样"
+                    + (item.optString("realm", "").isEmpty() ? "" : " · " + item.optString("realm")));
+            meta.setTextSize(11f);
+            meta.setTextColor(INK3);
+            card.addView(meta);
+
+            Sparkline sp = new Sparkline(a, ACCENT);
+            sp.setValues(vals);
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(56));
+            slp.topMargin = dp(6);
+            card.addView(sp, slp);
             list.addView(card);
         }
     }
@@ -1182,7 +1376,63 @@ final class Console {
         meta.setSingleLine(true);
         meta.setEllipsize(TextUtils.TruncateAt.END);
         card.addView(meta);
+        card.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { showRequestDetail(e); }
+        });
         return card;
+    }
+
+    /** 请求事件详情：把归档里的字段摊平展示（含可选的对话原文，可能很大，单独可滚动）。 */
+    private void showRequestDetail(JSONObject e) {
+        ScrollView sv = new ScrollView(a);
+        TextView tv = new TextView(a);
+        tv.setTextSize(12f);
+        tv.setTextColor(INK2);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextIsSelectable(true);
+        tv.setPadding(dp(14), dp(10), dp(14), dp(10));
+        StringBuilder sb = new StringBuilder();
+        sb.append("时间     ").append(e.optString("time")).append('\n');
+        sb.append("请求 ID  ").append(e.optString("request_id")).append('\n');
+        sb.append("路径     ").append(e.optString("path")).append('\n');
+        sb.append("账号     ").append(e.optString("account")).append('\n');
+        sb.append("模型     ").append(e.optString("model"));
+        String eff = e.optString("model_eff", "");
+        if (!eff.isEmpty() && !eff.equals(e.optString("model"))) sb.append(" ⤳ ").append(eff);
+        sb.append('\n');
+        sb.append("状态     ").append(e.optInt("status"))
+                .append(" · ").append(e.optString("outcome")).append('\n');
+        sb.append("耗时     ").append(e.optInt("duration_ms")).append("ms")
+                .append(" · 首字 ").append(e.optInt("ttfb_ms")).append("ms\n");
+        sb.append("Token    ").append(e.optInt("prompt_tokens")).append(" 入 / ")
+                .append(e.optInt("completion_tokens")).append(" 出 / ")
+                .append(e.optInt("total_tokens")).append(" 总\n");
+        if (e.optBoolean("credit_known")) {
+            sb.append("积分     ").append(e.optDouble("credit", 0)).append('\n');
+        }
+        if (e.optInt("cache_hit_tokens") > 0 || e.optInt("cache_miss_tokens") > 0) {
+            sb.append("缓存     ").append(e.optInt("cache_hit_tokens")).append(" 命中 / ")
+                    .append(e.optInt("cache_miss_tokens")).append(" 未命中\n");
+        }
+        if (e.optInt("tools_declared") > 0 || e.optInt("tool_calls") > 0) {
+            sb.append("工具     ").append(e.optInt("tools_declared")).append(" 声明 / ")
+                    .append(e.optInt("tool_calls")).append(" 调用\n");
+        }
+        if (!e.optString("client_ip", "").isEmpty()) {
+            sb.append("来源     ").append(e.optString("client_ip"))
+                    .append("  ").append(e.optString("user_agent", "")).append('\n');
+        }
+        Object ctx = e.opt("context");
+        if (ctx != null) {
+            sb.append("\n── 会话上下文 ──\n").append(String.valueOf(ctx));
+        }
+        tv.setText(sb.toString());
+        sv.addView(tv);
+        new AlertDialog.Builder(a)
+                .setTitle("请求详情")
+                .setView(sv)
+                .setPositiveButton("关闭", null)
+                .show();
     }
 
     private View chipSel(String label, boolean on, final Runnable onClick) {
