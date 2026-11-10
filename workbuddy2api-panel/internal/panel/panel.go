@@ -284,6 +284,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.creditHistory)
 	p.mux.HandleFunc("GET /panel/api/overview", p.overview)
 	p.mux.HandleFunc("GET /panel/api/logs", p.logsHandler)
+	// 落盘日志按区间导出（zip）：事故复盘「把最近三天发我」不必登设备翻文件。
+	p.mux.HandleFunc("GET /panel/api/logs/export", p.logsExportHandler)
 	// 错误观测：把日志环里的 WARN/ERR 按「账号 × 错误类型」聚合（见 errors.go）。
 	// 与日志同源、零新增存储——原始日志里几十行同质 WARN，人眼抓不到真正重要的差异。
 	p.mux.HandleFunc("GET /panel/api/error_summary", p.errorSummary)

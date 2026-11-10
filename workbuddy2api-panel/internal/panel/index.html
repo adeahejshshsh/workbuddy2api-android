@@ -1083,6 +1083,15 @@ body.veil-open { overflow: hidden; }
             <label class="fld"><span class="lb">单账号明细默认展示条数</span>
               <input name="package_detail_limit" type="number" min="1" placeholder="5">
               <span class="hint">积分构成页按最早到期展示，其余未用完包聚合</span></label>
+            <label class="fld"><span class="lb">选号策略</span>
+              <select name="selection_strategy">
+                <option value="weighted">weighted — 加权随机（缺省）</option>
+                <option value="round_robin">round_robin — 轮询（每次换下一个号）</option>
+                <option value="sequential">sequential — 顺序耗尽（用完一个再用下一个）</option>
+              </select>
+              <span class="hint">策略只在「已过全部可用性判定」的候选里决定选哪个：健康 / 冷却 /
+                在途 / 积分保底 / 成本分层 / 账号优先级全部先于它，所以切 sequential 也烧不穿保底。
+                配了账号占比（account_share）时占比优先。保存后立即生效</span></label>
             <label class="fld"><span class="lb">面板自动刷新间隔（秒）</span>
               <input name="poll_interval_sec" type="number" min="-3600" max="3600" placeholder="5">
               <span class="hint">0 / 留空 = 5 秒（旧行为）；负值 = 关闭自动刷新（只想当监控看、
@@ -1346,6 +1355,16 @@ body.veil-open { overflow: hidden; }
               <span class="hint">品牌词 / 身份句式是否也改写 user 与 assistant 的内容。
                 identity 下用户自己写的内容逐字保留（实测 user 里的品牌词不触发上游拦截），
                 工具描述与 system 仍照常改写。改动即时生效。</span></label>
+            <div class="switch"><span class="lb">运行日志按天落盘（可导出 ZIP）</span>
+              <input type="checkbox" name="panel_log_enabled"></div>
+            <div class="row">
+              <label class="fld"><span class="lb">日志保留天数</span>
+                <input name="panel_log_retention_days" type="number" min="1" max="365" placeholder="7"></label>
+              <label class="fld"><span class="lb">日志总量上限（MiB）</span>
+                <input name="panel_log_max_mb" type="number" min="1" max="4096" placeholder="50"></label>
+            </div>
+            <div class="hint">内存环每频道只有 500 行、重启归零；落盘后重启会回填、并能按区间导出
+              （运行日志页的「导出 ZIP」）。保留天数与上限都按天切文件、超限轮转。需重启生效。</div>
             <div class="switch"><span class="lb">OpenAI 兼容嵌入端点 /v1/embeddings</span>
               <input type="checkbox" name="embeddings_enabled"></div>
             <div class="hint">实验特性，缺省关闭（关着回 403 embeddings_disabled）。上游嵌入只注册了
@@ -1463,6 +1482,12 @@ body.veil-open { overflow: hidden; }
             <button class="xs chip" data-ch="sys">系统</button>
           </span>
           <span class="note" id="logNote">最近 500 行</span>
+          <select class="xs" id="logExportDays" title="导出区间（落盘文件按天切分）">
+            <option value="1">近 1 天</option>
+            <option value="3" selected>近 3 天</option>
+            <option value="7">近 7 天</option>
+          </select>
+          <button class="xs" id="btnLogExport" title="把落盘日志按区间打包成 ZIP 下载">导出 ZIP</button>
           <button class="xs" id="btnLogPin">自动滚动：开</button>
         </header>
         <pre id="logBox"></pre>
