@@ -657,8 +657,23 @@ public class MainActivity extends Activity {
     volatile int loadTries = 0;
     static final int MAX_LOAD_TRIES = 30;
 
+    /**
+     * 首次探测的启动宽限：Activity 刚起来时网关进程可能还没开始监听，此刻去 connect
+     * 只会得到「连接被拒」——状态条因此先闪一下「已停止」，日志里也留一堆噪声。
+     * 这里把第一次探测推迟到 1.2 秒后（状态条在这段时间显示「启动中」是准确的）。
+     */
+    final long probeDelayFrom = SystemClock.elapsedRealtime();
+    static final long PROBE_START_GRACE_MS = 1200;
+
     void probePort() {
         if (probing) return;
+        long age = SystemClock.elapsedRealtime() - probeDelayFrom;
+        if (age < PROBE_START_GRACE_MS) {
+            ui.postDelayed(new Runnable() {
+                public void run() { probePort(); }
+            }, PROBE_START_GRACE_MS - age);
+            return;
+        }
         probing = true;
         try {
             probe.execute(new Runnable() {
