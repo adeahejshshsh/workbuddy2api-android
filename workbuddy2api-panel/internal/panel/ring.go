@@ -61,6 +61,39 @@ type Ring struct {
 	head    int // 下一次写入位置
 	size    int // 已写入条数（<= cap）
 	cap     int
+	// store 全频道按天落盘（见 logstore.go）。nil = 未启用（纯内存）。
+	store *LogStore
+}
+
+// SetLogStore 挂上按天落盘存储，并用它回填最近日志。
+//
+// 回填来源是 store：内存环每频道只有 500 条、重启归零，而「昨天下午那波 429 从
+// 几点开始」正是要靠文件回答的问题。回填只灌内存环（有上限），不重建全部历史。
+func (r *Ring) SetLogStore(store *LogStore) error {
+	r.mu.Lock()
+	r.store = store
+	r.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+	back := store.Backfill(0)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cap <= 0 {
+		r.cap = 500
+	}
+	if r.entries == nil {
+		r.entries = make([]LogEntry, r.cap)
+	}
+	for _, entry := range back {
+		// 回填按时间升序逐条灌入：环是 FIFO，顺序错了「最近 N 条」就不是最近的。
+		r.entries[r.head] = entry
+		r.head = (r.head + 1) % r.cap
+		if r.size < r.cap {
+			r.size++
+		}
+	}
+	return nil
 }
 
 // NewRing 构建容量为 capacity 的日志环（非正值回退 500）。
@@ -93,7 +126,13 @@ func (r *Ring) Write(p []byte) (int, error) {
 		if r.entries == nil {
 			r.entries = make([]LogEntry, r.cap)
 		}
-		r.entries[r.head] = LogEntry{TS: now, Ch: classifyLine(text), Text: text}
+		entry := LogEntry{TS: now, Ch: classifyLine(text), Text: text}
+		r.entries[r.head] = entry
+		// 落盘在**锁内**做：同一把锁保证「入环顺序 = 文件顺序」。swap 出去写会让
+		// 两条并发日志在文件里倒序，事故复盘按时间读就错位了。
+		if r.store != nil {
+			r.store.Append(entry)
+		}
 		r.head = (r.head + 1) % r.cap
 		if r.size < r.cap {
 			r.size++

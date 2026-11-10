@@ -477,6 +477,24 @@ func main() {
 	if err := pn.StartTaskJobs(stateSibling(cfg.StateFile, "task-jobs.json")); err != nil {
 		log.Printf("WARN: [panel] 作业记录启动失败（面板作业历史不可用）: %v", err)
 	}
+	// 面板运行日志全频道按天落盘（logging.panel_log_*）：重启后回填、可按区间导出。
+	// 装配顺序必须在 log.SetOutput 之前 —— 回填完再把实时输出接上，否则启动期那几行
+	// 会先入环、再被回填的历史插到前面，时间就乱了。
+	var panelLogs *panel.LogStore
+	if cfg.Logging.PanelLogEnabled {
+		panelLogs = panel.NewLogStore(stateSibling(cfg.StateFile, "panel-logs"),
+			cfg.Logging.PanelLogRetentionDays, cfg.Logging.PanelLogMaxMB)
+		if panelLogs == nil {
+			log.Printf("WARN: 面板日志落盘不可用（数据目录建不出来），退回纯内存环")
+		} else {
+			if err := pn.Logs().SetLogStore(panelLogs); err != nil {
+				log.Printf("WARN: 面板日志回填失败（不影响新日志）: %v", err)
+			}
+			defer panelLogs.Close()
+			log.Printf("[panel] 运行日志落盘 %s（保留 %d 天，上限 %d MiB）",
+				panelLogs.Dir(), cfg.Logging.PanelLogRetentionDays, cfg.Logging.PanelLogMaxMB)
+		}
+	}
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 

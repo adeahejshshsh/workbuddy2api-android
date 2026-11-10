@@ -407,3 +407,16 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 
 **没搬**：`18a6776` 的运行日志落盘/导出（`logstore` 392 + `logexport` 119 + ring 改造 +
 面板页），单独一批做。
+
+## 第十批（下）：运行日志落盘 + 区间导出（`18a6776` 的后半）
+
+| 组件 | 内容 |
+|---|---|
+`panel/logstore.go` | 全频道按天落盘（`<state 同目录>/panel-logs/YYYY-MM-DD.jsonl`），单文件超上限轮转、保留 N 天清理、`Backfill` 供重启回填、`Export` 按区间写 zip |
+`panel/logexport.go` | `GET /panel/api/logs/export?days=N` 或 `from/to` RFC3339 → ZIP。先落临时文件再回传（zip 目录在尾部，边写边发会给出坏包）；区间无数据 404 而非空 zip；days 超保留期按保留期封顶 |
+`Ring.SetLogStore` | 挂存储 + 用文件回填内存环（只灌最近 N 条，不重建全部历史）；写入在**同一把锁内**落盘，保证「入环顺序 = 文件顺序」 |
+`cmd/server` | `logging.panel_log_enabled`（缺省 true）/ `panel_log_retention_days`（7）/ `panel_log_max_mb`（50）；装配必须在 `log.SetOutput` 之前，否则启动期几行会插到回填历史前面 |
+面板 | 运行日志页加「近 1/3/7 天」+「导出 ZIP」（先 HEAD 探状态码，非 2xx 弹错误文案）；配置页加选号策略与三项日志开关 |
+
+本仓差异：我们的 `Ring` 是固定数组 + 头指针（上游是 append 切片），`SetTaskArchive` 不存在 ——
+`SetLogStore` 按本仓结构重写（回填走同一 head/size 逻辑），旧的 task-logs 兜底分支相应删掉。

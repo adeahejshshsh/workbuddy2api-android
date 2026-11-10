@@ -62,6 +62,16 @@ type Config struct {
 		// 单个事件上限 16KB（超长按「丢最旧轮次 → 截断最后一条」收敛，保持合法 JSON）。
 		// 热生效（经 livecfg 快照），无需重启。
 		RequestArchiveContext bool `json:"request_archive_context"`
+		// PanelLogEnabled 面板「运行日志」是否按天落盘，缺省 true。
+		//
+		// 为什么默认开：内存环每频道只有 500 条，一次长会话就能把上午的行冲掉，
+		// 重启更是全部归零——「昨天下午那波 429 从几点开始的」这类问题原本无解。
+		// 目录建不出来时自动退回纯内存（不是启动失败）。
+		PanelLogEnabled bool `json:"panel_log_enabled"`
+		// PanelLogRetentionDays 面板日志保留天数，缺省 7；<=0 回落默认。
+		PanelLogRetentionDays int `json:"panel_log_retention_days"`
+		// PanelLogMaxMB 面板日志总量上限（MiB，按天文件，单文件超限轮转），缺省 50。
+		PanelLogMaxMB int `json:"panel_log_max_mb"`
 	} `json:"logging"`
 
 	Server struct {
@@ -556,6 +566,9 @@ func Default() *Config {
 	// 缺省 true 靠显式赋值实现（同 Schedule 开关）：JSON 里键缺席时字段保留此值，
 	// 只有显式 false 才关闭来源记录。
 	c.Logging.RequestClientInfo = true
+	c.Logging.PanelLogEnabled = true
+	c.Logging.PanelLogRetentionDays = 7
+	c.Logging.PanelLogMaxMB = 50
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.TravelHours = []int{9, 21}
 	c.Schedule.ActivityHours = []int{10}
@@ -1040,6 +1053,13 @@ func (c *Config) normalize() error {
 	}
 	if c.Logging.RequestRetentionDays <= 0 {
 		c.Logging.RequestRetentionDays = 7
+	}
+	// 面板日志保留参数：<=0 回落缺省（把保护悄悄关成 0 天/0 MiB 没有语义）。
+	if c.Logging.PanelLogRetentionDays <= 0 {
+		c.Logging.PanelLogRetentionDays = 7
+	}
+	if c.Logging.PanelLogMaxMB <= 0 {
+		c.Logging.PanelLogMaxMB = 50
 	}
 	if c.Logging.RequestArchiveMaxMB <= 0 {
 		c.Logging.RequestArchiveMaxMB = 100
