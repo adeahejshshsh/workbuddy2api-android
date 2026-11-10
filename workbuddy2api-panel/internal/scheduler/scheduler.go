@@ -269,7 +269,17 @@ func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepal
 // 任务进度永不跳动、连登/签到无效，跑了纯粹白烧配额且没有任何报错。
 // 额度查询、保活、签到照常（它们有显式错误或读端点可用）。
 func (s *Scheduler) skipBehaviorTask(a *auth.Auth) bool {
-	if a == nil || !a.IsEnterpriseSession() {
+	if a == nil {
+		return false
+	}
+	// 人工定性为个人版但令牌仍是企业切换会话：按用户意图照常跑，但留一行 WARN——
+	// 上游对这类会话可能「返回 200 却静默丢弃」，进度不动时这行是唯一线索。
+	if auth.NormalizeEnterpriseOverride(a.EnterpriseOverride) == "personal" && a.IsEnterpriseToken() {
+		log.Printf("WARN: scheduler: %s 已人工设为个人版，但令牌是企业切换会话（token_source=enterprise_switch）；"+
+			"行为类任务可能被上游静默丢弃（进度不动即此原因）", logfmt.Label(a.UID, a.NicknameValue()))
+		return false
+	}
+	if !a.IsEnterpriseSession() {
 		return false
 	}
 	log.Printf("scheduler: %s 处于企业上下文（token_source=enterprise_switch），跳过行为类任务",

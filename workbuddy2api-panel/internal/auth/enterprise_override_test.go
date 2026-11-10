@@ -4,6 +4,7 @@ package auth
 // enterpriseId —— 覆盖值必须能压过它，且两种文件形态（旧扁平 / 现嵌套）都要认。
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -128,5 +129,35 @@ func TestNormalizeEnterpriseOverride(t *testing.T) {
 		if got := NormalizeEnterpriseOverride(in); got != want {
 			t.Errorf("NormalizeEnterpriseOverride(%q)=%q want %q", in, got, want)
 		}
+	}
+}
+
+// TestPersonalOverrideBypassesEnterpriseSession 「企业切换会话」是第二层判据：
+// 只覆盖 IsEnterprise() 不够——面板改成个人版后任务面板仍回「企业上下文」，
+// 用户看到的就是「我改了但没用」（实测反馈）。
+func TestPersonalOverrideBypassesEnterpriseSession(t *testing.T) {
+	// 构造 token_source=enterprise_switch 的合成 JWT（不校验签名）。
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"token_source":"enterprise_switch"}`))
+	tok := "h." + payload + ".s"
+
+	a := &Auth{UID: "u9", AccessToken: tok}
+	if !a.IsEnterpriseSession() {
+		t.Fatal("前置：企业切换令牌应判企业上下文")
+	}
+	if !a.IsEnterpriseToken() {
+		t.Fatal("前置：IsEnterpriseToken 应为 true")
+	}
+	a.EnterpriseOverride = "personal"
+	if a.IsEnterpriseSession() {
+		t.Fatal("强制个人后不该再判企业上下文")
+	}
+	// 令牌事实本身不变（告警仍能看见）。
+	if !a.IsEnterpriseToken() {
+		t.Fatal("IsEnterpriseToken 只反映令牌，不受覆盖影响")
+	}
+	// 自动判定（无覆盖）时行为不变。
+	a.EnterpriseOverride = ""
+	if !a.IsEnterpriseSession() {
+		t.Fatal("无覆盖时应回到企业上下文")
 	}
 }
