@@ -127,6 +127,116 @@ final class PanelApi {
         });
     }
 
+    /** 二进制下载（导出账号）：回调拿到字节与建议文件名（取 Content-Disposition）。 */
+    interface FileCb {
+        void ok(byte[] data, String filename);
+        void fail(String msg);
+    }
+
+    static void download(final Context app, final String path, final FileCb cb) {
+        final Context ctx = app.getApplicationContext();
+        IO.execute(new Runnable() {
+            public void run() {
+                HttpURLConnection conn = null;
+                try {
+                    URL u = new URL(base(ctx) + path);
+                    conn = (HttpURLConnection) u.openConnection();
+                    conn.setConnectTimeout(6000);
+                    conn.setReadTimeout(60000);
+                    String k = key(ctx);
+                    if (!k.isEmpty()) conn.setRequestProperty("Authorization", "Bearer " + k);
+                    int code = conn.getResponseCode();
+                    InputStream is = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                    final byte[] data = is == null ? new byte[0] : readBytes(is);
+                    if (code < 200 || code >= 300) {
+                        final String msg = "HTTP " + code + "：" + brief(new String(data, "UTF-8"));
+                        UI.post(new Runnable() { public void run() { cb.fail(msg); } });
+                        return;
+                    }
+                    String name = "accounts.json";
+                    String cd = conn.getHeaderField("Content-Disposition");
+                    if (cd != null) {
+                        int i = cd.indexOf("filename=\"");
+                        if (i >= 0) {
+                            int j = cd.indexOf('"', i + 10);
+                            if (j > i) name = cd.substring(i + 10, j);
+                        }
+                    }
+                    final String fname = name;
+                    UI.post(new Runnable() { public void run() { cb.ok(data, fname); } });
+                } catch (final Throwable t) {
+                    final String msg = t.getClass().getSimpleName() + (t.getMessage() == null ? "" : "：" + t.getMessage());
+                    UI.post(new Runnable() { public void run() { cb.fail(msg); } });
+                } finally {
+                    if (conn != null) try { conn.disconnect(); } catch (Throwable ignored) {}
+                }
+            }
+        });
+    }
+
+    /** 上传单个文件（导入 cockpit / auths）：multipart/form-data，字段名固定为 file。 */
+    static void upload(final Context app, final String path, final String filename,
+                       final byte[] data, final Cb cb) {
+        final Context ctx = app.getApplicationContext();
+        IO.execute(new Runnable() {
+            public void run() {
+                HttpURLConnection conn = null;
+                try {
+                    String boundary = "----wb2api" + System.currentTimeMillis();
+                    URL u = new URL(base(ctx) + path);
+                    conn = (HttpURLConnection) u.openConnection();
+                    conn.setRequestMethod("POST");
+                    conn.setDoOutput(true);
+                    conn.setConnectTimeout(6000);
+                    conn.setReadTimeout(120000);
+                    conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+                    String k = key(ctx);
+                    if (!k.isEmpty()) conn.setRequestProperty("Authorization", "Bearer " + k);
+                    java.io.ByteArrayOutputStream body = new java.io.ByteArrayOutputStream();
+                    String head = "--" + boundary + "\r\n"
+                            + "Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"\r\n"
+                            + "Content-Type: application/json\r\n\r\n";
+                    body.write(head.getBytes("UTF-8"));
+                    body.write(data);
+                    body.write(("\r\n--" + boundary + "--\r\n").getBytes("UTF-8"));
+                    byte[] raw = body.toByteArray();
+                    conn.setFixedLengthStreamingMode(raw.length);
+                    OutputStream os = conn.getOutputStream();
+                    os.write(raw);
+                    os.close();
+
+                    int code = conn.getResponseCode();
+                    InputStream is = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                    String text = is == null ? "" : readAll(is);
+                    if (code < 200 || code >= 300) {
+                        final String msg = "HTTP " + code + "：" + brief(text);
+                        UI.post(new Runnable() { public void run() { cb.fail(msg); } });
+                        return;
+                    }
+                    JSONObject obj;
+                    try { obj = text.isEmpty() ? new JSONObject() : new JSONObject(text); }
+                    catch (Throwable t) { obj = new JSONObject(); }
+                    final JSONObject out = obj;
+                    UI.post(new Runnable() { public void run() { cb.ok(out); } });
+                } catch (final Throwable t) {
+                    final String msg = t.getClass().getSimpleName() + (t.getMessage() == null ? "" : "：" + t.getMessage());
+                    UI.post(new Runnable() { public void run() { cb.fail(msg); } });
+                } finally {
+                    if (conn != null) try { conn.disconnect(); } catch (Throwable ignored) {}
+                }
+            }
+        });
+    }
+
+    private static byte[] readBytes(InputStream is) throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+        is.close();
+        return bos.toByteArray();
+    }
+
     private static String readAll(InputStream is) throws Exception {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         byte[] buf = new byte[8192];
