@@ -220,6 +220,15 @@ public class MainActivity extends Activity {
     static final int BAD      = 0xFFF0655F;   // --bad
 
     WebView web;
+    /**
+     * 原生控制台（Console.java）。网页面板仍保留为「网页面板」入口（WebPanelActivity），
+     * 只用于本控制台未覆盖的进阶页（积分构成 / 余额趋势 / 模型锁池 / 请求记录 / 导入导出）。
+     *
+     * nativeMode=true 时 WebView 只创建不挂载、不加载：面板改原生后它只剩 fallback 角色，
+     * 常驻后台加载一份网页既费内存也抢 CPU。
+     */
+    Console console;
+    static final boolean nativeMode = true;
     TextView info, logLine, stateLabel;
     View dot;
     ProgressBar progress;
@@ -291,13 +300,14 @@ public class MainActivity extends Activity {
         bar.addView(chip("保活设置", new View.OnClickListener() {
             public void onClick(View v) { keepAliveWizard(); }
         }));
-        bar.addView(chip("重载面板", new View.OnClickListener() {
+        bar.addView(chip("网页面板", new View.OnClickListener() {
             public void onClick(View v) {
-                injected = false;
-                pageHadError = false;   // 手动重载：清错误标记，否则本次也会被判定失败（bug B2）
-                panelLoaded = false;
-                loadTries = 0;
-                web.reload();
+                // 原生控制台之外的进阶页仍走网页版：不为了重写而丢功能。
+                try {
+                    startActivity(new Intent(MainActivity.this, WebPanelActivity.class));
+                } catch (Throwable t) {
+                    toast("打开网页面板失败：" + t);
+                }
             }
         }));
         root.addView(bar);
@@ -436,7 +446,14 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
-        root.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        if (nativeMode) {
+            // 原生控制台占满剩余空间；WebView 保持未挂载（不渲染、不加载）。
+            console = new Console(this);
+            root.addView(console.view(), new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        } else {
+            root.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        }
 
         setContentView(root);
 
@@ -579,7 +596,7 @@ public class MainActivity extends Activity {
         // 都不来 —— panelLoading 永远 true，之后不再自动加载，只能手点「重载面板」。
         boolean loadingFresh = panelLoading
                 && (SystemClock.elapsedRealtime() - panelLoadAt) < PANEL_LOAD_TIMEOUT_MS;
-        if (!panelLoaded && !loadingFresh && portServing && web != null
+        if (!nativeMode && !panelLoaded && !loadingFresh && portServing && web != null
                 && loadTries < MAX_LOAD_TRIES) {
             panelLoading = true;
             panelLoadAt = SystemClock.elapsedRealtime();

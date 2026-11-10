@@ -36,6 +36,14 @@
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
+        <!-- 网页面板（fallback）：原生控制台未覆盖的进阶页从这里进，退出即销毁 -->
+        <activity
+            android:name=".WebPanelActivity"
+            android:exported="false"
+            android:label="网页面板"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
