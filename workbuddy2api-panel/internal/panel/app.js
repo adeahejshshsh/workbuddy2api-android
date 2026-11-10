@@ -724,17 +724,19 @@ function renderAccounts(list) {
       '<td class="who"><div class="nm">' + remarkName(s.uid, s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + (s.api_key ? ' <span class="realm-tag">API Key</span>' : '') + '</div><div class="id">' + esc(short) + '</div>' +
         (s.remark ? '<div class="hint" style="font-size:11.5px;color:var(--accent);margin-top:2px">备注：' + esc(s.remark) + '</div>' : '') +
         '<button class="xs remark-btn" data-uid="' + esc(s.uid) + '" data-remark="' + esc(s.remark || '') + '" style="margin-top:3px">备注</button></td>' +
-      '<td>' + tag + note + rateLimits + '</td>' +
-      '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
-      '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
-      '<td class="num">' + (s.in_flight || 0) + '</td>' +
-      '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
+      // data-label：窄屏把行渲染成卡片时，靠它显示「状态 / 积分 / …」标签
+      // （thead 在卡片模式里是隐藏的）。
+      '<td data-label="状态">' + tag + note + rateLimits + '</td>' +
+      '<td class="cred" data-label="积分" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
+      '<td class="num" data-label="成功 / 失败">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
+      '<td class="num" data-label="在途">' + (s.in_flight || 0) + '</td>' +
+      '<td class="num usage-cell" data-label="用量" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
         '<span class="usage-item usage-count"><b>' + req + '</b><em>次</em></span>' +
         '<span class="usage-item usage-total"><b>' + totalTok + '</b>' + totalTokUnit + '</span>' +
         '<span class="usage-item usage-latency"><b>' + latency + '</b></span>' +
         '<span class="usage-item usage-rate"><b>' + rate + '</b></span>' +
       '</span></td>' +
-      '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
+      '<td class="num" data-label="最近成功" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
       // 八个动作按**固定槽位**输出，缺位留空 span —— CSS 用 grid 固定列宽逐行对齐。
       // 否则按钮个数随状态变化（解冻/暂停/恢复互斥、企业号没有签到/任务），
       // 不同行的按钮起点不一致，整列左右错位。
@@ -2397,9 +2399,9 @@ async function loadTasks() {
       const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
       return '<tr title="' + esc(tip) + '"><td class="mark" aria-hidden="true"><i></i></td>' +
         '<td class="who"><div class="nm">' + esc(t.title || t.task_code) + '</div><div class="id">' + esc(t.task_code) + (t.tag ? ' · ' + esc(t.tag) : '') + '</div></td>' +
-        '<td class="num">' + esc(prog) + '</td>' +
-        '<td class="num">' + esc(reward) + '</td>' +
-        '<td>' + badge + '</td>' +
+        '<td class="num" data-label="进度">' + esc(prog) + '</td>' +
+        '<td class="num" data-label="奖励">' + esc(reward) + '</td>' +
+        '<td data-label="状态">' + badge + '</td>' +
         '<td class="acts">' + acted + '</td></tr>';
     }).join('');
     st.hidden = true;
