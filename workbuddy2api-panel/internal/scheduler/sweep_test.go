@@ -74,7 +74,20 @@ func TestTaskSweepPanicDoesNotKillLoop(t *testing.T) {
 	s.StartTaskSweep(ctx, 5*time.Millisecond)
 	waitFor(t, func() bool { return runs.Load() >= 2 }, "首轮 panic 后循环应继续（不能整个进程退出）")
 	// panic 后任务族锁必须已释放，否则面板按钮恒 409。
-	if !s.TryBeginTask(TaskSweep) {
+	//
+	// 不能「runs>=2 就立刻断言锁可获取」：第 2 轮可能正在执行（它持锁），这会让用例
+	// 在整包连跑时偶发假红（实测 3 次里红 2 次）。改成等锁自己放出来，超时才失败。
+	cancel()
+	locked := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.TryBeginTask(TaskSweep) {
+			locked = true
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !locked {
 		t.Fatal("panic 后 TaskSweep 锁未释放")
 	}
 	s.EndTask(TaskSweep)

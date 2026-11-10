@@ -31,6 +31,23 @@ type Config struct {
 	AuthDir     string `json:"auth_dir"`   // ./auths
 	StateFile   string `json:"state_file"` // ./data/state.json
 
+	// Accounts 账号目录相关（热重载，issue #199）。
+	Accounts struct {
+		// ReloadInterval 账号目录热重载轮询间隔。空 = 默认 10s；"0s" = 关闭轮询
+		// （手动接口 POST /panel/api/accounts/reload 仍可用）。
+		//
+		// 为什么默认开启：外部脚本/另一台机器往 auths/ 同步文件是最常见用法，而重启
+		// 进程会丢在途请求。轮询只做 ReadDir + 内容指纹，几十个号是微秒级开销。
+		ReloadInterval string `json:"reload_interval"`
+		// ReloadDeleteConfirm 文件消失后要连续几轮扫描确认才把账号移出池（默认 2）。
+		// 半写文件、临时移走都可能让账号「这一轮看不见」；剔除会写进 state.json，
+		// 下次启动也不复活，所以要连续确认。1 = 立即删（不建议）。
+		ReloadDeleteConfirm int `json:"reload_delete_confirm"`
+	} `json:"accounts"`
+
+	// ReloadIntervalDur 解析后的账号目录轮询间隔（accounts.reload_interval）；0 = 关闭轮询。
+	ReloadIntervalDur time.Duration `json:"-"`
+
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
@@ -566,6 +583,8 @@ func Default() *Config {
 	// 缺省 true 靠显式赋值实现（同 Schedule 开关）：JSON 里键缺席时字段保留此值，
 	// 只有显式 false 才关闭来源记录。
 	c.Logging.RequestClientInfo = true
+	c.Accounts.ReloadInterval = "10s"
+	c.Accounts.ReloadDeleteConfirm = 2
 	c.Logging.PanelLogEnabled = true
 	c.Logging.PanelLogRetentionDays = 7
 	c.Logging.PanelLogMaxMB = 50
@@ -1055,6 +1074,25 @@ func (c *Config) normalize() error {
 		c.Logging.RequestRetentionDays = 7
 	}
 	// 面板日志保留参数：<=0 回落缺省（把保护悄悄关成 0 天/0 MiB 没有语义）。
+	// 账号目录热重载：间隔解析失败 fail fast（静默回落 10s 会让「我关了轮询」变成
+	// 「它还在动」）；确认次数 <=0 回落 2，1 合法（立即删，不建议但允许）。
+	if c.Accounts.ReloadDeleteConfirm <= 0 {
+		c.Accounts.ReloadDeleteConfirm = 2
+	}
+	raw := strings.TrimSpace(c.Accounts.ReloadInterval)
+	if raw == "" {
+		raw = "10s"
+	}
+	d, derr := time.ParseDuration(raw)
+	if derr != nil {
+		return fmt.Errorf("accounts.reload_interval: %q 不是合法时长（例：10s / 1m / 0s）", c.Accounts.ReloadInterval)
+	}
+	if d < 0 {
+		return fmt.Errorf("accounts.reload_interval: 不能为负（关闭轮询请写 \"0s\"）")
+	}
+	c.Accounts.ReloadInterval = raw
+	c.ReloadIntervalDur = d
+
 	if c.Logging.PanelLogRetentionDays <= 0 {
 		c.Logging.PanelLogRetentionDays = 7
 	}

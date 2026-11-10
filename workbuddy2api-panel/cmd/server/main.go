@@ -591,6 +591,11 @@ func main() {
 	sch.SetTaskSweepJitter(cfg.Schedule.TaskSweepJitterPermill)
 	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)
 
+	// 账号目录热重载（issue #199）：外部脚本往 auths/ 同步文件后不必重启进程。
+	// 间隔 "0s" 关闭轮询，手动接口仍然可用。启动首轮会先对齐一次。
+	pn.SetReloadConfig(cfg.ReloadIntervalDur, cfg.Accounts.ReloadDeleteConfirm)
+	go pn.ReloadLoop(ctx.Done())
+
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
 	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，
 	// ModelRate 恒返回空串——积分保底的目录兜底在这段空窗期内形同虚设，触底号

@@ -110,6 +110,18 @@ type Panel struct {
 	jobMu    sync.Mutex
 	taskJobs *jobStore
 
+	// —— 账号目录热重载（reload.go）——
+	// reloadMu 同时守护「重载扫描/对齐」与「登录/导入/新增 Key 的落盘+入池」两条路径，
+	// 让它们互斥：重载刚扫完还没 upsert 完时插进来的 Add，可能被同一轮的删除判据当成
+	// 「文件不存在」而抹掉。锁序固定 proxyAccountMu → reloadMu → pool.mu。
+	reloadMu            sync.Mutex
+	reloadMissing       map[string]int // uid → 连续缺席轮数（达 confirm 才删）
+	reloadInterval      time.Duration  // 轮询间隔（0 = 关闭轮询，手动接口仍可用）
+	reloadDeleteConfirm int            // 删除需连续确认的轮数
+	reloadLastAt        time.Time
+	reloadLast          ReloadResult
+	reloadFingerprint   string // 上次成功重载后的目录内容指纹
+
 	// idxOnce/idxBody/idxETag 版本化 index.html 的实例级缓存（review #24）：
 	// 此前是包级单例，进程内构造第二个 Panel（测试/嵌入/多实例）会拿到第一个
 	// Panel 的版本串与 ETag，导致 app.js?v= 与响应体错配。
@@ -201,6 +213,9 @@ func New(cfg Config) *Panel {
 		started: time.Now(),
 		logs:    NewRing(500),
 		logins:  map[string]*loginSession{},
+		// 热重载的缺席计数表：nil map 上写会 panic（重载首轮就写）。
+		reloadMissing:       map[string]int{},
+		reloadDeleteConfirm: 2,
 	}
 	p.growthConc.Store(int64(cfg.GrowthConcurrency))
 	p.routes()
@@ -286,6 +301,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/logs", p.logsHandler)
 	// 落盘日志按区间导出（zip）：事故复盘「把最近三天发我」不必登设备翻文件。
 	p.mux.HandleFunc("GET /panel/api/logs/export", p.logsExportHandler)
+	// 账号目录热重载（reload.go）：POST 手动对齐一次，GET 看上次结果。
+	p.mux.HandleFunc("POST /panel/api/accounts/reload", p.reloadAccounts)
+	p.mux.HandleFunc("GET /panel/api/accounts/reload", p.reloadStatus)
 	// 错误观测：把日志环里的 WARN/ERR 按「账号 × 错误类型」聚合（见 errors.go）。
 	// 与日志同源、零新增存储——原始日志里几十行同质 WARN，人眼抓不到真正重要的差异。
 	p.mux.HandleFunc("GET /panel/api/error_summary", p.errorSummary)

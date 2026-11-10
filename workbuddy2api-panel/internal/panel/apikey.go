@@ -88,7 +88,11 @@ func (p *Panel) addAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "save auth: "+err.Error())
 		return
 	}
+	// 入池与目录热重载串行化（issue #199 风险 3）：重载刚扫完、还没 upsert 完时插进来
+	// 的 Add，可能被同一轮的删除判据当成「文件不存在」而抹掉。
+	p.reloadMu.Lock()
 	p.cfg.Pool.Add(a) // upsert：已存在则覆盖凭证、保留原池状态
+	p.reloadMu.Unlock()
 	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
 	log.Printf("panel: 添加 API Key 账号 uid=%s nickname=%q credits=%d/%d", uid, a.Nickname, remain, total)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "nickname": a.Nickname, "api_key": true})

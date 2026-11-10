@@ -420,3 +420,33 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 
 本仓差异：我们的 `Ring` 是固定数组 + 头指针（上游是 append 切片），`SetTaskArchive` 不存在 ——
 `SetLogStore` 按本仓结构重写（回填走同一 head/size 逻辑），旧的 task-logs 兜底分支相应删掉。
+
+## 第十一批：账号目录热重载（`9e5c2cd` + `c54c517`，#199）
+
+目标：外部脚本/另一台机器往 `auths/` 同步文件后**不必重启进程**（重启会丢在途请求）。
+
+装配落地：
+
+- `auth.LoadDirReport`：同一套扫描逻辑多回报「文件数 + 解析失败明细」，`LoadDir` 变薄壳；
+- `pool.RemoveMany`（一次落盘，避免逐号全量 save）+ `pool.InFlight`（在途时先不删）；
+- `panel/reload.go`：手动 `POST /panel/api/accounts/reload` + 轮询 `ReloadLoop`（缺省 10s，
+  `"0s"` 关闭）；`GET` 同路径回上次结果（含 removed_uids、pending_delete）；
+- `accounts.reload_interval` / `accounts.reload_delete_confirm`（缺省 2），间隔非法 fail fast。
+
+四条防「踢号」护栏（逐条对应上游 issue #199 的风险）：
+
+1. 本轮有任何文件解析失败 → **只增不删**（半写文件被当成「文件已删」会把在池号踢掉，
+   而剔除会写进 state.json，下次启动也不复活）；
+2. 删除要连续 N 轮扫描都缺席，第一次只挂账；
+3. 扫描前后各取一次目录签名，期间集合变动就放弃本轮（并给一次重试：LoadDirReport 自己
+   会写盘回填 realm，首轮指纹几乎必然变一次）；
+4. 剔除前再 stat 一次该账号文件，文件在就跳过（同时堵住「面板刚导入、重载还没看到」）。
+
+另：轮询判据用**内容指纹**（uid|expiresAt|realm 有序哈希）而不是 mtime —— 回填 realm
+会改 mtime，按 mtime 判会自激。
+
+`c54c517` 的串行化一并落地：登录入池、导入入池、API Key 入池、账号移除都持 `reloadMu`，
+与重载扫描互斥（锁序 `proxyAccountMu → reloadMu → pool.mu`）。
+
+**本仓差异**：`LoadDir` 是我们的版本（缺 uid 跳过 + 同 UID 去重），`LoadDirReport` 按它
+重构（缺 uid 也计入 ParseError，否则热重载会在「该文件本轮不可用」时删除同号）。

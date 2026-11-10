@@ -1083,6 +1083,16 @@ body.veil-open { overflow: hidden; }
             <label class="fld"><span class="lb">单账号明细默认展示条数</span>
               <input name="package_detail_limit" type="number" min="1" placeholder="5">
               <span class="hint">积分构成页按最早到期展示，其余未用完包聚合</span></label>
+            <div class="row">
+              <label class="fld"><span class="lb">账号目录热重载间隔</span>
+                <input name="reload_interval" placeholder="10s">
+                <span class="hint">外部脚本往 auths/ 同步文件后不必重启；"0s" 关闭轮询
+                  （手动接口 POST /panel/api/accounts/reload 仍可用）</span></label>
+              <label class="fld"><span class="lb">删除确认轮数</span>
+                <input name="reload_delete_confirm" type="number" min="1" max="10" placeholder="2">
+                <span class="hint">文件消失要连续几轮扫描确认才移出池。半写/临时移走很常见，
+                  1 = 立即删（不建议）</span></label>
+            </div>
             <label class="fld"><span class="lb">选号策略</span>
               <select name="selection_strategy">
                 <option value="weighted">weighted — 加权随机（缺省）</option>

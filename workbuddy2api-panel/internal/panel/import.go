@@ -260,7 +260,9 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		p.reloadMu.Lock()
 		p.cfg.Pool.Add(a)
+		p.reloadMu.Unlock()
 		p.cfg.Pool.Revive(uid)
 
 		imported++

@@ -410,7 +410,13 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "凭证已签发但落盘失败，请重新发起添加账号："+err.Error())
 		return
 	}
+	// 落盘 + 入池与目录热重载串行化：登录刚写出半份文件时若正好被重载扫到，该账号会被
+	// 判成「解析失败」进而在本轮拒绝删除——不会丢，但这一轮的 upsert 顺序可能反过来
+	// 把旧凭证盖回来。持同一把锁就没有这个窗口（SaveAtomic 已在上面完成，这里只锁入池；
+	// 半写窗口由 reload 侧的「解析失败只增不删」兜住）。
+	p.reloadMu.Lock()
 	p.cfg.Pool.Add(a)
+	p.reloadMu.Unlock()
 	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
 
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
