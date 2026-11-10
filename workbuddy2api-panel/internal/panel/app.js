@@ -747,7 +747,9 @@ function renderAccounts(list) {
         ((s.enterprise || s.api_key || s.realm === 'global') ? '' :
           '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>'),
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>',
-        ((s.enterprise || s.api_key || s.realm === 'global') ? '' :
+        // 国际版保留查询入口（上游任务是只读 schema）：按钮照常渲染，写操作在弹窗里
+        // 按 capabilities 禁用。企业版/API Key 仍隐藏——它们连查询都没有个人体系。
+        ((s.enterprise || s.api_key) ? '' :
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>'),
         // 探活只对冻结号有意义（只读探测上游是否已解封，不改池状态）。
         ((frozen && !s.paused) ? '<button class="xs ghost" data-a="probe_ban" data-u="' + esc(s.uid) + '" title="只读探测上游是否已解封：不 revive、不参与选号、不改任何状态">探活</button>' : ''),
@@ -757,6 +759,10 @@ function renderAccounts(list) {
                   : (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')),
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>'),
+        // 账号类型：点一下在 自动 / 强制企业 / 强制个人 之间循环。落 auth 文件，
+        // 重启与热重载都保持。用在「上游把个人号判成企业版」的情况（曾有整批误判）。
+        ((s.api_key) ? '' :
+          '<button class="xs ghost" data-a="ent_type" data-u="' + esc(s.uid) + '" data-o="' + esc(s.enterprise_override || '') + '" title="' + esc(entTypeTip(s)) + '">' + esc(entTypeLabel(s)) + '</button>'),
         '<button class="xs ghost" data-a="remark" data-u="' + esc(s.uid) + '" title="给这个账号起个本机备注（只存浏览器）">备注</button>',
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>',
       ].map(html => html || '<span class="slot" aria-hidden="true"></span>').join('') +
@@ -911,6 +917,15 @@ $('accBody').addEventListener('click', async ev => {
     } else if (a === 'resume') {
       await api('accounts/' + encodeURIComponent(u) + '/resume', { method: 'POST' });
       toast('已恢复选号', 'ok');
+    } else if (a === 'ent_type') {
+      // 循环："" → enterprise → personal → ""
+      const cur = b.dataset.o || '';
+      const next = cur === '' ? 'enterprise' : (cur === 'enterprise' ? 'personal' : '');
+      const r = await api('accounts/' + encodeURIComponent(u) + '/enterprise', {
+        method: 'POST', body: JSON.stringify({ override: next }),
+      });
+      const name = next === '' ? '自动判定' : (next === 'enterprise' ? '强制企业版' : '强制个人版');
+      toast('账号类型：' + name + (r.changed ? '' : '（判定结果未变）'), 'ok');
     } else if (a === 'tasks') {
       openTasks(u);
     } else if (a === 'remove') {
@@ -2260,6 +2275,24 @@ function autoTaskLabel(code) {
 }
 
 
+/* 账号类型文案：按钮上显示「自动 / 企业 / 个人」，title 说明为什么可能是人工设的。 */
+function entTypeLabel(s) {
+  const o = s.enterprise_override || '';
+  if (o === 'enterprise') return '类型：企业';
+  if (o === 'personal') return '类型：个人';
+  return s.enterprise ? '类型：企业（自动）' : '类型：个人（自动）';
+}
+function entTypeTip(s) {
+  const o = s.enterprise_override || '';
+  const base = '点击切换：自动判定 → 强制企业版 → 强制个人版 → 自动判定。\n' +
+    '自动判据看上游客端的 account.type 与 enterpriseId —— 国服个人号常带默认租户的 ' +
+    'enterpriseId，会被误判成企业版（签到 400、成长任务 403）。\n' +
+    '覆盖值写入该账号的 auth 文件，重启与目录热重载后仍然有效。';
+  if (o === 'enterprise') return base + '\n当前：强制企业版。';
+  if (o === 'personal') return base + '\n当前：强制个人版。';
+  return base + '\n当前：自动判定（结果为' + (s.enterprise ? '企业版' : '个人版') + '）。';
+}
+
 function openTasks(uid) {
   taskUID = uid;
   $('taskWho').textContent = uid.slice(0, 16);
@@ -2326,9 +2359,13 @@ async function loadTasks() {
   try {
     const d = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks');
     const list = d.tasks || [];
+    // capabilities：国际区任务只读（accept/claim/automate 均为 false），按钮据此关掉，
+    // 而不是让用户点了必然失败。message 里是「为什么只读」的一句话说明。
+    const caps = d.capabilities || {};
+    $('taskMsg').textContent = d.message || '';
     if (!list.length) {
       st.className = 'state';
-      st.textContent = '该账号暂无任务';
+      st.textContent = d.message || '该账号暂无任务';
       return;
     }
     // 有进度或可领取的排前面，已领取沉底——一眼看到"现在该做什么"。
@@ -2347,11 +2384,12 @@ async function loadTasks() {
         : t.locked ? '<span class="tag mute">未解锁</span>'
         : t.accept_status === 'accepted' ? '<span class="tag mute">进行中</span>'
         : '<span class="tag mute">未接受</span>';
+      const canAccept = caps.accept !== false, canClaim = caps.claim !== false, canAuto = caps.automate !== false;
       const acted = t.claimed || t.locked ? ''
-        : t.claimable ? '<button class="xs primary" data-t="claim" data-c="' + esc(t.task_code) + '">领取</button>'
-        : autoTaskLabel(t.task_code) ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(autoTaskLabel(t.task_code)) + '">一键完成</button>'
+        : t.claimable ? (canClaim ? '<button class="xs primary" data-t="claim" data-c="' + esc(t.task_code) + '">领取</button>' : '<span class="tag mute" title="国际区暂不支持领取">只读</span>')
+        : autoTaskLabel(t.task_code) ? (canAuto ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(autoTaskLabel(t.task_code)) + '">一键完成</button>' : '<span class="tag mute">只读</span>')
         : t.accept_status === 'accepted' ? ''
-        : '<button class="xs" data-t="accept" data-c="' + esc(t.task_code) + '">接受</button>';
+        : (canAccept ? '<button class="xs" data-t="accept" data-c="' + esc(t.task_code) + '">接受</button>' : '<span class="tag mute">只读</span>');
       // 操作指引（description/task_desc）挂 title 提示：如何完成交给用户看
       const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
       return '<tr title="' + esc(tip) + '"><td class="mark" aria-hidden="true"><i></i></td>' +

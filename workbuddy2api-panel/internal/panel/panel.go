@@ -302,6 +302,8 @@ func (p *Panel) routes() {
 	// 落盘日志按区间导出（zip）：事故复盘「把最近三天发我」不必登设备翻文件。
 	p.mux.HandleFunc("GET /panel/api/logs/export", p.logsExportHandler)
 	// 账号目录热重载（reload.go）：POST 手动对齐一次，GET 看上次结果。
+	// 人工定性是否企业版（覆盖上游自动判定；落 auth 文件）。
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/enterprise", p.accountEnterpriseOverride)
 	p.mux.HandleFunc("POST /panel/api/accounts/reload", p.reloadAccounts)
 	p.mux.HandleFunc("GET /panel/api/accounts/reload", p.reloadStatus)
 	// 错误观测：把日志环里的 WARN/ERR 按「账号 × 错误类型」聚合（见 errors.go）。
