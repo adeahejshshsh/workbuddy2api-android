@@ -76,6 +76,43 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// egressBackoffBase 出口级瞬时失败的退避基数（1s 起、翻倍、封顶 15s、±25% 抖动）。
+//
+// 与轮转退避的区别是**记账对象**不同，不是同一件事换个数字：轮转退避是「换号前
+// 歇一下，让上游频控窗口滑过」；本阶梯是「这条出口连续失败 N 次，整条链路歇一下」
+// ——直连出口被本域全部账号共用，换号换不到别的链路。测试置 0 跳过真实等待。
+var egressBackoffBase = 1 * time.Second
+
+const (
+	// egressBackoffCap 出口级退避封顶。
+	egressBackoffCap = 15 * time.Second
+	// egressGiveUpStreak 连续失败到这么多次就不再换号重试：链路已经证明是断的，
+	// 换号只是把同样的等待与失败重复一遍（同一出口）。4 次刚好走完 1s/2s/4s
+	// 三级阶梯——累计约 7 秒，对客户端可忍，对池子是「别把整池号一个个拖进惩罚」
+	// 的分界线。
+	egressGiveUpStreak = 4
+)
+
+// egressBackoff 出口连续失败 streak 次后应等待的时长：base·2^(streak-1) 封顶
+// egressBackoffCap，再施加 ±25% 抖动（与轮转退避同一 jitterDur，单一来源）。
+// base<=0（测试）恒 0。
+func egressBackoff(streak int, base time.Duration) time.Duration {
+	if base <= 0 || streak <= 0 {
+		return 0
+	}
+	d := base
+	for k := 1; k < streak && d < egressBackoffCap; k++ {
+		d *= 2
+		if d <= 0 {
+			return jitterDur(egressBackoffCap)
+		}
+	}
+	if d > egressBackoffCap {
+		d = egressBackoffCap
+	}
+	return jitterDur(d)
+}
+
 // busyWaitCap 「等一个名额 / 等模型解封」这类等待的硬上限。
 var busyWaitCap = 10 * time.Second
 
