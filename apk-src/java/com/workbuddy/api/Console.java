@@ -366,9 +366,8 @@ final class Console {
         acts.addView(actionPill(s.paused ? "恢复" : "暂停", new Runnable() {
             public void run() { doPause(s); }
         }));
-        acts.addView(actionPill("类型", new Runnable() {
-            public void run() { typeSheet(s); }
-        }));
+        // 类型 / 探活 / 备注 / 分组 / 模型开关都在「更多」里：动作行保持 5 个，
+        // 360px 屏不用横滑就能看全（旧版第 6 个被右边缘切掉）。
         acts.addView(actionPill("更多", new Runnable() {
             public void run() { moreSheet(s); }
         }));
