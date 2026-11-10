@@ -1586,6 +1586,8 @@ const CFG_MAP = {
   package_detail_limit: ['panel', 'package_detail_limit'],
   poll_interval_sec: ['panel', 'poll_interval_sec'],
   selection_strategy: ['pool', 'selection_strategy'],
+  reload_interval: ['accounts', 'reload_interval'],
+  reload_delete_confirm: ['accounts', 'reload_delete_confirm'],
   panel_log_enabled: ['logging', 'panel_log_enabled'],
   panel_log_retention_days: ['logging', 'panel_log_retention_days'],
   panel_log_max_mb: ['logging', 'panel_log_max_mb'],

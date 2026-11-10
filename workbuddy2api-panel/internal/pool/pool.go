@@ -523,6 +523,40 @@ func (p *Pool) Remove(uid string) *auth.Auth {
 	return e.a
 }
 
+// RemoveMany 批量移除（一次落盘），返回实际移除的 uid。热重载用：逐个 Remove 会
+// 触发 N 次全量 saveLocked（每轮扫描都要写一遍 state.json，账号多时明显）。
+func (p *Pool) RemoveMany(uids []string) []string {
+	if len(uids) == 0 {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	removed := make([]string, 0, len(uids))
+	for _, uid := range uids {
+		if _, ok := p.byUID[uid]; !ok {
+			continue
+		}
+		delete(p.byUID, uid)
+		removed = append(removed, uid)
+	}
+	if len(removed) > 0 {
+		p.dirty.Store(true)
+		p.saveLocked()
+	}
+	return removed
+}
+
+// InFlight 该账号当前在途请求数（热重载删除前的安全检查：在途时先不删）。
+func (p *Pool) InFlight(uid string) int {
+	p.mu.RLock()
+	e, ok := p.byUID[uid]
+	p.mu.RUnlock()
+	if !ok || e == nil {
+		return 0
+	}
+	return int(e.inFlight.Load())
+}
+
 // upsertLocked 更新或插入单个账号；已存在则只换凭证、保留 credits/cooling 状态。
 // 调用方必须已持有 p.mu；Add 与 SyncToDir 共用此 upsert 逻辑。
 func (p *Pool) upsertLocked(a *auth.Auth) {

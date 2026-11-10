@@ -618,10 +618,31 @@ func (a *Auth) SaveAtomicRetry() error {
 // 落盘，一次性把旧文件补上 realm 键。单个文件写失败不阻断启动（log WARN 继续），
 // 避免历史 auth 目录个别文件不可写时整个服务起不来。
 func LoadDir(dir string) ([]*Auth, error) {
-	files, err := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
+	r, err := LoadDirReport(dir)
 	if err != nil {
 		return nil, err
 	}
+	return r.Auths, nil
+}
+
+// LoadReport 一次账号目录扫描的结果。
+//
+// ParseError 非空表示「本次有文件读不动/解析不了」：账号可能**还在**，只是这一轮
+// 看不见。热重载必须据此放弃删除（见 panel/reload.go）——半写文件被当成「文件已删」
+// 会把在池账号踢掉，而剔除结果会持久化，下次启动也不复活。
+type LoadReport struct {
+	Auths      []*Auth
+	Files      int
+	ParseError []string // "文件名: 原因"
+}
+
+// LoadDirReport 同 LoadDir，另外回报文件数与解析失败的条目（热重载用来判断能否删号）。
+func LoadDirReport(dir string) (LoadReport, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
+	if err != nil {
+		return LoadReport{}, err
+	}
+	report := LoadReport{Files: len(files)}
 	// seenUID 重复 UID 检测：同 UID 出现在多个文件时（双 realm 同名 UID 概率近零）
 	// 打 WARN 告警含两文件路径，由「后载入者胜出」保持现状行为（不改变加载结果）。
 	seenUID := make(map[string]string, len(files))
@@ -629,10 +650,12 @@ func LoadDir(dir string) ([]*Auth, error) {
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
+			report.ParseError = append(report.ParseError, filepath.Base(f)+": read: "+err.Error())
 			continue
 		}
 		a, err := Parse(raw)
 		if err != nil {
+			report.ParseError = append(report.ParseError, filepath.Base(f)+": "+err.Error())
 			continue
 		}
 		// 缺 uid 的文件一律不进池（bug #1）：pool 以 UID 作 map key，空 key 会让
@@ -642,6 +665,8 @@ func LoadDir(dir string) ([]*Auth, error) {
 		// 与 Parse 的 "missing accessToken" 同口径：宁可跳过并告警，也不留半残的号。
 		if strings.TrimSpace(a.UID) == "" {
 			log.Printf("WARN: auth 文件缺 uid，已跳过（补 \"uid\" 字段后重启即恢复）：%s", f)
+			// 计入「本轮有文件不可用」：热重载据此只增不删，避免把在池同号误删。
+			report.ParseError = append(report.ParseError, filepath.Base(f)+": missing uid")
 			continue
 		}
 		a.FilePath = f
@@ -665,7 +690,8 @@ func LoadDir(dir string) ([]*Auth, error) {
 		}
 		out = append(out, a)
 	}
-	return out, nil
+	report.Auths = out
+	return report, nil
 }
 
 // IsEnterpriseSession 报告当前凭证是否处于「企业上下文」（上游 PR #162）：
