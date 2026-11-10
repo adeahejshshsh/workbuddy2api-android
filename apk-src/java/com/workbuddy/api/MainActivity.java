@@ -269,70 +269,9 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(BG);
 
-        // ── 状态条：三行（标识+状态 / 保活·省电·自愈 / 最后一行日志）
-        LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.VERTICAL);
-        head.setBackgroundColor(SURFACE);
-        head.setPadding(dp(13), dp(10), dp(13), dp(9));
-
-        LinearLayout row1 = new LinearLayout(this);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
-        row1.setGravity(Gravity.CENTER_VERTICAL);
-        dot = new View(this);
-        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(8), dp(8));
-        dlp.rightMargin = dp(8);
-        dot.setLayoutParams(dlp);
-        dot.setBackground(oval(INK3));
-        row1.addView(dot);
-        TextView title = txt("WorkBuddy2API", 14f, INK);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        row1.addView(title);
-        row1.addView(spacer());
-        stateLabel = txt("启动中", 11.5f, INK3);
-        row1.addView(stateLabel);
-        head.addView(row1);
-
-        info = txt("正在启动网关…", 11.5f, INK2);
-        info.setPadding(0, dp(5), 0, 0);
-        head.addView(info);
-
-        logLine = txt("", 10.5f, INK3);
-        logLine.setPadding(0, dp(3), 0, 0);
-        logLine.setSingleLine(true);
-        logLine.setEllipsize(TextUtils.TruncateAt.END);
-        head.addView(logLine);
-        root.addView(head);
-
-        View div = new View(this);
-        div.setBackgroundColor(LINE);
-        root.addView(div, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
-
-        // ── 动作条：4 个胶囊 chip（与面板 button 同圆角/同色）
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setBackgroundColor(SURFACE);
-        bar.setPadding(dp(9), dp(8), dp(9), dp(8));
-        bar.addView(chip("重启网关", new View.OnClickListener() {
-            public void onClick(View v) { restart(); }
-        }));
-        bar.addView(chip("复制密钥", new View.OnClickListener() {
-            public void onClick(View v) { copyApi(); }
-        }));
-        bar.addView(chip("保活设置", new View.OnClickListener() {
-            public void onClick(View v) { keepAliveWizard(); }
-        }));
-        bar.addView(chip("网页面板", new View.OnClickListener() {
-            public void onClick(View v) {
-                // 原生控制台之外的进阶页仍走网页版：不为了重写而丢功能。
-                try {
-                    startActivity(new Intent(MainActivity.this, WebPanelActivity.class));
-                } catch (Throwable t) {
-                    toast("打开网页面板失败：" + t);
-                }
-            }
-        }));
-        root.addView(bar);
-
+        // 状态条与动作条已移入「更多 → 网关与保活」二级页（不再占首屏），
+        // 但字段仍要提前建好：tick() 每 2 秒会写它们。
+        gatewayBlock();
         // ── 加载进度线（2dp，加载完自动收起）
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(100);
@@ -497,6 +436,83 @@ public class MainActivity extends Activity {
 
     // ── 小控件工厂（纯代码建视图，不用 XML 布局）
 
+    private LinearLayout gatewayBox;
+
+    /** 状态块单例：Console 的「网关与保活」页挂它，字段刷新照旧生效。 */
+    LinearLayout gatewayPanel() {
+        return gatewayBlock();
+    }
+
+    /**
+     * 状态块（三行状态 + 4 个动作）：原先固定在主界面顶部，占掉首屏还把账号列表往下推。
+     * 现在只在二级页显示，主界面直接进入控制台。
+     */
+    private LinearLayout gatewayBlock() {
+        if (gatewayBox != null) return gatewayBox;
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(Theme.glass(this, Theme.R_CARD));   // 与二级页其它卡片同材质
+        box.setPadding(dp(14), dp(12), dp(14), dp(12));
+
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        row1.setGravity(Gravity.CENTER_VERTICAL);
+        dot = new View(this);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(9), dp(9));
+        dlp.rightMargin = dp(8);
+        dot.setLayoutParams(dlp);
+        dot.setBackground(oval(INK3));
+        row1.addView(dot);
+        TextView title = txt("网关状态", 15f, INK);
+        title.setTypeface(Theme.sans(this, 2));
+        row1.addView(title);
+        row1.addView(spacer());
+        stateLabel = txt("启动中", 11.5f, INK3);
+        row1.addView(stateLabel);
+        box.addView(row1);
+
+        info = txt("正在启动网关…", 11.5f, INK2);
+        info.setPadding(0, dp(6), 0, 0);
+        box.addView(info);
+
+        logLine = txt("", 10.5f, INK3);
+        logLine.setTypeface(Theme.mono(this));
+        logLine.setPadding(0, dp(4), 0, 0);
+        logLine.setSingleLine(true);
+        logLine.setEllipsize(TextUtils.TruncateAt.END);
+        box.addView(logLine);
+
+        View div = new View(this);
+        div.setBackgroundColor(LINE);
+        box.addView(div, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(0, dp(9), 0, 0);
+        bar.addView(chip("重启网关", new View.OnClickListener() {
+            public void onClick(View v) { restart(); }
+        }));
+        bar.addView(chip("复制密钥", new View.OnClickListener() {
+            public void onClick(View v) { copyApi(); }
+        }));
+        bar.addView(chip("保活设置", new View.OnClickListener() {
+            public void onClick(View v) { keepAliveWizard(); }
+        }));
+        bar.addView(chip("网页面板", new View.OnClickListener() {
+            public void onClick(View v) {
+                try {
+                    startActivity(new Intent(MainActivity.this, WebPanelActivity.class));
+                } catch (Throwable t) {
+                    toast("打开网页面板失败：" + t);
+                }
+            }
+        }));
+        box.addView(bar);
+
+        gatewayBox = box;
+        return box;
+    }
+
     TextView txt(String s, float sp, int color) {
         TextView t = new TextView(this);
         t.setText(s);
@@ -551,6 +567,7 @@ public class MainActivity extends Activity {
     // ── 状态刷新
 
     void tick() {
+        if (gatewayBox == null) gatewayBlock();
         // 判定按"事实"，不按服务自报的中文串（上一版就是猜串，串一变就误报"已停止"）：
         //   端口在服务            → 运行中
         //   自称在跑但端口不通    → 启动中（第三行给出原因）

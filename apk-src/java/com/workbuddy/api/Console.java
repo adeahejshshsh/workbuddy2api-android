@@ -164,6 +164,7 @@ final class Console {
         else if ("models".equals(id)) renderModels();
         else if ("tasks".equals(id)) renderTasks();
         else if ("settings".equals(id)) renderSettings();
+        else if ("gateway".equals(id)) renderGateway();
     }
 
     private void show(ScrollView sv) {
@@ -1472,6 +1473,10 @@ final class Console {
 
         LinearLayout tools = Theme.card(a);
         tools.addView(Theme.label(a, "连接与账号"));
+        tools.addView(entry("网关与保活", "运行状态、重启、密钥、后台保活", new Runnable() {
+            public void run() { open("gateway"); }
+        }));
+        tools.addView(Theme.divider(a));
         tools.addView(entry("添加 / 迁移账号", "导入文件、导出、API Key、登录", new Runnable() {
             public void run() { addSheet(); }
         }));
@@ -1515,6 +1520,23 @@ final class Console {
             public void onClick(View v) { r.run(); }
         });
         return row;
+    }
+
+    // ── 网关与保活 ─────────────────────────────────────────────────────────
+    private void renderGateway() {
+        setBar("网关与保活", true);
+        LinearLayout col = Theme.column(a);
+        if (a instanceof MainActivity) {
+            col.addView(((MainActivity) a).gatewayPanel(), Theme.cardLp(a, Theme.S3));
+        } else {
+            col.addView(Theme.empty(a, "当前宿主没有网关面板"));
+        }
+        LinearLayout tips = Theme.card(a);
+        tips.addView(Theme.label(a, "说明"));
+        tips.addView(Theme.text(a, "状态每 2 秒刷新；「保活设置」会按缺失项依次引导（省电白名单 / 悬浮窗 / "
+                + "电池优化）。网关跑在应用内进程，锁屏被杀后由前台服务自愈。", 12.5f, Theme.INK3, 0));
+        col.addView(tips);
+        show(scrollOf(col));
     }
 
     // ── 设置 ───────────────────────────────────────────────────────────────
