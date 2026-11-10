@@ -129,6 +129,9 @@ func (s *chatStat) done() {
 	if s.budget != nil {
 		s.budget.add(s.credit, s.hasCredit)
 		s.budget.observeCache(int64(s.cacheHit), int64(s.cacheMiss), s.hasCache)
+	// 上游劣化滑窗采样（见 upstreamhealth.go）：收口处唯一能同时拿到 status /
+	// outcome / TTFB 的地方。纯观测，不改路径。
+	chatUpHealth.record(s.status, s.outcome, s.ttfb)
 	}
 	noteProm(s, total)
 }

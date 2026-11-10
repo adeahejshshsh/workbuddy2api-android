@@ -417,6 +417,11 @@ type Config struct {
 		// CreditFloorMaxRate 保底兜底允许的目录倍率上限（issue #30 / PR #2）：
 		// 0.2 = 触底号上放行 x0.11 这类便宜模型、x1.62 仍拦；0 = 严格模式；负值钳 0。
 		CreditFloorMaxRate float64 `json:"credit_floor_max_rate"`
+		// SelectionStrategy 选号策略：weighted（缺省，加权随机）/ round_robin（轮询）/
+		// sequential（顺序耗尽：当前号用到不可用才换）。策略只在「已过全部可用性判定」
+		// 的候选里决定选哪个——健康/冷却/在途/积分保底/成本分层/账号优先级全部先于它，
+		// 所以切到 sequential 也烧不穿 credit_floor。热生效。
+		SelectionStrategy string `json:"selection_strategy"`
 
 		CreditFloor int64 `json:"credit_floor"`
 		// CreditFloorByRealm 积分保底按域覆盖（issue #147）：键只认 "cn"/"global"，
@@ -1011,6 +1016,20 @@ func isLoopbackListen(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// normalizeSelectionStrategy 归一选号策略名。与 pool.NormalizeStrategy 同口径，
+// 但 config 层不 import pool（依赖方向），所以这里重写一份；两处取值集合由
+// config_test 的断言对齐。
+func normalizeSelectionStrategy(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "round_robin", "rr", "round-robin", "roundrobin":
+		return "round_robin"
+	case "sequential", "sequential_exhaust", "seq", "exhaust", "sequentialexhaust":
+		return "sequential"
+	default:
+		return "weighted"
+	}
+}
+
 func (c *Config) normalize() error {
 	var err error
 	// 监听面 × 密钥一致性守卫放在 listen 归一化**之后**（见本函数末尾）：
@@ -1166,6 +1185,9 @@ func (c *Config) normalize() error {
 	if c.Pool.CreditFloor < 0 {
 		c.Pool.CreditFloor = 0
 	}
+	// 选号策略按别名归一（rr / round-robin / seq 等），未知值回落 weighted ——
+	// 写错一个策略名不该让网关起不来，但必须**真的**落到 weighted 而不是空字符串。
+	c.Pool.SelectionStrategy = normalizeSelectionStrategy(c.Pool.SelectionStrategy)
 	if c.Pool.CreditFloorMaxRate < 0 {
 		c.Pool.CreditFloorMaxRate = 0
 	}

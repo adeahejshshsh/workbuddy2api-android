@@ -186,6 +186,7 @@ func main() {
 	p.SetReserveCredits(reserveCreditsOf(cfg))
 	p.SetReserveCreditsByRealm(cfg.Pool.ReserveCreditsByRealm)
 	p.SetAccountRouting(cfg.Pool.AccountPriority, cfg.Pool.AccountShare)
+	p.SetStrategy(cfg.Pool.SelectionStrategy) // 选号策略（weighted/round_robin/sequential）
 	p.SetBalanceWindow(balanceWindowOf(cfg)) // 窗口用量调度（默认 1h，"0" 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
@@ -881,6 +882,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetReserveCredits(reserveCreditsOf(newCfg))           // 保留积分热生效
 	p.SetReserveCreditsByRealm(newCfg.Pool.ReserveCreditsByRealm)
 	p.SetAccountRouting(newCfg.Pool.AccountPriority, newCfg.Pool.AccountShare)
+	p.SetStrategy(newCfg.Pool.SelectionStrategy) // 选号策略热生效
 	p.SetBalanceWindow(balanceWindowOf(newCfg)) // 窗口用量调度热生效
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
