@@ -31,6 +31,9 @@ func TestMain(m *testing.M) {
 	// 轮转退避归零（backoff.go 里那句「TestMain 已置 0」此前是空头承诺）：真实取值
 	// 500ms 起，MaxRotate=3 的用例要白等 1.5s+。退避**界**的断言由用例自己临时恢复。
 	rotateBackoffBase = 0
+	// 出口级退避同样归零（egress_backoff_test.go 会临时恢复真实值做阶梯断言）：
+	// 传输层失败用例默认会真睡 1s/2s/4s。
+	egressBackoffBase = 0
 	os.Exit(m.Run())
 }
 

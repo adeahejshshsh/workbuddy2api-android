@@ -41,6 +41,9 @@ type Pool struct {
 	exploreLast map[string]time.Time
 	// costExploreEvents 累计探索事件数（/status 透出；pick 写锁内 ++，无需 atomic）。
 	costExploreEvents int64
+	// egress 出口级瞬时失败计数（egress.go，键 = 出口身份）。运行态，不持久化：
+	// 链路状态易失，重启后从零开始是正确的。
+	egress map[string]egressStat
 	// degradeThreshold / degradeCooldown / degradeCooldownMax 连败降权参数
 	// （SetDegrade 注入；默认值见 defaultDegrade*，issue #114）。
 	degradeThreshold   int

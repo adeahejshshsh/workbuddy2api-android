@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"time"
 	"sync"
 	"testing"
 
@@ -83,7 +84,7 @@ func TestTransportErrorRetriesSameAccount(t *testing.T) {
 
 // 重试仍全失败时：状态仍是 502 upstream_unreachable，但**连败只计一次** ——
 // 一次网络抖动不该把一个号推过降权阈值（默认 5）。
-func TestTransportErrorCountsOncePerAccount(t *testing.T) {
+func TestTransportErrorChargesEgressNotAccount(t *testing.T) {
 	up := &resetThenOKUpstream{fail: 99}
 	p := testPoolWith(&auth.Auth{UID: "only", AccessToken: "at-only", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up.client(), MaxRotate: 3})
@@ -102,11 +103,16 @@ func TestTransportErrorCountsOncePerAccount(t *testing.T) {
 	if !ok {
 		t.Fatal("账号应仍在池中")
 	}
-	if st.ConsecutiveFails != 1 {
-		t.Fatalf("一次请求只该记一次连败，实际 %d（会把单号池推过降权阈值）", st.ConsecutiveFails)
+	// 归因改到出口（egress.go）：传输层失败发生在「上游看到这个号」之前，
+	// 不携带任何「这个号坏了」的证据，记到账号头上会把链路抖动摊成账号惩罚。
+	if st.ConsecutiveFails != 0 {
+		t.Fatalf("传输层失败不该记到账号头上，实际 consecutiveFails=%d", st.ConsecutiveFails)
 	}
 	if st.Disabled {
 		t.Fatal("传输层失败不该禁用账号")
+	}
+	if got := p.EgressStreak(egressKey(&auth.Auth{UID: "only"}), time.Now()); got != 3 {
+		t.Fatalf("出口计数=%d want 3（等于本次请求的上游调用数）", got)
 	}
 }
 

@@ -1605,10 +1605,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// silentBudget 静默回合救援的**额外**名额，不占轮转额度：MaxRotate=1 的部署
 	// 也该有一次救援机会（否则这条修复在最保守的配置下等于不存在）。
 	silentBudget := 0
-	// transportCounted 本轮请求里「传输层失败」已经计过连败的号。传输错误跟账号无关，
-	// 单账号池会对同一个号重试多次（见下方分支），若不拦，一次网络抖动就能把一个号
-	// 连败计数推到阈值（默认 5）—— 两次抖动就把唯一那个号降权出池。
-	transportCounted := map[string]bool{}
 
 	for i := 0; i < h.cfg.MaxRotate+silentBudget; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
@@ -1770,12 +1766,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
-			// 同一个号一次请求只计一次连败：下面会放开重试同一个号（单账号池），
-			// 一次网络抖动被记 3 次连败就足以把它推过降权阈值。
-			if !transportCounted[acct.UID] {
-				transportCounted[acct.UID] = true
-				h.cfg.Pool.NoteFailures(acct.UID)
-			}
+			// 出口级归因（egress.go）：走到这里的传输层失败**只可能**是直连路径
+			// （经代理的失败是 proxypool.Error，上面已终止轮转），而直连出口由本域
+			// 全部账号共用。拨号/TLS 失败发生在上游看到这个号之前，不携带「这个号
+			// 坏了」的任何证据；记到账号头上时，一次链路抖动会顺着轮转逐个给被选中
+			// 的号记连败——hub 现场实测 4 小时 196 次 URLError 陆续降权 13 个号，
+			// 而链路只断了几秒。改记出口，退避降到秒级。
+			//
+			// 这里不做「一个号只计一次」的去重：出口计数要按次数累加，streak 才能
+			// 走完 1s/2s/4s 三级阶梯后快速失败。
+			streak := h.cfg.Pool.NoteEgressFailure(egressKey(acct), time.Now())
 			fail(acct.UID)
 			// 传输层失败**跟账号无关**：`read: connection reset by peer` 是连接/网络事件，
 			// 同一个 realm 的所有号打的是同一个上游 host（cn 全走 copilot.tencent.com），
@@ -1783,8 +1783,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 第二圈直接选不到号 → 502 upstream_unreachable，把「一次瞬时重置」放大成
 			// 「网关连不上上游」。放开重选后单账号池也能重试，次数仍受 MaxRotate 约束。
 			delete(tried, acct.UID)
-			if !rotateBackoff(i, r.Context()) {
-				break // ctx 取消：终止轮转（传输层错误换号退避）
+			if streak >= egressGiveUpStreak {
+				// 链路连续失败：换号只是把同样的等待与失败重复一遍（换不到别的链路），
+				// 快速失败让客户端按自己的节奏重试。
+				break
+			}
+			if !sleepCtx(r.Context(), egressBackoff(streak, egressBackoffBase)) {
+				break // ctx 取消：终止轮转（传输层错误换路退避）
 			}
 			continue
 		}
@@ -2885,6 +2890,19 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 		return true
 	}
 	return !clientGone && errors.Is(err, context.Canceled)
+}
+
+// egressKey 这次传输层失败该记到哪个出口上。
+//
+// 键 = "direct:" + 域：cn 与 global 是不同的上游域名与网络环境，共用一条阶梯会让
+// 一个域的抖动压住另一个域刚恢复的那几秒。经代理的失败走不到这里（proxypool.Error
+// 在上游分支已终止轮转），所以不需要节点身份。
+func egressKey(a *auth.Auth) string {
+	realm := "cn"
+	if a != nil && a.Realm() != "" {
+		realm = a.Realm()
+	}
+	return "direct:" + realm
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。

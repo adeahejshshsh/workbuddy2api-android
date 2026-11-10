@@ -138,7 +138,8 @@ func (r *continueReader) tryNarrationRetry() bool {
 	r.finish, r.tail = "", nil
 	// 本段 usage 快照归零：下一段的思考/正文构成单独计量。
 	r.segCompletion, r.segThink = 0, 0
-	log.Printf("[narration] acct=%s model=%s seg=%d 正文停在预告句（%dB）→ 续写剩余内容",
-		r.label(), bareModelOf(r.body), r.seg, r.text.Len())
+	log.Printf("[narration] acct=%s model=%s seg=%d 正文停在预告句（%dB）→ 续写剩余内容  尾部=%q",
+		r.label(), bareModelOf(r.body), r.seg, r.text.Len(),
+		trimForLog(tailOf(r.text.String(), 60), 60))
 	return true
 }
