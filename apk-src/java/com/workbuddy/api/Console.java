@@ -15,6 +15,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CompoundButton;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
@@ -105,6 +106,7 @@ final class Console {
         addTab("usage", "用量");
         addTab("models", "模型");
         addTab("data", "数据");
+        addTab("tasks", "任务");
         addTab("logs", "日志");
         addTab("settings", "设置");
     }
@@ -134,6 +136,7 @@ final class Console {
         else if ("usage".equals(id)) buildUsage();
         else if ("models".equals(id)) buildModels();
         else if ("data".equals(id)) buildData();
+        else if ("tasks".equals(id)) buildTasks();
         else if ("logs".equals(id)) buildLogs();
         else if ("settings".equals(id)) buildSettings();
         else buildAccounts();
@@ -431,6 +434,174 @@ final class Console {
             meta.setTextColor(INK3);
             meta.setPadding(0, dp(3), 0, 0);
             card.addView(meta);
+            list.addView(card);
+        }
+    }
+
+    // ── 任务页：队列 / 作业历史 ────────────────────────────────────────────
+    private String taskMode = "queue";
+
+    private void buildTasks() {
+        pageBox.removeAllViews();
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout seg = new LinearLayout(a);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        seg.setPadding(dp(10), dp(8), dp(10), dp(4));
+        seg.addView(chipSel("队列", "queue".equals(taskMode), new Runnable() {
+            public void run() { taskMode = "queue"; buildTasks(); }
+        }));
+        seg.addView(chipSel("作业历史", "jobs".equals(taskMode), new Runnable() {
+            public void run() { taskMode = "jobs"; buildTasks(); }
+        }));
+        seg.addView(spacerH());
+        seg.addView(chipSel("刷新", false, new Runnable() {
+            public void run() { buildTasks(); }
+        }));
+        box.addView(seg);
+
+        final LinearLayout list = new LinearLayout(a);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(10), dp(4), dp(10), dp(12));
+        box.addView(list);
+        pageBox.addView(box);
+        pageScroll = null;
+        list.addView(empty("加载中…"));
+
+        String path = "queue".equals(taskMode) ? "/panel/api/queue" : "/panel/api/tasks/jobs";
+        PanelApi.get(a, path, new PanelApi.Cb() {
+            public void ok(JSONObject o) {
+                if ("queue".equals(taskMode)) renderQueue(list, o);
+                else renderJobs(list, o);
+            }
+            public void fail(String msg) {
+                list.removeAllViews();
+                list.addView(empty("加载失败：" + msg));
+            }
+        });
+    }
+
+    private void renderQueue(LinearLayout list, JSONObject o) {
+        list.removeAllViews();
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.VERTICAL);
+        head.setBackground(card());
+        head.setPadding(dp(12), dp(9), dp(12), dp(9));
+        list.addView(head);
+        head.addView(kv("状态", o.optBoolean("running") ? "运行中" : (o.optBoolean("started") ? "已结束" : "未启动")));
+        head.addView(kv("条目", o.optInt("total") + " 条 · 并发 " + o.optInt("conc")));
+
+        JSONArray items = o.optJSONArray("items");
+        if (items == null || items.length() == 0) {
+            list.addView(empty("队列为空（面板里「一键完成」或定时成长队列启动后这里会有条目）"));
+            return;
+        }
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject it = items.optJSONObject(i);
+            if (it == null) continue;
+            LinearLayout card = new LinearLayout(a);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(card());
+            card.setPadding(dp(12), dp(8), dp(12), dp(8));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.bottomMargin = dp(6);
+            card.setLayoutParams(lp);
+
+            LinearLayout r1 = new LinearLayout(a);
+            r1.setOrientation(LinearLayout.HORIZONTAL);
+            String st = it.optString("status", "");
+            TextView status = new TextView(a);
+            status.setText(statusTextOf(st));
+            status.setTextSize(11f);
+            status.setTextColor(statusColorOf(st));
+            status.setTypeface(Typeface.DEFAULT_BOLD);
+            r1.addView(status);
+            TextView who = new TextView(a);
+            String nick = it.optString("nickname", "");
+            who.setText("  " + (nick.isEmpty() ? it.optString("uid") : nick)
+                    + " · " + it.optString("code"));
+            who.setTextSize(12.5f);
+            who.setTextColor(INK);
+            who.setSingleLine(true);
+            who.setEllipsize(TextUtils.TruncateAt.END);
+            r1.addView(who, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            card.addView(r1);
+            if (!it.optString("message", "").isEmpty()) {
+                TextView msg = new TextView(a);
+                msg.setText(it.optString("message"));
+                msg.setTextSize(11f);
+                msg.setTextColor(INK3);
+                msg.setPadding(0, dp(2), 0, 0);
+                card.addView(msg);
+            }
+            list.addView(card);
+        }
+    }
+
+    private static String statusTextOf(String st) {
+        if ("done".equals(st)) return "完成";
+        if ("running".equals(st)) return "执行中";
+        if ("error".equals(st)) return "失败";
+        if ("skipped".equals(st)) return "跳过";
+        return "待执行";
+    }
+
+    private static int statusColorOf(String st) {
+        if ("done".equals(st)) return OK;
+        if ("error".equals(st)) return BAD;
+        if ("running".equals(st)) return ACCENT;
+        return INK3;
+    }
+
+    private void renderJobs(LinearLayout list, JSONObject o) {
+        list.removeAllViews();
+        JSONArray jobs = o.optJSONArray("jobs");
+        if (jobs == null || jobs.length() == 0) {
+            list.addView(empty("还没有作业记录（队列跑过一轮后这里会按账号留最近一条）"));
+            return;
+        }
+        for (int i = 0; i < jobs.length(); i++) {
+            JSONObject j = jobs.optJSONObject(i);
+            if (j == null) continue;
+            LinearLayout card = new LinearLayout(a);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(card());
+            card.setPadding(dp(12), dp(8), dp(12), dp(8));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.bottomMargin = dp(6);
+            card.setLayoutParams(lp);
+
+            String st = j.optString("status", "");
+            TextView head = new TextView(a);
+            head.setText(j.optString("uid") + "  ·  " + statusTextOf(st));
+            head.setTextSize(13f);
+            head.setTextColor("error".equals(st) ? BAD : ("interrupted".equals(st) ? WARN : INK));
+            head.setTypeface(Typeface.DEFAULT_BOLD);
+            card.addView(head);
+
+            TextView meta = new TextView(a);
+            String upd = j.optString("updated_at", "");
+            if (upd.length() > 19) upd = upd.substring(5, 19).replace('T', ' ');
+            meta.setText("完成 " + j.optInt("completed") + " / 失败 " + j.optInt("failed")
+                    + " / 跳过 " + j.optInt("skipped") + " / 共 " + j.optInt("total")
+                    + (upd.isEmpty() ? "" : " · " + upd));
+            meta.setTextSize(11f);
+            meta.setTextColor(INK3);
+            card.addView(meta);
+
+            String msg = j.optString("message", "");
+            String err = j.optString("error", "");
+            if (!msg.isEmpty() || !err.isEmpty()) {
+                TextView m = new TextView(a);
+                m.setText(!err.isEmpty() ? err : msg);
+                m.setTextSize(11f);
+                m.setTextColor(!err.isEmpty() ? BAD : INK3);
+                m.setPadding(0, dp(2), 0, 0);
+                card.addView(m);
+            }
             list.addView(card);
         }
     }
@@ -911,6 +1082,7 @@ final class Console {
                 "备注",
                 "分组",
                 "清空该账号的任务跳过名单",
+                "模型开关（该账号禁用哪些模型）",
                 "移除账号（不可撤销）"
         };
         new AlertDialog.Builder(a)
@@ -939,6 +1111,8 @@ final class Console {
                                     });
                         } else if (which == 6) {
                             clearSkip(uid);
+                        } else if (which == 7) {
+                            modelSheet(uid);
                         } else {
                             confirmRemove(uid, s.optString("nickname", uid));
                         }
@@ -951,6 +1125,96 @@ final class Console {
         if ("enterprise".equals(o)) return "强制企业版";
         if ("personal".equals(o)) return "强制个人版";
         return s.optBoolean("enterprise") ? "自动（企业）" : "自动（个人）";
+    }
+
+    /**
+     * 模型开关：列出上游目录里的模型，勾选 = 该账号可用；取消勾选 = 手动关闭
+     * （POST model_toggle，off=true）。关闭是**永久**语义（落 state.json，重启不丢），
+     * 所以这里逐项即时生效、不做「保存」按钮 —— 与网页版同口径。
+     */
+    private void modelSheet(final String uid) {
+        PanelApi.get(a, "/panel/api/models", new PanelApi.Cb() {
+            public void ok(JSONObject models) {
+                final JSONArray arr = models.optJSONArray("models");
+                PanelApi.get(a, "/panel/api/accounts/" + enc(uid) + "/models_off", new PanelApi.Cb() {
+                    public void ok(JSONObject off) {
+                        java.util.HashSet<String> offSet = new java.util.HashSet<String>();
+                        JSONArray list = off.optJSONArray("list");
+                        for (int i = 0; list != null && i < list.length(); i++) {
+                            JSONObject it = list.optJSONObject(i);
+                            if (it != null) offSet.add(it.optString("model"));
+                        }
+                        showModelSheet(uid, arr, offSet);
+                    }
+                    public void fail(String msg) { toast("读取模型开关失败：" + msg); }
+                });
+            }
+            public void fail(String msg) { toast("读取模型目录失败：" + msg); }
+        });
+    }
+
+    private void showModelSheet(final String uid, JSONArray models, java.util.HashSet<String> offSet) {
+        if (models == null || models.length() == 0) {
+            dialogText("模型开关", "模型目录为空（检查账号可用性或上游目录）");
+            return;
+        }
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(12), dp(8), dp(12), dp(8));
+        TextView hint = new TextView(a);
+        hint.setText("勾选 = 该账号可用；取消勾选 = 手动关闭（永久，落 state.json）。");
+        hint.setTextSize(11.5f);
+        hint.setTextColor(INK3);
+        hint.setPadding(0, 0, 0, dp(6));
+        box.addView(hint);
+
+        for (int i = 0; i < models.length(); i++) {
+            final JSONObject m = models.optJSONObject(i);
+            if (m == null) continue;
+            final String bare = bareModel(m.optString("id"));
+            final CheckBox cb = new CheckBox(a);
+            cb.setText(m.optString("name", bare) + "  ·  " + m.optString("id"));
+            cb.setTextSize(12.5f);
+            cb.setTextColor(INK);
+            cb.setChecked(!offSet.contains(bare));
+            cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+                public void onCheckedChanged(CompoundButton b, final boolean enabled) {
+                    try {
+                        JSONObject body = new JSONObject();
+                        body.put("model", bare);
+                        body.put("off", !enabled);
+                        PanelApi.post(a, "/panel/api/accounts/" + enc(uid) + "/model_toggle", body,
+                                new PanelApi.Cb() {
+                                    public void ok(JSONObject o) {
+                                        toast((enabled ? "已启用 " : "已关闭 ") + bare);
+                                    }
+                                    public void fail(String msg) {
+                                        toast("切换失败：" + msg);
+                                        // 回滚勾选状态：界面不能停在一个没生效的状态上
+                                        b.setChecked(!enabled);
+                                    }
+                                });
+                    } catch (Throwable t) { toast("切换失败：" + t); }
+                }
+            });
+            box.addView(cb);
+        }
+        ScrollView sv = new ScrollView(a);
+        sv.addView(box);
+        new AlertDialog.Builder(a)
+                .setTitle("模型开关")
+                .setView(sv)
+                .setPositiveButton("关闭", null)
+                .show();
+    }
+
+    /** cn:deepseek-v4 → deepseek-v4（服务端也会剥，但界面上比对用裸名更直观）。 */
+    private static String bareModel(String id) {
+        if (id == null) return "";
+        int i = id.indexOf(':');
+        if (i <= 0) return id;
+        String p = id.substring(0, i).toLowerCase();
+        return ("cn".equals(p) || "global".equals(p)) ? id.substring(i + 1) : id;
     }
 
     /** 探活：只读探测上游是否已解封（不改池状态），结论要说清下一步。 */
