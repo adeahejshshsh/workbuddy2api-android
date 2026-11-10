@@ -531,6 +531,7 @@ final class Console {
         final EditText et = field(hint);
         et.setText(initial == null ? "" : initial);
         LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(Theme.dp(a, Theme.S4), 0, Theme.dp(a, Theme.S4), Theme.dp(a, Theme.S2));
         box.addView(et);
         Sheet.custom(a, title, box, "保存", new Runnable() {
@@ -810,7 +811,7 @@ final class Console {
         }
         col.addView(seg);
 
-        final LinearLayout list = new LinearLayout(a);
+        final LinearLayout list = Theme.list(a);
         list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
         col.addView(list);
         list.addView(Theme.empty(a, "加载中…"));
@@ -881,7 +882,7 @@ final class Console {
             public void run() { renderModels(); }
         }));
         LinearLayout col = Theme.column(a);
-        final LinearLayout list = new LinearLayout(a);
+        final LinearLayout list = Theme.list(a);
         col.addView(list);
         list.addView(Theme.empty(a, "加载中…"));
         show(scrollOf(col));
@@ -966,7 +967,7 @@ final class Console {
             col.addView(seg2);
         }
 
-        final LinearLayout list = new LinearLayout(a);
+        final LinearLayout list = Theme.list(a);
         list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
         col.addView(list);
         list.addView(Theme.empty(a, "加载中…"));
@@ -1115,7 +1116,7 @@ final class Console {
         }
         col.addView(seg);
 
-        final LinearLayout list = new LinearLayout(a);
+        final LinearLayout list = Theme.list(a);
         list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
         col.addView(list);
         list.addView(Theme.empty(a, "加载中…"));
@@ -1292,7 +1293,7 @@ final class Console {
             chips.addView(clear);
             col.addView(chips);
 
-            final LinearLayout list = new LinearLayout(a);
+            final LinearLayout list = Theme.list(a);
             list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
             col.addView(list);
             list.addView(Theme.empty(a, "加载中…"));

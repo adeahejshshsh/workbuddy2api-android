@@ -311,6 +311,19 @@ final class Theme {
         return t;
     }
 
+    /**
+     * 纵向列表容器。
+     *
+     * 专门包一层的原因：Android 的 LinearLayout 默认是 **HORIZONTAL**，忘一行
+     * setOrientation 就会出现「列表只显示第一条、其余排到屏幕右侧」这种极难一眼看出的
+     * 布局 bug（本次请求日志就踩了）。所有「往里 addView 多条卡片」的容器都改用这个。
+     */
+    static LinearLayout list(Context c) {
+        LinearLayout box = new LinearLayout(c);
+        box.setOrientation(LinearLayout.VERTICAL);
+        return box;
+    }
+
     /** 页面统一内边距容器。 */
     static LinearLayout column(Context c) {
         LinearLayout box = new LinearLayout(c);
