@@ -348,7 +348,11 @@ body.veil-open { overflow: hidden; }
 .dlg header h3 { font-size: 15px; font-weight: 620; }
 .dlg header .hint { color: var(--ink-3); font-size: 12.5px; margin-top: 5px; }
 .dlg .body { padding: 18px 20px; overflow: auto; }
-.dlg footer { padding: 13px 20px; border-top: 1px solid var(--line-soft); display: flex; gap: 10px; }
+/* footer 允许换行：窄屏（手机 WebView ~400px）里 5 个按钮挤在一行会把每个按钮压到
+   几十像素宽，文字竖排成"一列字"（实测截图）。换行后每行按内容宽度排，弹窗也不会被
+   撑高到整屏。按钮自身禁止断行。 */
+.dlg footer { padding: 13px 20px; border-top: 1px solid var(--line-soft); display: flex; gap: 10px; flex-wrap: wrap; }
+.dlg footer button { white-space: nowrap; }
 .dlg footer .grow { flex: 1; }
 .dlg .tabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; margin-left: 10px; vertical-align: middle; }
 .dlg .tabs .tab { padding: 4px 14px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
@@ -1508,10 +1512,12 @@ body.veil-open { overflow: hidden; }
 
 <!-- 积分任务 -->
 <div class="veil" id="taskVeil">
-  <div class="dlg" style="width:940px" role="dialog" aria-modal="true" aria-labelledby="taskVeilTitle">
+  <div class="dlg" style="width:min(940px,96vw)" role="dialog" aria-modal="true" aria-labelledby="taskVeilTitle">
     <header>
-      <h3 id="taskVeilTitle">积分任务 <span class="hint" id="taskWho"></span> <span class="hint" id="taskMsg"></span></h3>
+      <h3 id="taskVeilTitle">积分任务 <span class="hint" id="taskWho"></span></h3>
       <div class="hint">查询上游任务进度；「接受」为报名（幂等），「领取」在进度达标后可用。所有操作走网关，无需外部脚本。</div>
+      <!-- 只读说明/失败原因单独一行：塞进 h3 会把标题挤成两行，弹窗整体被拉高。 -->
+      <div class="hint" id="taskMsg" hidden></div>
     </header>
     <div class="body">
       <div class="state" id="taskState"><span class="dots">加载中</span></div>

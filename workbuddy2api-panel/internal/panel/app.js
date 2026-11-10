@@ -2362,7 +2362,10 @@ async function loadTasks() {
     // capabilities：国际区任务只读（accept/claim/automate 均为 false），按钮据此关掉，
     // 而不是让用户点了必然失败。message 里是「为什么只读」的一句话说明。
     const caps = d.capabilities || {};
-    $('taskMsg').textContent = d.message || '';
+    // 说明只在有内容时显示：空 div 也会占一行高度，弹窗会被推高。
+    const msgEl = $('taskMsg');
+    msgEl.textContent = d.message || '';
+    msgEl.hidden = !d.message;
     if (!list.length) {
       st.className = 'state';
       st.textContent = d.message || '该账号暂无任务';

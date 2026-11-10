@@ -769,10 +769,24 @@ func (a *Auth) IsEnterpriseSession() bool {
 	if a == nil {
 		return false
 	}
+	// 人工定性为个人版时，连「企业切换会话」这一层也一并覆盖：否则面板上把账号
+	// 改成个人版后，任务面板仍然回「企业上下文账号不参与成长任务」——用户看到的是
+	// 「我改了但没用」。定性是人对上游字段的否决，不该被 token_source 再否决一次。
+	if NormalizeEnterpriseOverride(a.EnterpriseOverride) == "personal" {
+		return false
+	}
 	if a.IsEnterprise() {
 		return true
 	}
 	return jwtTokenSource(a.AccessTokenValue()) == "enterprise_switch"
+}
+
+// IsEnterpriseToken 令牌本身是否来自企业切换会话（token_source=enterprise_switch）。
+//
+// 与 IsEnterpriseSession 的区别：那个还会看账号是否被定性为企业版；这个只看令牌，
+// 用于「人工设成个人版、但令牌确实是企业会话」这种冲突场景的告警。
+func (a *Auth) IsEnterpriseToken() bool {
+	return a != nil && jwtTokenSource(a.AccessTokenValue()) == "enterprise_switch"
 }
 
 // jwtTokenSource 从 JWT 的 payload 段取 token_source（非 JWT / 解不出 → 空串）。

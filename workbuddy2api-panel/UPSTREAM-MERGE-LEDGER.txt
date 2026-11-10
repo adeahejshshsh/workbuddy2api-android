@@ -483,3 +483,19 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 - 写操作（accept / accept_all / claim / auto）：保持 501 + 「国际区任务暂仅支持查询」；
 - 面板：行内「任务」按钮对国际版恢复渲染（企业版 / API Key 仍隐藏）；弹窗按
   `capabilities` 把按钮换成「只读」标签，并把 message 显示在标题旁。
+
+## 修复：「强制个人」没生效 + 任务弹窗被拉长
+
+1. **第二层判据没覆盖**：`IsEnterpriseSession()` = `IsEnterprise() || token_source==enterprise_switch`。
+   首版只让 `IsEnterprise()` 尊重覆盖，于是企业切换令牌的账号改成个人版后，任务面板仍回
+   「企业上下文账号不参与成长任务（上游会静默丢弃）」——用户看到的就是「改了但没用」。
+   现在覆盖为 personal 时整层判据直接返回 false（定性是人对上游字段的否决，不该被
+   token_source 再否决一次）；同时新增 `IsEnterpriseToken()` 只反映令牌事实，供调度器在
+   「强制个人但仍是企业令牌」时留一行 WARN（上游可能 200 却静默丢弃，进度不动时这是唯一线索）。
+
+2. **弹窗被拉长**：两处
+   - 只读说明/失败原因塞进 `<h3>`，长文案把标题挤成两行 → 挪成 header 里独立一行，
+     空时 `hidden`（空 div 也占一行高度）；
+   - 弹窗写死 `width:940px`，手机 WebView（CSS 宽约 400px）里只能压窄 flex 项，
+     5 个按钮被挤到几十像素宽、文字竖排成「一列字」→ 改成 `width:min(940px,96vw)`，
+     并给 `.dlg footer` 加 `flex-wrap: wrap` + 按钮 `white-space: nowrap`（换行而不是压扁）。

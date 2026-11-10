@@ -3,6 +3,7 @@ package panel
 // 面板「账号类型」开关 + 国际版任务查询入口。
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -134,5 +135,33 @@ func TestAccountTasksGlobalIsReadOnly(t *testing.T) {
 	p.accountTaskAccept(rec, req)
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("国际版接单应 501，got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+// TestTasksAllowedAfterForcingPersonal 企业切换令牌 + 强制个人：任务查询必须放行
+// （此前 IsEnterpriseSession 会再拦一次，用户看到「改了但没用」）。
+func TestTasksAllowedAfterForcingPersonal(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"token_source":"enterprise_switch"}`))
+	a := &auth.Auth{UID: "e9", AccessToken: "h." + payload + ".s", RefreshToken: "rt",
+		ExpiresAt: 9999999999, EnterpriseID: "e-9", EnterpriseOverride: "personal"}
+	pl := pool.New("")
+	pl.Add(a)
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: fakeRoundTripper(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK,
+				Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body:   io.NopCloser(strings.NewReader(`{"code":0,"data":{"tasks":[]}}`))}, nil
+		})},
+		ChatBaseCN: "https://cn.example", WebBaseCN: "https://cn.example",
+		BillingBaseCN: "https://cn.example",
+	}
+	p := New(Config{Version: "test", Pool: pl, Upstream: up})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/panel/api/accounts/e9/tasks", nil)
+	req.SetPathValue("uid", "e9")
+	p.accountTasks(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("强制个人后任务查询应放行，got %d body=%s", rec.Code, rec.Body)
 	}
 }
