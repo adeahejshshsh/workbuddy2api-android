@@ -208,7 +208,124 @@ final class Console {
         rlp.topMargin = dp(10);
         box.addView(refresh, rlp);
 
+        // 请求指标 / 错误汇总：接口独立，先占位再各自填充（任一失败不影响另一块）
+        LinearLayout metrics = new LinearLayout(a);
+        metrics.setOrientation(LinearLayout.VERTICAL);
+        metrics.setBackground(card());
+        metrics.setPadding(dp(14), dp(11), dp(14), dp(11));
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        mlp.topMargin = dp(10);
+        box.addView(metrics, mlp);
+        metrics.addView(empty("请求指标加载中…"));
+        loadRequestMetrics(metrics);
+
+        LinearLayout errs = new LinearLayout(a);
+        errs.setOrientation(LinearLayout.VERTICAL);
+        errs.setBackground(card());
+        errs.setPadding(dp(14), dp(11), dp(14), dp(11));
+        LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        elp.topMargin = dp(10);
+        box.addView(errs, elp);
+        errs.addView(empty("错误汇总加载中…"));
+        loadErrorSummary(errs);
+
         restoreInto(sv);
+    }
+
+    /** 请求指标（进程内）：完成/在飞/成功/失败/成功率/平均耗时。 */
+    private void loadRequestMetrics(final LinearLayout box) {
+        PanelApi.get(a, "/panel/api/request_metrics", new PanelApi.Cb() {
+            public void ok(JSONObject o) {
+                box.removeAllViews();
+                TextView h = new TextView(a);
+                h.setText("请求指标（本次进程）");
+                h.setTextSize(13f);
+                h.setTextColor(INK2);
+                h.setTypeface(Typeface.DEFAULT_BOLD);
+                h.setPadding(0, 0, 0, dp(6));
+                box.addView(h);
+                box.addView(kv("完成 / 在飞", o.optInt("completed") + " / " + o.optInt("in_flight")));
+                box.addView(kv("成功 / 失败", o.optInt("succeeded") + " / " + o.optInt("failed")));
+                box.addView(kv("成功率", String.format(java.util.Locale.US, "%.1f%%（HTTP %.1f%%）",
+                        o.optDouble("success_rate", 0), o.optDouble("http_success_rate", 0))));
+                box.addView(kv("平均耗时", String.format(java.util.Locale.US, "%.0f ms",
+                        o.optDouble("avg_duration_ms", 0))));
+                JSONObject arc = o.optJSONObject("archive");
+                if (arc != null) {
+                    box.addView(kv("归档", (arc.optBoolean("enabled") ? "开启" : "关闭")
+                            + " · 文件 " + arc.optInt("files") + " · "
+                            + String.format(java.util.Locale.US, "%.1f MB", arc.optDouble("bytes") / 1048576.0)));
+                }
+            }
+            public void fail(String msg) {
+                box.removeAllViews();
+                box.addView(empty("请求指标不可用：" + msg));
+            }
+        });
+    }
+
+    /** 错误汇总：日志环里 WARN/ERR 按「账号 × 类型」聚合，取前 20 条。 */
+    private void loadErrorSummary(final LinearLayout box) {
+        PanelApi.get(a, "/panel/api/error_summary", new PanelApi.Cb() {
+            public void ok(JSONObject o) {
+                box.removeAllViews();
+                TextView h = new TextView(a);
+                h.setText("错误汇总（扫描 " + o.optInt("scanned") + " 行 · " + o.optString("updated_at") + "）");
+                h.setTextSize(13f);
+                h.setTextColor(INK2);
+                h.setTypeface(Typeface.DEFAULT_BOLD);
+                h.setPadding(0, 0, 0, dp(6));
+                box.addView(h);
+                JSONArray rows = o.optJSONArray("rows");
+                if (rows == null || rows.length() == 0) {
+                    box.addView(empty("最近没有 WARN/ERR"));
+                    return;
+                }
+                int n = Math.min(rows.length(), 20);
+                for (int i = 0; i < n; i++) {
+                    JSONObject r = rows.optJSONObject(i);
+                    if (r == null) continue;
+                    LinearLayout row = new LinearLayout(a);
+                    row.setOrientation(LinearLayout.VERTICAL);
+                    row.setPadding(0, dp(4), 0, dp(4));
+                    TextView line = new TextView(a);
+                    String sev = r.optString("sev", "warn");
+                    String code = r.optString("code", "");
+                    line.setText(r.optInt("count") + " 次 · " + r.optString("kind")
+                            + (code.isEmpty() ? "" : " [" + code + "]"));
+                    line.setTextSize(12.5f);
+                    line.setTextColor("bad".equals(sev) ? BAD : WARN);
+                    row.addView(line);
+                    TextView meta = new TextView(a);
+                    String acct = r.optString("account", "");
+                    String model = r.optString("model", "");
+                    meta.setText((acct.isEmpty() ? "非账号级" : acct)
+                            + (model.isEmpty() ? "" : " · " + model)
+                            + (r.optString("last", "").isEmpty() ? "" : " · 最近 " + r.optString("last"))
+                            + (r.optString("until", "").isEmpty() ? "" : " · 解锁 " + r.optString("until")));
+                    meta.setTextSize(11f);
+                    meta.setTextColor(INK3);
+                    row.addView(meta);
+                    String sample = r.optString("sample_full", r.optString("sample", ""));
+                    if (!sample.isEmpty()) {
+                        TextView sm = new TextView(a);
+                        sm.setText(sample);
+                        sm.setTextSize(10.5f);
+                        sm.setTextColor(INK3);
+                        sm.setSingleLine(true);
+                        sm.setEllipsize(TextUtils.TruncateAt.END);
+                        row.addView(sm);
+                    }
+                    box.addView(row);
+                }
+            }
+            public void fail(String msg) {
+                box.removeAllViews();
+                box.addView(empty("错误汇总不可用：" + msg));
+            }
+        });
     }
 
     private void addStatRow(LinearLayout parent, String k1, String v1, int c1,
@@ -1515,6 +1632,11 @@ final class Console {
             bar.addView(auto);
         } else {
             bar.addView(spacerH());
+            Button clear = btn("清空归档", false);
+            clear.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { confirmClearArchive(); }
+            });
+            bar.addView(clear);
             Button reload = btn("刷新", true);
             reload.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) { buildLogs(); }
@@ -1580,6 +1702,22 @@ final class Console {
             }
         });
         return box;
+    }
+
+    /** 清空归档：删掉 requests-*.jsonl（不影响运行日志环与其它文件），要二次确认。 */
+    private void confirmClearArchive() {
+        new AlertDialog.Builder(a)
+                .setTitle("清空请求归档")
+                .setMessage("将删除磁盘上的 requests-*.jsonl 请求事件文件，不可恢复。\n运行日志（内存环）不受影响。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清空", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        PanelApi.post(a, "/panel/api/request_logs/clear", null, new PanelApi.Cb() {
+                            public void ok(JSONObject o) { toast("归档已清空"); buildLogs(); }
+                            public void fail(String msg) { toast("清空失败：" + msg); }
+                        });
+                    }
+                }).show();
     }
 
     private View requestRow(JSONObject e) {
