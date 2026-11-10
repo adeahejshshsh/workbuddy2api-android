@@ -62,9 +62,29 @@ public class MainActivity extends Activity {
     // WebView 不自带选择器：壳必须在 onShowFileChooser 里发 Intent，并在
     // onActivityResult 里把结果回填给 WebView，否则点击「选择文件」毫无反应。
     private static final int REQ_FILE_CHOOSER = 0x5F11;
+    /** 原生控制台「导入账号」的文件选择（与 WebView 的 chooser 分开，回调也不同）。 */
+    private static final int REQ_IMPORT_FILE = 0x5F12;
+
+    /** 由 Console 调用：打开系统文件选择器挑一个 JSON（cockpit 导出或 auths 文件）。 */
+    void requestImportFile() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(i, REQ_IMPORT_FILE);
+        } catch (Throwable t) {
+            toast("打开文件选择器失败：" + t);
+        }
+    }
     private android.webkit.ValueCallback<Uri[]> fileChooserCb;
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_IMPORT_FILE) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                if (console != null) console.importUri(data.getData());
+            }
+            return;
+        }
         if (requestCode != REQ_FILE_CHOOSER) {
             super.onActivityResult(requestCode, resultCode, data);
             return;

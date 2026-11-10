@@ -740,6 +740,9 @@ final class Console {
         seg.addView(chipSel("余额趋势", "balance".equals(dataMode), new Runnable() {
             public void run() { dataMode = "balance"; buildData(); }
         }));
+        seg.addView(chipSel("开学季券码", "vouchers".equals(dataMode), new Runnable() {
+            public void run() { dataMode = "vouchers"; buildData(); }
+        }));
         box.addView(seg);
 
         final LinearLayout list = new LinearLayout(a);
@@ -749,6 +752,17 @@ final class Console {
         pageBox.addView(box);
         pageScroll = null;
 
+        if ("vouchers".equals(dataMode)) {
+            list.addView(empty("加载中…（逐账号查开学季券码）"));
+            PanelApi.get(a, "/panel/api/school/vouchers", new PanelApi.Cb() {
+                public void ok(JSONObject o) { renderVouchers(list, o); }
+                public void fail(String msg) {
+                    list.removeAllViews();
+                    list.addView(empty("券码加载失败：" + msg));
+                }
+            });
+            return;
+        }
         if ("packages".equals(dataMode)) {
             list.addView(empty("加载中…（逐账号向上游查积分包，账号多时要几秒）"));
             PanelApi.get(a, "/panel/api/packages", new PanelApi.Cb() {
@@ -788,6 +802,72 @@ final class Console {
                 list.addView(empty("余额趋势加载失败：" + msg));
             }
         });
+    }
+
+    private void renderVouchers(LinearLayout list, JSONObject o) {
+        list.removeAllViews();
+        JSONArray arr = o.optJSONArray("accounts");
+        if (arr == null || arr.length() == 0) {
+            list.addView(empty("没有账号"));
+            return;
+        }
+        int total = 0;
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject r = arr.optJSONObject(i);
+            if (r == null) continue;
+            JSONArray vs = r.optJSONArray("vouchers");
+            String err = r.optString("error", "");
+            if ((vs == null || vs.length() == 0) && err.isEmpty()) continue;
+
+            LinearLayout card = new LinearLayout(a);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(card());
+            card.setPadding(dp(12), dp(9), dp(12), dp(9));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.bottomMargin = dp(8);
+            card.setLayoutParams(lp);
+
+            String nick = r.optString("nickname", "");
+            TextView head = new TextView(a);
+            head.setText((nick.isEmpty() ? r.optString("uid") : nick));
+            head.setTextSize(13f);
+            head.setTextColor(INK);
+            head.setTypeface(Typeface.DEFAULT_BOLD);
+            card.addView(head);
+
+            if (!err.isEmpty()) {
+                TextView er = new TextView(a);
+                er.setText("查询失败：" + err);
+                er.setTextSize(11.5f);
+                er.setTextColor(BAD);
+                card.addView(er);
+            }
+            for (int j = 0; vs != null && j < vs.length(); j++) {
+                final JSONObject v = vs.optJSONObject(j);
+                if (v == null) continue;
+                total++;
+                TextView row = new TextView(a);
+                String to = v.optString("valid_to", "");
+                row.setText("· " + v.optString("prize_name", v.optString("sku_code", "券"))
+                        + (to.isEmpty() ? "" : "（有效期至 " + to + "）"));
+                row.setTextSize(11.5f);
+                row.setTextColor(INK2);
+                row.setPadding(0, dp(3), 0, 0);
+                card.addView(row);
+
+                TextView code = new TextView(a);
+                code.setText(v.optString("code"));
+                code.setTextSize(12.5f);
+                code.setTextColor(ACCENT);
+                code.setTypeface(Typeface.MONOSPACE);
+                code.setTextIsSelectable(true);
+                code.setPadding(0, dp(1), 0, dp(1));
+                card.addView(code);
+            }
+            list.addView(card);
+        }
+        if (total == 0) list.addView(empty("没有可用的开学季券码"));
     }
 
     private void renderPackages(LinearLayout list, JSONObject o) {
@@ -943,11 +1023,16 @@ final class Console {
         t.setTextSize(13f);
         t.setTextColor(INK2);
         head.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button reload = btn("重载目录", true);
+        Button reload = btn("重载目录", false);
         reload.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { reloadAccounts(); }
         });
         head.addView(reload);
+        Button add = btn("＋ 添加", true);
+        add.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { addAccountSheet(); }
+        });
+        head.addView(add);
         box.addView(head);
 
         JSONArray arr = o.optJSONArray("accounts");
@@ -1422,6 +1507,216 @@ final class Console {
         PanelApi.post(a, "/panel/api/accounts/" + enc(uid) + path, body, new PanelApi.Cb() {
             public void ok(JSONObject o) { toast("完成"); loadOverview(false); }
             public void fail(String msg) { toast("失败：" + msg); }
+        });
+    }
+
+    /** 添加账号：导入文件 / 导出 / 静态 API Key / 浏览器授权登录。 */
+    private void addAccountSheet() {
+        String[] items = new String[]{
+                "导入文件（cockpit 导出 / auths JSON）",
+                "导出账号（JSON 文件）",
+                "添加 API Key 账号",
+                "登录添加（浏览器授权，支持国际区）"
+        };
+        new AlertDialog.Builder(a)
+                .setTitle("添加 / 迁移账号")
+                .setItems(items, new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        if (which == 0) {
+                            if (a instanceof MainActivity) ((MainActivity) a).requestImportFile();
+                            else toast("当前宿主不支持文件选择");
+                        } else if (which == 1) {
+                            exportAccounts();
+                        } else if (which == 2) {
+                            apiKeyDialog();
+                        } else {
+                            loginSheet();
+                        }
+                    }
+                }).show();
+    }
+
+    /** 导入：由 MainActivity 选文件后回调 importUri()。 */
+    void importUri(android.net.Uri uri) {
+        try {
+            java.io.InputStream in = a.getContentResolver().openInputStream(uri);
+            if (in == null) { toast("读不到该文件"); return; }
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            in.close();
+            byte[] data = bos.toByteArray();
+            if (data.length == 0) { toast("文件为空"); return; }
+            String name = String.valueOf(uri.getLastPathSegment());
+            int slash = name.lastIndexOf('/');
+            if (slash >= 0) name = name.substring(slash + 1);
+            toast("导入中…（" + data.length + " 字节）");
+            PanelApi.upload(a, "/panel/api/import/cockpit", name, data, new PanelApi.Cb() {
+                public void ok(JSONObject o) {
+                    toast("导入完成：新增 " + o.optInt("imported") + "，跳过 " + o.optInt("skipped"));
+                    JSONArray errs = o.optJSONArray("errors");
+                    if (errs != null && errs.length() > 0) {
+                        dialogText("导入错误（前 20 条）", briefArray(errs, 20));
+                    }
+                    loadOverview(false);
+                }
+                public void fail(String msg) { toast("导入失败：" + msg); }
+            });
+        } catch (Throwable t) {
+            toast("导入失败：" + t);
+        }
+    }
+
+    private static String briefArray(JSONArray arr, int max) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < Math.min(arr.length(), max); i++) {
+            sb.append("· ").append(arr.optString(i)).append('\n');
+        }
+        if (arr.length() > max) sb.append("…共 ").append(arr.length()).append(" 条");
+        return sb.toString();
+    }
+
+    /** 导出：下载 JSON 到「下载」目录（Android 10+ 走 MediaStore，免存储权限）。 */
+    private void exportAccounts() {
+        PanelApi.download(a, "/panel/api/export/accounts", new PanelApi.FileCb() {
+            public void ok(byte[] data, String filename) {
+                try {
+                    String path;
+                    if (android.os.Build.VERSION.SDK_INT >= 29) {
+                        android.content.ContentValues cv = new android.content.ContentValues();
+                        cv.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, filename);
+                        cv.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/json");
+                        cv.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                                android.os.Environment.DIRECTORY_DOWNLOADS);
+                        android.net.Uri out = a.getContentResolver()
+                                .insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                        if (out == null) { toast("写入下载目录失败"); return; }
+                        java.io.OutputStream os = a.getContentResolver().openOutputStream(out);
+                        os.write(data);
+                        os.close();
+                        path = "下载/" + filename;
+                    } else {
+                        java.io.File dir = a.getExternalFilesDir(null);
+                        java.io.File f = new java.io.File(dir, filename);
+                        java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
+                        fos.write(data);
+                        fos.close();
+                        path = f.getAbsolutePath();
+                    }
+                    toast("已导出到 " + path + "（" + data.length + " 字节）");
+                } catch (Throwable t) {
+                    toast("保存失败：" + t);
+                }
+            }
+            public void fail(String msg) { toast("导出失败：" + msg); }
+        });
+    }
+
+    /** 静态 API Key 账号：uid + token（+ 昵称）。 */
+    private void apiKeyDialog() {
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(8), dp(16), dp(8));
+        final EditText uid = new EditText(a);
+        uid.setHint("uid（手机号或 UUID）");
+        uid.setTextSize(13f);
+        final EditText token = new EditText(a);
+        token.setHint("access token（ck_ / pt_ 开头）");
+        token.setTextSize(13f);
+        final EditText nick = new EditText(a);
+        nick.setHint("昵称（可选）");
+        nick.setTextSize(13f);
+        box.addView(uid);
+        box.addView(token);
+        box.addView(nick);
+        new AlertDialog.Builder(a)
+                .setTitle("添加 API Key 账号")
+                .setView(box)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("添加", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        try {
+                            JSONObject body = new JSONObject();
+                            body.put("uid", uid.getText().toString().trim());
+                            body.put("access_token", token.getText().toString().trim());
+                            body.put("nickname", nick.getText().toString().trim());
+                            PanelApi.post(a, "/panel/api/accounts/add_apikey", body, new PanelApi.Cb() {
+                                public void ok(JSONObject o) {
+                                    toast("已添加 " + o.optString("uid"));
+                                    loadOverview(false);
+                                }
+                                public void fail(String msg) { toast("添加失败：" + msg); }
+                            });
+                        } catch (Throwable t) { toast("添加失败：" + t); }
+                    }
+                }).show();
+    }
+
+    /** 登录添加：选域 → 打开授权页 → 每 3 秒轮询，完成即刷新列表。 */
+    private void loginSheet() {
+        new AlertDialog.Builder(a)
+                .setTitle("登录添加账号")
+                .setItems(new String[]{"国内版（workbuddy.cn）", "国际版（workbuddy.ai）"},
+                        new android.content.DialogInterface.OnClickListener() {
+                            public void onClick(android.content.DialogInterface d, int which) {
+                                startLogin(which == 1 ? "global" : "cn", 0);
+                            }
+                        }).show();
+    }
+
+    private void startLogin(final String realm, final int attempt) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("realm", realm);
+            PanelApi.post(a, "/panel/api/login/start", body, new PanelApi.Cb() {
+                public void ok(JSONObject o) {
+                    final String state = o.optString("state");
+                    String url = o.optString("url");
+                    if (state.isEmpty() || url.isEmpty()) {
+                        toast("发起登录失败：缺少 state / url");
+                        return;
+                    }
+                    toast("已打开浏览器，请完成授权（最长等 5 分钟）");
+                    try {
+                        a.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse(url)));
+                    } catch (Throwable t) {
+                        dialogText("请手动打开链接", url);
+                    }
+                    pollLogin(state, 0);
+                }
+                public void fail(String msg) { toast("发起登录失败：" + msg); }
+            });
+        } catch (Throwable t) {
+            toast("发起登录失败：" + t);
+        }
+    }
+
+    private void pollLogin(final String state, final int attempt) {
+        if (attempt > 100) { toast("登录超时（5 分钟未完成）"); return; }
+        PanelApi.get(a, "/panel/api/login/poll?state=" + enc(state), new PanelApi.Cb() {
+            public void ok(JSONObject o) {
+                if (o.optBoolean("done")) {
+                    String uid = o.optString("uid", "");
+                    toast("登录成功" + (uid.isEmpty() ? "" : "：" + uid));
+                    loadOverview(false);
+                    return;
+                }
+                if (o.has("error") && !o.optString("error").isEmpty()) {
+                    toast("登录失败：" + o.optString("error"));
+                    return;
+                }
+                ui.postDelayed(new Runnable() {
+                    public void run() { pollLogin(state, attempt + 1); }
+                }, 3000);
+            }
+            public void fail(String msg) {
+                // 网关重启/瞬时网络错误：继续等，不把一次抖动当登录失败
+                ui.postDelayed(new Runnable() {
+                    public void run() { pollLogin(state, attempt + 1); }
+                }, 3000);
+            }
         });
     }
 
@@ -1961,6 +2256,18 @@ final class Console {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(14);
         box.addView(save, lp);
+
+        Button all = btn("全部配置（高级）", false);
+        all.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                // 原生配置编辑器：按 JSON 类型自动生成控件，覆盖 config.json 全部键
+                a.startActivity(new android.content.Intent(a, ConfigActivity.class));
+            }
+        });
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.topMargin = dp(10);
+        box.addView(all, alp);
 
         TextView note = new TextView(a);
         note.setText("只覆盖这里显示的字段，其余配置原样保留。改动按网关的热生效规则执行，"
