@@ -40,9 +40,12 @@ const toolLoopBody = `{"model":"cn:deepseek-v4.1-flash","max_tokens":8192,` +
 
 func newToolOnlyReader(t *testing.T, up *upstream.Client, body, seg string) *continueReader {
 	t.Helper()
-	return newContinueReaderWithFloor(context.Background(), up,
+	r := newContinueReaderWithFloor(context.Background(), up,
 		&auth.Auth{UID: "u1", AccessToken: "at-1", ExpiresAt: 9999999999},
 		[]byte(body), "1.2.3.4", upstream.ChatMeta{}, io.NopCloser(strings.NewReader(seg)), 8192)
+	// 这些用例验证的是「开关打开时」的行为；默认关闭由 TestToolOnlyOffByDefault 覆盖。
+	r.toolOnlyRescue = true
+	return r
 }
 
 // TestToolOnlyAdoptsToolCall 续写段给工具调用 → 采纳，客户端收到工具分片。
@@ -191,7 +194,7 @@ func TestToolOnlyE2EResponses(t *testing.T) {
 				}, nil
 			})
 			p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-			h := NewHandler(Config{Pool: p, Upstream: up})
+			h := NewHandler(Config{Pool: p, Upstream: up, ToolOnlyRescue: true})
 
 			var buf bytes.Buffer
 			old := log.Writer()
@@ -227,3 +230,55 @@ func TestToolOnlyE2EResponses(t *testing.T) {
 }
 
 var _ = json.Marshal
+
+// TestToolOnlyOffByDefault 默认关闭：正常收尾不再被判成截断、不白打一次上游。
+//
+// 线上症状：agent 循环里模型看完工具结果给了一段完整回答（实测 1608B），
+// finish=stop、零工具调用——旧实现把它当「说一句就停了」，补发一次只采纳工具调用
+// 的续写请求，等于每次正常收尾都多打一次上游。
+func TestToolOnlyOffByDefault(t *testing.T) {
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	r := newContinueReaderWithFloor(context.Background(), up,
+		&auth.Auth{UID: "u1", AccessToken: "at-1", ExpiresAt: 9999999999},
+		[]byte(toolLoopBody), "1.2.3.4", upstream.ChatMeta{},
+		io.NopCloser(strings.NewReader(segToolOnlyStop)), 8192)
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("默认关闭时不该有续写请求，实际 %d 次", len(*reqs))
+	}
+	if strings.Contains(string(out), "tool_calls") {
+		t.Fatalf("不该出现续写段的工具调用:\n%s", out)
+	}
+	if !strings.Contains(string(out), "先看完整表单") {
+		t.Fatalf("首段正文应原样透传:\n%s", out)
+	}
+}
+
+// TestToolOnlySkipsFinishedAnswer 开关打开也不救「已经说完」的短答复：
+// 尾部有收尾词、没有前瞻动作词时按原样收尾。
+func TestToolOnlySkipsFinishedAnswer(t *testing.T) {
+	finished := `data: {"id":"t1","choices":[{"index":0,"delta":{"content":"已确认 user-store 的批量赋值接口支持按邮箱改记录，测试已通过，结论如上。"}}]}` + "\n\n" +
+		`data: {"id":"t1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":48,"total_tokens":106555}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	r := newToolOnlyReader(t, up, toolLoopBody, finished)
+	out, _ := io.ReadAll(r)
+	if len(*reqs) != 0 {
+		t.Fatalf("说完了的答复不该续写，实际 %d 次", len(*reqs))
+	}
+	if strings.Contains(string(out), "tool_calls") {
+		t.Fatalf("不该补工具调用:\n%s", out)
+	}
+
+	// 同一段打开开关、但尾部在预告动手 → 应当续写（既有用例已覆盖采纳路径，
+	// 这里只断言「真的发了请求」）。
+	up2, reqs2 := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	r2 := newToolOnlyReader(t, up2, toolLoopBody, segToolOnlyStop)
+	_, _ = io.ReadAll(r2)
+	if len(*reqs2) != 1 {
+		t.Fatalf("预告动手应续写一次，实际 %d", len(*reqs2))
+	}
+}

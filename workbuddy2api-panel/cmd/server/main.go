@@ -395,6 +395,7 @@ func main() {
 		SanitizeFingerprints:   cfg.Features.SanitizeBlacklistFingerprints,
 		EmbeddingsEnabled:      cfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled:  cfg.Features.WatermarkStripEnabled,
+		ToolOnlyRescue:         cfg.Features.ToolOnlyRescue,
 		RecordClientInfo:       cfg.Logging.RequestClientInfo,
 		RecordContext:          cfg.Logging.RequestArchiveContext,
 		ModelFallback:          cfg.Pool.ModelFallback,
@@ -539,6 +540,7 @@ func main() {
 		AdminAPIKey:                   cfg.AdminAPIKey,
 		WatermarkStripEnabled:         cfg.Features.WatermarkStripEnabled,
 		EmbeddingsEnabled:             cfg.Features.EmbeddingsEnabled,
+		ToolOnlyRescue:                cfg.Features.ToolOnlyRescue,
 		Tasks:                         sch,
 		GrowthRunner:                  pn.RunGrowthQueueOnce,
 		Audit:                         auditLog,
@@ -874,6 +876,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		SanitizeFingerprints:  newCfg.Features.SanitizeBlacklistFingerprints,
 		EmbeddingsEnabled:     newCfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
+		ToolOnlyRescue:        newCfg.Features.ToolOnlyRescue,
 		RecordClientInfo:      newCfg.Logging.RequestClientInfo,
 		RecordContext:         newCfg.Logging.RequestArchiveContext,
 		// review #3：这两个表是 handler 每次请求从 live 快照读的，漏填等于「保存任意

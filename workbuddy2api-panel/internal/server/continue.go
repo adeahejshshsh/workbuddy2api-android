@@ -119,6 +119,9 @@ type continueReader struct {
 
 	// toolOnlyTried 安全续写（只采纳工具调用）已用（每请求一次；见 tryToolOnlyRescue）。
 	toolOnlyTried bool
+	// toolOnlyRescue 该功能的总开关（features.tool_only_rescue，缺省关闭）。
+	// 由 handler 在构造后写入：默认零值 = 关，避免「正常收尾」被判成截断。
+	toolOnlyRescue bool
 	// toolOnly 当前段处于「只采纳工具调用」模式：正文/思考增量全部丢弃。
 	toolOnly bool
 	// origFinish/origTail 首段的终态帧：续写段没给工具调用时原样回放。

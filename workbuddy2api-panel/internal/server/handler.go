@@ -119,6 +119,8 @@ type Config struct {
 	RecordContext bool
 	// EmbeddingsEnabled /v1/embeddings 总开关（features.embeddings_enabled），缺省关闭。
 	EmbeddingsEnabled bool
+	// ToolOnlyRescue 「说一句就收尾」的安全续写（features.tool_only_rescue），缺省关闭。
+	ToolOnlyRescue bool
 	// WatermarkStripEnabled 去水印（裁白边）端点与 MCP 工具的总开关，缺省关闭。
 	// 关着时端点回 403、MCP 工具不出现在 tools/list 里，其它生成接口不受影响。
 	WatermarkStripEnabled bool
@@ -157,6 +159,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 
 		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
 		EmbeddingsEnabled:     h.cfg.EmbeddingsEnabled,
+		ToolOnlyRescue:        h.cfg.ToolOnlyRescue,
 	}
 }
 
@@ -2012,6 +2015,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// max_tokens 补回可用值（见 upstream.MinOutputBudget 的说明）。
 			cont := newContinueReaderWithFloor(r.Context(), h.cfg.Upstream, acct, body, clientIP, chatMeta, rc,
 				h.cfg.Upstream.BudgetFloorFor(body, acct.Realm()))
+			// 「说一句就收尾」的安全续写默认关闭（features.tool_only_rescue）：
+			// 判据只能依赖「末条是工具结果 + 正文短」，而 agent 循环里正常收尾
+			// 也完全长这样，实测会把正常结尾当截断、白打一次上游。
+			cont.toolOnlyRescue = h.loadLive().ToolOnlyRescue
 			defer cont.Close()
 			stats := newChatStatsReaderSince(cont, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
