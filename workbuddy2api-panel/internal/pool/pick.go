@@ -292,6 +292,18 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 	if sp := p.sharePoolLocked(candsAll); len(sp) > 0 {
 		e = p.pickByShare(sp)
 	}
+	// 选号策略（strategy.go）：weighted 返回 nil 继续走下面的既有加权随机路径；
+	// 轮询/顺序耗尽在 **candsAll**（不受 top5 截断）上选，否则环只有 5 个号，
+	// 「用完一个再用下一个」对第 6 个号永远不成立。
+	//
+	// 次序：显式占比（上面那个分支）优先于策略——占比是「这几个号怎么分」的更窄
+	// 意图，策略是「全体候选怎么排序」；两者同时配置时按用户的更窄意图走。没有
+	// 占比的池子（绝大多数）不受影响。
+	if e == nil {
+		if picked := p.pickByStrategyLocked(candsAll, reqModel, realm, now); picked != nil {
+			e = picked
+		}
+	}
 	// 防并发撞号：在持锁内基于「上次选中时刻」过滤，但同一批并发 goroutine 会串行进入
 	// 本函数（写锁），每个进入者都把 lastUsed 置为 now —— 于是同一瞬间的第 2..N 个
 	// 进入者看到前一个账号 lastUsed==now（距今 0 < minPickGap），被自然挤向其他账号。

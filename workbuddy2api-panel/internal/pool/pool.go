@@ -44,6 +44,14 @@ type Pool struct {
 	// egress 出口级瞬时失败计数（egress.go，键 = 出口身份）。运行态，不持久化：
 	// 链路状态易失，重启后从零开始是正确的。
 	egress map[string]egressStat
+
+	// strategy 选号策略（weighted / round_robin / sequential，见 strategy.go）。
+	// 空 = weighted（既有行为）。它只决定「同样合格的候选里选哪个」——健康、冷却、
+	// 在途、积分保底、成本分层、账号优先级全部先于它生效，策略无法绕过它们。
+	strategy string
+	// scheduling 策略游标：(realm, 模型) → 上次用到的账号。运行态不持久化
+	// （重启从环头重来，只影响下一次的起点，不影响正确性）。
+	scheduling map[string]scheduleCursor
 	// degradeThreshold / degradeCooldown / degradeCooldownMax 连败降权参数
 	// （SetDegrade 注入；默认值见 defaultDegrade*，issue #114）。
 	degradeThreshold   int
@@ -138,6 +146,8 @@ func New(stateFp string) *Pool {
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
 		exploreLast:         map[string]time.Time{},
+		strategy:            StrategyWeighted,
+		scheduling:          map[string]scheduleCursor{},
 	}
 	if stateFp != "" {
 		p.load()

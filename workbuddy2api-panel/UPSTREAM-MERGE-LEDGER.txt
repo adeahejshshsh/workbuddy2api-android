@@ -394,3 +394,16 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 - `592fb01` + `65e644e`（额度窗口探针 / 号池分区 / 代理订阅导入，随后又 revert 分区）：
   净增益只剩「额度窗口探针 + 代理订阅导入」，而本仓没有 proxypool（明确排除），
   订阅导入无处落地；分区已被上游自己撤销，不该先搬后撤。
+
+## 第十批（上）：选号策略 + 上游劣化滑窗告警（`18a6776` 的前半）
+
+| 上游 | 内容 | 落地 |
+|---|---|---|
+| `18a6776` | `internal/pool/strategy.go`：weighted（缺省）/ round_robin / sequential | 整文件移植。**边界**：策略只在「已过全部可用性判定」的候选里决定选哪个——健康/冷却/在途/积分保底/成本分层/账号优先级全部先于它，切 sequential 也烧不穿 credit_floor。游标按 `(realm, 模型)` 分桶并带策略标签（切策略后旧游标自动失效），在 `candsAll` 上选（不受 top5 截断）。本仓次序：显式 `account_share` 优先于策略，其余走策略 |
+| `18a6776` | `internal/server/upstreamhealth.go`：劣化滑窗告警 | 整文件移植。5 分钟滑窗、TTFB≥8s 占比 ≥30% 或 5xx ≥10% 且 ≥3 条时打一条聚合 WARN、10 分钟内不重复；499/interrupted 丢弃（调用方走了不代表上游坏）。挂在 `chatStat.done()` —— 唯一同时持有 status/outcome/TTFB 的收口 |
+
+配置：`pool.selection_strategy`（`weighted`/`round_robin`/`sequential`，另接受
+`rr`/`round-robin`/`seq`/`exhaust` 别名；未知值归一成 weighted 而不是报错），热生效。
+
+**没搬**：`18a6776` 的运行日志落盘/导出（`logstore` 392 + `logexport` 119 + ring 改造 +
+面板页），单独一批做。
