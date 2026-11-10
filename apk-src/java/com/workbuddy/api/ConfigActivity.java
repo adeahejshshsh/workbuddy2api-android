@@ -52,6 +52,7 @@ public class ConfigActivity extends Activity {
     private JSONObject cfg;
     private LinearLayout content;
     private TextView status;
+    private PanelService svc;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -113,22 +114,15 @@ public class ConfigActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(root);
+        svc = new PanelService(this);
         load();
     }
 
     private void load() {
         content.removeAllViews();
         content.addView(hint("加载中…"));
-        PanelApi.get(this, "/panel/api/config", new PanelApi.Cb() {
-            public void ok(JSONObject o) {
-                cfg = o.optJSONObject("config");
-                if (cfg == null) {
-                    content.removeAllViews();
-                    content.addView(hint("配置接口不可用（panel.LoadConfig 未装配）"));
-                    return;
-                }
-                render();
-            }
+        svc.loadConfig(new PanelService.ConfigCb() {
+            public void ok(JSONObject c, String path) { cfg = c; render(); }
             public void fail(String msg) {
                 content.removeAllViews();
                 content.addView(hint("读取配置失败：" + msg));
@@ -339,11 +333,8 @@ public class ConfigActivity extends Activity {
     private void saveAll() {
         if (cfg == null) return;
         status.setText("保存中…");
-        PanelApi.post(this, "/panel/api/config", cfg, new PanelApi.Cb() {
-            public void ok(JSONObject o) {
-                JSONArray need = o.optJSONArray("restart_required");
-                String extra = need == null || need.length() == 0 ? ""
-                        : "（需重启：" + need.toString() + "）";
+        svc.saveConfig(cfg, new PanelService.Cb<String>() {
+            public void ok(String extra) {
                 status.setText("已保存");
                 toast("配置已保存" + extra);
             }
