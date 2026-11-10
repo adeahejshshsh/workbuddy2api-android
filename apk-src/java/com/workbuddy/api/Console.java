@@ -366,12 +366,16 @@ final class Console {
         acts.addView(actionPill(s.paused ? "恢复" : "暂停", new Runnable() {
             public void run() { doPause(s); }
         }));
-        acts.addView(actionPill("类型", new Runnable() {
-            public void run() { typeSheet(s); }
-        }));
-        acts.addView(actionPill("更多", new Runnable() {
-            public void run() { moreSheet(s); }
-        }));
+        // 类型 / 探活 / 备注 / 分组 / 模型开关都在「更多」里：动作行保持 5 个，
+        // 360px 屏不用横滑就能看全（旧版第 6 个被右边缘切掉）。
+        TextView morePill = Theme.pill(a, "更多", false);
+        morePill.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { moreSheet(v, s); }
+        });
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        mlp.rightMargin = Theme.dp(a, Theme.S2);
+        acts.addView(morePill, mlp);
         return card;
     }
 
@@ -440,29 +444,26 @@ final class Console {
     private void typeSheet(final PanelService.Account s) {
         final String[] values = {"", "enterprise", "personal"};
         String cur = s.override == null ? "" : s.override;
-        final String[] labels = {
+        String[] labels = {
                 "自动判定" + (cur.isEmpty() ? " · 当前" : ""),
                 "强制企业版" + ("enterprise".equals(cur) ? " · 当前" : ""),
                 "强制个人版" + ("personal".equals(cur) ? " · 当前" : "")
         };
         int checked = "enterprise".equals(cur) ? 1 : ("personal".equals(cur) ? 2 : 0);
-        new AlertDialog.Builder(a, android.R.style.Theme_Material_Dialog_Alert)
-                .setTitle("账号类型")
-                .setSingleChoiceItems(labels, checked, new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface d, int which) {
-                        d.dismiss();
-                        svc.enterprise(s.uid, values[which], new PanelService.Cb<Boolean>() {
-                            public void ok(Boolean changed) {
-                                toast("类型已更新" + (changed ? "" : "（判定结果未变）"));
-                                loadOverview(false);
-                            }
-                            public void fail(String m) { toast("切换失败：" + m); }
-                        });
+        Sheet.single(a, "账号类型", labels, checked, new Sheet.Pick() {
+            public void onPick(int which) {
+                svc.enterprise(s.uid, values[which], new PanelService.Cb<Boolean>() {
+                    public void ok(Boolean changed) {
+                        toast("类型已更新" + (changed ? "" : "（判定结果未变）"));
+                        loadOverview(false);
                     }
-                }).show();
+                    public void fail(String m) { toast("切换失败：" + m); }
+                });
+            }
+        });
     }
 
-    private void moreSheet(final PanelService.Account s) {
+    private void moreSheet(View anchor, final PanelService.Account s) {
         String[] items = {
                 s.paused ? "恢复选号" : "暂停选号",
                 s.disabled ? "启用账号" : "禁用账号",
@@ -474,10 +475,9 @@ final class Console {
                 "模型开关",
                 "移除账号"
         };
-        new AlertDialog.Builder(a)
-                .setTitle(TextUtils.isEmpty(s.nickname) ? s.uid : s.nickname)
-                .setItems(items, new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface d, int which) {
+        Sheet.anchor(anchor, TextUtils.isEmpty(s.nickname) ? s.uid : s.nickname, items, 8,
+                new Sheet.Pick() {
+                    public void onPick(int which) {
                         if (which == 0) doPause(s);
                         else if (which == 1) svc.disable(s.uid, !s.disabled, after("已更新"));
                         else if (which == 2) typeSheet(s);
@@ -492,7 +492,7 @@ final class Console {
                         else if (which == 7) modelSheet(s);
                         else confirmRemove(s);
                     }
-                }).show();
+                });
     }
 
     private String typeLabel(PanelService.Account s) {
@@ -528,31 +528,25 @@ final class Console {
     private interface TextCommit { void onText(String t); }
 
     private void editText(String title, String hint, String initial, final TextCommit cb) {
-        EditText et = new EditText(a);
+        final EditText et = field(hint);
         et.setText(initial == null ? "" : initial);
-        et.setHint(hint);
-        et.setTextSize(15f);
-        et.setTypeface(Theme.sans(a));
-        new AlertDialog.Builder(a).setTitle(title).setView(et)
-                .setNegativeButton("取消", null)
-                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface d, int w) {
-                        cb.onText(et.getText() == null ? "" : et.getText().toString().trim());
-                    }
-                }).show();
+        LinearLayout box = new LinearLayout(a);
+        box.setPadding(Theme.dp(a, Theme.S4), 0, Theme.dp(a, Theme.S4), Theme.dp(a, Theme.S2));
+        box.addView(et);
+        Sheet.custom(a, title, box, "保存", new Runnable() {
+            public void run() {
+                cb.onText(et.getText() == null ? "" : et.getText().toString().trim());
+            }
+        });
     }
 
     private void confirmRemove(final PanelService.Account s) {
-        new AlertDialog.Builder(a)
-                .setTitle("移除账号")
-                .setMessage("删除本地凭据文件，不可撤销。\n\n"
-                        + (TextUtils.isEmpty(s.nickname) ? s.uid : s.nickname) + "\n" + s.uid)
-                .setNegativeButton("取消", null)
-                .setPositiveButton("移除", new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface d, int w) {
-                        svc.remove(s.uid, after("已移除"));
-                    }
-                }).show();
+        Sheet.confirm(a, "移除账号",
+                "删除本地凭据文件，不可撤销。\n\n"
+                        + (TextUtils.isEmpty(s.nickname) ? s.uid : s.nickname) + "\n" + s.uid,
+                "移除", true, new Runnable() {
+                    public void run() { svc.remove(s.uid, after("已移除")); }
+                });
     }
 
     // ── 模型开关 ───────────────────────────────────────────────────────────
@@ -608,9 +602,7 @@ final class Console {
             box.addView(row);
             box.addView(Theme.divider(a));
         }
-        ScrollView sv = scrollOf(box);
-        new AlertDialog.Builder(a).setTitle("模型开关").setView(sv)
-                .setPositiveButton("完成", null).show();
+        Sheet.custom(a, "模型开关", box, "完成", null);
     }
 
     // ── 账号积分任务（弹层）────────────────────────────────────────────────
@@ -663,14 +655,10 @@ final class Console {
             }
             col.addView(card);
         }
-        AlertDialog.Builder builder = new AlertDialog.Builder(a)
-                .setTitle("积分任务").setView(scrollOf(col)).setNegativeButton("关闭", null);
-        if (v.canAuto) {
-            builder.setPositiveButton("一键完成", new DialogInterface.OnClickListener() {
-                public void onClick(DialogInterface d, int w) { autoAll(uid); }
-            });
-        }
-        builder.show();
+        Sheet.custom(a, "积分任务", col, v.canAuto ? "一键完成" : null,
+                v.canAuto ? new Runnable() {
+                    public void run() { autoAll(uid); }
+                } : null);
     }
 
     private void autoAll(String uid) {
@@ -1432,23 +1420,20 @@ final class Console {
             ctx.addView(tv);
             col.addView(ctx);
         }
-        new AlertDialog.Builder(a).setTitle("请求详情").setView(scrollOf(col))
-                .setPositiveButton("关闭", null).show();
+        Sheet.custom(a, "请求详情", col, "关闭", null);
     }
 
     private void confirmClear() {
-        new AlertDialog.Builder(a)
-                .setTitle("清空请求归档")
-                .setMessage("删除磁盘上的 requests-*.jsonl，不可恢复。\n运行日志（内存）不受影响。")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("清空", new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface d, int w) {
+        Sheet.confirm(a, "清空请求归档",
+                "删除磁盘上的 requests-*.jsonl，不可恢复。\n运行日志（内存）不受影响。",
+                "清空", true, new Runnable() {
+                    public void run() {
                         svc.clearArchive(new PanelService.Cb<String>() {
                             public void ok(String m) { toast("已清空"); renderLogs(); }
                             public void fail(String msg) { toast("失败：" + msg); }
                         });
                     }
-                }).show();
+                });
     }
 
     // ── 更多 ───────────────────────────────────────────────────────────────
@@ -1635,17 +1620,16 @@ final class Console {
     private void addSheet() {
         String[] items = {"导入文件（cockpit / auths JSON）", "导出账号到下载目录",
                 "添加 API Key 账号", "登录添加（浏览器授权）"};
-        new AlertDialog.Builder(a).setTitle("添加 / 迁移账号")
-                .setItems(items, new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface d, int which) {
-                        if (which == 0) {
-                            if (a instanceof MainActivity) ((MainActivity) a).requestImportFile();
-                            else toast("当前宿主不支持文件选择");
-                        } else if (which == 1) exportAccounts();
-                        else if (which == 2) apiKeyDialog();
-                        else loginSheet();
-                    }
-                }).show();
+        Sheet.menu(a, "添加 / 迁移账号", items, -1, new Sheet.Pick() {
+            public void onPick(int which) {
+                if (which == 0) {
+                    if (a instanceof MainActivity) ((MainActivity) a).requestImportFile();
+                    else toast("当前宿主不支持文件选择");
+                } else if (which == 1) exportAccounts();
+                else if (which == 2) apiKeyDialog();
+                else loginSheet();
+            }
+        });
     }
 
     void importUri(android.net.Uri uri) {
@@ -1671,8 +1655,7 @@ final class Console {
                         for (int i = 0; i < Math.min(r.errors.size(), 20); i++) {
                             sb.append("· ").append(r.errors.get(i)).append('\n');
                         }
-                        new AlertDialog.Builder(a).setTitle("导入错误")
-                                .setMessage(sb.toString()).setPositiveButton("知道了", null).show();
+                        Sheet.confirm(a, "导入错误", sb.toString(), "知道了", false, null);
                     }
                     open("accounts");
                 }
@@ -1721,19 +1704,17 @@ final class Console {
         box.addView(uid);
         box.addView(token);
         box.addView(nick);
-        new AlertDialog.Builder(a).setTitle("添加 API Key 账号").setView(box)
-                .setNegativeButton("取消", null)
-                .setPositiveButton("添加", new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface d, int w) {
-                        svc.addApiKey(uid.getText().toString().trim(),
-                                token.getText().toString().trim(),
-                                nick.getText().toString().trim(),
-                                new PanelService.Cb<String>() {
-                                    public void ok(String id) { toast("已添加 " + id); open("accounts"); }
-                                    public void fail(String m) { toast("添加失败：" + m); }
-                                });
-                    }
-                }).show();
+        Sheet.custom(a, "添加 API Key 账号", box, "添加", new Runnable() {
+            public void run() {
+                svc.addApiKey(uid.getText().toString().trim(),
+                        token.getText().toString().trim(),
+                        nick.getText().toString().trim(),
+                        new PanelService.Cb<String>() {
+                            public void ok(String id) { toast("已添加 " + id); open("accounts"); }
+                            public void fail(String m) { toast("添加失败：" + m); }
+                        });
+            }
+        });
     }
 
     private EditText field(String hint) {
@@ -1745,13 +1726,11 @@ final class Console {
     }
 
     private void loginSheet() {
-        new AlertDialog.Builder(a).setTitle("登录添加账号")
-                .setItems(new String[]{"国内版 · workbuddy.cn", "国际版 · workbuddy.ai"},
-                        new DialogInterface.OnClickListener() {
-                            public void onClick(DialogInterface d, int which) {
-                                startLogin(which == 1 ? "global" : "cn");
-                            }
-                        }).show();
+        Sheet.menu(a, "登录添加账号",
+                new String[]{"国内版 · workbuddy.cn", "国际版 · workbuddy.ai"}, -1,
+                new Sheet.Pick() {
+                    public void onPick(int which) { startLogin(which == 1 ? "global" : "cn"); }
+                });
     }
 
     private void startLogin(String realm) {
