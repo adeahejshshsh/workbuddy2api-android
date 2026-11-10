@@ -52,6 +52,10 @@ final class Console {
 
     private String logMode = "run", logCh = "all", dataMode = "packages", taskMode = "queue";
     private boolean logAuto = true, logLoop;
+    /** 日志是否「跟随最新」：贴在最新一端时不打断，用户手动上滑后停止跟随。 */
+    private boolean logPinned = true;
+    /** 最新一排在最上面（true）还是最下面（false，默认，与原行为一致）。 */
+    private boolean logNewestFirst = false;
     private int usageHours = 72, balanceDays = 7;
     private String taskUid = "";
 
@@ -181,8 +185,17 @@ final class Console {
     }
 
     private ScrollView scrollOf(LinearLayout column) {
+        return scrollOf(column, false);
+    }
+
+    /** scrollbar=true 时显示右侧竖向滚动条（日志页需要：几千行必须能看出当前在哪）。 */
+    private ScrollView scrollOf(LinearLayout column, boolean scrollbar) {
         ScrollView sv = new ScrollView(a);
-        sv.setVerticalScrollBarEnabled(false);
+        sv.setVerticalScrollBarEnabled(scrollbar);
+        if (scrollbar) {
+            sv.setScrollbarFadingEnabled(false);
+            sv.setScrollBarStyle(View.SCROLLBARS_INSIDE_INSET);
+        }
         sv.addView(column);
         return sv;
     }
@@ -1243,9 +1256,12 @@ final class Console {
         col.addView(seg);
 
         if ("run".equals(logMode)) {
-            LinearLayout chips = new LinearLayout(a);
-            chips.setOrientation(LinearLayout.HORIZONTAL);
-            chips.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+            // 右侧：自动刷新 / 排序 / 一键到底。频道 + 这组按钮在窄屏会超宽，整组可横滑。
+            HorizontalScrollView chipScroll = new HorizontalScrollView(a);
+            chipScroll.setHorizontalScrollBarEnabled(false);
+            chipScroll.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+            LinearLayout chipRow = new LinearLayout(a);
+            chipRow.setOrientation(LinearLayout.HORIZONTAL);
             String[] ch = {"all", "task", "chat", "sys"};
             String[] cl = {"全部", "任务", "对话", "系统"};
             for (int i = 0; i < ch.length; i++) {
@@ -1258,15 +1274,46 @@ final class Console {
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.rightMargin = Theme.dp(a, Theme.S1);
-                chips.addView(p, lp);
+                chipRow.addView(p, lp);
             }
-            chips.addView(space());
             final TextView auto = Theme.pill(a, logAuto ? "自动" : "暂停", logAuto);
+            auto.setTextSize(11.5f);
             auto.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) { logAuto = !logAuto; renderLogs(); }
             });
-            chips.addView(auto);
-            col.addView(chips);
+            LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            alp.leftMargin = Theme.dp(a, Theme.S2);
+            alp.rightMargin = Theme.dp(a, Theme.S1);
+            chipRow.addView(auto, alp);
+
+            final TextView order = Theme.pill(a, logNewestFirst ? "最新在上" : "最新在下", false);
+            order.setTextSize(11.5f);
+            order.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    logNewestFirst = !logNewestFirst;
+                    // 换端后自动贴到「最新」那一端，省得手滑
+                    logPinned = true;
+                    renderLogs();
+                }
+            });
+            LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            olp.rightMargin = Theme.dp(a, Theme.S1);
+            chipRow.addView(order, olp);
+
+            // 「最新」比「到底」准确：切到「最新在上」时它跳的是顶端
+            final TextView tail = Theme.pill(a, "最新", true);
+            tail.setTextSize(11.5f);
+            tail.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    logPinned = true;
+                    scrollLogToNewest();
+                }
+            });
+            chipRow.addView(tail);
+            chipScroll.addView(chipRow);
+            col.addView(chipScroll);
 
             final TextView tv = Theme.num(a, "加载中…", 11f, Theme.INK2);
             tv.setId(android.R.id.text1);   // 自动刷新据此找回这个 TextView
@@ -1279,7 +1326,11 @@ final class Console {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             wlp.topMargin = Theme.dp(a, Theme.S3);
             col.addView(wrap, wlp);
-            show(scrollOf(col));
+
+            // 日志页显示右侧滚动条：几千行时要能看出当前位置
+            ScrollView sv = scrollOf(col, true);
+            show(sv);
+            watchLogScroll(sv);
             loadLogs(tv);
             startLogLoop();
         } else {
@@ -1297,7 +1348,7 @@ final class Console {
             list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
             col.addView(list);
             list.addView(Theme.empty(a, "加载中…"));
-            show(scrollOf(col));
+            show(scrollOf(col, true));
             svc.requestLogs(new PanelService.Cb<List<PanelService.ReqEvent>>() {
                 public void ok(List<PanelService.ReqEvent> rows) { bodyRequests(list, rows); }
                 public void fail(String m) { list.removeAllViews(); list.addView(Theme.empty(a, "失败：" + m)); }
@@ -1314,22 +1365,55 @@ final class Console {
     private void loadLogs(final TextView tv) {
         svc.logs(new PanelService.Cb<List<PanelService.LogRow>>() {
             public void ok(List<PanelService.LogRow> rows) {
-                StringBuilder sb = new StringBuilder();
+                // 先收集成行再决定顺序：最新在下（默认，等同于终端输出）或最新在上。
+                List<String> lines = new java.util.ArrayList<String>();
                 int start = Math.max(0, rows.size() - 400);
-                int shown = 0;
                 for (int i = start; i < rows.size(); i++) {
                     PanelService.LogRow r = rows.get(i);
                     if (!"all".equals(logCh) && !logCh.equals(r.channel)) continue;
                     String ts = r.time;
                     int t = ts.indexOf('T');
                     if (t > 0 && ts.length() > t + 9) ts = ts.substring(t + 1, t + 9);
-                    sb.append(ts).append("  ").append(r.text).append('\n');
-                    shown++;
+                    lines.add(ts + "  " + r.text);
                 }
-                tv.setText(shown == 0 ? "（暂无日志）" : sb.toString());
+                if (logNewestFirst) java.util.Collections.reverse(lines);
+                StringBuilder sb = new StringBuilder();
+                for (String line : lines) sb.append(line).append('\n');
+                tv.setText(lines.isEmpty() ? "（暂无日志）" : sb.toString());
+                if (logPinned) scrollLogToNewest();
             }
             public void fail(String msg) { tv.setText("日志加载失败：" + msg); }
         });
+    }
+
+    /** 滚到「最新」那一端：最新在下 → 到底；最新在上 → 到顶。 */
+    private void scrollLogToNewest() {
+        final ScrollView sv = currentScroll;
+        if (sv == null) return;
+        sv.post(new Runnable() {
+            public void run() {
+                if (logNewestFirst) sv.fullScroll(View.FOCUS_UP);
+                else sv.fullScroll(View.FOCUS_DOWN);
+            }
+        });
+    }
+
+    /**
+     * 跟随最新：用户手动滑离最新一端就停止跟随（否则刷一次把人顶回去），
+     * 滑回端头再自动恢复。用 ViewTreeObserver 监听（兼容 minSdk 21）。
+     */
+    private void watchLogScroll(final ScrollView sv) {
+        sv.getViewTreeObserver().addOnScrollChangedListener(
+                new android.view.ViewTreeObserver.OnScrollChangedListener() {
+                    public void onScrollChanged() {
+                        if (!"logs".equals(screen) || !"run".equals(logMode)) return;
+                        View child = sv.getChildAt(0);
+                        if (child == null) return;
+                        int max = Math.max(0, child.getHeight() - sv.getHeight());
+                        if (logNewestFirst) logPinned = sv.getScrollY() <= Theme.dp(a, 24);
+                        else logPinned = sv.getScrollY() >= max - Theme.dp(a, 24);
+                    }
+                });
     }
 
     private void startLogLoop() {
