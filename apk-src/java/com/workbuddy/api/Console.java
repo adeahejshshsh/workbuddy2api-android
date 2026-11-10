@@ -56,8 +56,11 @@ final class Console {
     private final LinearLayout tabs;
     private String page = "accounts";
     private boolean logAuto = true;
+    private String logMode = "run";   // run = 运行日志；req = 请求日志
     private String logCh = "all";
     private JSONObject overviewCache;
+    /** 当前页的滚动容器：动作后重新渲染时用它把滚动位置接回去（否则每次刷新都弹回顶部）。 */
+    private ScrollView pageScroll;
     /**
      * 冷启动重试计数：App 拉起来时 Go 网关可能还没开始监听（实测 1–3 秒，低端机更久）。
      * 这时任何 /panel/api 请求都是 connection refused —— 直接弹「加载失败」是在怪用户
@@ -143,6 +146,7 @@ final class Console {
         box.addView(grid);
 
         pageBox.addView(sv);
+        pageScroll = sv;
         loadOverview(false);
     }
 
@@ -189,7 +193,7 @@ final class Console {
         rlp.topMargin = dp(10);
         box.addView(refresh, rlp);
 
-        pageBox.addView(sv);
+        restoreInto(sv);
     }
 
     private void addStatRow(LinearLayout parent, String k1, String v1, int c1,
@@ -233,6 +237,7 @@ final class Console {
         box.setPadding(dp(10), dp(10), dp(10), dp(12));
         sv.addView(box);
         pageBox.addView(sv);
+        pageScroll = sv;
         loadOverview(false);
     }
 
@@ -268,8 +273,23 @@ final class Console {
                 if (s != null) box.addView(accountCard(s));
             }
         }
+        restoreInto(sv);
+    }
+
+    /**
+     * 换页内容但保留滚动位置：动作（签到/余额/任务…）完成后会整页重渲染，
+     * 不接回位置的话每点一次按钮都弹回最顶部 —— 账号多时得重新往下翻。
+     */
+    private void restoreInto(final ScrollView sv) {
+        final int y = pageScroll == null ? 0 : pageScroll.getScrollY();
         pageBox.removeAllViews();
         pageBox.addView(sv);
+        pageScroll = sv;
+        if (y > 0) {
+            sv.post(new Runnable() {
+                public void run() { sv.scrollTo(0, y); }
+            });
+        }
     }
 
     private View accountCard(final JSONObject s) {
@@ -338,14 +358,70 @@ final class Console {
 
         boolean personal = !s.optBoolean("enterprise") && !s.optBoolean("api_key");
         if (personal) {
-            acts.addView(actionBtn("签到", uid, "/checkin", null));
+            acts.addView(checkinBtn(uid));
         }
-        acts.addView(actionBtn("余额", uid, "/balance", null));
+        acts.addView(balanceBtn(uid));
         if (personal) acts.addView(taskBtn(uid));
         if (s.optBoolean("paused")) acts.addView(actionBtn("恢复选号", uid, "/resume", null));
         else acts.addView(actionBtn("暂停选号", uid, "/pause", null));
+        acts.addView(typeBtn(s));
         acts.addView(moreBtn(s));
         return card;
+    }
+
+    /** 签到：回包带 credits/credits_total 与 checkin_message，按「已签/跳过/完成」分档显示。 */
+    private View checkinBtn(final String uid) {
+        Button b = btn("签到", false);
+        b.setOnClickListener(new View.OnClickListener() {
+            public void onClick(final View v) {
+                v.setEnabled(false);
+                PanelApi.post(a, "/panel/api/accounts/" + enc(uid) + "/checkin", null, new PanelApi.Cb() {
+                    public void ok(JSONObject o) {
+                        v.setEnabled(true);
+                        StringBuilder sb = new StringBuilder();
+                        if (o.optBoolean("checkin_skipped")) sb.append("签到已跳过");
+                        else if (o.optBoolean("checkin_done")) sb.append("签到完成");
+                        else sb.append("签到未完成");
+                        if (o.has("credits")) sb.append(" · 积分 ").append(o.optInt("credits"));
+                        if (o.optInt("credits_total") > 0) sb.append("/").append(o.optInt("credits_total"));
+                        if (o.has("checkin_message") && !o.optString("checkin_message").isEmpty())
+                            sb.append("（").append(o.optString("checkin_message")).append("）");
+                        if (o.has("balance_error")) sb.append(" · 余额查询失败：").append(o.optString("balance_error"));
+                        toast(sb.toString());
+                        loadOverview(false);
+                    }
+                    public void fail(String msg) {
+                        v.setEnabled(true);
+                        toast("签到失败：" + msg);
+                    }
+                });
+            }
+        });
+        return b;
+    }
+
+    /** 余额：回包就是 credits / credits_total —— 此前只报「完成」，数值根本没显示。 */
+    private View balanceBtn(final String uid) {
+        Button b = btn("余额", false);
+        b.setOnClickListener(new View.OnClickListener() {
+            public void onClick(final View v) {
+                v.setEnabled(false);
+                PanelApi.post(a, "/panel/api/accounts/" + enc(uid) + "/balance", null, new PanelApi.Cb() {
+                    public void ok(JSONObject o) {
+                        v.setEnabled(true);
+                        String msg = "余额 " + o.optInt("credits");
+                        if (o.optInt("credits_total") > 0) msg += " / " + o.optInt("credits_total");
+                        toast(msg);
+                        loadOverview(false);
+                    }
+                    public void fail(String msg) {
+                        v.setEnabled(true);
+                        toast("余额刷新失败：" + msg);
+                    }
+                });
+            }
+        });
+        return b;
     }
 
     private View actionBtn(String label, final String uid, final String path, final JSONObject body) {
@@ -370,6 +446,55 @@ final class Console {
         return b;
     }
 
+    /** 账号类型：三选一（自动 / 强制企业 / 强制个人），比「点一下循环」明确得多。 */
+    private View typeBtn(final JSONObject s) {
+        Button b = btn("类型", false);
+        b.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { typeSheet(s); }
+        });
+        return b;
+    }
+
+    private void typeSheet(final JSONObject s) {
+        final String uid = s.optString("uid");
+        final String[] values = new String[]{"", "enterprise", "personal"};
+        final String cur = s.optString("enterprise_override", "");
+        final String[] labels = new String[]{
+                "自动判定" + (cur.isEmpty() ? "（当前）" : ""),
+                "强制企业版" + ("enterprise".equals(cur) ? "（当前）" : ""),
+                "强制个人版" + ("personal".equals(cur) ? "（当前）" : "")
+        };
+        int checked = "enterprise".equals(cur) ? 1 : ("personal".equals(cur) ? 2 : 0);
+        new AlertDialog.Builder(a)
+                .setTitle("账号类型")
+                .setSingleChoiceItems(labels, checked, new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        d.dismiss();
+                        applyType(uid, values[which]);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void applyType(final String uid, final String value) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("override", value);
+            PanelApi.post(a, "/panel/api/accounts/" + enc(uid) + "/enterprise", body, new PanelApi.Cb() {
+                public void ok(JSONObject o) {
+                    String name = value.isEmpty() ? "自动判定"
+                            : ("enterprise".equals(value) ? "强制企业版" : "强制个人版");
+                    toast("账号类型：" + name + (o.optBoolean("changed") ? "" : "（判定结果未变）"));
+                    loadOverview(false);
+                }
+                public void fail(String msg) { toast("切换失败：" + msg); }
+            });
+        } catch (Throwable t) {
+            toast("切换失败：" + t);
+        }
+    }
+
     private View moreBtn(final JSONObject s) {
         Button b = btn("更多", false);
         b.setOnClickListener(new View.OnClickListener() {
@@ -383,7 +508,7 @@ final class Console {
         String[] items = new String[]{
                 s.optBoolean("paused") ? "恢复选号" : "暂停选号",
                 s.optBoolean("disabled") ? "启用账号" : "禁用账号",
-                "账号类型：" + typeLabel(s) + "（点击切换）",
+                "账号类型：" + typeLabel(s),
                 "移除账号（不可撤销）"
         };
         new AlertDialog.Builder(a)
@@ -397,7 +522,7 @@ final class Console {
                             if (s.optBoolean("disabled")) hit(uid, "/revive", null);
                             else hit(uid, "/disable", null);
                         } else if (which == 2) {
-                            cycleType(s);
+                            typeSheet(s);
                         } else {
                             confirmRemove(uid, s.optString("nickname", uid));
                         }
@@ -410,23 +535,6 @@ final class Console {
         if ("enterprise".equals(o)) return "强制企业版";
         if ("personal".equals(o)) return "强制个人版";
         return s.optBoolean("enterprise") ? "自动（企业）" : "自动（个人）";
-    }
-
-    private void cycleType(final JSONObject s) {
-        String cur = s.optString("enterprise_override", "");
-        String next = cur.isEmpty() ? "enterprise" : ("enterprise".equals(cur) ? "personal" : "");
-        try {
-            JSONObject body = new JSONObject();
-            body.put("override", next);
-            final String label = next.isEmpty() ? "自动判定" : ("enterprise".equals(next) ? "强制企业版" : "强制个人版");
-            PanelApi.post(a, "/panel/api/accounts/" + enc(s.optString("uid")) + "/enterprise", body,
-                    new PanelApi.Cb() {
-                        public void ok(JSONObject o) { toast("账号类型：" + label); loadOverview(false); }
-                        public void fail(String msg) { toast("切换失败：" + msg); }
-                    });
-        } catch (Throwable t) {
-            toast("切换失败：" + t);
-        }
     }
 
     private void confirmRemove(final String uid, String name) {
@@ -614,28 +722,55 @@ final class Console {
 
     // ── 日志 ───────────────────────────────────────────────────────────────
     private void buildLogs() {
+        // 必须清空再建：此前直接 addView，切频道后新栏叠在旧栏上，看到的永远是
+        // 第一次建出来的那份（高亮恒在「全部」）。
+        pageBox.removeAllViews();
         LinearLayout box = new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setBackgroundColor(BG);
 
+        // 一级切换：运行日志 / 请求日志（对应网页面板「日志」页的上下两块）
+        LinearLayout seg = new LinearLayout(a);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        seg.setPadding(dp(10), dp(8), dp(10), dp(2));
+        seg.addView(chip2("运行日志", "run", logMode));
+        seg.addView(chip2("请求日志", "req", logMode));
+        box.addView(seg);
+
         LinearLayout bar = new LinearLayout(a);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(10), dp(8), dp(10), dp(6));
-        bar.addView(chip("全部", "all"));
-        bar.addView(chip("任务", "task"));
-        bar.addView(chip("对话", "chat"));
-        bar.addView(chip("系统", "sys"));
-        bar.addView(spacerH());
-        Button auto = btn(logAuto ? "自动刷新：开" : "自动刷新：关", false);
-        auto.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                logAuto = !logAuto;
-                buildLogs();
-            }
-        });
-        bar.addView(auto);
+        bar.setPadding(dp(10), dp(4), dp(10), dp(6));
+        if ("run".equals(logMode)) {
+            bar.addView(chip("全部", "all"));
+            bar.addView(chip("任务", "task"));
+            bar.addView(chip("对话", "chat"));
+            bar.addView(chip("系统", "sys"));
+            bar.addView(spacerH());
+            Button auto = btn(logAuto ? "自动刷新：开" : "自动刷新：关", false);
+            auto.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    logAuto = !logAuto;
+                    buildLogs();
+                }
+            });
+            bar.addView(auto);
+        } else {
+            bar.addView(spacerH());
+            Button reload = btn("刷新", true);
+            reload.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { buildLogs(); }
+            });
+            bar.addView(reload);
+        }
         box.addView(bar);
+
+        if ("req".equals(logMode)) {
+            box.addView(requestLogList());
+            pageBox.addView(box);
+            pageScroll = null;
+            return;
+        }
 
         final TextView tv = new TextView(a);
         tv.setId(android.R.id.text1);
@@ -651,6 +786,125 @@ final class Console {
         pageBox.addView(box);
         loadLogs();
         startLogLoop();
+    }
+
+    /** 一级分段（运行/请求）：选中态用实底，与二级 chips 区分开。 */
+    /**
+     * 请求日志（网页面板「日志」页上半部分）：/panel/api/request_logs 的最近 100 条。
+     * 每行一张小卡：时间 / 结果 / 模型（降级后加 ⤳）/ 账号 / token / TTFB / credit。
+     */
+    private View requestLogList() {
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(10), dp(4), dp(10), dp(12));
+        final LinearLayout list = new LinearLayout(a);
+        list.setOrientation(LinearLayout.VERTICAL);
+        box.addView(list);
+        final TextView loading = empty("加载中…");
+        list.addView(loading);
+
+        PanelApi.get(a, "/panel/api/request_logs?limit=100", new PanelApi.Cb() {
+            public void ok(JSONObject o) {
+                list.removeAllViews();
+                JSONArray arr = o.optJSONArray("entries");
+                if (arr == null || arr.length() == 0) {
+                    list.addView(empty("暂无请求记录（检查 logging.request_archive_enabled 是否开启）"));
+                    return;
+                }
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject e = arr.optJSONObject(i);
+                    if (e != null) list.addView(requestRow(e));
+                }
+            }
+            public void fail(String msg) {
+                list.removeAllViews();
+                list.addView(empty("请求日志加载失败：" + msg));
+            }
+        });
+        return box;
+    }
+
+    private View requestRow(JSONObject e) {
+        LinearLayout card = new LinearLayout(a);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(card());
+        card.setPadding(dp(11), dp(8), dp(11), dp(8));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = dp(7);
+        card.setLayoutParams(lp);
+
+        int status = e.optInt("status");
+        LinearLayout line1 = new LinearLayout(a);
+        line1.setOrientation(LinearLayout.HORIZONTAL);
+        line1.setGravity(Gravity.CENTER_VERTICAL);
+        TextView st = new TextView(a);
+        st.setText(String.valueOf(status));
+        st.setTextSize(12.5f);
+        st.setTypeface(Typeface.DEFAULT_BOLD);
+        st.setTextColor(status >= 200 && status < 300 ? OK : (status >= 500 ? BAD : WARN));
+        line1.addView(st);
+        TextView model = new TextView(a);
+        String m = e.optString("model", "-");
+        String eff = e.optString("model_eff", "");
+        if (!eff.isEmpty() && !eff.equals(m)) m = m + " ⤳ " + eff;
+        model.setText(m);
+        model.setTextSize(12.5f);
+        model.setTextColor(INK);
+        model.setPadding(dp(8), 0, 0, 0);
+        model.setSingleLine(true);
+        model.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        line1.addView(model, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView time = new TextView(a);
+        String ts = e.optString("time", "");
+        int t = ts.indexOf('T');
+        time.setText(t > 0 && ts.length() > t + 9 ? ts.substring(t + 1, t + 9) : ts);
+        time.setTextSize(11f);
+        time.setTextColor(INK3);
+        line1.addView(time);
+        card.addView(line1);
+
+        StringBuilder sb = new StringBuilder();
+        String acc = e.optString("account", "");
+        if (!acc.isEmpty()) sb.append(acc).append(" · ");
+        sb.append("总 ").append(e.optInt("total_tokens")).append(" tok");
+        if (e.optInt("ttfb_ms") > 0) sb.append(" · 首字 ").append(e.optInt("ttfb_ms")).append("ms");
+        if (e.optInt("duration_ms") > 0) sb.append(" · 用时 ").append(e.optInt("duration_ms")).append("ms");
+        if (e.optBoolean("credit_known")) sb.append(" · ").append(e.optDouble("credit", 0)).append("c");
+        String outcome = e.optString("outcome", "");
+        if (!outcome.isEmpty()) sb.append(" · ").append(outcome);
+        TextView meta = new TextView(a);
+        meta.setText(sb.toString());
+        meta.setTextSize(11f);
+        meta.setTextColor(INK3);
+        meta.setPadding(0, dp(3), 0, 0);
+        meta.setSingleLine(true);
+        meta.setEllipsize(TextUtils.TruncateAt.END);
+        card.addView(meta);
+        return card;
+    }
+
+    private View chip2(String label, final String mode, String cur) {
+        TextView t = new TextView(a);
+        t.setText(label);
+        t.setTextSize(12.5f);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        boolean on = mode.equals(cur);
+        t.setTextColor(on ? Color.WHITE : INK3);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(on ? ACCENT : SURFACE2);
+        bg.setCornerRadius(dp(8));
+        t.setBackground(bg);
+        t.setPadding(dp(12), dp(6), dp(12), dp(6));
+        t.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { logMode = mode; buildLogs(); }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.rightMargin = dp(8);
+        t.setLayoutParams(lp);
+        return t;
     }
 
     private View chip(String label, final String ch) {
@@ -768,6 +1022,7 @@ final class Console {
         sv.addView(box);
         pageBox.removeAllViews();
         pageBox.addView(sv);
+        pageScroll = sv;
     }
 
     private LinearLayout section(String title) {
