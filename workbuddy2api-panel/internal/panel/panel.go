@@ -317,6 +317,9 @@ func (p *Panel) routes() {
 	// (账号 × 模型) 手动开关：运维显式禁用某账号的某模型（永久语义，仅手动解）。
 	// 与上游触发的临时冷却（6004/11102）正交，且手动优先。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_toggle", p.modelToggle)
+	// 手动关闭的模型清单（只读）：原生控制台/脚本据此显示当前开关状态，
+	// 不必先 POST 一次才知道。
+	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/models_off", p.accountModelsOff)
 	// 封禁账号探活：只读探测上游是否已解封，不 revive、不参与选号。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/probe_ban", p.accountProbeBan)
 	p.mux.HandleFunc("POST /panel/api/login/start", p.loginStart)
@@ -1621,6 +1624,24 @@ func (p *Panel) modelToggle(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "uid": uid, "model": model, "off": req.Off,
 		"list": p.cfg.Pool.ModelOffOf(uid),
 	})
+}
+
+// accountModelsOff GET /panel/api/accounts/{uid}/models_off —— 该账号手动关闭的模型。
+//
+// 为什么单开一个只读接口：model_toggle 的响应里带 list，但那是「刚改完」的快照；
+// 界面首次打开、或另一个客户端改过之后，必须能重新读一次。塞进 /status 会让每次
+// 概览轮询都带上全池的 modelOff 明细（账号多时纯属噪音）。
+func (p *Panel) accountModelsOff(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if _, ok := p.cfg.Pool.Status(uid); !ok {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	list := p.cfg.Pool.ModelOffOf(uid)
+	if list == nil {
+		list = []pool.ModelOffEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "list": list})
 }
 
 // balanceHistory 返回余额采样序列，供「余额趋势」视图画折线。
