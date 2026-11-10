@@ -58,6 +58,14 @@ final class Console {
     private boolean logAuto = true;
     private String logCh = "all";
     private JSONObject overviewCache;
+    /**
+     * 冷启动重试计数：App 拉起来时 Go 网关可能还没开始监听（实测 1–3 秒，低端机更久）。
+     * 这时任何 /panel/api 请求都是 connection refused —— 直接弹「加载失败」是在怪用户
+     * 手快，而不是在等网关。这里改成：连接类错误一律视为「启动中」，自动重试（2s 一次），
+     * 超过 60 秒才如实报错。
+     */
+    private int startRetries;
+    private static final int MAX_START_RETRIES = 30;
 
     Console(Activity a) {
         this.a = a;
@@ -828,14 +836,59 @@ final class Console {
     private void loadOverview(final boolean quiet) {
         PanelApi.get(a, "/panel/api/overview", new PanelApi.Cb() {
             public void ok(JSONObject o) {
+                startRetries = 0;
                 overviewCache = o;
                 if ("overview".equals(page)) renderOverview(o);
                 else if ("accounts".equals(page)) renderAccounts(o);
             }
             public void fail(String msg) {
+                if (isConnectErr(msg) && startRetries < MAX_START_RETRIES) {
+                    startRetries++;
+                    showStarting();
+                    ui.postDelayed(new Runnable() {
+                        public void run() { if ("accounts".equals(page) || "overview".equals(page)) loadOverview(true); }
+                    }, 2000);
+                    return;
+                }
                 if (!quiet) toast("加载失败：" + msg);
             }
         });
+    }
+
+    /** 连接层错误（网关还没监听）与业务错误的区分：只有前者该被当成「启动中」。 */
+    private static boolean isConnectErr(String msg) {
+        if (msg == null) return false;
+        String m = msg.toLowerCase();
+        return m.contains("connect") || m.contains("refused") || m.contains("econnrefused")
+                || m.contains("timeout") || m.contains("timed out") || m.contains("unreachable")
+                || m.contains("sockettimeout") || m.contains("http 502") || m.contains("http 503");
+    }
+
+    /** 启动占位：不弹错、不空屏，明确告诉用户在等什么。 */
+    private void showStarting() {
+        pageBox.removeAllViews();
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setPadding(dp(24), dp(40), dp(24), dp(24));
+        ProgressBar pb = new ProgressBar(a);
+        pb.setIndeterminate(true);
+        box.addView(pb);
+        TextView t = new TextView(a);
+        t.setText("网关启动中…");
+        t.setTextSize(14f);
+        t.setTextColor(INK2);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(0, dp(12), 0, dp(4));
+        box.addView(t);
+        TextView sub = new TextView(a);
+        sub.setText("Go 后端还没开始监听（已重试 " + startRetries + " 次，每 2 秒一次）");
+        sub.setTextSize(11.5f);
+        sub.setTextColor(INK3);
+        sub.setGravity(Gravity.CENTER);
+        box.addView(sub);
+        pageBox.addView(box, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
     // ── 小工具 ─────────────────────────────────────────────────────────────
