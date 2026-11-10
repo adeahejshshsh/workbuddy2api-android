@@ -74,9 +74,41 @@ func lastMessageIsToolResult(body []byte) bool {
 	return last.Role == "tool" || last.ToolCallID != ""
 }
 
+// toolIntentTail 尾部是否在「预告下一步要动手」。
+//
+// 这是本判据里唯一的语义闸门，也是默认关闭之外的**第二道**收缩：只靠
+// 「末条是工具结果 + 正文短」会把 agent 循环里的正常收尾全部命中（实测 1608B 的
+// 完整回答被判成截断）。这里要求最后 60 字节里出现前瞻动作词，且不出现收尾词
+// （"已完成/如上/总结"），把「说完了」和「马上要动手」分开。
+func toolIntentTail(text string) bool {
+	tail := tailOf(strings.TrimSpace(text), 60)
+	if tail == "" {
+		return false
+	}
+	for _, done := range []string{"完成", "完毕", "如上", "以上", "总结", "结束", "搞定", "通过", "结论"} {
+		if strings.Contains(tail, done) {
+			return false
+		}
+	}
+	for _, act := range []string{"先看", "先查", "先确认", "先读", "我先", "接下来", "下一步",
+		"然后", "再去", "让我", "去看", "查看", "看一下", "检查", "执行", "调用", "跑一下", "试一下"} {
+		if strings.Contains(tail, act) {
+			return true
+		}
+	}
+	return false
+}
+
 // tryToolOnlyRescue 安全续写：只采纳工具调用，正文一律丢弃。
+//
+// **缺省关闭**（features.tool_only_rescue）：只有「末条是工具结果 + 正文短」这一条
+// 结构证据，而 agent 循环里正常收尾同样满足它——线上表现为「正常回答被判成截断，
+// 白打一次上游，且续写段只采纳工具调用」。需要这条救援时必须显式打开配置，并且
+// 仍要过 toolIntentTail 的语义闸门。
 func (r *continueReader) tryToolOnlyRescue() bool {
 	switch {
+	case !r.toolOnlyRescue:
+		return false
 	case r.toolOnlyTried, r.narrationTried, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
 		return false
 	case r.finish != "stop":
@@ -88,6 +120,10 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 	}
 	// 尾部落在预告符上：交给 narration（那条会把正文接上去，比这里更合适）。
 	if narrationTailSuspends(r.text.String()) {
+		return false
+	}
+	// 语义闸门：尾部不像「马上要动手」就是正常收尾，不救（见 toolIntentTail）。
+	if !toolIntentTail(r.text.String()) {
 		return false
 	}
 	declared, toolTurn := bodyToolShape(r.body)
@@ -120,7 +156,7 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 	r.finish, r.tail = "", nil
 	r.toolOnly = true
 	r.segCompletion, r.segThink = 0, 0
-	log.Printf("[toolonly] acct=%s model=%s seg=%d 正文只有 %dB 就收尾（末条是工具结果）→ 试续一次，只采纳工具调用",
+	log.Printf("[toolonly] acct=%s model=%s seg=%d 正文 %dB 且尾部预告动手 → 试续一次，只采纳工具调用",
 		r.label(), bareModelOf(r.body), r.seg, r.text.Len())
 	return true
 }

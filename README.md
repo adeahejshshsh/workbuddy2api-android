@@ -44,6 +44,10 @@
   `generate_video` / `get_video_task`，可选 `strip_watermark`），Claude Desktop / Cursor /
   Codex / DSH 这类客户端配一个 URL 就能用；工具内部直接调网关自己的 handler，换号 /
   错误策略 / 记账 / 请求日志与 REST 同一条路径
+* **续写与救援**：`finish_reason=length` 时同账号补发「已输出内容 + 续写指令」，把多段
+  拼成一条客户端可见流；「说一句就停」的语义救援（`features.tool_only_rescue`）**缺省
+  关闭** —— 判据只能看「末条是工具结果 + 正文短」，而 agent 循环里的正常收尾完全一样，
+  实测会把 1608B 的完整回答当成截断、白打一次上游。打开后仍要求尾部预告动手才救
 * **去水印（可选，`features.watermark_strip_enabled`，缺省关）**：
   `POST /v1/images/strip-watermark` —— 把成品图底部的纯白留白整条裁掉，右下角水印随之
   消失。纯本地图像处理、不扣积分；留白不足回 422 并给出实测像素数（绝不硬裁）

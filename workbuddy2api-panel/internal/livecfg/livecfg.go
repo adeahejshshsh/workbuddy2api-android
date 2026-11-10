@@ -27,6 +27,11 @@ type Snapshot struct {
 	// 缺省 false）。热生效：关着时端点回 403 embeddings_disabled——不是 404，
 	// 「功能存在、只是没开」与「上游没有这个协议」必须能区分开。
 	EmbeddingsEnabled bool
+	// ToolOnlyRescue 「说一句就收尾」的安全续写（只采纳工具调用）。
+	// 见 internal/server/toolonly.go：features.tool_only_rescue，**缺省关闭**——
+	// 判据只能看「末条是工具结果 + 正文短」，而 agent 循环里正常收尾也长这样，
+	// 线上实测会把正常结尾当成截断、白打一次上游。需要时必须显式打开。
+	ToolOnlyRescue bool
 	// RecordContext 请求事件是否记录会话上下文（system + messages / 出图 prompt）。
 	// 比 IP/UA 敏感得多（是用户的实际对话内容），所以单独一个开关、缺省关闭。
 	RecordContext bool

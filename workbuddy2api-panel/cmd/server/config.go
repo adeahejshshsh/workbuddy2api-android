@@ -362,6 +362,11 @@ type Config struct {
 		// 暴露给所有客户端。关着回 403 embeddings_disabled（不是 404）。
 		EmbeddingsEnabled     bool `json:"embeddings_enabled"`
 		WatermarkStripEnabled bool `json:"watermark_strip_enabled"`
+		// ToolOnlyRescue 「说一句就收尾」的安全续写（只采纳工具调用），默认**关**。
+		// 判据只能看「末条是工具结果 + 正文短（<2KB）」，而 agent 循环里的正常收尾
+		// 长得一模一样：线上实测把 1608B 的完整回答当成截断，白打一次上游。
+		// 打开后还要过 server.toolIntentTail 的语义闸门（尾部预告动手才救）。
+		ToolOnlyRescue bool `json:"tool_only_rescue"`
 	} `json:"features"`
 
 	Prompt struct {
