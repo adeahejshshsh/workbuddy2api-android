@@ -3,134 +3,194 @@ package com.workbuddy.api;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
-import android.graphics.Color;
+import android.content.Intent;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.CheckBox;
-import android.widget.CompoundButton;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.List;
 
 /**
- * 原生控制台 = **纯 UI**：只负责把 PanelService 给到的模型画成控件、把点击转成服务调用。
+ * 原生控制台界面（Glassmorphism 深色数据台，ui-ux-pro-max 设计系统）。
  *
- * 分层（这次重排的目的）：
- *   PanelApi      传输层：鉴权、超时、错误文案（不知道业务）
- *   PanelService  数据层：路径、JSON 解析、模型（不含任何 view/widget）
- *   Console       界面层：布局、交互（不含任何 JSONObject / HTTP）
+ * 结构：AppBar（返回/标题/动作）+ 内容区 + 底部 5 项导航。
+ *   底部：账号 · 概览 · 数据 · 日志 · 更多      （导航 ≤5，符合 UX 规则）
+ *   二级：用量 / 模型 / 任务 / 设置 —— 从「更多」进入，AppBar 带返回
  *
- * 这样接口加字段只改 PanelService，界面改版只改本文件，互不影响。
- * 进阶页面（积分构成、余额趋势、券码、队列、作业、日志、全部配置……）同样在本文件里
- * 分页组织；配置编辑因为控件生成逻辑独立，单独放在 ConfigActivity。
+ * 只与 PanelService 打交道：本文件不含 HTTP、不含 JSON 解析。
  */
 final class Console {
-
-    private static final int BG = 0xFF0F1115, SURFACE = 0xFF171A20, SURFACE2 = 0xFF1F232B;
-    private static final int LINE = 0xFF2A2F39, INK = 0xFFE7EAF0, INK2 = 0xFFA7AEBB, INK3 = 0xFF6E7683;
-    private static final int ACCENT = 0xFF6E8BFF, OK = 0xFF4CC38A, WARN = 0xFFE5B567, BAD = 0xFFE5677D;
 
     private final Activity a;
     private final PanelService svc;
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private final LinearLayout root, pageBox, tabs;
 
-    private String page = "accounts";
-    private ScrollView pageScroll;
+    private final LinearLayout root, appBar, navBar;
+    private final FrameLayout host;
+    private final TextView title;
+    private final ImageView back;
+
+    private String dest = "accounts";     // 底部导航选中项
+    private String screen = "accounts";   // 当前实际页面（可能是二级页）
+    private ScrollView currentScroll;
+
     private int startRetries;
     private static final int MAX_START_RETRIES = 30;
 
-    // 各页局部状态
-    private String logMode = "run", logCh = "all";
+    private String logMode = "run", logCh = "all", dataMode = "packages", taskMode = "queue";
     private boolean logAuto = true, logLoop;
-    private String dataMode = "packages";
-    private int balanceDays = 7, usageHours = 72;
-    private String taskMode = "queue";
+    private int usageHours = 72, balanceDays = 7;
+    private String taskUid = "";
 
     Console(Activity a) {
         this.a = a;
         this.svc = new PanelService(a);
+
         root = new LinearLayout(a);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(BG);
-        pageBox = new LinearLayout(a);
-        pageBox.setOrientation(LinearLayout.VERTICAL);
-        root.addView(pageBox, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        tabs = new LinearLayout(a);
-        tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setBackgroundColor(SURFACE);
-        tabs.setPadding(dp(4), dp(6), dp(4), dp(6));
-        HorizontalScrollView hs = new HorizontalScrollView(a);
-        hs.setHorizontalScrollBarEnabled(false);
-        hs.setBackgroundColor(SURFACE);
-        hs.addView(tabs);
-        root.addView(hs, new LinearLayout.LayoutParams(
+        root.setBackground(Theme.backdrop(a));
+
+        // AppBar
+        appBar = new LinearLayout(a);
+        appBar.setOrientation(LinearLayout.HORIZONTAL);
+        appBar.setGravity(Gravity.CENTER_VERTICAL);
+        appBar.setPadding(Theme.dp(a, Theme.S2), Theme.dp(a, Theme.S2),
+                Theme.dp(a, Theme.S2), Theme.dp(a, Theme.S2));
+        back = Theme.iconButton(a, R.drawable.ic_back, Theme.INK, "返回");
+        back.setVisibility(View.GONE);
+        back.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { open("more"); }
+        });
+        appBar.addView(back);
+        title = Theme.text(a, "", 17f, Theme.INK, 2);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = Theme.dp(a, Theme.S2);
+        appBar.addView(title, tlp);
+        root.addView(appBar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        show("accounts");
+
+        host = new FrameLayout(a);
+        root.addView(host, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        navBar = new LinearLayout(a);
+        navBar.setOrientation(LinearLayout.HORIZONTAL);
+        navBar.setBackgroundColor(0xF20B1220);
+        navBar.setPadding(0, Theme.dp(a, 6), 0, Theme.dp(a, 8));
+        root.addView(navBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        buildNav();
+        open("accounts");
         ui.postDelayed(new Runnable() { public void run() { loadOverview(true); } }, 1200);
     }
 
     View view() { return root; }
 
     // ── 导航 ───────────────────────────────────────────────────────────────
-    private void buildTabs() {
-        tabs.removeAllViews();
-        tab("accounts", "账号"); tab("overview", "概览"); tab("usage", "用量");
-        tab("models", "模型"); tab("data", "数据"); tab("tasks", "任务");
-        tab("logs", "日志"); tab("settings", "设置");
+    private void buildNav() {
+        navBar.removeAllViews();
+        nav("accounts", "账号", R.drawable.ic_accounts);
+        nav("overview", "概览", R.drawable.ic_overview);
+        nav("data", "数据", R.drawable.ic_data);
+        nav("logs", "日志", R.drawable.ic_logs);
+        nav("more", "更多", R.drawable.ic_more);
     }
 
-    private void tab(final String id, String label) {
-        TextView t = new TextView(a);
-        t.setText(label);
-        t.setGravity(Gravity.CENTER);
-        t.setTextSize(12.5f);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setTextColor(id.equals(page) ? ACCENT : INK3);
-        t.setMinWidth(dp(64));
-        t.setPadding(dp(8), dp(9), dp(8), dp(9));
-        t.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { show(id); }
+    private void nav(final String id, String label, int icon) {
+        boolean on = id.equals(dest);
+        LinearLayout item = new LinearLayout(a);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.CENTER);
+        item.setPadding(0, Theme.dp(a, 6), 0, Theme.dp(a, 4));
+        ImageView iv = new ImageView(a);
+        iv.setImageResource(icon);
+        iv.setColorFilter(on ? Theme.ACCENT : Theme.INK3);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
+                Theme.dp(a, 22), Theme.dp(a, 22));
+        item.addView(iv, ilp);
+        TextView t = Theme.text(a, label, 10.5f, on ? Theme.ACCENT : Theme.INK3, on ? 2 : 0);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tlp.topMargin = Theme.dp(a, 4);
+        item.addView(t, tlp);
+        item.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { open(id); }
         });
-        tabs.addView(t);
+        navBar.addView(item, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
     }
 
-    void show(String id) {
-        page = id;
-        buildTabs();
-        pageBox.removeAllViews();
-        if ("overview".equals(id)) { buildOverviewShell(); loadOverview(false); }
-        else if ("usage".equals(id)) buildUsage();
-        else if ("models".equals(id)) buildModels();
-        else if ("data".equals(id)) buildData();
-        else if ("tasks".equals(id)) buildTasks();
-        else if ("logs".equals(id)) buildLogs();
-        else if ("settings".equals(id)) buildSettings();
-        else { buildAccountsShell(); loadOverview(false); }
+    private void setBar(String t, boolean withBack, View... actions) {
+        title.setText(t);
+        back.setVisibility(withBack ? View.VISIBLE : View.GONE);
+        // AppBar 尾部动作（除返回与标题外全部重建）
+        while (appBar.getChildCount() > 2) appBar.removeViewAt(2);
+        for (View v : actions) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.leftMargin = Theme.dp(a, Theme.S1);
+            appBar.addView(v, lp);
+        }
     }
 
-    /** 换页内容但保留滚动位置（动作后整页重建时不弹回顶部）。 */
-    private void restoreInto(final ScrollView sv) {
-        final int y = pageScroll == null ? 0 : pageScroll.getScrollY();
-        pageBox.removeAllViews();
-        pageBox.addView(sv);
-        pageScroll = sv;
+    /** 打开页面：底部导航项直接切；二级页保持底部选中「更多」。 */
+    private void open(String id) {
+        screen = id;
+        if ("accounts".equals(id) || "overview".equals(id) || "data".equals(id)
+                || "logs".equals(id) || "more".equals(id)) dest = id;
+        else dest = "more";
+        buildNav();
+        if ("accounts".equals(id)) { renderAccountsShell(); loadOverview(false); }
+        else if ("overview".equals(id)) { renderOverviewShell(); loadOverview(false); }
+        else if ("data".equals(id)) renderData();
+        else if ("logs".equals(id)) renderLogs();
+        else if ("more".equals(id)) renderMore();
+        else if ("usage".equals(id)) renderUsage();
+        else if ("models".equals(id)) renderModels();
+        else if ("tasks".equals(id)) renderTasks();
+        else if ("settings".equals(id)) renderSettings();
+    }
+
+    private void show(ScrollView sv) {
+        host.removeAllViews();
+        host.addView(sv, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        currentScroll = sv;
+    }
+
+    private void show(View v) {
+        host.removeAllViews();
+        host.addView(v, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    private ScrollView scrollOf(LinearLayout column) {
+        ScrollView sv = new ScrollView(a);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.addView(column);
+        return sv;
+    }
+
+    /** 同一页面内刷新时保留滚动位置。 */
+    private void refresh(LinearLayout column) {
+        int y = currentScroll == null ? 0 : currentScroll.getScrollY();
+        ScrollView sv = scrollOf(column);
+        show(sv);
         if (y > 0) sv.post(new Runnable() { public void run() { sv.scrollTo(0, y); } });
     }
 
@@ -139,15 +199,17 @@ final class Console {
         svc.overview(new PanelService.Cb<PanelService.Overview>() {
             public void ok(PanelService.Overview o) {
                 startRetries = 0;
-                if ("overview".equals(page)) renderOverview(o);
-                else if ("accounts".equals(page)) renderAccounts(o);
+                if ("accounts".equals(screen)) renderAccounts(o);
+                else if ("overview".equals(screen)) renderOverview(o);
             }
             public void fail(String msg) {
                 if (isConnectErr(msg) && startRetries < MAX_START_RETRIES) {
                     startRetries++;
                     showStarting();
                     ui.postDelayed(new Runnable() {
-                        public void run() { if ("accounts".equals(page) || "overview".equals(page)) loadOverview(true); }
+                        public void run() {
+                            if ("accounts".equals(screen) || "overview".equals(screen)) loadOverview(true);
+                        }
                     }, 2000);
                     return;
                 }
@@ -160,240 +222,237 @@ final class Console {
         if (msg == null) return false;
         String m = msg.toLowerCase();
         return m.contains("connect") || m.contains("refused") || m.contains("timeout")
-                || m.contains("timed out") || m.contains("unreachable") || m.contains("sockettimeout")
-                || m.contains("http 502") || m.contains("http 503");
+                || m.contains("timed out") || m.contains("unreachable") || m.contains("http 502")
+                || m.contains("http 503");
     }
 
     private void showStarting() {
-        pageBox.removeAllViews();
         LinearLayout box = new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER);
-        box.setPadding(dp(24), dp(40), dp(24), dp(24));
         ProgressBar pb = new ProgressBar(a);
         pb.setIndeterminate(true);
         box.addView(pb);
-        TextView t = new TextView(a);
-        t.setText("网关启动中…");
-        t.setTextSize(14f);
-        t.setTextColor(INK2);
+        TextView t = Theme.text(a, "网关启动中", 16f, Theme.INK, 2);
         t.setGravity(Gravity.CENTER);
-        t.setPadding(0, dp(12), 0, dp(4));
+        t.setPadding(0, Theme.dp(a, Theme.S4), 0, Theme.dp(a, 4));
         box.addView(t);
-        TextView sub = new TextView(a);
-        sub.setText("Go 后端还没开始监听（已重试 " + startRetries + " 次，每 2 秒一次）");
-        sub.setTextSize(11.5f);
-        sub.setTextColor(INK3);
+        TextView sub = Theme.text(a, "等待后端监听 · 已重试 " + startRetries + " 次（每 2 秒）",
+                12f, Theme.INK3, 0);
         sub.setGravity(Gravity.CENTER);
         box.addView(sub);
-        pageBox.addView(box, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        show(box);
     }
 
-    // ── 账号页 ─────────────────────────────────────────────────────────────
-    private void buildAccountsShell() {
-        ScrollView sv = new ScrollView(a);
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(10), dp(10), dp(10), dp(12));
-        sv.addView(box);
-        pageBox.addView(sv);
-        pageScroll = sv;
-    }
-
-    private void renderAccounts(PanelService.Overview o) {
-        ScrollView sv = new ScrollView(a);
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(10), dp(10), dp(10), dp(12));
-        sv.addView(box);
-
-        LinearLayout head = new LinearLayout(a);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(4), 0, dp(4), dp(8));
-        TextView t = new TextView(a);
-        t.setText("账号池 · " + o.total + " 个（可用 " + o.healthy + "）");
-        t.setTextSize(13f);
-        t.setTextColor(INK2);
-        head.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button reload = btn("重载目录", false);
-        reload.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
+    // ── 账号 ───────────────────────────────────────────────────────────────
+    private void renderAccountsShell() {
+        setBar("账号池", false, iconAction(R.drawable.ic_refresh, "重载目录", new Runnable() {
+            public void run() {
                 svc.reloadAccounts(new PanelService.Cb<String>() {
                     public void ok(String s) { toast(s); loadOverview(false); }
                     public void fail(String m) { toast("重载失败：" + m); }
                 });
             }
-        });
-        head.addView(reload);
-        Button add = btn("＋ 添加", true);
-        add.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { addSheet(); }
-        });
-        head.addView(add);
-        box.addView(head);
+        }), iconAction(R.drawable.ic_add, "添加账号", new Runnable() {
+            public void run() { addSheet(); }
+        }));
+        LinearLayout col = Theme.column(a);
+        col.addView(Theme.empty(a, "加载中…"));
+        show(scrollOf(col));
+    }
+
+    private void renderAccounts(PanelService.Overview o) {
+        setBar("账号池", false, iconAction(R.drawable.ic_refresh, "重载目录", new Runnable() {
+            public void run() {
+                svc.reloadAccounts(new PanelService.Cb<String>() {
+                    public void ok(String s) { toast(s); loadOverview(false); }
+                    public void fail(String m) { toast("重载失败：" + m); }
+                });
+            }
+        }), iconAction(R.drawable.ic_add, "添加账号", new Runnable() {
+            public void run() { addSheet(); }
+        }));
+
+        LinearLayout col = Theme.column(a);
+
+        // 概览条：总数 / 可用 / 冷却 / 禁用
+        LinearLayout hero = Theme.card(a);
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.addView(Theme.kpi(a, String.valueOf(o.total), "账号", Theme.INK),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(Theme.kpi(a, String.valueOf(o.healthy), "可用", Theme.ACCENT),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(Theme.kpi(a, String.valueOf(o.cooling), "冷却", Theme.WARN),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(Theme.kpi(a, String.valueOf(o.disabled), "禁用", Theme.BAD),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        hero.addView(row);
+        col.addView(hero, Theme.cardLp(a, Theme.S4));
 
         if (o.accounts.isEmpty()) {
-            box.addView(empty("还没有账号。点右上「＋ 添加」导入文件或登录。"));
+            col.addView(Theme.empty(a, "还没有账号\n点右上「＋」导入文件或登录添加"));
         } else {
-            for (PanelService.Account acc : o.accounts) box.addView(accountCard(acc));
+            for (PanelService.Account acc : o.accounts) col.addView(accountCard(acc));
         }
-        restoreInto(sv);
+        refresh(col);
     }
 
     private View accountCard(final PanelService.Account s) {
-        LinearLayout card = new LinearLayout(a);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(cardBg());
-        card.setPadding(dp(13), dp(11), dp(13), dp(10));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(9);
-        card.setLayoutParams(lp);
+        LinearLayout card = Theme.card(a);
+        card.setLayoutParams(Theme.cardLp(a, Theme.S3));
 
-        LinearLayout r1 = new LinearLayout(a);
-        r1.setOrientation(LinearLayout.HORIZONTAL);
-        r1.setGravity(Gravity.CENTER_VERTICAL);
-        View dot = new View(a);
-        dot.setBackground(oval(s.cooling || s.paused ? WARN : (s.disabled ? BAD : OK)));
-        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(8), dp(8));
-        dlp.rightMargin = dp(8);
-        r1.addView(dot, dlp);
-        TextView name = new TextView(a);
-        name.setText(TextUtils.isEmpty(s.nickname) ? "未命名" : s.nickname);
-        name.setTextSize(14.5f);
-        name.setTextColor(INK);
-        name.setTypeface(Typeface.DEFAULT_BOLD);
+        // 第一行：状态点 + 昵称 + 标签
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        int dotColor = s.disabled ? Theme.BAD : (s.cooling || s.paused ? Theme.WARN : Theme.ACCENT);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                Theme.dp(a, 8), Theme.dp(a, 8));
+        dlp.rightMargin = Theme.dp(a, Theme.S2);
+        head.addView(Theme.dot(a, dotColor, 8), dlp);
+        TextView name = Theme.text(a, TextUtils.isEmpty(s.nickname) ? "未命名账号" : s.nickname,
+                16f, Theme.INK, 2);
         name.setSingleLine(true);
         name.setEllipsize(TextUtils.TruncateAt.END);
-        r1.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        if ("global".equals(s.realm)) r1.addView(badge("国际", ACCENT));
-        if (s.enterprise) r1.addView(badge("企业", WARN));
-        if (s.apiKey) r1.addView(badge("Key", INK3));
-        if ("personal".equals(s.override)) r1.addView(badge("个人*", OK));
-        if ("enterprise".equals(s.override)) r1.addView(badge("企业*", WARN));
-        card.addView(r1);
+        head.addView(name, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        if ("global".equals(s.realm)) head.addView(Theme.tag(a, "国际", Theme.INFO));
+        if (s.enterprise) head.addView(Theme.tag(a, "企业", Theme.WARN));
+        if (s.apiKey) head.addView(Theme.tag(a, "KEY", Theme.INK3));
+        if ("personal".equals(s.override)) head.addView(Theme.tag(a, "强制个人", Theme.ACCENT));
+        if ("enterprise".equals(s.override)) head.addView(Theme.tag(a, "强制企业", Theme.WARN));
+        card.addView(head);
 
-        TextView sub = new TextView(a);
-        sub.setText(s.uid + " · " + s.statusText());
-        sub.setTextSize(11.5f);
-        sub.setTextColor(INK3);
-        sub.setPadding(0, dp(3), 0, 0);
+        // 第二行：uid + 状态
+        TextView sub = Theme.text(a, s.uid + "  ·  " + s.statusText(), 11.5f, Theme.INK3, 0);
+        sub.setPadding(0, Theme.dp(a, 3), 0, 0);
         card.addView(sub);
 
-        TextView meta = new TextView(a);
-        meta.setText("积分 " + s.credits + (s.creditsTotal > 0 ? "/" + s.creditsTotal : "")
-                + " · 成功 " + s.success + " / 失败 " + s.errTotal + " · 在途 " + s.inFlight);
-        meta.setTextSize(12f);
-        meta.setTextColor(INK2);
-        meta.setPadding(0, dp(4), 0, 0);
-        card.addView(meta);
+        // 第三行：积分 / 成功失败 / 在途（数字用等宽）
+        LinearLayout stats = new LinearLayout(a);
+        stats.setOrientation(LinearLayout.HORIZONTAL);
+        stats.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
+        stats.addView(statBlock("积分", s.credits + (s.creditsTotal > 0 ? "/" + s.creditsTotal : ""),
+                Theme.INK), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f));
+        stats.addView(statBlock("成功", String.valueOf(s.success), Theme.ACCENT),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        stats.addView(statBlock("失败", String.valueOf(s.errTotal), s.errTotal > 0 ? Theme.BAD : Theme.INK3),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        stats.addView(statBlock("在途", String.valueOf(s.inFlight), Theme.INFO),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(stats);
 
+        // 动作行：主操作（签到/余额/任务）+ 更多
         HorizontalScrollView hs = new HorizontalScrollView(a);
         hs.setHorizontalScrollBarEnabled(false);
         LinearLayout acts = new LinearLayout(a);
         acts.setOrientation(LinearLayout.HORIZONTAL);
-        acts.setPadding(0, dp(8), 0, 0);
+        acts.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
         hs.addView(acts);
         card.addView(hs);
 
         boolean personal = !s.enterprise && !s.apiKey;
-        if (personal) acts.addView(checkinBtn(s));
-        acts.addView(balanceBtn(s));
-        if (personal) acts.addView(tasksBtn(s));
-        acts.addView(pauseBtn(s));
-        acts.addView(typeBtn(s));
-        acts.addView(moreBtn(s));
+        if (personal) acts.addView(actionPill("签到", new Runnable() {
+            public void run() { doCheckin(s); }
+        }));
+        acts.addView(actionPill("余额", new Runnable() {
+            public void run() { doBalance(s); }
+        }));
+        if (personal) acts.addView(actionPill("任务", new Runnable() {
+            public void run() { accountTasks(s.uid); }
+        }));
+        acts.addView(actionPill(s.paused ? "恢复" : "暂停", new Runnable() {
+            public void run() { doPause(s); }
+        }));
+        acts.addView(actionPill("类型", new Runnable() {
+            public void run() { typeSheet(s); }
+        }));
+        acts.addView(actionPill("更多", new Runnable() {
+            public void run() { moreSheet(s); }
+        }));
         return card;
     }
 
-    private View checkinBtn(final PanelService.Account s) {
-        Button b = btn("签到", false);
-        b.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                v.setEnabled(false);
-                svc.checkin(s.uid, new PanelService.Cb<PanelService.TaskResult>() {
-                    public void ok(PanelService.TaskResult r) {
-                        v.setEnabled(true);
-                        toast("签到完成" + (r.message.isEmpty() ? "" : "：" + r.message));
-                        loadOverview(false);
-                    }
-                    public void fail(String m) { v.setEnabled(true); toast("签到失败：" + m); }
-                });
-            }
-        });
-        return b;
+    private View statBlock(String label, String value, int color) {
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.addView(Theme.label(a, label));
+        TextView v = Theme.num(a, value, 13f, color);
+        v.setPadding(0, Theme.dp(a, 2), 0, 0);
+        box.addView(v);
+        return box;
     }
 
-    private View balanceBtn(final PanelService.Account s) {
-        Button b = btn("余额", false);
-        b.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                v.setEnabled(false);
-                svc.balance(s.uid, new PanelService.Cb<long[]>() {
-                    public void ok(long[] v2) {
-                        v.setEnabled(true);
-                        toast("余额 " + v2[0] + (v2[1] > 0 ? " / " + v2[1] : ""));
-                        loadOverview(false);
-                    }
-                    public void fail(String m) { v.setEnabled(true); toast("余额刷新失败：" + m); }
-                });
-            }
+    private View actionPill(String label, final Runnable r) {
+        TextView p = Theme.pill(a, label, false);
+        p.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { r.run(); }
         });
-        return b;
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) p.getLayoutParams();
+        if (lp == null) lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.rightMargin = Theme.dp(a, Theme.S2);
+        p.setLayoutParams(lp);
+        return p;
     }
 
-    private View pauseBtn(final PanelService.Account s) {
-        Button b = btn(s.paused ? "恢复选号" : "暂停选号", false);
-        b.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                v.setEnabled(false);
-                svc.pause(s.uid, s.paused, new PanelService.Cb<String>() {
-                    public void ok(String m) { toast(s.paused ? "已恢复选号" : "已暂停选号"); loadOverview(false); }
-                    public void fail(String m) { v.setEnabled(true); toast("失败：" + m); }
-                });
-            }
+    private View iconAction(int icon, String desc, final Runnable r) {
+        ImageView iv = Theme.iconButton(a, icon, Theme.INK2, desc);
+        iv.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { r.run(); }
         });
-        return b;
+        return iv;
     }
 
-    private View tasksBtn(final PanelService.Account s) {
-        Button b = btn("任务", false);
-        b.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                currentTaskUid = s.uid;   // autoAll / accept / claim 都以它为目标账号
-                openTasks(s.uid);
+    private void doCheckin(PanelService.Account s) {
+        toast("签到中…");
+        svc.checkin(s.uid, new PanelService.Cb<PanelService.TaskResult>() {
+            public void ok(PanelService.TaskResult r) {
+                if ("skipped".equals(r.error)) toast("今日已签到");
+                else if ("not_done".equals(r.error)) toast("签到未完成，稍后再试");
+                else if (!r.error.isEmpty()) toast("签到异常：" + r.error);
+                else toast("签到完成" + (r.message.isEmpty() ? "" : "：" + r.message));
+                loadOverview(false);
             }
+            public void fail(String m) { toast("签到失败：" + m); }
         });
-        return b;
     }
 
-    private View typeBtn(final PanelService.Account s) {
-        Button b = btn("类型", false);
-        b.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { typeSheet(s); }
+    private void doBalance(PanelService.Account s) {
+        svc.balance(s.uid, new PanelService.Cb<long[]>() {
+            public void ok(long[] v) {
+                toast("余额 " + v[0] + (v[1] > 0 ? " / " + v[1] : ""));
+                loadOverview(false);
+            }
+            public void fail(String m) { toast("余额查询失败：" + m); }
         });
-        return b;
+    }
+
+    private void doPause(PanelService.Account s) {
+        svc.pause(s.uid, s.paused, new PanelService.Cb<String>() {
+            public void ok(String m) { toast("已更新选号状态"); loadOverview(false); }
+            public void fail(String m) { toast("失败：" + m); }
+        });
     }
 
     private void typeSheet(final PanelService.Account s) {
-        final String[] values = new String[]{"", "enterprise", "personal"};
-        final String cur = s.override == null ? "" : s.override;
-        final String[] labels = new String[]{
-                "自动判定" + (cur.isEmpty() ? "（当前）" : ""),
-                "强制企业版" + ("enterprise".equals(cur) ? "（当前）" : ""),
-                "强制个人版" + ("personal".equals(cur) ? "（当前）" : "")
+        final String[] values = {"", "enterprise", "personal"};
+        String cur = s.override == null ? "" : s.override;
+        final String[] labels = {
+                "自动判定" + (cur.isEmpty() ? " · 当前" : ""),
+                "强制企业版" + ("enterprise".equals(cur) ? " · 当前" : ""),
+                "强制个人版" + ("personal".equals(cur) ? " · 当前" : "")
         };
         int checked = "enterprise".equals(cur) ? 1 : ("personal".equals(cur) ? 2 : 0);
-        new AlertDialog.Builder(a)
+        new AlertDialog.Builder(a, android.R.style.Theme_Material_Dialog_Alert)
                 .setTitle("账号类型")
                 .setSingleChoiceItems(labels, checked, new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int which) {
                         d.dismiss();
                         svc.enterprise(s.uid, values[which], new PanelService.Cb<Boolean>() {
                             public void ok(Boolean changed) {
-                                toast("账号类型已更新" + (changed ? "" : "（判定结果未变）"));
+                                toast("类型已更新" + (changed ? "" : "（判定结果未变）"));
                                 loadOverview(false);
                             }
                             public void fail(String m) { toast("切换失败：" + m); }
@@ -402,39 +461,33 @@ final class Console {
                 }).show();
     }
 
-    private View moreBtn(final PanelService.Account s) {
-        Button b = btn("更多", false);
-        b.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { moreSheet(s); }
-        });
-        return b;
-    }
-
     private void moreSheet(final PanelService.Account s) {
-        String[] items = new String[]{
+        String[] items = {
                 s.paused ? "恢复选号" : "暂停选号",
                 s.disabled ? "启用账号" : "禁用账号",
                 "账号类型：" + typeLabel(s),
                 "探活（只读确认是否已解封）",
                 "备注",
                 "分组",
-                "清空该账号的任务跳过名单",
-                "模型开关（该账号禁用哪些模型）",
-                "移除账号（不可撤销）"
+                "清空任务跳过名单",
+                "模型开关",
+                "移除账号"
         };
         new AlertDialog.Builder(a)
                 .setTitle(TextUtils.isEmpty(s.nickname) ? s.uid : s.nickname)
                 .setItems(items, new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int which) {
-                        if (which == 0) svc.pause(s.uid, s.paused, afterAction("已更新"));
-                        else if (which == 1) svc.disable(s.uid, !s.disabled, afterAction("已更新"));
+                        if (which == 0) doPause(s);
+                        else if (which == 1) svc.disable(s.uid, !s.disabled, after("已更新"));
                         else if (which == 2) typeSheet(s);
                         else if (which == 3) probe(s);
-                        else if (which == 4) editText("备注", "只存本机，不影响上游", s.remark,
-                                new TextCommit() { public void onText(String t) { remark(s.uid, t); } });
-                        else if (which == 5) editText("分组", "用于面板筛选，仅本机保存", s.group,
-                                new TextCommit() { public void onText(String t) { group(s.uid, t); } });
-                        else if (which == 6) clearSkip(s.uid);
+                        else if (which == 4) editText("备注", "仅本机保存", s.remark, new TextCommit() {
+                            public void onText(String t) { svc.setRemark(s.uid, t, after("备注已保存")); }
+                        });
+                        else if (which == 5) editText("分组", "用于面板筛选", s.group, new TextCommit() {
+                            public void onText(String t) { svc.setGroup(s.uid, t, after("分组已保存")); }
+                        });
+                        else if (which == 6) svc.clearSkip(s.uid, after("已清空跳过名单"));
                         else if (which == 7) modelSheet(s);
                         else confirmRemove(s);
                     }
@@ -444,25 +497,26 @@ final class Console {
     private String typeLabel(PanelService.Account s) {
         if ("enterprise".equals(s.override)) return "强制企业版";
         if ("personal".equals(s.override)) return "强制个人版";
-        return s.enterprise ? "自动（企业）" : "自动（个人）";
+        return s.enterprise ? "自动 · 企业" : "自动 · 个人";
     }
 
-    private PanelService.Cb<String> afterAction(final String okMsg) {
+    private PanelService.Cb<String> after(final String ok) {
         return new PanelService.Cb<String>() {
-            public void ok(String m) { toast(okMsg); loadOverview(false); }
+            public void ok(String m) { toast(ok); loadOverview(false); }
             public void fail(String m) { toast("失败：" + m); }
         };
     }
 
     private void probe(PanelService.Account s) {
+        toast("探活中…");
         svc.probeBan(s.uid, new PanelService.Cb<PanelService.ProbeResult>() {
             public void ok(PanelService.ProbeResult r) {
                 String msg;
-                if ("lifted".equals(r.verdict)) msg = "已解封，可以点「启用账号」恢复使用";
-                else if ("still_banned".equals(r.verdict)) msg = "仍被封禁，继续等待（勿反复启用）";
-                else if ("blocked".equals(r.verdict)) msg = "会话有效但被风控拦截 —— 继续观察";
-                else if ("session_dead".equals(r.verdict)) msg = "不是封禁问题：登录态失效，需要重新登录";
-                else if ("inconclusive".equals(r.verdict)) msg = "探测无明确结论（网络/限流），稍后再试";
+                if ("lifted".equals(r.verdict)) msg = "已解封，可启用";
+                else if ("still_banned".equals(r.verdict)) msg = "仍被封禁，继续等待";
+                else if ("blocked".equals(r.verdict)) msg = "被风控拦截，继续观察";
+                else if ("session_dead".equals(r.verdict)) msg = "登录态失效，需重新登录";
+                else if ("inconclusive".equals(r.verdict)) msg = "无明确结论，稍后再试";
                 else msg = "无法探测：" + r.verdict;
                 toast(msg + (r.detail.isEmpty() ? "" : "（" + r.detail + "）"));
             }
@@ -470,13 +524,14 @@ final class Console {
         });
     }
 
-    private interface TextCommit { void onText(String text); }
+    private interface TextCommit { void onText(String t); }
 
     private void editText(String title, String hint, String initial, final TextCommit cb) {
-        final EditText et = new EditText(a);
+        EditText et = new EditText(a);
         et.setText(initial == null ? "" : initial);
         et.setHint(hint);
-        et.setTextSize(14f);
+        et.setTextSize(15f);
+        et.setTypeface(Theme.sans(a));
         new AlertDialog.Builder(a).setTitle(title).setView(et)
                 .setNegativeButton("取消", null)
                 .setPositiveButton("保存", new DialogInterface.OnClickListener() {
@@ -486,808 +541,804 @@ final class Console {
                 }).show();
     }
 
-    private void remark(final String uid, String text) {
-        svc.setRemark(uid, text, afterAction("备注已保存"));
-    }
-
-    private void group(final String uid, String text) {
-        svc.setGroup(uid, text, afterAction("分组已保存"));
-    }
-
-    private void clearSkip(final String uid) {
-        svc.clearSkip(uid, afterAction("已清空跳过名单"));
-    }
-
     private void confirmRemove(final PanelService.Account s) {
         new AlertDialog.Builder(a)
                 .setTitle("移除账号")
-                .setMessage("将删除该账号的本地凭据文件，且不可撤销。\n\n"
-                        + (TextUtils.isEmpty(s.nickname) ? s.uid : s.nickname) + "（" + s.uid + "）")
+                .setMessage("删除本地凭据文件，不可撤销。\n\n"
+                        + (TextUtils.isEmpty(s.nickname) ? s.uid : s.nickname) + "\n" + s.uid)
                 .setNegativeButton("取消", null)
                 .setPositiveButton("移除", new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int w) {
-                        svc.remove(s.uid, afterAction("已移除"));
+                        svc.remove(s.uid, after("已移除"));
                     }
                 }).show();
     }
 
     // ── 模型开关 ───────────────────────────────────────────────────────────
     private void modelSheet(final PanelService.Account s) {
+        toast("读取模型目录…");
         svc.models(new PanelService.Cb<List<PanelService.ModelInfo>>() {
             public void ok(final List<PanelService.ModelInfo> models) {
                 svc.modelsOff(s.uid, new PanelService.Cb<List<String>>() {
-                    public void ok(List<String> off) { showModelSheet(s.uid, models, off); }
-                    public void fail(String m) { toast("读取模型开关失败：" + m); }
+                    public void ok(List<String> off) { showModels(s.uid, models, off); }
+                    public void fail(String m) { toast("读取开关失败：" + m); }
                 });
             }
             public void fail(String m) { toast("读取模型目录失败：" + m); }
         });
     }
 
-    private void showModelSheet(final String uid, List<PanelService.ModelInfo> models,
-                                List<String> offList) {
-        if (models.isEmpty()) { dialogText("模型开关", "模型目录为空"); return; }
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(12), dp(8), dp(12), dp(8));
-        TextView hint = new TextView(a);
-        hint.setText("勾选 = 该账号可用；取消勾选 = 手动关闭（永久，落 state.json）。");
-        hint.setTextSize(11.5f);
-        hint.setTextColor(INK3);
+    private void showModels(final String uid, List<PanelService.ModelInfo> models, List<String> off) {
+        if (models.isEmpty()) { toast("模型目录为空"); return; }
+        LinearLayout box = Theme.column(a);
+        TextView hint = Theme.text(a, "勾选 = 该账号可用；取消 = 手动关闭（永久写入 state.json）",
+                12f, Theme.INK3, 0);
         box.addView(hint);
         for (final PanelService.ModelInfo m : models) {
             final String bare = m.id.contains(":") ? m.id.substring(m.id.indexOf(':') + 1) : m.id;
-            final CheckBox cb = new CheckBox(a);
-            cb.setText(m.name + "  ·  " + m.id);
-            cb.setTextSize(12.5f);
-            cb.setTextColor(INK);
-            cb.setChecked(!offList.contains(bare));
-            cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-                public void onCheckedChanged(CompoundButton b, boolean enabled) {
-                    svc.setModelOff(uid, bare, !enabled, new PanelService.Cb<String>() {
-                        public void ok(String msg) { toast((enabled ? "已启用 " : "已关闭 ") + bare); }
-                        public void fail(String msg) {
-                            toast("切换失败：" + msg);
-                            b.setChecked(!enabled);
+            final boolean enabled = !off.contains(bare);
+            LinearLayout row = new LinearLayout(a);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, Theme.dp(a, Theme.S2), 0, Theme.dp(a, Theme.S2));
+            LinearLayout info = new LinearLayout(a);
+            info.setOrientation(LinearLayout.VERTICAL);
+            info.addView(Theme.text(a, m.name, 14f, Theme.INK, 1));
+            info.addView(Theme.text(a, m.id, 11f, Theme.INK3, 0));
+            row.addView(info, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            final TextView toggle = Theme.pill(a, enabled ? "可用" : "已关闭",
+                    enabled ? true : false);
+            toggle.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    final boolean next = !"可用".equals(String.valueOf(toggle.getText()));
+                    svc.setModelOff(uid, bare, !next, new PanelService.Cb<String>() {
+                        public void ok(String msg) {
+                            toggle.setText(next ? "可用" : "已关闭");
+                            toggle.setBackground(next ? Theme.round(a, Theme.ACCENT, Theme.R_PILL)
+                                    : Theme.outlined(a, 0x0DFFFFFF, Theme.R_PILL, Theme.LINE, 1));
+                            toggle.setTextColor(next ? Theme.ON_ACCENT : Theme.INK2);
                         }
+                        public void fail(String m) { toast("切换失败：" + m); }
                     });
                 }
             });
-            box.addView(cb);
+            row.addView(toggle);
+            box.addView(row);
+            box.addView(Theme.divider(a));
         }
-        ScrollView sv = new ScrollView(a);
-        sv.addView(box);
+        ScrollView sv = scrollOf(box);
         new AlertDialog.Builder(a).setTitle("模型开关").setView(sv)
-                .setPositiveButton("关闭", null).show();
+                .setPositiveButton("完成", null).show();
     }
 
-    // ── 任务弹层 ───────────────────────────────────────────────────────────
-    private void openTasks(String uid) {
+    // ── 账号积分任务（弹层）────────────────────────────────────────────────
+    private void accountTasks(final String uid) {
+        toast("读取任务…");
         svc.tasks(uid, new PanelService.Cb<PanelService.TasksView>() {
-            public void ok(PanelService.TasksView v) { showTasks(v); }
-            public void fail(String m) { dialogText("任务查询失败", m); }
+            public void ok(final PanelService.TasksView v) { showAccountTasks(uid, v); }
+            public void fail(String m) { toast("任务查询失败：" + m); }
         });
     }
 
-    private void showTasks(final PanelService.TasksView v) {
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(14), dp(12), dp(14), dp(8));
-        ScrollView sv = new ScrollView(a);
-        sv.addView(box);
+    private void showAccountTasks(final String uid, final PanelService.TasksView v) {
+        LinearLayout col = Theme.column(a);
         if (!v.message.isEmpty()) {
-            TextView m = new TextView(a);
-            m.setText(v.message);
-            m.setTextSize(12f);
-            m.setTextColor(WARN);
-            m.setPadding(0, 0, 0, dp(8));
-            box.addView(m);
+            col.addView(Theme.text(a, v.message, 12f, Theme.WARN, 0));
         }
         if (v.tasks.isEmpty()) {
-            box.addView(empty(v.message.isEmpty() ? "该账号暂无任务" : v.message));
-        } else {
-            for (PanelService.TaskItem t : v.tasks) box.addView(taskRow(t, v));
+            col.addView(Theme.empty(a, v.message.isEmpty() ? "该账号暂无任务" : v.message));
         }
-        AlertDialog.Builder b = new AlertDialog.Builder(a).setTitle("积分任务").setView(sv)
-                .setNegativeButton("关闭", null);
+        for (final PanelService.TaskItem t : v.tasks) {
+            LinearLayout card = Theme.card(a);
+            card.setLayoutParams(Theme.cardLp(a, Theme.S2));
+            card.addView(Theme.text(a, t.title, 14f, Theme.INK, 1));
+            String st = t.claimed ? "已领取" : t.claimable ? "可领取" : t.locked ? "未解锁"
+                    : "accepted".equals(t.acceptStatus) ? "进行中" : "未接受";
+            card.addView(Theme.text(a, (t.target > 0 ? t.current + " / " + t.target : "—")
+                    + "  ·  " + st + (t.credit > 0 ? "  ·  +" + t.credit + " 分" : ""),
+                    11.5f, Theme.INK3, 0));
+            if (!t.claimed && !t.locked) {
+                final boolean accept = !t.claimable && v.canAccept
+                        && !"accepted".equals(t.acceptStatus);
+                final boolean claim = t.claimable && v.canClaim;
+                if (accept || claim) {
+                    TextView b = Theme.pill(a, accept ? "接受" : "领取", true);
+                    b.setOnClickListener(new View.OnClickListener() {
+                        public void onClick(View x) {
+                            PanelService.Cb<String> cb = new PanelService.Cb<String>() {
+                                public void ok(String m) { toast("已完成"); accountTasks(uid); }
+                                public void fail(String m) { toast("失败：" + m); }
+                            };
+                            if (accept) svc.acceptTask(uid, t.code, cb);
+                            else svc.claimTask(uid, t.code, cb);
+                        }
+                    });
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    lp.topMargin = Theme.dp(a, Theme.S2);
+                    card.addView(b, lp);
+                }
+            }
+            col.addView(card);
+        }
+        AlertDialog.Builder builder = new AlertDialog.Builder(a)
+                .setTitle("积分任务").setView(scrollOf(col)).setNegativeButton("关闭", null);
         if (v.canAuto) {
-            b.setPositiveButton("一键完成全部", new DialogInterface.OnClickListener() {
-                public void onClick(DialogInterface d, int w) { autoAll(v); }
+            builder.setPositiveButton("一键完成", new DialogInterface.OnClickListener() {
+                public void onClick(DialogInterface d, int w) { autoAll(uid); }
             });
         }
-        b.show();
+        builder.show();
     }
 
-    private View taskRow(final PanelService.TaskItem t, final PanelService.TasksView v) {
-        LinearLayout row = new LinearLayout(a);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(0, dp(6), 0, dp(8));
-        TextView title = new TextView(a);
-        title.setText(t.title);
-        title.setTextSize(13.5f);
-        title.setTextColor(INK);
-        row.addView(title);
-        String st = t.claimed ? "已领取" : t.claimable ? "可领取" : t.locked ? "未解锁"
-                : "accepted".equals(t.acceptStatus) ? "进行中" : "未接受";
-        TextView meta = new TextView(a);
-        meta.setText((t.target > 0 ? t.current + " / " + t.target : "—") + " · " + st
-                + (t.credit > 0 ? " · +" + t.credit + " 分" : ""));
-        meta.setTextSize(11.5f);
-        meta.setTextColor(INK3);
-        row.addView(meta);
-        if (!t.claimed && !t.locked) {
-            if (t.claimable && v.canClaim) row.addView(taskAction("领取", t.code, false));
-            else if (!t.claimable && v.canAccept && !"accepted".equals(t.acceptStatus)
-                    && !t.claimable) row.addView(taskAction("接受", t.code, true));
-        }
-        return row;
-    }
-
-    private View taskAction(final String label, final String code, final boolean accept) {
-        Button b = btn(label, true);
-        b.setOnClickListener(new View.OnClickListener() {
-            public void onClick(final View v) {
-                v.setEnabled(false);
-                PanelService.Cb<String> cb = new PanelService.Cb<String>() {
-                    public void ok(String m) { toast(label + "完成"); v.setEnabled(true); }
-                    public void fail(String m) { toast(label + "失败：" + m); v.setEnabled(true); }
-                };
-                if (accept) svc.acceptTask(currentTaskUid, code, cb);
-                else svc.claimTask(currentTaskUid, code, cb);
-            }
-        });
-        return b;
-    }
-
-    private String currentTaskUid = "";
-
-    private void autoAll(PanelService.TasksView v) {
-        if (currentTaskUid.isEmpty()) return;
-        toast("开始执行可自动任务（含真实对话，可能 1–2 分钟）…");
-        svc.autoAll(currentTaskUid, new PanelService.Cb<PanelService.TaskResult>() {
+    private void autoAll(String uid) {
+        toast("开始执行可自动任务（含真实对话，1–2 分钟）…");
+        svc.autoAll(uid, new PanelService.Cb<PanelService.TaskResult>() {
             public void ok(PanelService.TaskResult r) {
-                toast("执行完成：成功 " + r.done + "，跳过 " + r.skipped + "，失败 " + r.failed);
+                toast("执行完成：成功 " + r.done + " · 跳过 " + r.skipped + " · 失败 " + r.failed);
             }
             public void fail(String m) { toast("一键完成失败：" + m); }
         });
     }
 
     // ── 概览 ───────────────────────────────────────────────────────────────
-    private void buildOverviewShell() {
-        ScrollView sv = new ScrollView(a);
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(12), dp(12), dp(12), dp(12));
-        sv.addView(box);
-        pageBox.addView(sv);
-        pageScroll = sv;
+    private void renderOverviewShell() {
+        setBar("运行概览", false);
+        LinearLayout col = Theme.column(a);
+        col.addView(Theme.empty(a, "加载中…"));
+        show(scrollOf(col));
     }
 
     private void renderOverview(PanelService.Overview o) {
-        if (currentTaskUid == null) currentTaskUid = "";
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(12), dp(12), dp(12), dp(12));
-        ScrollView sv = new ScrollView(a);
-        sv.addView(box);
+        setBar("运行概览", false, iconAction(R.drawable.ic_refresh, "刷新", new Runnable() {
+            public void run() { loadOverview(false); }
+        }));
+        LinearLayout col = Theme.column(a);
 
-        LinearLayout grid = new LinearLayout(a);
-        grid.setOrientation(LinearLayout.VERTICAL);
-        grid.setBackground(cardBg());
-        box.addView(grid);
-        statRow(grid, "账号总数", String.valueOf(o.total), INK, "可用", String.valueOf(o.healthy), OK);
-        statRow(grid, "冷却中", String.valueOf(o.cooling), WARN, "已禁用", String.valueOf(o.disabled), BAD);
-        statRow(grid, "已暂停选号", String.valueOf(o.paused), WARN, "粘性会话", String.valueOf(o.sticky), INK);
+        LinearLayout hero = Theme.card(a);
+        LinearLayout row1 = new LinearLayout(a);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        row1.addView(Theme.kpi(a, String.valueOf(o.total), "账号", Theme.INK),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row1.addView(Theme.kpi(a, String.valueOf(o.healthy), "可用", Theme.ACCENT),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row1.addView(Theme.kpi(a, String.valueOf(o.sticky), "粘性", Theme.INFO),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        hero.addView(row1);
+        col.addView(hero, Theme.cardLp(a, Theme.S3));
 
-        LinearLayout info = new LinearLayout(a);
-        info.setOrientation(LinearLayout.VERTICAL);
-        info.setBackground(cardBg());
-        info.setPadding(dp(14), dp(12), dp(14), dp(12));
-        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        ilp.topMargin = dp(10);
-        box.addView(info, ilp);
-        info.addView(kv("版本", o.version));
-        info.addView(kv("运行", (o.uptimeSec / 3600) + " 时 " + (o.uptimeSec % 3600) / 60 + " 分"));
-        info.addView(kv("鉴权", o.authRequired ? "已启用（Bearer）" : "未启用"));
-        info.addView(kv("Redis", o.redisMode));
+        LinearLayout info = Theme.card(a);
+        info.addView(Theme.label(a, "实例"));
+        info.addView(Theme.kvRow(a, "版本", o.version));
+        info.addView(Theme.kvRow(a, "运行时长", (o.uptimeSec / 3600) + " 小时 " + (o.uptimeSec % 3600) / 60 + " 分"));
+        info.addView(Theme.kvRow(a, "鉴权", o.authRequired ? "Bearer" : "关闭"));
+        info.addView(Theme.kvRow(a, "Redis", o.redisMode.isEmpty() ? "—" : o.redisMode));
+        col.addView(info, Theme.cardLp(a, Theme.S3));
 
-        LinearLayout metrics = new LinearLayout(a);
-        metrics.setOrientation(LinearLayout.VERTICAL);
-        metrics.setBackground(cardBg());
-        metrics.setPadding(dp(14), dp(11), dp(14), dp(11));
-        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        mlp.topMargin = dp(10);
-        box.addView(metrics, mlp);
-        renderMetrics(metrics);
+        LinearLayout metrics = Theme.card(a);
+        col.addView(metrics, Theme.cardLp(a, Theme.S3));
+        loadMetrics(metrics);
 
-        LinearLayout errBox = new LinearLayout(a);
-        errBox.setOrientation(LinearLayout.VERTICAL);
-        errBox.setBackground(cardBg());
-        errBox.setPadding(dp(14), dp(11), dp(14), dp(11));
-        LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        elp.topMargin = dp(10);
-        box.addView(errBox, elp);
-        renderErrors(errBox);
+        LinearLayout errs = Theme.card(a);
+        col.addView(errs);
+        loadErrors(errs);
 
-        restoreInto(sv);
+        refresh(col);
     }
 
-    private void renderMetrics(final LinearLayout box) {
+    private void loadMetrics(final LinearLayout box) {
         box.removeAllViews();
-        box.addView(h3("请求指标（本次进程）"));
+        box.addView(Theme.label(a, "请求指标 · 本次进程"));
         svc.metrics(new PanelService.Cb<PanelService.Metrics>() {
             public void ok(PanelService.Metrics m) {
-                box.addView(kv("完成 / 在飞", m.completed + " / " + m.inFlight));
-                box.addView(kv("成功 / 失败", m.succeeded + " / " + m.failed));
-                box.addView(kv("成功率", String.format(java.util.Locale.US, "%.1f%%（HTTP %.1f%%）",
-                        m.successRate, m.httpSuccessRate)));
-                box.addView(kv("平均耗时", String.format(java.util.Locale.US, "%.0f ms", m.avgDurationMs)));
-                box.addView(kv("归档", (m.archiveEnabled ? "开启" : "关闭") + " · 文件 "
-                        + m.archiveFiles + " · " + String.format(java.util.Locale.US, "%.1f MB",
-                        m.archiveBytes / 1048576.0)));
+                LinearLayout row = new LinearLayout(a);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setPadding(0, Theme.dp(a, Theme.S2), 0, Theme.dp(a, Theme.S2));
+                row.addView(Theme.kpi(a, String.valueOf(m.completed), "完成", Theme.INK),
+                        new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                row.addView(Theme.kpi(a, String.format(java.util.Locale.US, "%.0f%%", m.successRate * 100),
+                        "成功率", m.successRate >= 0.95 ? Theme.ACCENT : Theme.WARN),
+                        new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                row.addView(Theme.kpi(a, String.format(java.util.Locale.US, "%.0f", m.avgDurationMs), "ms 均值",
+                        Theme.INFO), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                box.addView(row);
+                box.addView(Theme.kvRow(a, "成功 / 失败", m.succeeded + " / " + m.failed));
+                box.addView(Theme.kvRow(a, "在途", String.valueOf(m.inFlight)));
+                box.addView(Theme.kvRow(a, "HTTP 成功率",
+                        String.format(java.util.Locale.US, "%.1f%%", m.httpSuccessRate * 100)));
+                box.addView(Theme.kvRow(a, "归档", (m.archiveEnabled ? "开启" : "关闭") + " · "
+                        + m.archiveFiles + " 文件 · "
+                        + String.format(java.util.Locale.US, "%.1f MB", m.archiveBytes / 1048576.0)));
             }
-            public void fail(String msg) { box.addView(kv("请求指标", "不可用：" + msg)); }
+            public void fail(String msg) { box.addView(Theme.text(a, "不可用：" + msg, 12f, Theme.INK3, 0)); }
         });
     }
 
-    private void renderErrors(final LinearLayout box) {
+    private void loadErrors(final LinearLayout box) {
         box.removeAllViews();
-        box.addView(h3("错误汇总"));
+        box.addView(Theme.label(a, "错误汇总"));
         svc.errors(new PanelService.Cb<PanelService.ErrSummary>() {
             public void ok(PanelService.ErrSummary s) {
-                box.addView(kv("扫描", s.scanned + " 行 · " + s.updatedAt));
-                if (s.rows.isEmpty()) { box.addView(kv("最近", "没有 WARN/ERR")); return; }
-                int n = Math.min(s.rows.size(), 20);
+                box.addView(Theme.text(a, "扫描 " + s.scanned + " 行 · " + s.updatedAt,
+                        11.5f, Theme.INK3, 0));
+                if (s.rows.isEmpty()) {
+                    box.addView(Theme.text(a, "最近没有 WARN / ERR", 13f, Theme.ACCENT, 1));
+                    return;
+                }
+                int n = Math.min(s.rows.size(), 12);
                 for (int i = 0; i < n; i++) {
                     PanelService.ErrStat r = s.rows.get(i);
-                    TextView line = new TextView(a);
-                    line.setText(r.count + " 次 · " + r.kind + (r.code.isEmpty() ? "" : " [" + r.code + "]"));
-                    line.setTextSize(12.5f);
-                    line.setTextColor("bad".equals(r.sev) ? BAD : WARN);
-                    line.setPadding(0, dp(4), 0, 0);
-                    box.addView(line);
-                    TextView meta = new TextView(a);
-                    meta.setText((r.account.isEmpty() ? "非账号级" : r.account)
+                    LinearLayout row = new LinearLayout(a);
+                    row.setOrientation(LinearLayout.VERTICAL);
+                    row.setPadding(0, Theme.dp(a, Theme.S2), 0, Theme.dp(a, Theme.S2));
+                    LinearLayout top = new LinearLayout(a);
+                    top.setOrientation(LinearLayout.HORIZONTAL);
+                    top.setGravity(Gravity.CENTER_VERTICAL);
+                    top.addView(Theme.statusChip(a, String.valueOf(r.count), r.count > 3 ? Theme.BAD : Theme.WARN));
+                    TextView kind = Theme.text(a, r.kind + (r.code.isEmpty() ? "" : " · " + r.code),
+                            13f, Theme.INK, 1);
+                    kind.setPadding(Theme.dp(a, Theme.S2), 0, 0, 0);
+                    kind.setSingleLine(true);
+                    kind.setEllipsize(TextUtils.TruncateAt.END);
+                    top.addView(kind, new LinearLayout.LayoutParams(0,
+                            ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                    row.addView(top);
+                    String meta = (r.account.isEmpty() ? "非账号级" : r.account)
                             + (r.model.isEmpty() ? "" : " · " + r.model)
-                            + (r.last.isEmpty() ? "" : " · 最近 " + r.last));
-                    meta.setTextSize(11f);
-                    meta.setTextColor(INK3);
-                    box.addView(meta);
+                            + (r.last.isEmpty() ? "" : " · " + r.last);
+                    row.addView(Theme.text(a, meta, 11f, Theme.INK3, 0));
+                    box.addView(row);
+                    if (i < n - 1) box.addView(Theme.divider(a));
                 }
             }
-            public void fail(String msg) { box.addView(kv("错误汇总", "不可用：" + msg)); }
+            public void fail(String msg) {
+                box.addView(Theme.text(a, "不可用：" + msg, 12f, Theme.INK3, 0));
+            }
         });
     }
 
     // ── 用量 ───────────────────────────────────────────────────────────────
-    private void buildUsage() {
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
+    private void renderUsage() {
+        setBar("用量", true, iconAction(R.drawable.ic_refresh, "刷新", new Runnable() {
+            public void run() { renderUsage(); }
+        }));
+        LinearLayout col = Theme.column(a);
         LinearLayout seg = new LinearLayout(a);
         seg.setOrientation(LinearLayout.HORIZONTAL);
-        seg.setPadding(dp(10), dp(8), dp(10), dp(4));
         final int[] hours = {24, 72, 168, 720};
-        String[] labels = {"近 24 小时", "近 3 天", "近 7 天", "近 30 天"};
+        String[] labels = {"24H", "3D", "7D", "30D"};
         for (int i = 0; i < hours.length; i++) {
             final int h = hours[i];
-            seg.addView(chipSel(labels[i], h == usageHours, new Runnable() {
-                public void run() { usageHours = h; buildUsage(); }
-            }));
+            TextView p = Theme.pill(a, labels[i], h == usageHours);
+            p.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { usageHours = h; renderUsage(); }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.rightMargin = Theme.dp(a, Theme.S2);
+            seg.addView(p, lp);
         }
-        box.addView(seg);
+        col.addView(seg);
+
         final LinearLayout list = new LinearLayout(a);
-        list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(dp(10), dp(4), dp(10), dp(12));
-        box.addView(list);
-        pageBox.addView(box);
-        pageScroll = null;
-        list.addView(empty("加载中…"));
+        list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
+        col.addView(list);
+        list.addView(Theme.empty(a, "加载中…"));
+        show(scrollOf(col));
+
         svc.usage(usageHours, new PanelService.Cb<PanelService.Usage>() {
-            public void ok(PanelService.Usage u) { renderUsage(list, u); }
-            public void fail(String m) { list.removeAllViews(); list.addView(empty("用量加载失败：" + m)); }
+            public void ok(PanelService.Usage u) { renderUsageBody(list, u); }
+            public void fail(String m) { list.removeAllViews(); list.addView(Theme.empty(a, "失败：" + m)); }
         });
     }
 
-    private void renderUsage(LinearLayout list, PanelService.Usage u) {
+    private void renderUsageBody(LinearLayout list, PanelService.Usage u) {
         list.removeAllViews();
-        LinearLayout card = new LinearLayout(a);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(cardBg());
-        card.setPadding(dp(13), dp(11), dp(13), dp(11));
-        list.addView(card);
-        card.addView(kv("统计区间", (u.from + " ~ " + u.to).trim()));
-        card.addView(kv("请求", u.requests + "（失败 " + u.errors + "）"));
-        card.addView(kv("Token", "总 " + u.totalTokens + " · 入 " + u.promptTokens + " · 出 " + u.completionTokens));
-        if (u.cacheHitRate > 0) card.addView(kv("前缀缓存命中率",
-                String.format(java.util.Locale.US, "%.1f%%", u.cacheHitRate * 100)));
-        card.addView(kv("平均延迟", String.format(java.util.Locale.US, "%.0f ms", u.avgLatencyMs)));
-        card.addView(kv("平均吐字", String.format(java.util.Locale.US, "%.1f tok/s", u.avgTps)));
-        if (u.credits > 0) card.addView(kv("积分消耗",
-                String.format(java.util.Locale.US, "%.2f c", u.credits)));
-        agg(list, "按账号", u.byAccount);
-        agg(list, "按模型", u.byModel);
+        LinearLayout totals = Theme.card(a);
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.addView(Theme.kpi(a, String.valueOf(u.requests), "请求", Theme.INK),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(Theme.kpi(a, fmtTokens(u.totalTokens), "TOKENS", Theme.INFO),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(Theme.kpi(a, String.format(java.util.Locale.US, "%.0f", u.credits), "积分", Theme.ACCENT),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        totals.addView(row);
+        totals.addView(Theme.kvRow(a, "失败", String.valueOf(u.errors)));
+        totals.addView(Theme.kvRow(a, "入 / 出", u.promptTokens + " / " + u.completionTokens));
+        if (u.cacheHitRate > 0) {
+            totals.addView(Theme.kvRow(a, "缓存命中", String.format(java.util.Locale.US, "%.1f%%", u.cacheHitRate * 100)));
+        }
+        totals.addView(Theme.kvRow(a, "平均延迟", String.format(java.util.Locale.US, "%.0f ms", u.avgLatencyMs)));
+        totals.addView(Theme.kvRow(a, "平均吐字", String.format(java.util.Locale.US, "%.1f tok/s", u.avgTps)));
+        list.addView(totals, Theme.cardLp(a, Theme.S3));
+        usageSection(list, "按账号", u.byAccount);
+        usageSection(list, "按模型", u.byModel);
     }
 
-    private void agg(LinearLayout list, String title, List<PanelService.Usage.Row> rows) {
+    private String fmtTokens(long n) {
+        if (n >= 1000000) return String.format(java.util.Locale.US, "%.1fM", n / 1000000.0);
+        if (n >= 1000) return String.format(java.util.Locale.US, "%.1fK", n / 1000.0);
+        return String.valueOf(n);
+    }
+
+    private void usageSection(LinearLayout list, String title, List<PanelService.Usage.Row> rows) {
         if (rows.isEmpty()) return;
-        list.addView(h3(title));
-        for (int i = 0; i < Math.min(rows.size(), 20); i++) {
+        LinearLayout card = Theme.card(a);
+        card.addView(Theme.label(a, title));
+        int n = Math.min(rows.size(), 12);
+        for (int i = 0; i < n; i++) {
             PanelService.Usage.Row r = rows.get(i);
-            LinearLayout row = new LinearLayout(a);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setPadding(dp(2), dp(5), dp(2), dp(5));
-            TextView name = new TextView(a);
-            name.setText((r.extra.isEmpty() ? r.key : r.extra)
-                    + (r.realm.isEmpty() ? "" : " · " + r.realm));
-            name.setTextSize(12.5f);
-            name.setTextColor(INK2);
+            LinearLayout line = new LinearLayout(a);
+            line.setOrientation(LinearLayout.HORIZONTAL);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setPadding(0, Theme.dp(a, 6), 0, Theme.dp(a, 6));
+            TextView name = Theme.text(a, r.extra.isEmpty() ? r.key : r.extra, 13f, Theme.INK, 0);
             name.setSingleLine(true);
             name.setEllipsize(TextUtils.TruncateAt.END);
-            row.addView(name, new LinearLayout.LayoutParams(0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            TextView val = new TextView(a);
-            val.setText(r.requests + " 次 · " + r.tokens + " tok"
-                    + (r.credits > 0 ? String.format(java.util.Locale.US, " · %.2fc", r.credits) : ""));
-            val.setTextSize(11.5f);
-            val.setTextColor(INK3);
-            row.addView(val);
-            list.addView(row);
+            line.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            TextView v = Theme.num(a, r.requests + " · " + fmtTokens(r.tokens), 12f, Theme.INK3);
+            line.addView(v);
+            card.addView(line);
+            if (i < n - 1) card.addView(Theme.divider(a));
         }
+        list.addView(card, Theme.cardLp(a, Theme.S3));
     }
 
     // ── 模型 ───────────────────────────────────────────────────────────────
-    private void buildModels() {
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(10), dp(10), dp(10), dp(12));
+    private void renderModels() {
+        setBar("模型与档位", true, iconAction(R.drawable.ic_refresh, "刷新", new Runnable() {
+            public void run() { renderModels(); }
+        }));
+        LinearLayout col = Theme.column(a);
         final LinearLayout list = new LinearLayout(a);
-        list.setOrientation(LinearLayout.VERTICAL);
-        box.addView(list);
-        pageBox.addView(box);
-        pageScroll = null;
-        list.addView(empty("加载中…"));
+        col.addView(list);
+        list.addView(Theme.empty(a, "加载中…"));
+        show(scrollOf(col));
         svc.models(new PanelService.Cb<List<PanelService.ModelInfo>>() {
-            public void ok(List<PanelService.ModelInfo> models) { renderModels(list, models); }
-            public void fail(String m) { list.removeAllViews(); list.addView(empty("模型加载失败：" + m)); }
+            public void ok(List<PanelService.ModelInfo> models) {
+                list.removeAllViews();
+                if (models.isEmpty()) { list.addView(Theme.empty(a, "没有可用模型")); return; }
+                for (PanelService.ModelInfo m : models) {
+                    LinearLayout card = Theme.card(a);
+                    card.setLayoutParams(Theme.cardLp(a, Theme.S2));
+                    LinearLayout top = new LinearLayout(a);
+                    top.setOrientation(LinearLayout.HORIZONTAL);
+                    top.setGravity(Gravity.CENTER_VERTICAL);
+                    TextView name = Theme.text(a, m.name, 14.5f, Theme.INK, 2);
+                    name.setSingleLine(true);
+                    name.setEllipsize(TextUtils.TruncateAt.END);
+                    top.addView(name, new LinearLayout.LayoutParams(0,
+                            ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                    TextView price = Theme.num(a, m.hasPromo()
+                            ? String.format(java.util.Locale.US, "%.2f", m.promoCredits)
+                            : (m.credits > 0 ? String.format(java.util.Locale.US, "%.2f", m.credits) : "0"),
+                            14f, m.hasPromo() ? Theme.ACCENT : Theme.INK2);
+                    top.addView(price);
+                    card.addView(top);
+
+                    LinearLayout tags = new LinearLayout(a);
+                    tags.setOrientation(LinearLayout.HORIZONTAL);
+                    tags.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+                    tags.addView(Theme.tag(a, m.id, Theme.INK3));
+                    if (m.hasPromo()) tags.addView(Theme.tag(a, "限时价", Theme.ACCENT));
+                    if (m.reasoning) tags.addView(Theme.tag(a, "思考", Theme.INFO));
+                    if (m.images) tags.addView(Theme.tag(a, "图片", Theme.INFO));
+                    if (m.tools) tags.addView(Theme.tag(a, "工具", Theme.INFO));
+                    card.addView(tags);
+                    list.addView(card);
+                }
+            }
+            public void fail(String m) { list.removeAllViews(); list.addView(Theme.empty(a, "失败：" + m)); }
         });
     }
 
-    private void renderModels(LinearLayout list, List<PanelService.ModelInfo> models) {
-        list.removeAllViews();
-        if (models.isEmpty()) { list.addView(empty("没有可用模型")); return; }
-        for (PanelService.ModelInfo m : models) {
-            LinearLayout card = new LinearLayout(a);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setBackground(cardBg());
-            card.setPadding(dp(12), dp(9), dp(12), dp(9));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(7);
-            card.setLayoutParams(lp);
-            LinearLayout r1 = new LinearLayout(a);
-            r1.setOrientation(LinearLayout.HORIZONTAL);
-            TextView name = new TextView(a);
-            name.setText(m.name);
-            name.setTextSize(13.5f);
-            name.setTextColor(INK);
-            name.setTypeface(Typeface.DEFAULT_BOLD);
-            name.setSingleLine(true);
-            name.setEllipsize(TextUtils.TruncateAt.END);
-            r1.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            TextView price = new TextView(a);
-            price.setText(m.hasPromo() ? String.format(java.util.Locale.US, "%.2f c", m.promoCredits)
-                    : (m.credits > 0 ? String.format(java.util.Locale.US, "%.2f c", m.credits) : "免费"));
-            price.setTextSize(12.5f);
-            price.setTextColor(m.hasPromo() ? OK : INK2);
-            r1.addView(price);
-            card.addView(r1);
-
-            StringBuilder sb = new StringBuilder(m.id);
-            if (m.hasPromo()) sb.append(" · 原价 ").append(String.format(java.util.Locale.US, "%.2f c", m.credits));
-            if (!m.tags.isEmpty()) sb.append(" · ").append(m.tags);
-            if (m.reasoning) sb.append(" · 思考");
-            if (m.images) sb.append(" · 图片");
-            if (m.tools) sb.append(" · 工具");
-            TextView meta = new TextView(a);
-            meta.setText(sb);
-            meta.setTextSize(11f);
-            meta.setTextColor(INK3);
-            card.addView(meta);
-            list.addView(card);
-        }
-    }
-
-    // ── 数据（积分构成 / 余额趋势 / 券码）─────────────────────────────────
-    private void buildData() {
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
+    // ── 数据 ───────────────────────────────────────────────────────────────
+    private void renderData() {
+        setBar("数据", false, iconAction(R.drawable.ic_refresh, "刷新", new Runnable() {
+            public void run() { renderData(); }
+        }));
+        LinearLayout col = Theme.column(a);
         LinearLayout seg = new LinearLayout(a);
         seg.setOrientation(LinearLayout.HORIZONTAL);
-        seg.setPadding(dp(10), dp(8), dp(10), dp(4));
-        seg.addView(chipSel("积分构成", "packages".equals(dataMode), new Runnable() {
-            public void run() { dataMode = "packages"; buildData(); }
-        }));
-        seg.addView(chipSel("余额趋势", "balance".equals(dataMode), new Runnable() {
-            public void run() { dataMode = "balance"; buildData(); }
-        }));
-        seg.addView(chipSel("开学季券码", "vouchers".equals(dataMode), new Runnable() {
-            public void run() { dataMode = "vouchers"; buildData(); }
-        }));
-        box.addView(seg);
+        String[] ids = {"packages", "balance", "vouchers"};
+        String[] labels = {"积分构成", "余额趋势", "券码"};
+        for (int i = 0; i < ids.length; i++) {
+            final String id = ids[i];
+            TextView p = Theme.pill(a, labels[i], id.equals(dataMode));
+            p.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { dataMode = id; renderData(); }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.rightMargin = Theme.dp(a, Theme.S2);
+            seg.addView(p, lp);
+        }
+        col.addView(seg);
 
         if ("balance".equals(dataMode)) {
             LinearLayout seg2 = new LinearLayout(a);
             seg2.setOrientation(LinearLayout.HORIZONTAL);
-            seg2.setPadding(dp(10), 0, dp(10), dp(6));
+            seg2.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
             final int[] days = {7, 30};
-            String[] labels = {"近 7 天", "近 30 天"};
+            String[] dl = {"近 7 天", "近 30 天"};
             for (int i = 0; i < days.length; i++) {
                 final int d = days[i];
-                seg2.addView(chipSel(labels[i], d == balanceDays, new Runnable() {
-                    public void run() { balanceDays = d; buildData(); }
-                }));
+                TextView p = Theme.pill(a, dl[i], d == balanceDays);
+                p.setOnClickListener(new View.OnClickListener() {
+                    public void onClick(View v) { balanceDays = d; renderData(); }
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.rightMargin = Theme.dp(a, Theme.S2);
+                seg2.addView(p, lp);
             }
-            box.addView(seg2);
+            col.addView(seg2);
         }
 
         final LinearLayout list = new LinearLayout(a);
-        list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(dp(10), dp(4), dp(10), dp(12));
-        box.addView(list);
-        pageBox.addView(box);
-        pageScroll = null;
-        list.addView(empty("加载中…"));
+        list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
+        col.addView(list);
+        list.addView(Theme.empty(a, "加载中…"));
+        show(scrollOf(col));
 
         if ("vouchers".equals(dataMode)) {
             svc.vouchers(new PanelService.Cb<List<PanelService.VoucherAccount>>() {
-                public void ok(List<PanelService.VoucherAccount> v) { renderVouchers(list, v); }
-                public void fail(String m) { list.removeAllViews(); list.addView(empty("券码加载失败：" + m)); }
+                public void ok(List<PanelService.VoucherAccount> v) { bodyVouchers(list, v); }
+                public void fail(String m) { list.removeAllViews(); list.addView(Theme.empty(a, "失败：" + m)); }
             });
         } else if ("packages".equals(dataMode)) {
             svc.packages(new PanelService.Cb<List<PanelService.PkgAccount>>() {
-                public void ok(List<PanelService.PkgAccount> v) { renderPackages(list, v); }
-                public void fail(String m) { list.removeAllViews(); list.addView(empty("积分构成加载失败：" + m)); }
+                public void ok(List<PanelService.PkgAccount> v) { bodyPackages(list, v); }
+                public void fail(String m) { list.removeAllViews(); list.addView(Theme.empty(a, "失败：" + m)); }
             });
         } else {
             svc.balanceHistory(balanceDays, new PanelService.Cb<List<PanelService.BalanceSeries>>() {
-                public void ok(List<PanelService.BalanceSeries> v) { renderBalance(list, v); }
-                public void fail(String m) { list.removeAllViews(); list.addView(empty("余额趋势加载失败：" + m)); }
+                public void ok(List<PanelService.BalanceSeries> v) { bodyBalance(list, v); }
+                public void fail(String m) { list.removeAllViews(); list.addView(Theme.empty(a, "失败：" + m)); }
             });
         }
     }
 
-    private void renderPackages(LinearLayout list, List<PanelService.PkgAccount> rows) {
+    private void bodyPackages(LinearLayout list, List<PanelService.PkgAccount> rows) {
         list.removeAllViews();
-        if (rows.isEmpty()) { list.addView(empty("没有账号")); return; }
+        if (rows.isEmpty()) { list.addView(Theme.empty(a, "没有账号")); return; }
         for (PanelService.PkgAccount r : rows) {
-            LinearLayout card = new LinearLayout(a);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setBackground(cardBg());
-            card.setPadding(dp(12), dp(9), dp(12), dp(9));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(8);
-            card.setLayoutParams(lp);
-            TextView head = new TextView(a);
-            head.setText((r.nickname.isEmpty() ? r.uid : r.nickname) + "  " + r.remain + " / " + r.size
-                    + ("global".equals(r.realm) ? "  · 国际" : ""));
-            head.setTextSize(13.5f);
-            head.setTextColor(INK);
-            head.setTypeface(Typeface.DEFAULT_BOLD);
-            card.addView(head);
+            LinearLayout card = Theme.card(a);
+            card.setLayoutParams(Theme.cardLp(a, Theme.S2));
+            LinearLayout top = new LinearLayout(a);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            TextView name = Theme.text(a, r.nickname.isEmpty() ? r.uid : r.nickname, 14.5f, Theme.INK, 2);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            top.addView(name, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            top.addView(Theme.num(a, r.remain + " / " + r.size, 13f, Theme.ACCENT));
+            card.addView(top);
             if (!r.plan.isEmpty() && !"unknown".equals(r.plan)) {
-                card.addView(kv("套餐", r.plan + (r.planEvidence.isEmpty() ? "" : "（" + r.planEvidence + "）")));
+                card.addView(Theme.text(a, "套餐 " + r.plan
+                        + (r.planEvidence.isEmpty() ? "" : " · " + r.planEvidence), 11.5f, Theme.INK3, 0));
             }
             if (!r.error.isEmpty()) {
-                TextView er = new TextView(a);
-                er.setText("查询失败：" + r.error);
-                er.setTextSize(11.5f);
-                er.setTextColor(BAD);
-                card.addView(er);
+                card.addView(Theme.text(a, "查询失败：" + r.error, 12f, Theme.BAD, 0));
                 list.addView(card);
                 continue;
             }
             for (PanelService.Pkg p : r.packages) {
                 String end = p.endTime.length() > 10 ? p.endTime.substring(0, 10) : p.endTime;
-                TextView row = new TextView(a);
-                row.setText("· " + p.name + "  " + p.remain + "/" + p.size
-                        + (end.isEmpty() ? "" : " 到期 " + end));
-                row.setTextSize(11.5f);
-                row.setTextColor(INK2);
-                card.addView(row);
+                LinearLayout line = new LinearLayout(a);
+                line.setOrientation(LinearLayout.HORIZONTAL);
+                line.setPadding(0, Theme.dp(a, 5), 0, 0);
+                TextView n = Theme.text(a, p.name, 12.5f, Theme.INK2, 0);
+                n.setSingleLine(true);
+                n.setEllipsize(TextUtils.TruncateAt.END);
+                line.addView(n, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                line.addView(Theme.num(a, p.remain + "/" + p.size
+                        + (end.isEmpty() ? "" : " · " + end), 11.5f, Theme.INK3));
+                card.addView(line);
             }
             list.addView(card);
         }
     }
 
-    private void renderBalance(LinearLayout list, List<PanelService.BalanceSeries> rows) {
+    private void bodyBalance(LinearLayout list, List<PanelService.BalanceSeries> rows) {
         list.removeAllViews();
-        if (rows.isEmpty()) { list.addView(empty("还没有余额采样（网关每 30 分钟采样一次）")); return; }
+        if (rows.isEmpty()) {
+            list.addView(Theme.empty(a, "还没有余额采样\n网关每 30 分钟采样一次"));
+            return;
+        }
         for (PanelService.BalanceSeries s : rows) {
-            LinearLayout card = new LinearLayout(a);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setBackground(cardBg());
-            card.setPadding(dp(12), dp(9), dp(12), dp(9));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(8);
-            card.setLayoutParams(lp);
-            TextView head = new TextView(a);
-            head.setText(s.name + "   当前 " + s.current + "（窗口内 " + (s.change >= 0 ? "+" : "") + s.change + "）");
-            head.setTextSize(13f);
-            head.setTextColor(INK);
-            card.addView(head);
-            card.addView(kv("区间", s.min + " ~ " + s.max + " · " + s.values.size() + " 个采样"
-                    + (s.realm.isEmpty() ? "" : " · " + s.realm)));
+            LinearLayout card = Theme.card(a);
+            card.setLayoutParams(Theme.cardLp(a, Theme.S2));
+            LinearLayout top = new LinearLayout(a);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            TextView name = Theme.text(a, s.name, 14f, Theme.INK, 2);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            top.addView(name, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            TextView cur = Theme.num(a, String.valueOf(s.current), 16f, Theme.INK);
+            top.addView(cur);
+            card.addView(top);
+            card.addView(Theme.kvRow(a, "窗口内变化", (s.change >= 0 ? "+" : "") + s.change));
+            card.addView(Theme.kvRow(a, "区间", s.min + " ~ " + s.max + " · " + s.values.size() + " 点"));
+
             float[] vals = new float[s.values.size()];
             for (int i = 0; i < vals.length; i++) vals[i] = s.values.get(i);
-            Sparkline sp = new Sparkline(a, ACCENT);
+            Sparkline sp = new Sparkline(a, Theme.ACCENT);
             sp.setValues(vals);
             LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(56));
-            slp.topMargin = dp(6);
+                    ViewGroup.LayoutParams.MATCH_PARENT, Theme.dp(a, 60));
+            slp.topMargin = Theme.dp(a, Theme.S2);
             card.addView(sp, slp);
             list.addView(card);
         }
     }
 
-    private void renderVouchers(LinearLayout list, List<PanelService.VoucherAccount> rows) {
+    private void bodyVouchers(LinearLayout list, List<PanelService.VoucherAccount> rows) {
         list.removeAllViews();
         int total = 0;
-        for (PanelService.VoucherAccount a1 : rows) {
-            if (a1.vouchers.isEmpty() && a1.error.isEmpty()) continue;
-            LinearLayout card = new LinearLayout(a);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setBackground(cardBg());
-            card.setPadding(dp(12), dp(9), dp(12), dp(9));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(8);
-            card.setLayoutParams(lp);
-            TextView head = new TextView(a);
-            head.setText(a1.nickname.isEmpty() ? a1.uid : a1.nickname);
-            head.setTextSize(13f);
-            head.setTextColor(INK);
-            head.setTypeface(Typeface.DEFAULT_BOLD);
-            card.addView(head);
-            if (!a1.error.isEmpty()) {
-                TextView er = new TextView(a);
-                er.setText("查询失败：" + a1.error);
-                er.setTextSize(11.5f);
-                er.setTextColor(BAD);
-                card.addView(er);
+        for (PanelService.VoucherAccount v : rows) {
+            if (v.vouchers.isEmpty() && v.error.isEmpty()) continue;
+            LinearLayout card = Theme.card(a);
+            card.setLayoutParams(Theme.cardLp(a, Theme.S2));
+            card.addView(Theme.text(a, v.nickname.isEmpty() ? v.uid : v.nickname, 14f, Theme.INK, 2));
+            if (!v.error.isEmpty()) {
+                card.addView(Theme.text(a, "查询失败：" + v.error, 12f, Theme.BAD, 0));
             }
-            for (PanelService.Voucher v : a1.vouchers) {
+            for (PanelService.Voucher vc : v.vouchers) {
                 total++;
-                TextView row = new TextView(a);
-                row.setText("· " + v.prize + (v.validTo.isEmpty() ? "" : "（有效期至 " + v.validTo + "）"));
-                row.setTextSize(11.5f);
-                row.setTextColor(INK2);
-                card.addView(row);
-                TextView code = new TextView(a);
-                code.setText(v.code);
-                code.setTextSize(12.5f);
-                code.setTextColor(ACCENT);
-                code.setTypeface(Typeface.MONOSPACE);
+                card.addView(Theme.text(a, vc.prize
+                        + (vc.validTo.isEmpty() ? "" : " · 至 " + vc.validTo), 12f, Theme.INK2, 0));
+                TextView code = Theme.num(a, vc.code, 14f, Theme.ACCENT);
                 code.setTextIsSelectable(true);
                 card.addView(code);
             }
             list.addView(card);
         }
-        if (total == 0) list.addView(empty("没有可用的开学季券码"));
+        if (total == 0) list.addView(Theme.empty(a, "没有可用的券码"));
     }
 
-    // ── 任务页（队列 / 作业）──────────────────────────────────────────────
-    private void buildTasks() {
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
+    // ── 任务 ───────────────────────────────────────────────────────────────
+    private void renderTasks() {
+        setBar("任务", true, iconAction(R.drawable.ic_refresh, "刷新", new Runnable() {
+            public void run() { renderTasks(); }
+        }));
+        LinearLayout col = Theme.column(a);
         LinearLayout seg = new LinearLayout(a);
         seg.setOrientation(LinearLayout.HORIZONTAL);
-        seg.setPadding(dp(10), dp(8), dp(10), dp(4));
-        seg.addView(chipSel("队列", "queue".equals(taskMode), new Runnable() {
-            public void run() { taskMode = "queue"; buildTasks(); }
-        }));
-        seg.addView(chipSel("作业历史", "jobs".equals(taskMode), new Runnable() {
-            public void run() { taskMode = "jobs"; buildTasks(); }
-        }));
-        seg.addView(spacerH());
-        seg.addView(chipSel("刷新", false, new Runnable() {
-            public void run() { buildTasks(); }
-        }));
-        box.addView(seg);
+        String[] ids = {"queue", "jobs"};
+        String[] labels = {"队列", "作业历史"};
+        for (int i = 0; i < ids.length; i++) {
+            final String id = ids[i];
+            TextView p = Theme.pill(a, labels[i], id.equals(taskMode));
+            p.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { taskMode = id; renderTasks(); }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.rightMargin = Theme.dp(a, Theme.S2);
+            seg.addView(p, lp);
+        }
+        col.addView(seg);
+
         final LinearLayout list = new LinearLayout(a);
-        list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(dp(10), dp(4), dp(10), dp(12));
-        box.addView(list);
-        pageBox.addView(box);
-        pageScroll = null;
-        list.addView(empty("加载中…"));
+        list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
+        col.addView(list);
+        list.addView(Theme.empty(a, "加载中…"));
+        show(scrollOf(col));
 
         if ("queue".equals(taskMode)) {
             svc.queue(new PanelService.Cb<PanelService.Queue>() {
-                public void ok(PanelService.Queue q) { renderQueue(list, q); }
-                public void fail(String m) { list.removeAllViews(); list.addView(empty("加载失败：" + m)); }
+                public void ok(PanelService.Queue q) { bodyQueue(list, q); }
+                public void fail(String m) { list.removeAllViews(); list.addView(Theme.empty(a, "失败：" + m)); }
             });
         } else {
             svc.jobs(new PanelService.Cb<List<PanelService.Job>>() {
-                public void ok(List<PanelService.Job> js) { renderJobs(list, js); }
-                public void fail(String m) { list.removeAllViews(); list.addView(empty("加载失败：" + m)); }
+                public void ok(List<PanelService.Job> js) { bodyJobs(list, js); }
+                public void fail(String m) { list.removeAllViews(); list.addView(Theme.empty(a, "失败：" + m)); }
             });
         }
     }
 
-    private void renderQueue(LinearLayout list, PanelService.Queue q) {
+    private void bodyQueue(LinearLayout list, PanelService.Queue q) {
         list.removeAllViews();
-        LinearLayout head = new LinearLayout(a);
-        head.setOrientation(LinearLayout.VERTICAL);
-        head.setBackground(cardBg());
-        head.setPadding(dp(12), dp(9), dp(12), dp(9));
-        list.addView(head);
-        head.addView(kv("状态", q.running ? "运行中" : (q.started ? "已结束" : "未启动")));
-        head.addView(kv("条目", q.total + " 条 · 并发 " + q.conc));
+        LinearLayout head = Theme.card(a);
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.addView(Theme.kpi(a, q.running ? "运行中" : (q.started ? "已结束" : "未启动"), "状态",
+                q.running ? Theme.ACCENT : Theme.INK2),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
+        row.addView(Theme.kpi(a, String.valueOf(q.total), "条目", Theme.INK),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(Theme.kpi(a, String.valueOf(q.conc), "并发", Theme.INFO),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        head.addView(row);
+        list.addView(head, Theme.cardLp(a, Theme.S3));
+
         if (q.items.isEmpty()) {
-            list.addView(empty("队列为空（面板里「一键完成」或定时成长队列启动后这里会有条目）"));
+            list.addView(Theme.empty(a, "队列为空"));
             return;
         }
         for (PanelService.Queue.Item it : q.items) {
-            LinearLayout card = new LinearLayout(a);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setBackground(cardBg());
-            card.setPadding(dp(12), dp(8), dp(12), dp(8));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(6);
-            card.setLayoutParams(lp);
-            LinearLayout r1 = new LinearLayout(a);
-            r1.setOrientation(LinearLayout.HORIZONTAL);
-            TextView st = new TextView(a);
-            st.setText(statusText(it.status));
-            st.setTextSize(11f);
-            st.setTextColor(statusColor(it.status));
-            st.setTypeface(Typeface.DEFAULT_BOLD);
-            r1.addView(st);
-            TextView who = new TextView(a);
-            who.setText("  " + (it.nickname.isEmpty() ? it.uid : it.nickname) + " · " + it.code);
-            who.setTextSize(12.5f);
-            who.setTextColor(INK);
+            LinearLayout card = Theme.card(a);
+            card.setLayoutParams(Theme.cardLp(a, Theme.S2));
+            LinearLayout top = new LinearLayout(a);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            top.addView(Theme.statusChip(a, statusText(it.status), statusColor(it.status)));
+            TextView who = Theme.text(a, (it.nickname.isEmpty() ? it.uid : it.nickname) + " · " + it.code,
+                    12.5f, Theme.INK, 0);
+            who.setPadding(Theme.dp(a, Theme.S2), 0, 0, 0);
             who.setSingleLine(true);
             who.setEllipsize(TextUtils.TruncateAt.END);
-            r1.addView(who, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            card.addView(r1);
-            if (!it.message.isEmpty()) card.addView(kv("", it.message));
-            list.addView(card);
-        }
-    }
-
-    private void renderJobs(LinearLayout list, List<PanelService.Job> jobs) {
-        list.removeAllViews();
-        if (jobs.isEmpty()) { list.addView(empty("还没有作业记录")); return; }
-        for (PanelService.Job j : jobs) {
-            LinearLayout card = new LinearLayout(a);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setBackground(cardBg());
-            card.setPadding(dp(12), dp(8), dp(12), dp(8));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(6);
-            card.setLayoutParams(lp);
-            TextView head = new TextView(a);
-            head.setText(j.uid + "  ·  " + statusText(j.status));
-            head.setTextSize(13f);
-            head.setTextColor("error".equals(j.status) ? BAD : ("interrupted".equals(j.status) ? WARN : INK));
-            head.setTypeface(Typeface.DEFAULT_BOLD);
-            card.addView(head);
-            String upd = j.updatedAt.length() > 19 ? j.updatedAt.substring(5, 19).replace('T', ' ') : j.updatedAt;
-            card.addView(kv("进度", "完成 " + j.completed + " / 失败 " + j.failed + " / 跳过 "
-                    + j.skipped + " / 共 " + j.total + (upd.isEmpty() ? "" : " · " + upd)));
-            if (!j.error.isEmpty() || !j.message.isEmpty()) {
-                card.addView(kv("", j.error.isEmpty() ? j.message : j.error));
+            top.addView(who, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            card.addView(top);
+            if (!it.message.isEmpty()) {
+                card.addView(Theme.text(a, it.message, 11.5f, Theme.INK3, 0));
             }
             list.addView(card);
         }
     }
 
-    // ── 日志 ───────────────────────────────────────────────────────────────
-    private void buildLogs() {
-        pageBox.removeAllViews();
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout seg = new LinearLayout(a);
-        seg.setOrientation(LinearLayout.HORIZONTAL);
-        seg.setPadding(dp(10), dp(8), dp(10), dp(2));
-        seg.addView(chipSel("运行日志", "run".equals(logMode), new Runnable() {
-            public void run() { logMode = "run"; buildLogs(); }
-        }));
-        seg.addView(chipSel("请求日志", "req".equals(logMode), new Runnable() {
-            public void run() { logMode = "req"; buildLogs(); }
-        }));
-        box.addView(seg);
-
-        LinearLayout bar = new LinearLayout(a);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(10), dp(4), dp(10), dp(6));
-        if ("run".equals(logMode)) {
-            bar.addView(chip("全部", "all"));
-            bar.addView(chip("任务", "task"));
-            bar.addView(chip("对话", "chat"));
-            bar.addView(chip("系统", "sys"));
-            bar.addView(spacerH());
-            Button auto = btn(logAuto ? "自动刷新：开" : "自动刷新：关", false);
-            auto.setOnClickListener(new View.OnClickListener() {
-                public void onClick(View v) { logAuto = !logAuto; buildLogs(); }
-            });
-            bar.addView(auto);
-        } else {
-            bar.addView(spacerH());
-            Button clear = btn("清空归档", false);
-            clear.setOnClickListener(new View.OnClickListener() {
-                public void onClick(View v) { confirmClearArchive(); }
-            });
-            bar.addView(clear);
-            Button reload = btn("刷新", true);
-            reload.setOnClickListener(new View.OnClickListener() {
-                public void onClick(View v) { buildLogs(); }
-            });
-            bar.addView(reload);
+    private void bodyJobs(LinearLayout list, List<PanelService.Job> jobs) {
+        list.removeAllViews();
+        if (jobs.isEmpty()) { list.addView(Theme.empty(a, "还没有作业记录")); return; }
+        for (PanelService.Job j : jobs) {
+            LinearLayout card = Theme.card(a);
+            card.setLayoutParams(Theme.cardLp(a, Theme.S2));
+            LinearLayout top = new LinearLayout(a);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            TextView uid = Theme.num(a, j.uid, 12.5f, Theme.INK);
+            top.addView(uid, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            top.addView(Theme.statusChip(a, statusText(j.status), statusColor(j.status)));
+            card.addView(top);
+            card.addView(Theme.kvRow(a, "完成 / 失败 / 跳过",
+                    j.completed + " / " + j.failed + " / " + j.skipped));
+            String upd = j.updatedAt.length() > 19 ? j.updatedAt.substring(5, 19).replace('T', ' ') : j.updatedAt;
+            if (!upd.isEmpty()) card.addView(Theme.kvRow(a, "更新", upd));
+            if (!j.error.isEmpty()) card.addView(Theme.text(a, j.error, 11.5f, Theme.BAD, 0));
+            else if (!j.message.isEmpty()) card.addView(Theme.text(a, j.message, 11.5f, Theme.INK3, 0));
+            list.addView(card);
         }
-        box.addView(bar);
-
-        if ("req".equals(logMode)) {
-            LinearLayout list = new LinearLayout(a);
-            list.setOrientation(LinearLayout.VERTICAL);
-            list.setPadding(dp(10), dp(4), dp(10), dp(12));
-            box.addView(list);
-            pageBox.addView(box);
-            pageScroll = null;
-            list.addView(empty("加载中…"));
-            svc.requestLogs(new PanelService.Cb<List<PanelService.ReqEvent>>() {
-                public void ok(List<PanelService.ReqEvent> rows) { renderRequestLogs(list, rows); }
-                public void fail(String m) { list.removeAllViews(); list.addView(empty("请求日志加载失败：" + m)); }
-            });
-            return;
-        }
-
-        final TextView tv = new TextView(a);
-        tv.setId(android.R.id.text1);
-        tv.setTextSize(10.5f);
-        tv.setTextColor(INK2);
-        tv.setTypeface(Typeface.MONOSPACE);
-        tv.setTextIsSelectable(true);
-        tv.setPadding(dp(10), dp(4), dp(10), dp(12));
-        ScrollView sv = new ScrollView(a);
-        sv.addView(tv);
-        box.addView(sv, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        pageBox.addView(box);
-        loadLogs();
-        startLogLoop();
     }
 
-    private void loadLogs() {
+    private static String statusText(String st) {
+        if ("done".equals(st)) return "完成";
+        if ("running".equals(st)) return "执行中";
+        if ("error".equals(st)) return "失败";
+        if ("skipped".equals(st)) return "跳过";
+        if ("partial".equals(st)) return "部分完成";
+        if ("interrupted".equals(st)) return "中断";
+        return "待执行";
+    }
+
+    private static int statusColor(String st) {
+        if ("done".equals(st)) return Theme.ACCENT;
+        if ("error".equals(st)) return Theme.BAD;
+        if ("running".equals(st)) return Theme.INFO;
+        if ("partial".equals(st) || "interrupted".equals(st)) return Theme.WARN;
+        return Theme.INK3;
+    }
+
+    // ── 日志 ───────────────────────────────────────────────────────────────
+    private void renderLogs() {
+        setBar("日志", false,
+                iconAction(R.drawable.ic_refresh, "刷新", new Runnable() {
+                    public void run() { renderLogs(); }
+                }));
+        LinearLayout col = Theme.column(a);
+        LinearLayout seg = new LinearLayout(a);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        String[] ids = {"run", "req"};
+        String[] labels = {"运行日志", "请求日志"};
+        for (int i = 0; i < ids.length; i++) {
+            final String id = ids[i];
+            TextView p = Theme.pill(a, labels[i], id.equals(logMode));
+            p.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { logMode = id; renderLogs(); }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.rightMargin = Theme.dp(a, Theme.S2);
+            seg.addView(p, lp);
+        }
+        col.addView(seg);
+
+        if ("run".equals(logMode)) {
+            LinearLayout chips = new LinearLayout(a);
+            chips.setOrientation(LinearLayout.HORIZONTAL);
+            chips.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+            String[] ch = {"all", "task", "chat", "sys"};
+            String[] cl = {"全部", "任务", "对话", "系统"};
+            for (int i = 0; i < ch.length; i++) {
+                final String id = ch[i];
+                TextView p = Theme.pill(a, cl[i], id.equals(logCh));
+                p.setTextSize(11.5f);
+                p.setOnClickListener(new View.OnClickListener() {
+                    public void onClick(View v) { logCh = id; renderLogs(); }
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.rightMargin = Theme.dp(a, Theme.S1);
+                chips.addView(p, lp);
+            }
+            chips.addView(space());
+            final TextView auto = Theme.pill(a, logAuto ? "自动" : "暂停", logAuto);
+            auto.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { logAuto = !logAuto; renderLogs(); }
+            });
+            chips.addView(auto);
+            col.addView(chips);
+
+            final TextView tv = Theme.num(a, "加载中…", 11f, Theme.INK2);
+            tv.setId(android.R.id.text1);   // 自动刷新据此找回这个 TextView
+            tv.setTextIsSelectable(true);
+            LinearLayout wrap = Theme.card(a);
+            wrap.setPadding(Theme.dp(a, Theme.S3), Theme.dp(a, Theme.S3),
+                    Theme.dp(a, Theme.S3), Theme.dp(a, Theme.S3));
+            wrap.addView(tv);
+            LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            wlp.topMargin = Theme.dp(a, Theme.S3);
+            col.addView(wrap, wlp);
+            show(scrollOf(col));
+            loadLogs(tv);
+            startLogLoop();
+        } else {
+            LinearLayout chips = new LinearLayout(a);
+            chips.setOrientation(LinearLayout.HORIZONTAL);
+            chips.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+            TextView clear = Theme.pill(a, "清空归档", false);
+            clear.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { confirmClear(); }
+            });
+            chips.addView(clear);
+            col.addView(chips);
+
+            final LinearLayout list = new LinearLayout(a);
+            list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
+            col.addView(list);
+            list.addView(Theme.empty(a, "加载中…"));
+            show(scrollOf(col));
+            svc.requestLogs(new PanelService.Cb<List<PanelService.ReqEvent>>() {
+                public void ok(List<PanelService.ReqEvent> rows) { bodyRequests(list, rows); }
+                public void fail(String m) { list.removeAllViews(); list.addView(Theme.empty(a, "失败：" + m)); }
+            });
+        }
+    }
+
+    private View space() {
+        View v = new View(a);
+        v.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
+        return v;
+    }
+
+    private void loadLogs(final TextView tv) {
         svc.logs(new PanelService.Cb<List<PanelService.LogRow>>() {
             public void ok(List<PanelService.LogRow> rows) {
-                TextView tv = (TextView) pageBox.findViewById(android.R.id.text1);
-                if (tv == null) return;
                 StringBuilder sb = new StringBuilder();
                 int start = Math.max(0, rows.size() - 400);
+                int shown = 0;
                 for (int i = start; i < rows.size(); i++) {
                     PanelService.LogRow r = rows.get(i);
                     if (!"all".equals(logCh) && !logCh.equals(r.channel)) continue;
                     String ts = r.time;
                     int t = ts.indexOf('T');
                     if (t > 0 && ts.length() > t + 9) ts = ts.substring(t + 1, t + 9);
-                    sb.append(ts).append(' ').append(r.text).append('\n');
+                    sb.append(ts).append("  ").append(r.text).append('\n');
+                    shown++;
                 }
-                tv.setText(sb.length() == 0 ? "（暂无日志）" : sb.toString());
+                tv.setText(shown == 0 ? "（暂无日志）" : sb.toString());
             }
-            public void fail(String msg) {
-                TextView tv = (TextView) pageBox.findViewById(android.R.id.text1);
-                if (tv != null) tv.setText("日志加载失败：" + msg);
-            }
+            public void fail(String msg) { tv.setText("日志加载失败：" + msg); }
         });
     }
 
@@ -1296,230 +1347,272 @@ final class Console {
         logLoop = true;
         ui.postDelayed(new Runnable() {
             public void run() {
-                if (!"logs".equals(page) || !"run".equals(logMode)) { logLoop = false; return; }
-                if (logAuto) loadLogs();
+                if (!"logs".equals(screen) || !"run".equals(logMode)) { logLoop = false; return; }
+                if (logAuto) {
+                    View v = host.findViewById(android.R.id.text1);
+                    if (v instanceof TextView) loadLogs((TextView) v);
+                }
                 ui.postDelayed(this, 3000);
             }
         }, 3000);
     }
 
-    private void renderRequestLogs(LinearLayout list, List<PanelService.ReqEvent> rows) {
+    private void bodyRequests(LinearLayout list, List<PanelService.ReqEvent> rows) {
         list.removeAllViews();
         if (rows.isEmpty()) {
-            list.addView(empty("暂无请求记录（检查 logging.request_archive_enabled 是否开启）"));
+            list.addView(Theme.empty(a, "暂无请求记录\n检查 logging.request_archive_enabled"));
             return;
         }
         for (final PanelService.ReqEvent e : rows) {
-            LinearLayout card = new LinearLayout(a);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setBackground(cardBg());
-            card.setPadding(dp(11), dp(8), dp(11), dp(8));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(7);
-            card.setLayoutParams(lp);
-
-            LinearLayout line1 = new LinearLayout(a);
-            line1.setOrientation(LinearLayout.HORIZONTAL);
-            line1.setGravity(Gravity.CENTER_VERTICAL);
-            TextView st = new TextView(a);
-            st.setText(String.valueOf(e.status));
-            st.setTextSize(12.5f);
-            st.setTypeface(Typeface.DEFAULT_BOLD);
-            st.setTextColor(e.status >= 200 && e.status < 300 ? OK : (e.status >= 500 ? BAD : WARN));
-            line1.addView(st);
-            TextView model = new TextView(a);
-            String m = e.model.isEmpty() ? "-" : e.model;
-            if (!e.modelEff.isEmpty() && !e.modelEff.equals(e.model)) m = m + " ⤳ " + e.modelEff;
-            model.setText(m);
-            model.setTextSize(12.5f);
-            model.setTextColor(INK);
-            model.setSingleLine(true);
-            model.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-            model.setPadding(dp(8), 0, 0, 0);
-            line1.addView(model, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            TextView time = new TextView(a);
+            LinearLayout card = Theme.card(a);
+            card.setLayoutParams(Theme.cardLp(a, Theme.S2));
+            card.setClickable(true);
+            LinearLayout top = new LinearLayout(a);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            int color = e.status >= 200 && e.status < 300 ? Theme.ACCENT
+                    : (e.status >= 500 ? Theme.BAD : Theme.WARN);
+            top.addView(Theme.statusChip(a, String.valueOf(e.status), color));
+            String model = e.model.isEmpty() ? "—" : e.model;
+            if (!e.modelEff.isEmpty() && !e.modelEff.equals(e.model)) model += " ⤳ " + e.modelEff;
+            TextView m = Theme.text(a, model, 12.5f, Theme.INK, 1);
+            m.setSingleLine(true);
+            m.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            m.setPadding(Theme.dp(a, Theme.S2), 0, 0, 0);
+            top.addView(m, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             String ts = e.time;
             int t = ts.indexOf('T');
-            time.setText(t > 0 && ts.length() > t + 9 ? ts.substring(t + 1, t + 9) : ts);
-            time.setTextSize(11f);
-            time.setTextColor(INK3);
-            line1.addView(time);
-            card.addView(line1);
+            top.addView(Theme.num(a, t > 0 && ts.length() > t + 9 ? ts.substring(t + 1, t + 9) : ts,
+                    11f, Theme.INK3));
+            card.addView(top);
 
             StringBuilder sb = new StringBuilder();
             if (!e.account.isEmpty()) sb.append(e.account).append(" · ");
             sb.append("总 ").append(e.totalTokens).append(" tok");
             if (e.ttfbMs > 0) sb.append(" · 首字 ").append(e.ttfbMs).append("ms");
-            if (e.durationMs > 0) sb.append(" · 用时 ").append(e.durationMs).append("ms");
+            if (e.durationMs > 0) sb.append(" · ").append(e.durationMs).append("ms");
             if (e.creditKnown) sb.append(" · ").append(e.credit).append("c");
-            if (!e.outcome.isEmpty()) sb.append(" · ").append(e.outcome);
-            TextView meta = new TextView(a);
-            meta.setText(sb.toString());
-            meta.setTextSize(11f);
-            meta.setTextColor(INK3);
+            TextView meta = Theme.text(a, sb.toString(), 11f, Theme.INK3, 0);
             meta.setSingleLine(true);
             meta.setEllipsize(TextUtils.TruncateAt.END);
             card.addView(meta);
 
             card.setOnClickListener(new View.OnClickListener() {
-                public void onClick(View v) { showRequestDetail(e); }
+                public void onClick(View v) { requestDetail(e); }
             });
             list.addView(card);
         }
     }
 
-    private void showRequestDetail(PanelService.ReqEvent e) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("时间     ").append(e.time).append('\n');
-        sb.append("请求 ID  ").append(e.requestId).append('\n');
-        sb.append("路径     ").append(e.path).append('\n');
-        sb.append("账号     ").append(e.account).append('\n');
-        sb.append("模型     ").append(e.model);
-        if (!e.modelEff.isEmpty() && !e.modelEff.equals(e.model)) sb.append(" ⤳ ").append(e.modelEff);
-        sb.append('\n');
-        sb.append("状态     ").append(e.status).append(" · ").append(e.outcome).append('\n');
-        sb.append("耗时     ").append(e.durationMs).append("ms · 首字 ").append(e.ttfbMs).append("ms\n");
-        sb.append("Token    ").append(e.promptTokens).append(" 入 / ")
-                .append(e.completionTokens).append(" 出 / ").append(e.totalTokens).append(" 总\n");
-        if (e.creditKnown) sb.append("积分     ").append(e.credit).append('\n');
+    private void requestDetail(PanelService.ReqEvent e) {
+        LinearLayout col = Theme.column(a);
+        LinearLayout card = Theme.card(a);
+        card.addView(Theme.kvRow(a, "时间", e.time));
+        card.addView(Theme.kvRow(a, "ID", e.requestId));
+        card.addView(Theme.kvRow(a, "路径", e.path));
+        card.addView(Theme.kvRow(a, "账号", e.account));
+        card.addView(Theme.kvRow(a, "模型", e.model + (e.modelEff.isEmpty() || e.modelEff.equals(e.model)
+                ? "" : " → " + e.modelEff)));
+        card.addView(Theme.kvRow(a, "状态", e.status + " · " + e.outcome));
+        card.addView(Theme.kvRow(a, "耗时", e.durationMs + "ms · 首字 " + e.ttfbMs + "ms"));
+        card.addView(Theme.kvRow(a, "Token", e.promptTokens + " / " + e.completionTokens + " / " + e.totalTokens));
+        if (e.creditKnown) card.addView(Theme.kvRow(a, "积分", String.valueOf(e.credit)));
         if (e.cacheHit > 0 || e.cacheMiss > 0) {
-            sb.append("缓存     ").append(e.cacheHit).append(" 命中 / ").append(e.cacheMiss).append(" 未命中\n");
+            card.addView(Theme.kvRow(a, "缓存", e.cacheHit + " 命中 / " + e.cacheMiss + " 未命中"));
         }
-        if (e.toolsDeclared > 0 || e.toolCalls > 0) {
-            sb.append("工具     ").append(e.toolsDeclared).append(" 声明 / ").append(e.toolCalls).append(" 调用\n");
+        card.addView(Theme.kvRow(a, "工具", e.toolsDeclared + " 声明 / " + e.toolCalls + " 调用"));
+        if (!e.clientIp.isEmpty()) card.addView(Theme.kvRow(a, "来源", e.clientIp));
+        col.addView(card, Theme.cardLp(a, Theme.S3));
+        if (!e.context.isEmpty()) {
+            LinearLayout ctx = Theme.card(a);
+            ctx.addView(Theme.label(a, "会话上下文"));
+            TextView tv = Theme.num(a, e.context, 11f, Theme.INK2);
+            tv.setTextIsSelectable(true);
+            ctx.addView(tv);
+            col.addView(ctx);
         }
-        if (!e.clientIp.isEmpty()) sb.append("来源     ").append(e.clientIp).append("  ").append(e.userAgent).append('\n');
-        if (!e.context.isEmpty()) sb.append("\n── 会话上下文 ──\n").append(e.context);
-
-        TextView tv = new TextView(a);
-        tv.setText(sb.toString());
-        tv.setTextSize(12f);
-        tv.setTextColor(INK2);
-        tv.setTypeface(Typeface.MONOSPACE);
-        tv.setTextIsSelectable(true);
-        tv.setPadding(dp(14), dp(10), dp(14), dp(10));
-        ScrollView sv = new ScrollView(a);
-        sv.addView(tv);
-        new AlertDialog.Builder(a).setTitle("请求详情").setView(sv)
+        new AlertDialog.Builder(a).setTitle("请求详情").setView(scrollOf(col))
                 .setPositiveButton("关闭", null).show();
     }
 
-    private void confirmClearArchive() {
+    private void confirmClear() {
         new AlertDialog.Builder(a)
                 .setTitle("清空请求归档")
-                .setMessage("将删除磁盘上的 requests-*.jsonl 请求事件文件，不可恢复。\n运行日志（内存环）不受影响。")
+                .setMessage("删除磁盘上的 requests-*.jsonl，不可恢复。\n运行日志（内存）不受影响。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("清空", new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int w) {
                         svc.clearArchive(new PanelService.Cb<String>() {
-                            public void ok(String m) { toast("归档已清空"); buildLogs(); }
-                            public void fail(String msg) { toast("清空失败：" + msg); }
+                            public void ok(String m) { toast("已清空"); renderLogs(); }
+                            public void fail(String msg) { toast("失败：" + msg); }
                         });
                     }
                 }).show();
     }
 
+    // ── 更多 ───────────────────────────────────────────────────────────────
+    private void renderMore() {
+        setBar("更多", false);
+        LinearLayout col = Theme.column(a);
+
+        LinearLayout nav = Theme.card(a);
+        nav.addView(Theme.label(a, "数据与运行"));
+        nav.addView(entry("用量与成本", "按区间、账号、模型看 token 与积分", new Runnable() {
+            public void run() { open("usage"); }
+        }));
+        nav.addView(Theme.divider(a));
+        nav.addView(entry("模型与档位", "价格、限时优惠、能力标记", new Runnable() {
+            public void run() { open("models"); }
+        }));
+        nav.addView(Theme.divider(a));
+        nav.addView(entry("任务队列", "队列进度与作业历史", new Runnable() {
+            public void run() { open("tasks"); }
+        }));
+        col.addView(nav, Theme.cardLp(a, Theme.S3));
+
+        LinearLayout tools = Theme.card(a);
+        tools.addView(Theme.label(a, "连接与账号"));
+        tools.addView(entry("添加 / 迁移账号", "导入文件、导出、API Key、登录", new Runnable() {
+            public void run() { addSheet(); }
+        }));
+        tools.addView(Theme.divider(a));
+        tools.addView(entry("设置", "定时任务、日志、全部配置", new Runnable() {
+            public void run() { open("settings"); }
+        }));
+        tools.addView(Theme.divider(a));
+        tools.addView(entry("网页面板", "完整 Web 界面（兜底）", new Runnable() {
+            public void run() {
+                try {
+                    a.startActivity(new Intent(a, WebPanelActivity.class));
+                } catch (Throwable t) { toast("打开失败：" + t); }
+            }
+        }));
+        col.addView(tools, Theme.cardLp(a, Theme.S3));
+
+        LinearLayout about = Theme.card(a);
+        about.addView(Theme.label(a, "关于"));
+        about.addView(Theme.kvRow(a, "界面", "Glassmorphism · Fira Sans / Mono"));
+        about.addView(Theme.kvRow(a, "版本", appVersion()));
+        col.addView(about);
+
+        show(scrollOf(col));
+    }
+
+    private View entry(String title, String sub, final Runnable r) {
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, Theme.dp(a, Theme.S3), 0, Theme.dp(a, Theme.S3));
+        LinearLayout texts = new LinearLayout(a);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.addView(Theme.text(a, title, 14.5f, Theme.INK, 1));
+        texts.addView(Theme.text(a, sub, 11.5f, Theme.INK3, 0));
+        row.addView(texts, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView arrow = Theme.text(a, "›", 20f, Theme.INK3, 0);
+        row.addView(arrow);
+        row.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { r.run(); }
+        });
+        return row;
+    }
+
     // ── 设置 ───────────────────────────────────────────────────────────────
-    private void buildSettings() {
+    private void renderSettings() {
+        setBar("设置", true);
+        LinearLayout col = Theme.column(a);
+        col.addView(Theme.empty(a, "加载中…"));
+        show(scrollOf(col));
         svc.loadSettings(new PanelService.Cb<PanelService.Settings>() {
-            public void ok(PanelService.Settings st) { renderSettings(st); }
-            public void fail(String msg) { dialogText("设置", "读取配置失败：" + msg); }
+            public void ok(PanelService.Settings st) { bodySettings(st); }
+            public void fail(String m) {
+                LinearLayout col = Theme.column(a);
+                col.addView(Theme.empty(a, "读取配置失败：" + m));
+                show(scrollOf(col));
+            }
         });
     }
 
-    private void renderSettings(final PanelService.Settings st) {
-        ScrollView sv = new ScrollView(a);
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(12), dp(12), dp(12), dp(16));
+    private void bodySettings(final PanelService.Settings st) {
+        LinearLayout col = Theme.column(a);
 
-        LinearLayout sched = section("定时任务");
-        sched.addView(sw("每日签到", st.checkin, new BoolSet() {
+        LinearLayout sched = Theme.card(a);
+        sched.addView(Theme.label(a, "定时任务"));
+        sched.addView(toggleRow("每日签到", st.checkin, new BoolSet() {
             public void set(boolean v) { st.checkin = v; }
         }));
-        sched.addView(sw("猫猫旅行", st.travel, new BoolSet() {
+        sched.addView(toggleRow("猫猫旅行", st.travel, new BoolSet() {
             public void set(boolean v) { st.travel = v; }
         }));
-        sched.addView(sw("活跃上报", st.activity, new BoolSet() {
+        sched.addView(toggleRow("活跃上报", st.activity, new BoolSet() {
             public void set(boolean v) { st.activity = v; }
         }));
-        sched.addView(sw("国际版网页活跃", st.webActivity, new BoolSet() {
+        sched.addView(toggleRow("国际版网页活跃", st.webActivity, new BoolSet() {
             public void set(boolean v) { st.webActivity = v; }
         }));
-        sched.addView(sw("保活", st.keepalive, new BoolSet() {
+        sched.addView(toggleRow("保活", st.keepalive, new BoolSet() {
             public void set(boolean v) { st.keepalive = v; }
         }));
-        box.addView(sched);
+        col.addView(sched, Theme.cardLp(a, Theme.S3));
 
-        LinearLayout other = section("日志与进阶");
-        other.addView(sw("运行日志落盘", st.panelLog, new BoolSet() {
+        LinearLayout other = Theme.card(a);
+        other.addView(Theme.label(a, "日志"));
+        other.addView(toggleRow("运行日志落盘", st.panelLog, new BoolSet() {
             public void set(boolean v) { st.panelLog = v; }
         }));
-        Button all = btn("全部配置（高级）", true);
-        all.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                a.startActivity(new android.content.Intent(a, ConfigActivity.class));
-            }
-        });
-        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        alp.topMargin = dp(8);
-        other.addView(all, alp);
-        box.addView(other);
+        col.addView(other, Theme.cardLp(a, Theme.S3));
 
-        Button save = btn("保存上面的开关", true);
+        TextView save = Theme.primaryButton(a, "保存开关");
         save.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 svc.saveSettings(st, new PanelService.Cb<String>() {
                     public void ok(String extra) { toast("已保存" + extra); }
-                    public void fail(String msg) { toast("保存失败：" + msg); }
+                    public void fail(String m) { toast("保存失败：" + m); }
                 });
             }
         });
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        slp.topMargin = dp(14);
-        box.addView(save, slp);
-        box.addView(hint("只覆盖这里显示的开关，其余配置原样保留；选号策略等全部字段请在「全部配置」里改。"));
+        col.addView(save, Theme.cardLp(a, Theme.S3));
 
-        sv.addView(box);
-        pageBox.removeAllViews();
-        pageBox.addView(sv);
-        pageScroll = sv;
-    }
+        TextView all = Theme.ghostButton(a, "全部配置（高级）");
+        all.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                a.startActivity(new Intent(a, ConfigActivity.class));
+            }
+        });
+        col.addView(all, Theme.cardLp(a, Theme.S3));
 
-    private LinearLayout section(String title) {
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackground(cardBg());
-        box.setPadding(dp(14), dp(12), dp(14), dp(12));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(10);
-        box.setLayoutParams(lp);
-        box.addView(h3(title));
-        return box;
+        col.addView(Theme.text(a, "只覆盖这里的开关，其余配置原样保留。", 11.5f, Theme.INK3, 0));
+        show(scrollOf(col));
     }
 
     private interface BoolSet { void set(boolean v); }
 
-    private Switch sw(String label, boolean on, final BoolSet setter) {
-        Switch s = new Switch(a);
-        s.setText(label);
-        s.setTextSize(13.5f);
-        s.setTextColor(INK);
-        s.setChecked(on);
-        s.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            public void onCheckedChanged(CompoundButton b, boolean checked) { setter.set(checked); }
+    private View toggleRow(String label, boolean on, final BoolSet setter) {
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, Theme.dp(a, Theme.S2), 0, Theme.dp(a, Theme.S2));
+        row.addView(Theme.text(a, label, 14f, Theme.INK, 0),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        final TextView sw = Theme.pill(a, on ? "开" : "关", on);
+        sw.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                boolean next = !"开".equals(String.valueOf(sw.getText()));
+                sw.setText(next ? "开" : "关");
+                sw.setBackground(next ? Theme.round(a, Theme.ACCENT, Theme.R_PILL)
+                        : Theme.outlined(a, 0x0DFFFFFF, Theme.R_PILL, Theme.LINE, 1));
+                sw.setTextColor(next ? Theme.ON_ACCENT : Theme.INK2);
+                setter.set(next);
+            }
         });
-        return s;
+        row.addView(sw);
+        return row;
     }
 
     // ── 添加账号 ───────────────────────────────────────────────────────────
     private void addSheet() {
-        String[] items = {"导入文件（cockpit 导出 / auths JSON）", "导出账号（JSON 文件）",
-                "添加 API Key 账号", "登录添加（浏览器授权，支持国际区）"};
+        String[] items = {"导入文件（cockpit / auths JSON）", "导出账号到下载目录",
+                "添加 API Key 账号", "登录添加（浏览器授权）"};
         new AlertDialog.Builder(a).setTitle("添加 / 迁移账号")
                 .setItems(items, new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int which) {
@@ -1536,7 +1629,7 @@ final class Console {
     void importUri(android.net.Uri uri) {
         try {
             java.io.InputStream in = a.getContentResolver().openInputStream(uri);
-            if (in == null) { toast("读不到该文件"); return; }
+            if (in == null) { toast("读不到文件"); return; }
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
             byte[] buf = new byte[8192];
             int n;
@@ -1547,7 +1640,7 @@ final class Console {
             String name = String.valueOf(uri.getLastPathSegment());
             int slash = name.lastIndexOf('/');
             if (slash >= 0) name = name.substring(slash + 1);
-            toast("导入中…（" + data.length + " 字节）");
+            toast("导入中…");
             svc.importFile(name, data, new PanelService.Cb<PanelService.ImportResult>() {
                 public void ok(PanelService.ImportResult r) {
                     toast("导入完成：新增 " + r.imported + "，跳过 " + r.skipped);
@@ -1556,11 +1649,12 @@ final class Console {
                         for (int i = 0; i < Math.min(r.errors.size(), 20); i++) {
                             sb.append("· ").append(r.errors.get(i)).append('\n');
                         }
-                        dialogText("导入错误（前 20 条）", sb.toString());
+                        new AlertDialog.Builder(a).setTitle("导入错误")
+                                .setMessage(sb.toString()).setPositiveButton("知道了", null).show();
                     }
-                    loadOverview(false);
+                    open("accounts");
                 }
-                public void fail(String msg) { toast("导入失败：" + msg); }
+                public void fail(String m) { toast("导入失败：" + m); }
             });
         } catch (Throwable t) { toast("导入失败：" + t); }
     }
@@ -1590,23 +1684,18 @@ final class Console {
                         fos.close();
                         path = f.getAbsolutePath();
                     }
-                    toast("已导出到 " + path + "（" + data.length + " 字节）");
+                    toast("已导出 " + path);
                 } catch (Throwable t) { toast("保存失败：" + t); }
             }
-            public void fail(String msg) { toast("导出失败：" + msg); }
+            public void fail(String m) { toast("导出失败：" + m); }
         });
     }
 
     private void apiKeyDialog() {
-        LinearLayout box = new LinearLayout(a);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(16), dp(8), dp(16), dp(8));
-        final EditText uid = new EditText(a);
-        uid.setHint("uid（手机号或 UUID）");
-        final EditText token = new EditText(a);
-        token.setHint("access token（ck_ / pt_ 开头）");
-        final EditText nick = new EditText(a);
-        nick.setHint("昵称（可选）");
+        LinearLayout box = Theme.column(a);
+        final EditText uid = field("uid（手机号或 UUID）");
+        final EditText token = field("access token（ck_ / pt_ 开头）");
+        final EditText nick = field("昵称（可选）");
         box.addView(uid);
         box.addView(token);
         box.addView(nick);
@@ -1614,18 +1703,28 @@ final class Console {
                 .setNegativeButton("取消", null)
                 .setPositiveButton("添加", new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int w) {
-                        svc.addApiKey(uid.getText().toString().trim(), token.getText().toString().trim(),
-                                nick.getText().toString().trim(), new PanelService.Cb<String>() {
-                                    public void ok(String id) { toast("已添加 " + id); loadOverview(false); }
-                                    public void fail(String msg) { toast("添加失败：" + msg); }
+                        svc.addApiKey(uid.getText().toString().trim(),
+                                token.getText().toString().trim(),
+                                nick.getText().toString().trim(),
+                                new PanelService.Cb<String>() {
+                                    public void ok(String id) { toast("已添加 " + id); open("accounts"); }
+                                    public void fail(String m) { toast("添加失败：" + m); }
                                 });
                     }
                 }).show();
     }
 
+    private EditText field(String hint) {
+        EditText et = new EditText(a);
+        et.setHint(hint);
+        et.setTextSize(15f);
+        et.setTypeface(Theme.sans(a));
+        return et;
+    }
+
     private void loginSheet() {
         new AlertDialog.Builder(a).setTitle("登录添加账号")
-                .setItems(new String[]{"国内版（workbuddy.cn）", "国际版（workbuddy.ai）"},
+                .setItems(new String[]{"国内版 · workbuddy.cn", "国际版 · workbuddy.ai"},
                         new DialogInterface.OnClickListener() {
                             public void onClick(DialogInterface d, int which) {
                                 startLogin(which == 1 ? "global" : "cn");
@@ -1636,24 +1735,23 @@ final class Console {
     private void startLogin(String realm) {
         svc.loginStart(realm, new PanelService.Cb<PanelService.LoginStart>() {
             public void ok(final PanelService.LoginStart s) {
-                toast("已打开浏览器，请完成授权（最长等 5 分钟）");
+                toast("浏览器已打开，完成授权后自动返回（最长 5 分钟）");
                 try {
-                    a.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
-                            android.net.Uri.parse(s.url)));
-                } catch (Throwable t) { dialogText("请手动打开链接", s.url); }
+                    a.startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(s.url)));
+                } catch (Throwable t) { toast("请手动打开：" + s.url); }
                 pollLogin(s.state, 0);
             }
-            public void fail(String msg) { toast("发起登录失败：" + msg); }
+            public void fail(String m) { toast("发起登录失败：" + m); }
         });
     }
 
     private void pollLogin(final String state, final int attempt) {
-        if (attempt > 100) { toast("登录超时（5 分钟未完成）"); return; }
+        if (attempt > 100) { toast("登录超时"); return; }
         svc.loginPoll(state, new PanelService.Cb<PanelService.LoginPoll>() {
             public void ok(PanelService.LoginPoll p) {
                 if (p.done) {
                     toast("登录成功" + (p.uid.isEmpty() ? "" : "：" + p.uid));
-                    loadOverview(false);
+                    open("accounts");
                     return;
                 }
                 if (!p.error.isEmpty()) { toast("登录失败：" + p.error); return; }
@@ -1665,200 +1763,15 @@ final class Console {
         });
     }
 
-    // ── 小组件 ─────────────────────────────────────────────────────────────
-    private static String statusText(String st) {
-        if ("done".equals(st)) return "完成";
-        if ("running".equals(st)) return "执行中";
-        if ("error".equals(st)) return "失败";
-        if ("skipped".equals(st)) return "跳过";
-        if ("partial".equals(st)) return "部分完成";
-        if ("interrupted".equals(st)) return "中断";
-        return "待执行";
-    }
-
-    private static int statusColor(String st) {
-        if ("done".equals(st)) return OK;
-        if ("error".equals(st)) return BAD;
-        if ("running".equals(st)) return ACCENT;
-        if ("partial".equals(st) || "interrupted".equals(st)) return WARN;
-        return INK3;
-    }
-
-    private TextView h3(String text) {
-        TextView t = new TextView(a);
-        t.setText(text);
-        t.setTextSize(13f);
-        t.setTextColor(INK2);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setPadding(0, dp(6), 0, dp(6));
-        return t;
-    }
-
-    private TextView kv(String k, String v) {
-        TextView t = new TextView(a);
-        t.setText(k.isEmpty() ? v : (k + "：" + v));
-        t.setTextSize(12.5f);
-        t.setTextColor(INK2);
-        t.setPadding(0, dp(2), 0, dp(2));
-        return t;
-    }
-
-    private TextView hint(String text) {
-        TextView t = new TextView(a);
-        t.setText(text);
-        t.setTextSize(11.5f);
-        t.setTextColor(INK3);
-        t.setPadding(dp(4), dp(8), dp(4), dp(8));
-        return t;
-    }
-
-    private TextView empty(String msg) {
-        TextView t = new TextView(a);
-        t.setText(msg);
-        t.setTextSize(12.5f);
-        t.setTextColor(INK3);
-        t.setGravity(Gravity.CENTER);
-        t.setPadding(dp(6), dp(24), dp(6), dp(24));
-        return t;
-    }
-
-    private TextView badge(String text, int color) {
-        TextView t = new TextView(a);
-        t.setText(text);
-        t.setTextSize(10f);
-        t.setTextColor(color);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor((color & 0x00FFFFFF) | 0x22000000);
-        bg.setCornerRadius(dp(6));
-        t.setBackground(bg);
-        t.setPadding(dp(5), dp(1), dp(5), dp(1));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.leftMargin = dp(5);
-        t.setLayoutParams(lp);
-        return t;
-    }
-
-    private Button btn(String label, boolean primary) {
-        Button b = new Button(a);
-        b.setText(label);
-        b.setAllCaps(false);
-        b.setTextSize(12.5f);
-        b.setTextColor(primary ? Color.WHITE : INK);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(primary ? ACCENT : SURFACE2);
-        bg.setCornerRadius(dp(9));
-        b.setBackground(bg);
-        b.setMinHeight(dp(38));
-        b.setMinimumHeight(dp(38));
-        b.setPadding(dp(12), dp(6), dp(12), dp(6));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.rightMargin = dp(7);
-        b.setLayoutParams(lp);
-        return b;
-    }
-
-    private View chipSel(String label, boolean on, final Runnable onClick) {
-        TextView t = new TextView(a);
-        t.setText(label);
-        t.setTextSize(12.5f);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setTextColor(on ? Color.WHITE : INK3);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(on ? ACCENT : SURFACE2);
-        bg.setCornerRadius(dp(8));
-        t.setBackground(bg);
-        t.setPadding(dp(12), dp(6), dp(12), dp(6));
-        t.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { onClick.run(); }
-        });
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.rightMargin = dp(8);
-        t.setLayoutParams(lp);
-        return t;
-    }
-
-    private View chip(String label, final String ch) {
-        TextView t = new TextView(a);
-        t.setText(label);
-        t.setTextSize(12f);
-        t.setPadding(dp(10), dp(6), dp(10), dp(6));
-        t.setTextColor(ch.equals(logCh) ? ACCENT : INK3);
-        t.setBackground(cardBg());
-        t.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { logCh = ch; buildLogs(); }
-        });
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.rightMargin = dp(6);
-        t.setLayoutParams(lp);
-        return t;
-    }
-
-    private View spacerH() {
-        View v = new View(a);
-        v.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
-        return v;
-    }
-
-    private GradientDrawable cardBg() {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(SURFACE);
-        g.setCornerRadius(dp(12));
-        g.setStroke(dp(1), LINE);
-        return g;
-    }
-
-    private GradientDrawable oval(int color) {
-        GradientDrawable g = new GradientDrawable();
-        g.setShape(GradientDrawable.OVAL);
-        g.setColor(color);
-        return g;
-    }
-
-    private void statRow(LinearLayout parent, String k1, String v1, int c1, String k2, String v2, int c2) {
-        LinearLayout row = new LinearLayout(a);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setPadding(dp(14), dp(11), dp(14), dp(11));
-        row.addView(stat(k1, v1, c1), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(stat(k2, v2, c2), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        parent.addView(row);
-        View div = new View(a);
-        div.setBackgroundColor(LINE);
-        parent.addView(div, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
-    }
-
-    private View stat(String label, String value, int color) {
-        LinearLayout v = new LinearLayout(a);
-        v.setOrientation(LinearLayout.VERTICAL);
-        TextView val = new TextView(a);
-        val.setText(value);
-        val.setTextSize(22f);
-        val.setTextColor(color);
-        val.setTypeface(Typeface.create("monospace", Typeface.BOLD));
-        TextView lab = new TextView(a);
-        lab.setText(label);
-        lab.setTextSize(11.5f);
-        lab.setTextColor(INK3);
-        v.addView(val);
-        v.addView(lab);
-        return v;
-    }
-
-    private int dp(int v) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
-                a.getResources().getDisplayMetrics());
+    /** 版本串取自 PackageManager（与清单 versionName 一致）。 */
+    private String appVersion() {
+        try {
+            return a.getPackageManager().getPackageInfo(a.getPackageName(), 0).versionName;
+        } catch (Throwable t) { return "—"; }
     }
 
     private void toast(String s) {
         if (a instanceof MainActivity) ((MainActivity) a).toast(s);
         else Toast.makeText(a, s, Toast.LENGTH_SHORT).show();
-    }
-
-    private void dialogText(String title, String msg) {
-        new AlertDialog.Builder(a).setTitle(title).setMessage(msg)
-                .setPositiveButton("知道了", null).show();
     }
 }

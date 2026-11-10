@@ -45,9 +45,10 @@ import java.util.List;
  */
 public class ConfigActivity extends Activity {
 
-    private static final int BG = 0xFF0F1115, SURFACE = 0xFF171A20, SURFACE2 = 0xFF1F232B;
-    private static final int LINE = 0xFF2A2F39, INK = 0xFFE7EAF0, INK2 = 0xFFA7AEBB, INK3 = 0xFF6E7683;
-    private static final int ACCENT = 0xFF6E8BFF, BAD = 0xFFE5677D;
+    // 与 Theme 同一套令牌（glass 深色数据台）
+    private static final int BG = Theme.BG, SURFACE = Theme.CARD_SOLID, SURFACE2 = Theme.MUTED;
+    private static final int LINE = Theme.LINE, INK = Theme.INK, INK2 = Theme.INK2, INK3 = Theme.INK3;
+    private static final int ACCENT = Theme.ACCENT, BAD = Theme.BAD;
 
     private JSONObject cfg;
     private LinearLayout content;
@@ -67,10 +68,11 @@ public class ConfigActivity extends Activity {
         bar.setPadding(dp(10), dp(8), dp(10), dp(8));
 
         TextView back = new TextView(this);
-        back.setText("← 返回");
-        back.setTextSize(13.5f);
+        back.setText("‹ 返回");
+        back.setTextSize(15f);
         back.setTextColor(ACCENT);
-        back.setPadding(dp(6), dp(6), dp(6), dp(6));
+        back.setTypeface(Theme.sans(this, 1));
+        back.setPadding(dp(8), dp(10), dp(8), dp(10));
         back.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { finish(); }
         });
@@ -78,9 +80,9 @@ public class ConfigActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText("全部配置");
-        title.setTextSize(14f);
+        title.setTextSize(16f);
         title.setTextColor(INK);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTypeface(Theme.sans(this, 2));
         title.setPadding(dp(8), 0, 0, 0);
         bar.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -92,13 +94,14 @@ public class ConfigActivity extends Activity {
         Button save = new Button(this);
         save.setText("保存");
         save.setAllCaps(false);
-        save.setTextSize(12.5f);
-        save.setTextColor(0xFFFFFFFF);
+        save.setTextSize(13.5f);
+        save.setTextColor(Theme.ON_ACCENT);
+        save.setTypeface(Theme.sans(this, 2));
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(ACCENT);
-        bg.setCornerRadius(dp(9));
+        bg.setCornerRadius(dp(Theme.R_CTRL));
         save.setBackground(bg);
-        save.setPadding(dp(14), dp(6), dp(14), dp(6));
+        save.setPadding(dp(18), dp(8), dp(18), dp(8));
         save.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { saveAll(); }
         });
@@ -160,10 +163,11 @@ public class ConfigActivity extends Activity {
     private View sectionHeader(String name) {
         TextView t = new TextView(this);
         t.setText(name);
-        t.setTextSize(12.5f);
+        t.setTextSize(12f);
         t.setTextColor(ACCENT);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setPadding(dp(4), dp(14), 0, dp(6));
+        t.setTypeface(Theme.sans(this, 2));
+        t.setLetterSpacing(0.08f);
+        t.setPadding(dp(4), dp(16), 0, dp(6));
         return t;
     }
 
@@ -190,7 +194,8 @@ public class ConfigActivity extends Activity {
         TextView label = new TextView(this);
         label.setText(key);
         label.setTextSize(12f);
-        label.setTextColor(INK2);
+        label.setTextColor(INK3);
+        label.setTypeface(Theme.sans(this));
         box.addView(label);
 
         if (value instanceof Boolean) {
@@ -348,10 +353,11 @@ public class ConfigActivity extends Activity {
     private EditText textInput(String value) {
         EditText et = new EditText(this);
         et.setText(value);
-        et.setTextSize(13f);
+        et.setTextSize(14f);
         et.setTextColor(INK);
+        et.setTypeface(Theme.mono(this));
         et.setSingleLine(true);
-        et.setPadding(dp(10), dp(6), dp(10), dp(6));
+        et.setPadding(dp(10), dp(8), dp(10), dp(8));
         return et;
     }
 
@@ -364,8 +370,8 @@ public class ConfigActivity extends Activity {
 
     private GradientDrawable card() {
         GradientDrawable g = new GradientDrawable();
-        g.setColor(SURFACE);
-        g.setCornerRadius(dp(10));
+        g.setColor(Theme.CARD);
+        g.setCornerRadius(dp(Theme.R_CARD));
         g.setStroke(dp(1), LINE);
         return g;
     }

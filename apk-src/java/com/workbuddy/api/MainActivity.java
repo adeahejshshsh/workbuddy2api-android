@@ -227,17 +227,18 @@ public class MainActivity extends Activity {
     }
 
     // ── 设计令牌（= 面板 :root / [data-theme="dark"]）
-    static final int BG       = 0xFF0C0E14;   // --bg
-    static final int SURFACE  = 0xFF14171F;   // --surface
-    static final int SURFACE2 = 0xFF1A1E28;   // --surface-2
-    static final int LINE     = 0xFF262C3A;   // --line
-    static final int INK      = 0xFFE8EBF2;   // --ink
-    static final int INK2     = 0xFFA8B0C2;   // --ink-2
-    static final int INK3     = 0xFF6B7488;   // --ink-3
-    static final int ACCENT   = 0xFF5B7CFA;   // --accent
-    static final int OK       = 0xFF3DDC97;   // --ok
-    static final int WARN     = 0xFFF5B544;   // --warn
-    static final int BAD      = 0xFFF0655F;   // --bad
+    // 统一到 Theme（glass 深色数据台），避免壳与原生控制台两套配色
+    static final int BG       = Theme.BG;
+    static final int SURFACE  = Theme.CARD_SOLID;
+    static final int SURFACE2 = Theme.MUTED;
+    static final int LINE     = Theme.LINE;
+    static final int INK      = Theme.INK;
+    static final int INK2     = Theme.INK2;
+    static final int INK3     = Theme.INK3;
+    static final int ACCENT   = Theme.ACCENT;
+    static final int OK       = Theme.ACCENT;
+    static final int WARN     = Theme.WARN;
+    static final int BAD      = Theme.BAD;
 
     WebView web;
     /**
