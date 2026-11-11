@@ -122,9 +122,12 @@ final class Sheet {
         return pw;
     }
 
-    /** 下拉菜单底：同一套玻璃材质（采样极光 + 光边），不做真实模糊（PopupWindow 太碎）。 */
-    private static android.graphics.drawable.Drawable glassBg(Activity a, float radiusDp) {
-        return Theme.chrome(a, radiusDp, 0xB3101A2E, 0, false);
+    private static GradientDrawable glassBg(Activity a, float radiusDp) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Theme.CARD_SOLID);
+        bg.setCornerRadius(Theme.dp(a, radiusDp));
+        bg.setStroke(Theme.dp(a, 1), Theme.LINE);
+        return bg;
     }
 
     // ── 单选 ───────────────────────────────────────────────────────────────
@@ -196,9 +199,12 @@ final class Sheet {
 
         LinearLayout card = new LinearLayout(a);
         card.setOrientation(LinearLayout.VERTICAL);
-        // 弹层玻璃：采样极光 + 真模糊(24dp) + 棱边折射。一屏同时只有导航条与它开
-        // lens —— 玻璃是这个体系里最贵的东西（每帧采样 + 模糊 + shader）。
-        card.setBackground(Theme.chrome(a, 22, 0xA6101A2E, 24, true));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Theme.CARD_SOLID);
+        float r = Theme.dp(a, 22);
+        bg.setCornerRadii(new float[]{r, r, r, r, 0, 0, 0, 0});
+        bg.setStroke(Theme.dp(a, 1), Theme.LINE);
+        card.setBackground(bg);
         card.setPadding(0, Theme.dp(a, Theme.S2), 0, Theme.dp(a, Theme.S2));
 
         // 抓取条

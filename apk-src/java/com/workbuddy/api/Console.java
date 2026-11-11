@@ -47,9 +47,6 @@ final class Console {
     final Handler ui = new Handler(Looper.getMainLooper());
 
     private final LinearLayout root, appBar, navBar;
-    /** 根容器：内容铺满整屏，底部导航作为**浮层**压在内容之上（玻璃才有东西可折射）。 */
-    private final FrameLayout stack;
-    private Aurora aurora;
     private final FrameLayout host;
     private final TextView title;
     private final ImageView back;
@@ -84,10 +81,7 @@ final class Console {
 
         root = new LinearLayout(a);
         root.setOrientation(LinearLayout.VERTICAL);
-        // 液态玻璃的采样源：缓慢漂移的极光网格（也是页面底色本身）。
-        // 玻璃背后必须是会动的、有明暗突变的内容，否则只能得到一块半透明塑料。
-        aurora = new Aurora();
-        Glass.bind(aurora);
+        root.setBackground(Theme.backdrop(a));
 
         // AppBar
         appBar = new LinearLayout(a);
@@ -95,7 +89,6 @@ final class Console {
         appBar.setGravity(Gravity.CENTER_VERTICAL);
         appBar.setPadding(Theme.dp(a, Theme.S2), Theme.dp(a, Theme.S2),
                 Theme.dp(a, Theme.S2), Theme.dp(a, Theme.S2));
-        appBar.setBackground(Theme.chrome(a, 0, 0x66101A2E, 16, false));
         back = Theme.iconButton(a, R.drawable.ic_back, Theme.INK, "返回");
         back.setVisibility(View.GONE);
         back.setOnClickListener(new View.OnClickListener() {
@@ -116,21 +109,10 @@ final class Console {
 
         navBar = new LinearLayout(a);
         navBar.setOrientation(LinearLayout.HORIZONTAL);
-        // 底部导航是整屏最该有玻璃感的一处：真模糊 + 棱边折射（lens 会弯折滚动到
-        // 它下方的卡片）。一屏只有它和弹层开 lens，其余表面只做采样。
-        navBar.setBackground(Theme.chrome(a, 0, 0x8C0B1220, 26, true));
-        navBar.setPadding(Theme.dp(a, 6), Theme.dp(a, 6), Theme.dp(a, 6), Theme.dp(a, 8));
-
-        // 叠层：极光底面 → 内容（AppBar + 页面）→ 浮在底部的玻璃导航。
-        // 导航一旦进入线性布局，下面就没有内容经过，lens 只能折射到底色，
-        // 那就退化成一条磨砂条了（Backdrop「铁律 2」的典型翻车）。
-        stack = new FrameLayout(a);
-        stack.setBackground(aurora);
-        stack.addView(root, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        stack.addView(navBar, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM));
+        navBar.setBackgroundColor(0xF20B1220);
+        navBar.setPadding(0, Theme.dp(a, 6), 0, Theme.dp(a, 8));
+        root.addView(navBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         accounts = new ScreenAccounts(this);
         overview = new ScreenOverview(this);
@@ -147,7 +129,7 @@ final class Console {
         ui.postDelayed(new Runnable() { public void run() { loadOverview(true); } }, 1200);
     }
 
-    View view() { return stack; }
+    View view() { return root; }
 
     // ── 导航 ───────────────────────────────────────────────────────────────
     private void buildNav() {
@@ -164,10 +146,7 @@ final class Console {
         LinearLayout item = new LinearLayout(a);
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.CENTER);
-        // 选中项是「材质片」而不是第二层玻璃：上亮下暗的渐变 + 渐变描边，
-        // 读作受光的小块材质；再叠一层玻璃会采样到源内容，出现一块锐利的洞。
-        item.setBackground(Theme.material(a, 14, on));
-        item.setPadding(0, Theme.dp(a, 7), 0, Theme.dp(a, 5));
+        item.setPadding(0, Theme.dp(a, 6), 0, Theme.dp(a, 4));
         ImageView iv = new ImageView(a);
         iv.setImageResource(icon);
         iv.setColorFilter(on ? Theme.ACCENT : Theme.INK3);
@@ -182,11 +161,8 @@ final class Console {
         item.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { open(id); }
         });
-        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        nlp.leftMargin = Theme.dp(a, 2);
-        nlp.rightMargin = Theme.dp(a, 2);
-        navBar.addView(item, nlp);
+        navBar.addView(item, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
     }
 
     void setBar(String t, boolean withBack, View... actions) {
@@ -241,10 +217,6 @@ final class Console {
     /** scrollbar=true 时显示右侧竖向滚动条（日志页需要：几千行必须能看出当前在哪）。 */
     ScrollView scrollOf(LinearLayout column, boolean scrollbar) {
         ScrollView sv = new ScrollView(a);
-        // 底部导航是浮层：内容要能滚到它下面（clipToPadding=false 才看得见穿过），
-        // 末尾再留一条等价空白，最后一张卡才不会被导航永久压住。
-        sv.setClipToPadding(false);
-        sv.setPadding(0, 0, 0, Theme.dp(a, 70));
         sv.setVerticalScrollBarEnabled(scrollbar);
         if (scrollbar) {
             sv.setScrollbarFadingEnabled(false);
