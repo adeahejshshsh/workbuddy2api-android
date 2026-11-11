@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.Dialog;
 import android.content.Intent;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -15,6 +16,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -172,7 +174,7 @@ final class ScreenTasks {
     }
 
     private static int statusColor(String st) {
-        if ("done".equals(st)) return Theme.ACCENT;
+        if ("done".equals(st)) return Theme.MINT;
         if ("error".equals(st)) return Theme.BAD;
         if ("running".equals(st)) return Theme.INFO;
         if ("partial".equals(st) || "interrupted".equals(st)) return Theme.WARN;
@@ -188,6 +190,15 @@ final class ScreenTasks {
         });
     }
 
+    /** 任务状态归一：claim 可领取 / doing 进行中 / todo 未开始 / locked 未解锁 / done 已完成。 */
+    private static String stateOf(PanelService.TaskItem t) {
+        if (t.claimed) return "done";
+        if (t.claimable) return "claim";
+        if (t.locked) return "locked";
+        if ("accepted".equals(t.acceptStatus)) return "doing";
+        return "todo";
+    }
+
     private void showAccountTasks(final String uid, final PanelService.TasksView v) {
         LinearLayout col = Theme.column(a);
         if (!v.message.isEmpty()) {
@@ -195,44 +206,209 @@ final class ScreenTasks {
         }
         if (v.tasks.isEmpty()) {
             col.addView(Theme.empty(a, v.message.isEmpty() ? "该账号暂无任务" : v.message));
+            Sheet.custom(a, "积分任务", col, v.canAuto ? "一键完成" : null,
+                    v.canAuto ? new Runnable() {
+                        public void run() { autoAll(uid); }
+                    } : null);
+            return;
         }
-        for (final PanelService.TaskItem t : v.tasks) {
-            LinearLayout card = Theme.card(a);
-            card.setLayoutParams(Theme.cardLp(a, Theme.S2));
-            card.addView(Theme.text(a, t.title, 14f, Theme.INK, 1));
-            String st = t.claimed ? "已领取" : t.claimable ? "可领取" : t.locked ? "未解锁"
-                    : "accepted".equals(t.acceptStatus) ? "进行中" : "未接受";
-            card.addView(Theme.text(a, (t.target > 0 ? t.current + " / " + t.target : "—")
-                    + "  ·  " + st + (t.credit > 0 ? "  ·  +" + t.credit + " 分" : ""),
-                    11.5f, Theme.INK3, 0));
-            if (!t.claimed && !t.locked) {
-                final boolean accept = !t.claimable && v.canAccept
-                        && !"accepted".equals(t.acceptStatus);
-                final boolean claim = t.claimable && v.canClaim;
-                if (accept || claim) {
-                    TextView b = Theme.pill(a, accept ? "接受" : "领取", true);
-                    b.setOnClickListener(new View.OnClickListener() {
-                        public void onClick(View x) {
-                            PanelService.Cb<String> cb = new PanelService.Cb<String>() {
-                                public void ok(String m) { toast("已完成"); accountTasks(uid); }
-                                public void fail(String m) { toast("失败：" + m); }
-                            };
-                            if (accept) svc.acceptTask(uid, t.code, cb);
-                            else svc.claimTask(uid, t.code, cb);
-                        }
-                    });
-                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                    lp.topMargin = Theme.dp(a, Theme.S2);
-                    card.addView(b, lp);
-                }
-            }
-            col.addView(card);
+
+        int done = 0, claimable = 0, credit = 0;
+        for (PanelService.TaskItem t : v.tasks) {
+            if ("done".equals(stateOf(t))) done++;
+            else if (t.claimable) { claimable++; credit += t.credit; }
         }
+        col.addView(headerCard(v.tasks.size(), done, claimable, credit),
+                Theme.cardLp(a, Theme.S3));
+
+        // 按状态分组：能动手的排前面，已完成沉底。原来一条流水列表里「已领取」和
+        // 「可领取」只差尾部几个字，得逐条读才能分辨，想要的动作会被灰条目淹没。
+        List<PanelService.TaskItem> claim = new ArrayList<PanelService.TaskItem>();
+        List<PanelService.TaskItem> doing = new ArrayList<PanelService.TaskItem>();
+        List<PanelService.TaskItem> todo = new ArrayList<PanelService.TaskItem>();
+        List<PanelService.TaskItem> locked = new ArrayList<PanelService.TaskItem>();
+        List<PanelService.TaskItem> finished = new ArrayList<PanelService.TaskItem>();
+        for (PanelService.TaskItem t : v.tasks) {
+            String st = stateOf(t);
+            if ("claim".equals(st)) claim.add(t);
+            else if ("doing".equals(st)) doing.add(t);
+            else if ("todo".equals(st)) todo.add(t);
+            else if ("locked".equals(st)) locked.add(t);
+            else finished.add(t);
+        }
+        section(col, "可领取", claim, Theme.ACCENT, uid, v);
+        section(col, "进行中", doing, Theme.INFO, uid, v);
+        section(col, "未开始", todo, Theme.INK2, uid, v);
+        section(col, "未解锁", locked, Theme.SLATE, uid, v);
+        section(col, "已完成", finished, Theme.MINT, uid, v);
+
         Sheet.custom(a, "积分任务", col, v.canAuto ? "一键完成" : null,
                 v.canAuto ? new Runnable() {
                     public void run() { autoAll(uid); }
                 } : null);
+    }
+
+    /** 顶部总览：已完成 N / 总数 + 进度条 + 还可领多少分。 */
+    private LinearLayout headerCard(int total, int done, int claimable, int credit) {
+        LinearLayout card = Theme.card(a);
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout left = new LinearLayout(a);
+        left.setOrientation(LinearLayout.VERTICAL);
+        left.addView(Theme.num(a, done + " / " + total, 20f,
+                done >= total ? Theme.MINT : Theme.INK));
+        left.addView(Theme.label(a, "已完成任务"));
+        row.addView(left, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        if (claimable > 0) {
+            row.addView(Theme.statusChip(a, "可领 " + claimable + " 项 +" + credit + " 分", Theme.ACCENT));
+        } else if (done >= total) {
+            row.addView(Theme.statusChip(a, "全部完成", Theme.MINT));
+        } else {
+            row.addView(Theme.statusChip(a, "待推进 " + (total - done) + " 项", Theme.INK2));
+        }
+        card.addView(row);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Theme.dp(a, 5));
+        plp.topMargin = Theme.dp(a, Theme.S3);
+        card.addView(Theme.progress(a, done, total, done >= total ? Theme.MINT : Theme.ACCENT), plp);
+        return card;
+    }
+
+    /** 分组标题（色点 + 名称 + 条数），空组不渲染。 */
+    private void section(LinearLayout col, String label, List<PanelService.TaskItem> items,
+                         int color, String uid, PanelService.TasksView v) {
+        if (items.isEmpty()) return;
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(Theme.dot(a, color, 6));
+        TextView name = Theme.text(a, label, 12f, color, 2);
+        name.setPadding(Theme.dp(a, 6), 0, 0, 0);
+        head.addView(name);
+        TextView count = Theme.num(a, String.valueOf(items.size()), 11f, Theme.INK3);
+        count.setPadding(Theme.dp(a, 6), 0, 0, 0);
+        head.addView(count);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = Theme.dp(a, Theme.S3);
+        lp.bottomMargin = Theme.dp(a, Theme.S2);
+        col.addView(head, lp);
+        for (final PanelService.TaskItem t : items) {
+            col.addView(taskCard(uid, v, t), Theme.cardLp(a, Theme.S2));
+        }
+    }
+
+    /**
+     * 单条任务卡：状态用四层信号同时表达——描边色、标题色/前置勾、状态胶囊、进度条，
+     * 缩略浏览也能分辨「能领 / 在做 / 做完 / 锁着」，不必逐条读正文。
+     */
+    private LinearLayout taskCard(final String uid, final PanelService.TasksView v,
+                                  final PanelService.TaskItem t) {
+        final String st = stateOf(t);
+        boolean done = "done".equals(st);
+        final boolean claimNow = "claim".equals(st);
+        final boolean acceptNow = "todo".equals(st) && v.canAccept;
+
+        int border, bg, titleColor;
+        if (claimNow) { border = 0x9922C55E; bg = 0xF71B2336; titleColor = Theme.INK; }
+        else if ("doing".equals(st)) { border = 0x8038BDF8; bg = 0xF21B2336; titleColor = Theme.INK; }
+        else if ("todo".equals(st)) { border = Theme.LINE; bg = 0xE61B2336; titleColor = Theme.INK2; }
+        else if ("locked".equals(st)) { border = 0x33475569; bg = 0xCC1B2336; titleColor = Theme.INK3; }
+        else { border = 0x5522C55E; bg = 0xB31B2336; titleColor = Theme.INK3; }
+
+        LinearLayout card = Theme.card(a);
+        GradientDrawable g = Theme.outlined(a, bg, Theme.R_CARD, border, claimNow ? 1.5f : 1f);
+        card.setBackground(claimNow ? Theme.ripple(a, g, 0x3322C55E) : g);
+
+        LinearLayout top = new LinearLayout(a);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        if (done) {
+            TextView tick = Theme.text(a, "✓", 13f, Theme.MINT, 2);
+            tick.setPadding(0, 0, Theme.dp(a, 6), 0);
+            top.addView(tick);
+        }
+        TextView title = Theme.text(a, t.title, 13.5f, titleColor, claimNow ? 2 : 1);
+        top.addView(title, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        top.addView(Theme.statusChip(a, chipText(st), chipColor(st)));
+        card.addView(top);
+
+        if (t.target > 0) {
+            LinearLayout pr = new LinearLayout(a);
+            pr.setOrientation(LinearLayout.HORIZONTAL);
+            pr.setGravity(Gravity.CENTER_VERTICAL);
+            int barColor = done ? Theme.MINT : claimNow ? Theme.ACCENT
+                    : "doing".equals(st) ? Theme.INFO : Theme.SLATE;
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, Theme.dp(a, 5), 1f);
+            pr.addView(Theme.progress(a, t.current, t.target, barColor), blp);
+            TextView pv = Theme.num(a, Math.min(t.current, t.target) + " / " + t.target,
+                    11f, done ? Theme.INK3 : Theme.INK2);
+            pv.setPadding(Theme.dp(a, Theme.S3), 0, 0, 0);
+            pr.addView(pv);
+            LinearLayout.LayoutParams prlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            prlp.topMargin = Theme.dp(a, Theme.S2);
+            card.addView(pr, prlp);
+        }
+
+        if (t.credit > 0) {
+            TextView tag = Theme.tag(a, done ? "+" + t.credit + " 分 已入账" : "+" + t.credit + " 分",
+                    done ? Theme.MINT : claimNow || "doing".equals(st) ? Theme.ACCENT : Theme.INK2);
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            tlp.topMargin = Theme.dp(a, Theme.S2);
+            card.addView(tag, tlp);
+        }
+
+        if (claimNow && v.canClaim) {
+            TextView b = Theme.primaryButton(a, "领取 +" + t.credit + " 分");
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = Theme.dp(a, Theme.S3);
+            b.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View x) {
+                    svc.claimTask(uid, t.code, new PanelService.Cb<String>() {
+                        public void ok(String m) { toast("已领取 " + t.title); accountTasks(uid); }
+                        public void fail(String m) { toast("领取失败：" + m); }
+                    });
+                }
+            });
+            card.addView(b, lp);
+        } else if (acceptNow) {
+            TextView b = Theme.ghostButton(a, "接受任务");
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = Theme.dp(a, Theme.S3);
+            b.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View x) {
+                    svc.acceptTask(uid, t.code, new PanelService.Cb<String>() {
+                        public void ok(String m) { toast("已接受 " + t.title); accountTasks(uid); }
+                        public void fail(String m) { toast("接受失败：" + m); }
+                    });
+                }
+            });
+            card.addView(b, lp);
+        }
+        return card;
+    }
+
+    private static String chipText(String st) {
+        if ("claim".equals(st)) return "可领取";
+        if ("doing".equals(st)) return "进行中";
+        if ("todo".equals(st)) return "未开始";
+        if ("locked".equals(st)) return "未解锁";
+        return "已完成";
+    }
+
+    private static int chipColor(String st) {
+        if ("claim".equals(st)) return Theme.ACCENT;
+        if ("doing".equals(st)) return Theme.INFO;
+        if ("locked".equals(st)) return Theme.SLATE;
+        if ("todo".equals(st)) return Theme.INK2;
+        return Theme.MINT;
     }
 
     private void autoAll(String uid) {

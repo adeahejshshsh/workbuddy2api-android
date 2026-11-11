@@ -43,6 +43,10 @@ final class Theme {
     static final int WARN = 0xFFF59E0B;
     static final int BAD = 0xFFEF4444;
     static final int ON_BAD = 0xFFFFFFFF;
+    /** 已完成（已经到手的绿，比强调色淡一档：亮绿=可操作，这种绿=已收下）。 */
+    static final int MINT = 0xFF34D399;
+    /** 置灰 / 不可用 / 未解锁。 */
+    static final int SLATE = 0xFF64748B;
 
     // ── 尺度 ───────────────────────────────────────────────────────────────
     static final int R_CARD = 18, R_CTRL = 14, R_PILL = 999;
@@ -301,6 +305,35 @@ final class Theme {
         box.addView(v);
         box.addView(label(c, label));
         return box;
+    }
+
+    /**
+     * 细进度条（5dp 高胶囊）：按 cur/target 比例填充，未达部分留轨道底色。
+     *
+     * 用于任务/作业这类「有明确目标值」的条目——纯文字 "3 / 5" 在列表里几乎看不出差别，
+     * 一条填充比例不同的横条可以让人一眼扫出哪些已经走完。
+     */
+    static LinearLayout progress(Context c, int cur, int target, int color) {
+        LinearLayout track = new LinearLayout(c);
+        track.setOrientation(LinearLayout.HORIZONTAL);
+        track.setBackground(round(c, 0x1FFFFFFF, R_PILL));
+        int total = target > 0 ? target : 1;
+        int done = Math.max(0, Math.min(cur, total));
+        if (done > 0) {
+            View fill = new View(c);
+            fill.setBackground(round(c, color, R_PILL));
+            track.addView(fill, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.MATCH_PARENT, done));
+        }
+        if (done < total) {
+            View rest = new View(c);
+            rest.setBackground(round(c, 0x00000000, R_PILL));
+            track.addView(rest, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.MATCH_PARENT, total - done));
+        }
+        track.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(c, 5)));
+        return track;
     }
 
     /** 空状态。 */
