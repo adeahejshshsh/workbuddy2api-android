@@ -535,6 +535,8 @@ func main() {
 		MetricsEnabled: cfg.MetricsEnabled,
 		// 11140 连坐全池暂停（upstream.restriction_hold_seconds，启动时读取）。
 		RestrictionHold: cfg.RestrictionHoldDur,
+		// 首帧心跳：等上游首帧期间补 SSE 注释帧（server.head_keepalive，缺省 1.5s）。
+		HeadKeepalive: cfg.HeadKeepaliveDur,
 		// 运维接口（手动补跑排程）+ 操作审计：整段缺省关闭。
 		AdminEnabled:                  cfg.Admin.Enabled,
 		AdminAPIKey:                   cfg.AdminAPIKey,

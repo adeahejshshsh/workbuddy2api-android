@@ -517,3 +517,17 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 | `7366740` proxypool 订阅流式数组 | ⏭ 跳过 | 本仓明确不含 proxypool |
 | `849d338` compress v1.20.2 | ⏭ 跳过 | 离线环境取不到模块（`proxy.golang.org` 不可达、本地缓存只有 1.17.4），升了无法构建；联网后可一行升 |
 | `d011fc8` / `cf2b80f` billing 用例时间锚 | ⏭ 跳过 | 断言文件 `billing_expiry_cycle_test.go` 本仓不存在（上游在更早批次引入），无对象可修 |
+
+## 第十三批：第十二批「需重写」三条的落地
+
+第十二批跳过 3 条「patch 打不上、需按本仓结构重写」的提交，这里逐条落地。
+
+| 上游提交 | 落地方式 |
+|---|---|
+| `8df99ac` 等上游首帧期间补 SSE 注释帧 | **完整移植**：新增 `internal/server/headkeepalive.go`（198 行 + 7 条用例），配置键 `server.head_keepalive`（缺省 1500ms，0=关）接进本仓 `server` 节——本仓仍是 `max_body_mb`，无需上游那次 `max_payload_bytes` 重构；`chatCompletions` 在轮转循环前包一层 writer；四个错误写函数（`writeOpenAIError` / `…Hint` / `…ErrorFull` / `writeModelQuotaError`）加「响应头已提交 → 协议内 error 帧」分支（本仓多一个 `writeOpenAIErrorFull`，按同一口径补） |
+| `1adfa52` 签到「请稍后重试」自动补签 | **按本仓 scheduler 重写**：`checkin_retry.go` 只保留 `checkinRetryDelays`(10/40min) + `checkinOne` + `checkinRetryLoop` + `joinUIDs`；主循环 `RunCheckinNowCtx` 把内联签到换成 `checkinOne`，瞬时失败收进 `pending`，批末 `go checkinRetryLoop`。依赖项补齐：`Pool.CheckinDoneToday`、`upstream.IsTransientBilling` 导出，并把「429 请求处理中」并入瞬时判据（2s/5s/10s 阶梯） |
+| `cfef70d` 国际版到期批次聚合 | **只移植核心口径**（本仓无上游 `ExpiryBucket` 子系统）：归并键 `PackageCode` → `(PackageCode, 该行自己的 end)`，每行用自己的 `balanceRemain()`，同 (码,end) 留剩余更大的一条；summary 余额只在「该码只有一个未来周期」时借用；已用完周期不参与 `earliestAt`。配套 4 条用例（同码多周期分开 / 快过期只算自己那份 / 单周期借 / 多周期不借）。前端 `exp-est` 标注与 `ExpiryBucket.Estimated` **未收**（本仓无该结构，面板「积分构成」本来就逐包展示到期日） |
+
+本批同时补：`config.example.json` 记录 `head_keepalive`。
+
+未做：`d011fc8`/`cf2b80f` 是上游 `billing_expiry_cycle_test.go` 的时间锚修正——本仓该文件按自身模型重写（`expiryAggregate` 直接断言五个返回值），不需要这两个补丁；`849d338` 依赖升级仍需联网。

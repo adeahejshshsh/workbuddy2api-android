@@ -109,6 +109,10 @@ type Config struct {
 	// RequestLog 请求指标与脱敏 JSONL 归档（可选；nil = 不记录）。
 	RequestLog *reqlog.Recorder
 
+	// HeadKeepalive 等上游首帧期间的 SSE 注释帧间隔（server.head_keepalive）。
+	// 0 = 关闭（回到「首帧否决窗口内零字节」的旧行为）。见 headkeepalive.go。
+	HeadKeepalive time.Duration
+
 	// RecordClientInfo 是否在请求日志里记录调用来源（客户端 IP / User-Agent）。
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
@@ -1318,6 +1322,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st = newChatStat(time.Now(), body, peek.Stream, h.budget)
+	// 等上游首帧期间向客户端补 SSE 注释帧（见 headkeepalive.go）：大上下文 TTFB
+	// 可达 3~6 秒，而 StreamHint 首帧否决窗口内一个字节都不写，客户端会把它当
+	// 「连接僵死」自行放弃（线上实测四次零内容中断全落在 3.46~4.09s）。
+	// 放在轮转循环之前：选号/建请求这段空窗也一起覆盖；写过注释后响应头已提交，
+	// 后续错误由 writeOpenAIError* 的「已提交」分支降级成协议内 error 帧。
+	if h.cfg.HeadKeepalive > 0 && peek.Stream {
+		hk := newHeadKeepaliveWriter(r.Context(), w, h.cfg.HeadKeepalive)
+		if hk != nil {
+			w = hk
+			defer hk.stop()
+		}
+	}
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 补 requestID（bug B1）：全仓没有任何一处给 st.requestID 赋值，于是
@@ -3267,6 +3283,10 @@ func briefBodyOr(body, fallback string) string {
 // requestId / 本地化文案）作为并列字段透出——message 保持一句人话，客户端既能显示
 // 也能编程取字段，谁都不必再解析一串转义 JSON。
 func writeOpenAIErrorFull(w http.ResponseWriter, status int, code, msg, hint string, br *upstream.ErrorBrief) {
+	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+		k.writeErrorFrame(status, "api_error", code, msg, hint)
+		return
+	}
 	errObj := map[string]any{
 		"message": msg,
 		"type":    "api_error",
@@ -3293,6 +3313,10 @@ func writeOpenAIErrorFull(w http.ResponseWriter, status int, code, msg, hint str
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
+	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+		k.writeErrorFrame(status, "api_error", code, msg, "")
+		return
+	}
 	writeJSON(w, status, map[string]any{
 		"error": map[string]any{
 			"message": msg,
@@ -3313,6 +3337,10 @@ const wafCooldownBase = 60 * time.Second
 // error.gateway_hint（hint 为空串时不带字段——未覆盖形态不编造）。
 // message 仍是上游原文透传（hint 只做并列补充，绝不替换/包装 message）。
 func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint string) {
+	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+		k.writeErrorFrame(status, "api_error", code, msg, hint)
+		return
+	}
 	if hint == "" {
 		writeOpenAIError(w, status, code, msg)
 		return
@@ -3479,6 +3507,10 @@ func modelQuotaCode(reason string) int {
 // 写成 "insufficient_quota" 字符串会让它既认不出配额也认不出业务码。
 // type 仍标 insufficient_quota：OpenAI 口径里这就是「别重试，去等额度」。
 func writeModelQuotaError(w http.ResponseWriter, code int, msg, hint string, br *upstream.ErrorBrief) {
+	if k, ok := w.(*headKeepaliveWriter); ok && k.Committed() {
+		k.writeErrorFrame(http.StatusTooManyRequests, "insufficient_quota", strconv.Itoa(code), msg, hint)
+		return
+	}
 	e := map[string]any{
 		"message": msg,
 		"type":    "insufficient_quota",

@@ -287,11 +287,6 @@ final class Console {
         show(box);
     }
 
-
-
-
-
-
     // 这些入口仍被 Console/宿主调用，转给账号分区
     void addSheet() { accounts.addSheet(); }
     void importUri(android.net.Uri uri) { accounts.importUri(uri); }
@@ -306,64 +301,6 @@ final class Console {
         });
         return iv;
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     /** 版本串取自 PackageManager（与清单 versionName 一致）。 */
     String appVersion() {

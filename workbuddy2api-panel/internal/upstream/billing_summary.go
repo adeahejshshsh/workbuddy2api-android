@@ -177,25 +177,54 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 		d   packageDetail
 		end time.Time
 	}
-	best := make(map[string]pick, len(details))
+	// 归并的最小单位是 **（PackageCode, 计量周期）**，不是 PackageCode 本身。
+	//
+	// 错在哪（上游 issue #200）：国际版 Bonus Pack 每天发一个包、**所有包共用同一个
+	// PackageCode**，明细里同码多条、CycleEndTime 逐日递推。此前只按码归并、取「最早
+	// 的未来到期」那条，再把 summary 里**当前周期**的剩余配到这个旧 end 上：
+	//
+	//	旧周期（已用完）的 end + 新周期的 remain → 面板显示「927 分明天到期」，
+	//	真实情况是「明天 27 分、后天 30 分……逐日到期」。
+	//
+	// 更坏的是 expiring（7 天内快过期额度）也被整笔算进去，池子会把这号当成
+	// 「积分马上作废」优先消耗——不只是显示问题。
+	type cycleKey struct {
+		code string
+		end  int64 // Unix 秒：同一周期同码的 end 必然相同，用它当周期标识
+	}
+	merged := make(map[cycleKey]pick, len(details))
 	for _, d := range details {
 		end, ok := packageEndAt(d.DeductionEndTime, d.ExpiredTime, d.CycleEndTime)
 		if !ok || !end.After(now) {
 			continue
 		}
-		cur, seen := best[d.PackageCode]
-		if !seen || end.Before(cur.end) {
-			best[d.PackageCode] = pick{d: d, end: end}
+		k := cycleKey{d.PackageCode, end.Unix()}
+		if cur, seen := merged[k]; seen {
+			// 同一批可能同时出现在 paid / free 两条端点：留剩余更大的一条。
+			if d.balanceRemain() > cur.d.balanceRemain() {
+				merged[k] = pick{d: d, end: end}
+			}
+			continue
 		}
+		merged[k] = pick{d: d, end: end}
+	}
+	// 每个码有多少个未来周期：只有一个时「借 summary 余额」不会跨周期串味（历史行为，
+	// 覆盖「明细自报 0 而 summary 有数」的套餐型包）；多个时一律不借。
+	futurePerCode := make(map[string]int, len(merged))
+	for k := range merged {
+		futurePerCode[k.code]++
 	}
 	byDate := make(map[string]int64)
-	for code, p := range best {
-		r, ok := remainByCode[code]
-		if !ok {
-			// summary 没列这个包（已用完/过期/不同周期）→ 明细自报剩余，但仅在为正时计。
-			r = int64(p.d.balanceRemain())
+	for k, p := range merged {
+		// 每行用**自己的**剩余；只有单周期码才允许回落到 summary 的余额。
+		r := int64(p.d.balanceRemain())
+		if r <= 0 && futurePerCode[k.code] == 1 {
+			if sr, ok := remainByCode[k.code]; ok {
+				r = sr
+			}
 		}
 		if r <= 0 {
+			// 该周期已用完 / 明细没给剩余：不贡献额度，也不该拉早 earliestAt。
 			continue
 		}
 		end := p.end

@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"io"
 	"net/http"
 	"time"
@@ -85,15 +86,47 @@ var billingRetryDelay = 2 * time.Second
 // 上游 5xx（ErrServer，实测偶发 "code 10000 / API request failed with status
 // code: 500"）或网络层错误（非 *Error 的传输失败）。业务错误（code!=0 的
 // 已签到/参数错、4xx、限流）不重试——重试只会原样再失败一次。
+// IsTransientBilling 导出「这次计费类失败值不值得过一会儿再试」的判据，供调度器
+// 决定要不要把账号放进延后补签队列（签到本身只有 2s/4s 两次内联重试，覆盖不了
+// 上游「请稍后重试」这种需要分钟级沉降的形态）。
+func IsTransientBilling(err error) bool { return isTransientBillingErr(err) }
+
 func isTransientBillingErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	var ue *Error
 	if errors.As(err, &ue) {
-		return ue.Kind == ErrServer
+		// 5xx（实测偶发 "code 10000 / status 500"）与 429「请求处理中」（上游临时状态，
+		// 需要等它结算完）都值得等一会儿再试；其余 4xx 是确定性拒绝。
+		return ue.Kind == ErrServer || isBillingProcessingErr(err)
 	}
+	// 非 *Error = 传输层失败：值不值得重试由调用方决定（签到这类低频维护调用值得）。
 	return true
+}
+
+// billingProcessingRetryDelays 429「请求处理中」的退避阶梯：这是上游**临时状态**
+// （签到/余额查询偶发），比 5xx 需要更久沉降才能结算完；与真·限流的退避分开，
+// 免得把限流也拖成三次长重试。
+var billingProcessingRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
+// billingProcessingMarkers 上游 429 里表示「请求处理中」的文案（中英双形态）。
+var billingProcessingMarkers = []string{"请求处理中", "request is being processed", "request processing"}
+
+// isBillingProcessingErr 报告 err 是否为「429 + 请求处理中」形态：临时状态，值得等它沉降。
+// 只认带分类的 *Error 且 Status==429；普通 429（真·限流）不匹配，仍不重试。
+func isBillingProcessingErr(err error) bool {
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Status != http.StatusTooManyRequests {
+		return false
+	}
+	lower := strings.ToLower(ue.Msg)
+	for _, m := range billingProcessingMarkers {
+		if strings.Contains(ue.Msg, m) || strings.Contains(lower, strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
 }
 
 // retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试：
@@ -113,8 +146,13 @@ func (c *Client) retryBillingTransientCtx(ctx context.Context, fn func() error) 
 	if err == nil || !isTransientBillingErr(err) {
 		return err
 	}
-	for i := 1; i <= 2; i++ {
-		t := time.NewTimer(time.Duration(i) * billingRetryDelay)
+	// 429「请求处理中」比 5xx 需要更久沉降：走 2s/5s/10s 阶梯，其余仍是 2s/4s 两次。
+	delays := []time.Duration{billingRetryDelay, 2 * billingRetryDelay}
+	if isBillingProcessingErr(err) {
+		delays = billingProcessingRetryDelays
+	}
+	for i := 0; i < len(delays); i++ {
+		t := time.NewTimer(delays[i])
 		select {
 		case <-ctx.Done():
 			t.Stop()
