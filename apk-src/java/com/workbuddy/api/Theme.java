@@ -141,9 +141,26 @@ final class Theme {
         return g;
     }
 
-    /** 玻璃卡：半透明填充 + 1px 冷色描边 + 大圆角。 */
-    static GradientDrawable glass(Context c, float radiusDp) {
-        return outlined(c, CARD, radiusDp, LINE, 1);
+    /**
+     * 玻璃卡：采样极光底 + 上亮下暗的受光渐变 + 顶部光边（液态玻璃的内容卡片版）。
+     *
+     * 卡片不做 RenderEffect 模糊：极光底本身是 1/6 分辨率放大，已经足够软；一屏
+     * 二十张卡各自模糊一次会把滚动帧率吃光（Backdrop 的「玻璃只做浮层」原则）。
+     */
+    static android.graphics.drawable.Drawable glass(Context c, float radiusDp) {
+        // 45% 的底色：再高就把背后的极光盖掉了（玻璃立刻变塑料板）。
+        return Glass.surface(c, radiusDp, 0x731B2336, 0, false);
+    }
+
+    /** 浮层玻璃（导航条/顶栏/弹层）：真模糊 + 可选棱边折射，一屏最多两三处。 */
+    static android.graphics.drawable.Drawable chrome(Context c, float radiusDp, int tint,
+                                                     float blurDp, boolean lens) {
+        return Glass.surface(c, radiusDp, tint, blurDp, lens);
+    }
+
+    /** 材质片：玻璃内部的选中态/徽标（玻璃不能叠玻璃，只能用光做出材质感）。 */
+    static android.graphics.drawable.Drawable material(Context c, float radiusDp, boolean on) {
+        return Glass.material(c, radiusDp, on);
     }
 
     /** 顶部微光背景（从略亮的蓝黑渐变到背景色）。 */
