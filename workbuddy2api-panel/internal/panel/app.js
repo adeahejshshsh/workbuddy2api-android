@@ -2335,18 +2335,45 @@ $('btnTaskAcceptAll').onclick = async () => {
 };
 
 // 一键完成全部可自动任务（耗时较长：含真实对话，逐项回读验证）。
+//
+// 走异步形态：服务端受理后立刻 202 返回作业 ID，进度靠轮询单账号作业拿到。
+// 同步形态会把这条连接占住几分钟 —— 浏览器同源连接有上限，批量点几个号就会
+// 让整个面板刷不出数据（用户视角是「点了之后面板死了」）。旧服务端不支持
+// async 参数时会直接回同步结果，这里按同一口径折算，不要求两端同版本。
 $('btnTaskAutoAll').onclick = async () => {
   if (!taskUID) return;
   const btn = $('btnTaskAutoAll');
   if (!confirm('将依次执行：补报对话事件、领取 Buddy、glm-5.2 对话、尝试上报。\n过程约 1-2 分钟（含真实对话），确认继续？')) return;
   btn.disabled = true; btn.textContent = '执行中…';
   try {
-    const r = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks/auto_all', { method: 'POST' });
-    const okN = (r.results || []).filter(x => x.status === 'done').length;
-    const skipN = (r.results || []).filter(x => x.status === 'skipped').length;
-    const errN = (r.results || []).filter(x => x.status === 'error').length;
-    toast(`执行完成：成功 ${okN} 项，跳过 ${skipN} 项${errN ? '，失败 ' + errN + ' 项' : ''}`, errN ? 'err' : 'ok');
-    console.log('auto_all results:', r.results);
+    const base = 'accounts/' + encodeURIComponent(taskUID);
+    const r = await api(base + '/tasks/auto_all?async=1', { method: 'POST' });
+    let j = null;
+    if (r.async) {
+      for (let i = 0; i < 400; i++) {
+        await new Promise(res => setTimeout(res, 3000));
+        const d = await api(base + '/tasks/job');
+        j = d.job;
+        if (!j) continue;
+        const done = (j.completed || 0) + (j.failed || 0) + (j.skipped || 0);
+        btn.textContent = `执行中 ${done}${j.total ? '/' + j.total : ''} 项`;
+        if (j.status !== 'running') break;
+      }
+      if (!j) throw new Error('服务端没有返回作业记录，进度不可见（请看运行日志）');
+      if (j.status === 'running') throw new Error('执行超过 20 分钟仍未结束，请到「作业历史」查看');
+    } else {
+      const rs = r.results || [];
+      j = {
+        status: rs.some(x => x.status === 'error') ? 'partial' : 'done',
+        completed: rs.filter(x => x.status === 'done').length,
+        skipped: rs.filter(x => x.status === 'skipped').length,
+        failed: rs.filter(x => x.status === 'error').length,
+        results: rs,
+      };
+    }
+    const errN = j.failed || 0;
+    toast(`执行完成：成功 ${j.completed || 0} 项，跳过 ${j.skipped || 0} 项${errN ? '，失败 ' + errN + ' 项' : ''}`, errN ? 'err' : 'ok');
+    console.log('auto_all results:', j.results || j);
   } catch (e) { toast(e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '一键完成可自动任务'; loadTasks(); }
 };

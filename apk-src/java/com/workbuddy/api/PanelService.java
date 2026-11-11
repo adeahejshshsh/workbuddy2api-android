@@ -84,7 +84,23 @@ final class PanelService {
 
     static final class Job {
         String uid = "", status = "", message = "", error = "", updatedAt = "";
+        String jobId = "", currentTask = "";
         int total, completed, failed, skipped;
+
+        static Job from(JSONObject j) {
+            Job x = new Job();
+            if (j == null) return x;
+            x.uid = j.optString("uid"); x.status = j.optString("status");
+            x.message = j.optString("message"); x.error = j.optString("error");
+            x.updatedAt = j.optString("updated_at");
+            x.jobId = j.optString("job_id"); x.currentTask = j.optString("current_task");
+            x.total = j.optInt("total"); x.completed = j.optInt("completed");
+            x.failed = j.optInt("failed"); x.skipped = j.optInt("skipped");
+            return x;
+        }
+
+        /** 已处理项数（作业总项数未知时用它当分母的下界）。 */
+        int handled() { return completed + failed + skipped; }
     }
 
     static final class Pkg {
@@ -405,19 +421,51 @@ final class PanelService {
         });
     }
 
-    void autoAll(String uid, final Cb<TaskResult> cb) {
-        PanelApi.post(ctx, account(uid) + "/tasks/auto_all", null, new PanelApi.Cb() {
+    /**
+     * 一键完成（异步）：立刻返回受理的作业，进度靠 {@link #taskJob} 轮询。
+     *
+     * 以前这里是同步 POST，服务端要跑完整条流水线才回（几十秒到十几分钟），
+     * 客户端那条连接一直被占住 —— 表现就是「点了一键完成，界面一个数据都刷不出来」。
+     * 现在服务端 202 立即返回作业 ID，客户端拿着它轮询作业记录。
+     *
+     * 兼容旧网关：若响应里没有 async 标记（说明对面还是同步实现），把 results
+     * 直接折算成一个终态作业交回去，不再轮询。
+     */
+    void autoAllAsync(String uid, final Cb<Job> cb) {
+        PanelApi.postSlow(ctx, account(uid) + "/tasks/auto_all?async=1", null, new PanelApi.Cb() {
             public void ok(JSONObject o) {
-                TaskResult r = new TaskResult();
-                JSONArray rs = o.optJSONArray("results");
-                for (int i = 0; rs != null && i < rs.length(); i++) {
-                    JSONObject it = rs.optJSONObject(i);
-                    String st = it == null ? "" : it.optString("status");
-                    if ("done".equals(st)) r.done++;
-                    else if ("skipped".equals(st)) r.skipped++;
-                    else r.failed++;
+                Job j = new Job();
+                j.uid = uid;
+                j.jobId = o.optString("job_id");
+                if (!o.optBoolean("async")) {
+                    JSONArray rs = o.optJSONArray("results");
+                    for (int i = 0; rs != null && i < rs.length(); i++) {
+                        JSONObject it = rs.optJSONObject(i);
+                        String st = it == null ? "" : it.optString("status");
+                        if ("done".equals(st)) j.completed++;
+                        else if ("skipped".equals(st)) j.skipped++;
+                        else j.failed++;
+                    }
+                    j.total = j.handled();
+                    j.status = j.failed > 0 && j.completed > 0 ? "partial"
+                            : j.failed > 0 ? "error" : "done";
+                    j.message = "同步形态已完成";
+                } else {
+                    j.status = "running";
+                    j.message = o.optString("message");
                 }
-                cb.ok(r);
+                cb.ok(j);
+            }
+            public void fail(String msg) { cb.fail(msg); }
+        });
+    }
+
+    /** 单账号最新作业（异步一键完成的进度来源）。没有记录时 job 为 null。 */
+    void taskJob(String uid, final Cb<Job> cb) {
+        PanelApi.get(ctx, account(uid) + "/tasks/job", new PanelApi.Cb() {
+            public void ok(JSONObject o) {
+                JSONObject j = o.optJSONObject("job");
+                cb.ok(j == null ? null : Job.from(j));
             }
             public void fail(String msg) { cb.fail(msg); }
         });
@@ -453,13 +501,7 @@ final class PanelService {
                 for (int i = 0; arr != null && i < arr.length(); i++) {
                     JSONObject j = arr.optJSONObject(i);
                     if (j == null) continue;
-                    Job x = new Job();
-                    x.uid = j.optString("uid"); x.status = j.optString("status");
-                    x.message = j.optString("message"); x.error = j.optString("error");
-                    x.updatedAt = j.optString("updated_at");
-                    x.total = j.optInt("total"); x.completed = j.optInt("completed");
-                    x.failed = j.optInt("failed"); x.skipped = j.optInt("skipped");
-                    out.add(x);
+                    out.add(Job.from(j));
                 }
                 cb.ok(out);
             }

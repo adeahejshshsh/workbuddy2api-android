@@ -24,8 +24,13 @@ import java.util.regex.Pattern;
  * 为什么不引 OkHttp/Gson：壳里只有 GET/POST + 十来个接口，多两个依赖只为了少写 150 行，
  * 却把 APK 体积和混淆面一起放大。org.json 是 Android 自带的，HttpURLConnection 也是。
  *
- * 线程模型：所有请求在单线程池里串行（面板接口本来就是给人点的，串行反而避免并发
- * 写配置/账号动作互相踩），回调切回主线程。
+ * 线程模型：普通请求走 4 线程池，长动作（一键完成这类跑几十秒到十几分钟的）走
+ * 单独的串行通道，回调切回主线程。
+ *
+ * 为什么不能全塞进一条单线程：旧版所有请求共用一个单线程池，点一次「一键完成」
+ * 就把整条通道占住 —— 期间账号列表、用量、日志全部排在后面，界面看上去就是
+ * 「点了之后一个数据都刷不出来，直到那个任务跑完」。串行只对同一类动作有意义
+ * （避免并发改配置/并发打同一个账号），不能拿来做全局无差别串行。
  */
 final class PanelApi {
 
@@ -36,7 +41,10 @@ final class PanelApi {
         void fail(String msg);
     }
 
-    private static final ExecutorService IO = Executors.newSingleThreadExecutor();
+    /** 普通请求（读列表/日志/配置等，秒级返回）。 */
+    private static final ExecutorService IO = Executors.newFixedThreadPool(4);
+    /** 长动作通道：一条线程，保证两次长动作不会叠在一起，也不挤占普通请求。 */
+    private static final ExecutorService SLOW = Executors.newSingleThreadExecutor();
     private static final Handler UI = new Handler(Looper.getMainLooper());
     private static final Pattern API_KEY =
             Pattern.compile("\"api_key\"\\s*:\\s*\"([^\"]*)\"");
@@ -68,17 +76,22 @@ final class PanelApi {
     }
 
     static void get(Context c, String path, Cb cb) {
-        req(c, "GET", path, null, cb);
+        req(c, "GET", path, null, false, cb);
     }
 
     static void post(Context c, String path, JSONObject body, Cb cb) {
-        req(c, "POST", path, body, cb);
+        req(c, "POST", path, body, false, cb);
+    }
+
+    /** 长动作（一键完成等）：单独通道 + 长读超时，期间普通请求不受影响。 */
+    static void postSlow(Context c, String path, JSONObject body, Cb cb) {
+        req(c, "POST", path, body, true, cb);
     }
 
     private static void req(final Context app, final String method, final String path,
-                            final JSONObject body, final Cb cb) {
+                            final JSONObject body, final boolean slow, final Cb cb) {
         final Context ctx = app.getApplicationContext();
-        IO.execute(new Runnable() {
+        (slow ? SLOW : IO).execute(new Runnable() {
             public void run() {
                 HttpURLConnection conn = null;
                 try {
@@ -86,7 +99,9 @@ final class PanelApi {
                     conn = (HttpURLConnection) u.openConnection();
                     conn.setRequestMethod(method);
                     conn.setConnectTimeout(6000);
-                    conn.setReadTimeout(30000);
+                    // 长通道给足时间：服务端对整条流水线兜 15 分钟，这里只留 10 分钟
+                    // 上限，避免客户端比服务端先断、把「还在跑」误报成失败。
+                    conn.setReadTimeout(slow ? 600000 : 30000);
                     String k = key(ctx);
                     if (!k.isEmpty()) conn.setRequestProperty("Authorization", "Bearer " + k);
                     conn.setRequestProperty("Accept", "application/json");

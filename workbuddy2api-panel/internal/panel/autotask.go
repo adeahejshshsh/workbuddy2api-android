@@ -1731,14 +1731,30 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 // 流程：先把所有未接受的任务批量 accept（规范状态机；上游脚本建议"先 accept"），
 // 再逐项执行行为链路。accept 不是进度产生的必要条件，但让后续状态流转规范。
 func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
+	return p.runAutoAllWith(a, nil)
+}
+
+// runAutoAllWith 与 runAutoAll 同体，多一个逐项回调 emit。
+//
+// 为什么要回调：一键完成对单个账号要跑几十秒到几分钟（mp 待办每条 45s 节流）。
+// 同步 HTTP 期间前端只能干等，作业记录也要等流水线结束才有内容。emit 让每一项
+// 一有结局就写进 jobStore，前端轮询 /accounts/{uid}/tasks/job 就能看到「跑到第几项」。
+func (p *Panel) runAutoAllWith(a *auth.Auth, emit func(map[string]any)) []map[string]any {
 	var out []map[string]any
+	add := func(item map[string]any) {
+		out = append(out, item)
+		if emit != nil {
+			emit(item)
+		}
+	}
 	// 企业上下文不做行为类任务（上游 PR #162）：/v2/report 返回 200 却静默丢弃，
 	// 跑了也记不上账，只会白烧配额。
 	if a.IsEnterpriseSession() {
-		return append(out, map[string]any{
+		add(map[string]any{
 			"task_code": "(pipeline)", "status": "skipped",
 			"message": "企业上下文（token_source=enterprise_switch）：上游静默丢弃行为上报，已跳过",
 		})
+		return out
 	}
 
 	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
@@ -1765,12 +1781,12 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 				}
 			}
 			if err := acceptErr; err != nil {
-				out = append(out, map[string]any{
+				add(map[string]any{
 					"task_code": "(批量接受)", "status": "error",
 					"message": "接受任务失败（不阻塞后续）: " + err.Error(),
 				})
 			} else {
-				out = append(out, map[string]any{
+				add(map[string]any{
 					"task_code": "(批量接受)", "status": "done",
 					"message": fmt.Sprintf("已接受 %d 个任务", len(codes)),
 				})
@@ -1803,12 +1819,12 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 				}
 			}
 			if err := mpAccErr; err != nil {
-				out = append(out, map[string]any{
+				add(map[string]any{
 					"task_code": "(批量接受-mp)", "status": "error",
 					"message": "接受小程序任务失败（不阻塞后续）: " + err.Error(),
 				})
 			} else {
-				out = append(out, map[string]any{
+				add(map[string]any{
 					"task_code": "(批量接受-mp)", "status": "done",
 					"message": fmt.Sprintf("已接受 %d 个小程序任务", len(mpCodes)),
 				})
@@ -1845,19 +1861,19 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		if err != nil {
 			item["status"] = "error"
 			item["message"] = "查询失败: " + err.Error()
-			out = append(out, item)
+			add(item)
 			continue
 		}
 		if before == nil {
 			item["status"] = "skipped"
 			item["message"] = "该账号无此任务"
-			out = append(out, item)
+			add(item)
 			continue
 		}
 		if taskDone(before) {
 			item["status"] = "skipped"
 			item["message"] = "已完成（" + taskProgressText(before) + "）"
-			out = append(out, item)
+			add(item)
 			continue
 		}
 		if covered[strings.ToLower(effCode)] {
@@ -1865,7 +1881,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			// 不再重跑一遍动作链（BUG-15）
 			item["status"] = "skipped"
 			item["message"] = "同一次上报已覆盖（无需重复执行）"
-			out = append(out, item)
+			add(item)
 			continue
 		}
 		// 跳过名单门控（v1.22.0）：尝试型默认不跑；反复无效的也不跑 —— 省下的
@@ -1873,20 +1889,20 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		if act.Attempt && !p.attemptAllowed() {
 			item["status"] = "skipped"
 			item["message"] = "尝试型任务（上游未证实可点亮），默认不执行"
-			out = append(out, item)
+			add(item)
 			continue
 		}
 		if blocked, why := p.skipBlocked(a.UID, effCode); blocked { // 同口径用实际码（bug #7）
 			item["status"] = "skipped"
 			item["message"] = "已跳过（判定做不了）：" + why
-			out = append(out, item)
+			add(item)
 			continue
 		}
 		msg, err := act.run(p, a)
 		if err != nil {
 			item["status"] = "error"
 			item["message"] = err.Error()
-			out = append(out, item)
+			add(item)
 			continue
 		}
 		var after *upstream.Task
@@ -1958,7 +1974,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 				item["message"] = msg + "；达标但领奖失败（可在列表手动重试）"
 			}
 		}
-		out = append(out, item)
+		add(item)
 		// 项间节流改成可中断（bug #9）：客户端断开后不再把整条流水线跑完。
 		if !sleepAB(a.UID, reportGap) {
 			return out
@@ -1987,6 +2003,25 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "该账号有任务动作正在执行中，请等本轮结束后再试")
 		return
 	}
+	// 异步形态（`?async=1`）：与本函数的同步形态行为完全一致，只是不等结果 ——
+	// 立刻 202 返回作业 ID，流水线在后台跑并把每一项写进作业记录。
+	//
+	// 为什么必须有这条路：手机端/网页端点「一键完成」后，同步请求会把客户端的
+	// 这条连接占住几十秒到十几分钟（mp 待办每条 45s 节流），期间客户端但凡把请求
+	// 排在同一个线程/连接池上，其它页面就一条数据都拿不到。改成 202 + 轮询作业，
+	// 列表、日志、用量全程可用。
+	//
+	// 保留同步形态：这是既有网页面板正在用的契约，改默认值等于同时改两个前端。
+	if r.URL.Query().Get("async") == "1" {
+		jobID := p.jobBegin(uid, "growth", 0)
+		go p.runAutoAllAsync(a, uid, jobID)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"ok": true, "async": true, "job_id": jobID,
+			"message": "已开始执行，进度见作业历史",
+		})
+		return
+	}
+
 	// 用 context 兜底超时（多项任务串联 + 每项含真实对话，可能耗时较长）。
 	//
 	// 预算必须覆盖流水线真实耗时，否则必然 504：mp 待办每条 sleep(mpChatEventGap=45s
@@ -2030,4 +2065,38 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 		// 说「仍在后台继续」会让用户干等一个已经停掉的流水线。
 		writeErr(w, http.StatusGatewayTimeout, "执行超时，流水线已中止（可在任务列表查看已完成项）")
 	}
+}
+
+// runAutoAllAsync 后台执行一键完成（`?async=1` 的落地实现）。
+//
+// 与同步形态共用同一把 per-account 锁、同一套中止标记与同一份执行体，差别只有两点：
+//   - 生命周期不挂在 HTTP 请求上：用独立 ctx 兜 15 分钟，客户端离开不影响（也不会
+//     因为 handler 返回就把 ctx 取消掉，这正是同步形态下客户端断连即中止的原因）；
+//   - 每项结局实时写 jobStore（jobItem），前端轮询 @/tasks/job 能看到「跑到第几项」。
+//
+// 锁在流水线真正结束后才放：期间重复点击仍然 409，不会出现两轮并发。
+func (p *Panel) runAutoAllAsync(a *auth.Auth, uid, jobID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	// 最后执行：放锁。
+	defer p.unlockAccount(uid)
+	// 次外层：panic 兜底 —— 非 http 起的 goroutine 没人 recover，一次弱类型解析
+	// 失败就会带走整个网关进程。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ERR: [panel] auto_all(async) uid=%s panic: %v", uid, r)
+			p.jobEnd(uid, jobID, fmt.Sprintf("内部错误：%v", r))
+		}
+	}()
+	defer watchAbort(ctx.Done(), uid)()
+	clearAborted(uid)
+
+	results := p.runAutoAllWith(a, func(item map[string]any) {
+		code, _ := item["task_code"].(string)
+		status, _ := item["status"].(string)
+		msg, _ := item["message"].(string)
+		p.jobItem(uid, jobID, code, status, msg)
+	})
+	log.Printf("panel: 一键完成（异步）uid=%s 共 %d 项", uid, len(results))
+	p.jobEnd(uid, jobID, "")
 }

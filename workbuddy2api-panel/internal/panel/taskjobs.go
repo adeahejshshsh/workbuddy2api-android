@@ -258,6 +258,11 @@ func (p *Panel) jobItem(uid, jobID, code, status, msg string) {
 	if len(j.Results) < maxTaskJobResults {
 		j.Results = append(j.Results, TaskJobResult{Code: code, Status: status, Message: msg, At: now})
 	}
+	// 总项数未知的作业（一键完成异步形态：开跑前不额外列一次任务，直接按已产出的
+	// 项数自增）——否则作业历史里一行「0 项」看不出进度到哪。
+	if j.Total < len(j.Results) {
+		j.Total = len(j.Results)
+	}
 	switch status {
 	case "done":
 		j.Completed++
