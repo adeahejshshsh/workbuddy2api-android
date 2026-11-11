@@ -746,6 +746,7 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 	}
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+	var pending []string   // 瞬时失败、待 10/40 分钟补签的账号
 	plan := s.spreadPlan(taskCheckin, spread, cst.Now())
 	for _, st := range plan.order(s.cfg.Pool.List()) {
 		if st.Disabled && !includeDisabled {
@@ -775,20 +776,11 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 			return // 停机/取消：不再把剩余账号的等待全睡完
 		}
 		if a.SupportsPersonalEndpoints() {
-			if err := s.cfg.Upstream.DailyCheckinCtx(ctx, a); err != nil {
-				// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
-				if upstream.IsAlreadyCheckin(err) {
-					s.cfg.Pool.NoteCheckinDone(st.UID)
-					log.Printf("checkin %s: 今天已签到（幂等）", logfmt.Label(st.UID, st.Nickname))
-				} else {
-					log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
-				}
-				// 其余业务错误也继续走余额查询
-			} else {
-				// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在
-				// 重复触发时出现），成功也落一行。
-				s.cfg.Pool.NoteCheckinDone(st.UID)
-				log.Printf("checkin %s: 签到成功", logfmt.Label(st.UID, st.Nickname))
+			done, err := s.checkinOne(ctx, a, st.UID)
+			// 瞬时失败（上游 500 + 「请稍后重试」）收进补签队列：2s/4s 的内联重试
+			// 覆盖不了分钟级沉降，而错过后要等 12 小时后的下一次排程。
+			if !done && err != nil && upstream.IsTransientBilling(err) {
+				pending = append(pending, st.UID)
 			}
 		}
 		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次。
@@ -799,6 +791,10 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
+	}
+	// 补签只在本批结束后起一次后台循环（ctx 取消即退，不阻塞返回）。
+	if len(pending) > 0 {
+		go s.checkinRetryLoop(ctx, pending)
 	}
 	// 连登管家与主循环共用 ctx：账号间节流被取消（停机/客户端断连）时整轮都不会执行。
 	// 此前静默跳过，日志里看不出「连登这轮为什么没跑」（报告 #13）。

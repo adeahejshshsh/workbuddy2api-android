@@ -4,7 +4,8 @@
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": {
-    "read_timeout": "300s"
+    "read_timeout": "300s",
+    "head_keepalive": "1500ms"
   },
   "panel": {
     "package_detail_limit": 5

@@ -62,6 +62,18 @@ func (p *Pool) SetNickname(uid, nickname string) bool {
 
 // NoteCheckinDone 标记账号今日已签到（签到成功与上游"今天已签到"幂等拒绝均算）。
 // 记录本地日期，跨零点自然过期；不触碰冷却/禁用状态（签到与冷却域正交）。
+// CheckinDoneToday 报告该账号今天是否已签到（本地记账；成功与上游幂等拒绝都算）。
+// 供调度器的延后补签在重试前跳过已经签成的账号。
+func (p *Pool) CheckinDoneToday(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	return e.lastCheckinDay == cst.Day(time.Now())
+}
+
 func (p *Pool) NoteCheckinDone(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
