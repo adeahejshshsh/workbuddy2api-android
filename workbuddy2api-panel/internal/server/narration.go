@@ -36,6 +36,40 @@ import (
 // 否则模型会以为任务已完成而再重复一遍结论。
 const narrationNudge = "你上一条回复停在一句预告（例如以冒号结尾的「……：」）上就结束了，剩余内容还没写。请紧接着把剩下的部分写完：需要查看文件、执行命令或调用工具就直接调用，不要重复已经写过的内容，不要重新开头，不要道歉或解释。"
 
+// toolCallMarkupMarkers 模型把工具调用写成**文本标记**时用到的特征串。
+//
+// 线上实测（DSH / deepseek-harness，2026-11-10 21:30 起 40 分钟）：76 次 narration
+// 触发里 25 次（33%）正文尾部是 DSML 标记，典型形态
+//
+//	"…</｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>"
+//
+// 这类文本**本身就是一次工具调用**，客户端（DSH）会自己解析并执行它。网关只看到
+// 「正文」，又因为尾部不是句末标点就判定「话没说完」→ 补发续写指令 → 模型再发一次
+// 调用 → 客户端再执行一次。用户看到的就是「任务早该结束了，却一直在工具调用」。
+//
+// 所以：正文里只要出现工具调用标记，一律不续写——不管标记是否闭合。闭合的说明这次
+// 调用已经完整（更不该续）；未闭合的说明流在标记中间断了，续写会拼出第二个调用，
+// 同样有害，交给客户端按自己的协议处理。
+var toolCallMarkupMarkers = []string{
+	"｜｜DSML｜｜", "|DSML|", // DeepSeek 的 DSML 标记（全角/半角竖线两种写法都出现过）
+	"</function_calls>", "<function_calls>",
+	"antml:invoke", "<invoke name=",
+	"</tool_calls>", "<tool_calls>", // 少数 prompt 会把工具调用格式教成这种 XML
+}
+
+// hasToolCallMarkup 正文里是否出现了「写成文本的工具调用」。
+func hasToolCallMarkup(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, m := range toolCallMarkupMarkers {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // narrationTailSuspends 正文尾部是否「话没说完」。
 //
 // 只认结构性的收尾符，不猜测语义：
@@ -44,8 +78,14 @@ const narrationNudge = "你上一条回复停在一句预告（例如以冒号�
 //   - 末尾既不是句末标点也不是收尾符号 → 视为未写完（英文旁白
 //     "Reading failfirst.sh mutation script" 这种就是这一形态：7 个 token
 //     的现在分词短语，没有任何标点）。
+//
+// 例外：正文里含工具调用标记时**一律**返回 false（见 toolCallMarkupMarkers）——
+// 那种「未说完」是标记的收尾符造成的假象，续写会造出第二次工具调用。
 func narrationTailSuspends(text string) bool {
-	t := strings.TrimRight(text, " \t\r\n")
+	if hasToolCallMarkup(text) {
+		return false
+	}
+	t := strings.TrimRight(text, " 	\r\n")
 	if t == "" {
 		return false
 	}

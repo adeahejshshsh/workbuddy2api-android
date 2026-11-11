@@ -282,3 +282,37 @@ func TestToolOnlySkipsFinishedAnswer(t *testing.T) {
 		t.Fatalf("预告动手应续写一次，实际 %d", len(*reqs2))
 	}
 }
+
+// TestToolOnlyCoversWidenedWindow 曾经放宽到 7500B 的窗口现在**必须不命中**。
+//
+// 2026-11-10 21:30 那批反馈（「任务该结束了却一直在工具调用」）证明：正文写到
+// 1500~5000B 的「零工具调用收尾」里，有相当比例是模型真的答完了，被续写指令推着
+// 又调了一次工具。在能区分「提前收尾」与「答完」之前，这一档不能救。
+func TestToolOnlyCoversWidenedWindow(t *testing.T) {
+	mid := strings.Repeat("这里是一段排查过程的叙述。", 150) // ~5850 字节
+	seg := `data: {"id":"t1","choices":[{"index":0,"delta":{"content":"` + mid + `"}}]}` + "\n\n" +
+		`data: {"id":"t1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":900,"total_tokens":107407}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	_, _ = io.ReadAll(r)
+	if len(*reqs) != 0 {
+		t.Fatalf("5.8KB 正文不该续写（会推着已答完的模型再调一次工具），实际续写 %d 次", len(*reqs))
+	}
+}
+
+// TestToolOnlySkipsToolCallMarkup 正文是「写成文本的工具调用」（DSML/XML）时不能续写。
+//
+// 客户端会自己解析并执行这段标记；再补一句「继续执行」会让模型发出第二次调用，
+// 用户看到的就是「任务结束不了」。线上 DSH 会话实测：40 分钟里 25 次这类误救。
+func TestToolOnlySkipsToolCallMarkup(t *testing.T) {
+	seg := `data: {"id":"t1","choices":[{"index":0,"delta":{"content":"正在执行 </｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>"}}]}` + "\n\n" +
+		`data: {"id":"t1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":30,"total_tokens":106537}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	_, _ = io.ReadAll(r)
+	if len(*reqs) != 0 {
+		t.Fatalf("正文含工具调用标记时不该续写，实际 %d 次", len(*reqs))
+	}
+}
