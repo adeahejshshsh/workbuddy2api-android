@@ -35,7 +35,7 @@ WS="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
 TOKEN_FILE="${TOKEN_FILE:-/sdcard/public_repo}"
 STAGE="$PREFIX/tmp/ghrepo"
-APK="$WS/WorkBuddy2API.apk"
+APK="$WS/dist/WorkBuddy2API.apk"
 
 # token 来源（issue ISSUE-02）：优先环境变量（不落盘、不进外部存储），
 # 其次才是 /sdcard 上的文件。用完在退出时 unset。
@@ -68,7 +68,7 @@ VER=$(grep -o 'android:versionName="[^"]*"' "$WS/apk-src/AndroidManifest.xml" | 
 # Release 附件统一用**带时间后缀**的产物（2026-10-27 起）：同名稳定副本
 # WorkBuddy2API.apk 留在工作区供本地安装，但上传用 WorkBuddy2API-v<ver>-<ts>.apk ——
 # 事后能一眼核对「这个 release 到底是哪次构建」。找不到带时间戳的就退回稳定名。
-for cand in "$WS/WorkBuddy2API-v$VER"-*.apk; do
+for cand in "$WS/dist/WorkBuddy2API-v$VER"-*.apk; do
   [ -f "$cand" ] || continue
   APK="$cand"   # glob 按字典序展开，时间戳定长(YYYYMMDDHHMM) → 最后一个即最新
 done
@@ -103,8 +103,7 @@ tar -C "$WS" \
     --exclude=./workbuddy2api-panel/config.json \
     --exclude=./workbuddy2api-panel/signin \
     --exclude=./apk-src/wb2api.keystore \
-    --exclude=./WorkBuddy2API.apk \
-    --exclude=./WorkBuddy2API.apk.idsig \
+    --exclude=./dist \
     --exclude=./.panel-ip \
     --exclude=./.kspass \
     --exclude=./.tmp \

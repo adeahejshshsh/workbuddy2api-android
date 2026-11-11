@@ -20,6 +20,7 @@ apk-src/wb2api.keystore
 *.idsig
 
 # 成品与构建中间物（APK 走 Releases 分发，不进 git 历史）
+dist/
 WorkBuddy2API.apk
 *.apk
 *.apk.unsigned
@@ -43,6 +44,8 @@ docs/*.tmp
 !AGENT.md
 !CHANGELOG.md
 !NOTICE.md
+!docs/LAYOUT.md
+!tests/README.md
 
 # Python 字节码（tools/ patches/ 里的 __pycache__）
 __pycache__/

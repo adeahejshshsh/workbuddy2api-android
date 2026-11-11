@@ -65,7 +65,8 @@ fi
 # 参数：--new-keystore 显式允许生成新签名密钥（换密钥 = 已装用户无法覆盖升级，
 # 必须是人的明确决定，不能是脚本的自动兜底）。
 NEW_KEYSTORE=0
-OUTDIR="$WS"
+OUTDIR="$WS/dist"
+mkdir -p "$OUTDIR"
 for arg in "$@"; do
   case "$arg" in
     --new-keystore) NEW_KEYSTORE=1 ;;
@@ -234,7 +235,7 @@ if [ -f "$AJ" ]; then
   javac -J-Xmx512m --release 11 -encoding UTF-8 -cp "$AJ" -d classes $RJAVA "$SRC"/java/com/workbuddy/api/*.java
   # 看门狗退避序列自检：宿主 JVM 就能跑，不需要真机（打进 dex 就不必了，单独放 test-out）
   rm -rf test-out && mkdir -p test-out
-  javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$SRC"/test/WatchdogSelfCheck.java
+  javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$WS"/tests/android/WatchdogSelfCheck.java
   java -cp "$AJ:classes:test-out" WatchdogSelfCheck
 
   echo "== 4/6 dex (d8) =="
