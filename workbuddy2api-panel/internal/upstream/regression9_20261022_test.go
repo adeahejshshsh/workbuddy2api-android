@@ -8,7 +8,7 @@ import (
 // DSH 身份句品牌词必须被改写：上游按逐字匹配把品牌词原串当成「非官方渠道调用」
 // 整单拦截（400 11‑-128 unapproved channel）。改写值 = DeepSeek + U+200B + Harness，
 // 即零宽空格 + 换词（见 sanitize.go 的 sanitizeRewrites）。
-// 依据 misakano7545/workbuddy2api-panel `4f60a4c6` 的实测结论。
+// 依据 linguo2625469/workbuddy2api-panel `4f60a4c6` 的实测结论。
 //
 // 三个串一律用拼接构造，不手打整词：这个品牌词在终端/编辑器里会被渲染成同一个
 // 样子，肉眼与 diff 都分不出「空格」和「零宽空格」，手写迟早写反。

@@ -257,28 +257,133 @@ func TestToolOnlyOffByDefault(t *testing.T) {
 	}
 }
 
-// TestToolOnlySkipsFinishedAnswer 开关打开也不救「已经说完」的短答复：
-// 尾部有收尾词、没有前瞻动作词时按原样收尾。
-func TestToolOnlySkipsFinishedAnswer(t *testing.T) {
-	finished := `data: {"id":"t1","choices":[{"index":0,"delta":{"content":"已确认 user-store 的批量赋值接口支持按邮箱改记录，测试已通过，结论如上。"}}]}` + "\n\n" +
-		`data: {"id":"t1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":48,"total_tokens":106555}}` + "\n\n" +
+// TestToolOnlyCoversWidenedWindow 曾经放宽到 7500B 的窗口现在**必须不命中**。
+//
+// 2026-11-10 21:30 那批反馈（「任务该结束了却一直在工具调用」）证明：正文写到
+// 1500~5000B 的「零工具调用收尾」里，有相当比例是模型真的答完了，被续写指令推着
+// 又调了一次工具。在能区分「提前收尾」与「答完」之前，这一档不能救。
+func TestToolOnlyCoversWidenedWindow(t *testing.T) {
+	mid := strings.Repeat("这里是一段排查过程的叙述。", 150) // ~5850 字节
+	seg := `data: {"id":"t1","choices":[{"index":0,"delta":{"content":"` + mid + `"}}]}` + "\n\n" +
+		`data: {"id":"t1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":900,"total_tokens":107407}}` + "\n\n" +
 		"data: [DONE]\n\n"
 	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
-	r := newToolOnlyReader(t, up, toolLoopBody, finished)
-	out, _ := io.ReadAll(r)
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	_, _ = io.ReadAll(r)
 	if len(*reqs) != 0 {
-		t.Fatalf("说完了的答复不该续写，实际 %d 次", len(*reqs))
+		t.Fatalf("5.8KB 正文不该续写（会推着已答完的模型再调一次工具），实际续写 %d 次", len(*reqs))
 	}
-	if strings.Contains(string(out), "tool_calls") {
-		t.Fatalf("不该补工具调用:\n%s", out)
-	}
+}
 
-	// 同一段打开开关、但尾部在预告动手 → 应当续写（既有用例已覆盖采纳路径，
-	// 这里只断言「真的发了请求」）。
-	up2, reqs2 := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
-	r2 := newToolOnlyReader(t, up2, toolLoopBody, segToolOnlyStop)
-	_, _ = io.ReadAll(r2)
-	if len(*reqs2) != 1 {
-		t.Fatalf("预告动手应续写一次，实际 %d", len(*reqs2))
+// TestToolOnlySkipsToolCallMarkup 正文是「写成文本的工具调用」（DSML/XML）时不能续写。
+//
+// 客户端会自己解析并执行这段标记；再补一句「继续执行」会让模型发出第二次调用，
+// 用户看到的就是「任务结束不了」。线上 DSH 会话实测：40 分钟里 25 次这类误救。
+func TestToolOnlySkipsToolCallMarkup(t *testing.T) {
+	seg := `data: {"id":"t1","choices":[{"index":0,"delta":{"content":"正在执行 </｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>"}}]}` + "\n\n" +
+		`data: {"id":"t1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":30,"total_tokens":106537}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	_, _ = io.ReadAll(r)
+	if len(*reqs) != 0 {
+		t.Fatalf("正文含工具调用标记时不该续写，实际 %d 次", len(*reqs))
+	}
+}
+
+// segToolOnlyLongFinal 首段：正文已经是一段完整总结（>120B、句号收尾）。
+// 这是「任务做完了」的正常形态，不该被救援推着再调一次工具。
+const segToolOnlyLongFinal = `data: {"id":"t9","choices":[{"index":0,"delta":{"content":"我把三处问题都改完了：热重载的删除确认已经在轮询里真正走完，流式首帧的空窗补了心跳帧，代理订阅的流式数组也认了。` + `全部改动已经提交并推送，CI 两个工作流都通过，服务器没有动。"}}]}` + "\n\n" +
+	`data: {"id":"t9","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":120,"total_tokens":106627}}` + "\n\n" +
+	"data: [DONE]\n\n"
+
+// 续写段把「刚执行过的那次 read_file {}」原样再发一遍。
+const segToolOnlyDuplicateCall = `data: {"id":"t4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_10","function":{"name":"read_file","arguments":"{}"}}]}}]}` + "\n\n" +
+	`data: {"id":"t4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":106600,"completion_tokens":12,"total_tokens":106612}}` + "\n\n" +
+	"data: [DONE]\n\n"
+
+// B：正文够长且以句末标点收尾 → 不续写。
+func TestToolOnlySkipsFinishedAnswer(t *testing.T) {
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	r := newToolOnlyReader(t, up, toolLoopBody, segToolOnlyLongFinal)
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("已完成的答复不该再发续写请求，实际 %d 次", len(*reqs))
+	}
+	s := string(out)
+	if !strings.Contains(s, "全部改动已经提交并推送") {
+		t.Fatalf("首段正文应照常下发:\n%s", s)
+	}
+	if strings.Contains(s, "tool_calls") {
+		t.Fatalf("不该出现工具调用:\n%s", s)
+	}
+}
+
+func TestToolOnlyLooksFinished(t *testing.T) {
+	long := strings.Repeat("这是一段已经写完的总结。", 10) // >120B，句号收尾
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"长且句号收尾", long, true},
+		{"长但停在冒号", strings.Repeat("我先看一下这些文件：", 10), false},
+		{"短句收尾", "好的。", false},
+		{"长但无标点", strings.Repeat("继续往下写", 30), false},
+		{"空", "", false},
+	}
+	for _, c := range cases {
+		if got := toolOnlyLooksFinished(c.text); got != c.want {
+			t.Errorf("%s: got %v want %v (len=%d)", c.name, got, c.want, len(c.text))
+		}
+	}
+}
+
+// A：续写段重发上一次的调用（同名同参）→ 整段丢弃，客户端收不到任何工具分片。
+func TestToolOnlyRejectsDuplicateCall(t *testing.T) {
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyDuplicateCall })
+	r := newToolOnlyReader(t, up, toolLoopBody, segToolOnlyStop)
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("应尝试续写一次，实际 %d 次", len(*reqs))
+	}
+	s := string(out)
+	if strings.Contains(s, "tool_calls") || strings.Contains(s, "call_10") {
+		t.Fatalf("重发的调用必须被拦下，客户端不该看到:\n%s", s)
+	}
+	if !strings.Contains(s, "先看完整表单。") {
+		t.Fatalf("首段正文应照常保留:\n%s", s)
+	}
+	if !strings.Contains(s, `"finish_reason":"stop"`) {
+		t.Fatalf("应回滚到首段的 stop 终态:\n%s", s)
+	}
+	if strings.Contains(s, `"id":"t4"`) {
+		t.Fatalf("续写段的帧不该下发:\n%s", s)
+	}
+}
+
+// 参数归一化：历史写 {"a": 1}、续写写 {"a":1} 也算同一次调用。
+func TestToolOnlyDuplicateIgnoresArgWhitespace(t *testing.T) {
+	body := `{"model":"m","messages":[` +
+		`{"role":"user","content":"x"},` +
+		`{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"write_file","arguments":"{\"path\": \"/a\", \"text\": \"hi\"}"}}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":"ok"}]}`
+	seg := `data: {"id":"t5","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"write_file","arguments":"{\"path\":\"/a\",\"text\":\"hi\"}"}}]}}]}` + "\n\n" +
+		`data: {"id":"t5","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":30000,"completion_tokens":5,"total_tokens":30005}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, _ := fakeContinueUpstream(t, func(call int) (int, string) { return 200, seg })
+	r := newToolOnlyReader(t, up, body, segToolOnlyStop)
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(out), "write_file") {
+		t.Fatalf("仅空白差异的同参数调用也应被判为重复:\n%s", string(out))
 	}
 }

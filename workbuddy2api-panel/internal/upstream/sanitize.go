@@ -137,7 +137,7 @@ var sanitizeRewrites = [][2]string{
 	// （源码里写 \u200B 转义而非裸零宽字符：裸字符在 diff / 终端里不可见，
 	//   审查时看不出改了什么，也没法 grep。）
 	// 按短语全局替换而非只认开头 —— 同一品牌词在长提示词正文里还会出现多次。
-	// 依据：misakano7545/workbuddy2api-panel `4f60a4c6`（DSH 身份句改按品牌词表驱动）。
+	// 依据：linguo2625469/workbuddy2api-panel `4f60a4c6`（DSH 身份句改按品牌词表驱动）。
 	// **本项属身份类规则**：sanitize_brand_scope=identity 时不作用于 user/assistant 消息
 	// （实测 user 里的品牌词不触发 11‑-128），见 sanitizeIdentityRewrites。
 	{"DeepSeek Harness", "DeepSeek\u200BHarness"},

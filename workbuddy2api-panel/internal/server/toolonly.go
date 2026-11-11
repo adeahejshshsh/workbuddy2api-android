@@ -34,22 +34,51 @@ import (
 	"log"
 	"strings"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+
 )
 
 // toolOnlyMaxBytes 首段正文超过这个长度就不算「一句预告/一次提前收尾」。
 //
 // 取值依据（两台机器实测）：
 //   - 预告句收尾那批（"…："/无标点）正文多集中在 40~200B；
-//   - 但「写完一段就收尾」的形态要长得多——线上中断投诉对得上的两条是
-//     completion 461 / 316 token（≈1400B / 950B），end 于句号、零工具调用；
-//     该机今日 120 条同类请求的 completion 中位数是 825 token。
-// 上限给到 2000B：能覆盖「提前收尾」这一带，又不至于把成篇的最终答复
-// （p50≈2600B 以上）全拉进来。误命中的代价只是多一次上游调用——续写段只采纳
-// 工具调用，纯正文整段丢弃，客户端看到的内容不变。
+//   - 「写完一段就收尾」要长得多：中断投诉对得上的两条是 completion 461 / 316 token
+//     （≈1400B / 950B），句号收尾、零工具调用；
+//   - 按 25 分钟样本放宽到 N token 的覆盖率（prompt≥8k 那批 46 条）：
+//     ≤650(2000B) 41% / ≤1000 76% / ≤2500 87% / 不设限 100%。
+// 上限取 2000B。曾试过放到 7500B（覆盖 41%→77%），但上线后出现反向副作用：
+// 已经写完的任务被推着再调一次工具（用户反馈「任务该结束了却一直在工具调用」），
+// 因为「模型肯再调一次」并不等于「它还没做完」。在没有可靠判据区分「提前收尾」与
+// 「已经答完」之前，宁可少救：救援只在正文明显短（一句预告）时才触发。
 const toolOnlyMaxBytes = 2000
 
-// toolOnlyMinPrompt 长会话门槛：短会话里模型给一句就收尾是正常的（问答、寒暄）。
+// toolOnlyMinPrompt 长会话门槛：几百 token 的短问答里，模型给一句就收尾是正常的。
+// 实测「被门槛挡掉」的那批都是 4k~10k prompt（AsyncOpenAI / Go-http-client 的小会话），
+// 给到 8000 能覆盖它们，又不会把一句话问答也算进来。
 const toolOnlyMinPrompt = 20000
+
+// toolOnlyFinalAnswerBytes 正文长度达到这个数、且以句末标点收尾，就当作「最终答复」不救。
+//
+// 为什么需要这条（2026-11-11 实测）：08:00–09:00 一共 29 次救续，**29 次全部被采纳**，
+// 正文长度是 39/66/73/148/150/157/189/198/198/366/…/1917B。一个「只在模型提前收尾时
+// 救一次」的机制如果采纳率 100%，说明它事实上在给每个 agent 回合无条件追加一次工具
+// 调用——Hermes Agent 这种「每步收尾都写一句简短状态」的客户端因此永远结束不了回合。
+//
+// 判据取「长度 + 尾部」而不是只取尾部：尾部句号在两种形态里都出现（真收尾、写完一段
+// 再停），唯一稳定区分的是长度——预告句（"我先看一下："）实测集中在 40~200B，而真正
+// 写完的总结通常在 150B 以上。120B 落在两者之间，偏保守地保住了「短预告仍可救」。
+const toolOnlyFinalAnswerBytes = 120
+
+// toolOnlyLooksFinished 报告正文是否已经像「最终答复」：够长 + 以句末标点收尾。
+// 短句（"好的。"）不算——那正是这条救援原本要覆盖的形态。
+func toolOnlyLooksFinished(text string) bool {
+	s := strings.TrimSpace(text)
+	if s == "" || len(s) < toolOnlyFinalAnswerBytes {
+		return false
+	}
+	// narrationTailSuspends 对句末标点返回 false；冒号/逗号/未闭合代码块返回 true。
+	return !narrationTailSuspends(s)
+}
 
 // toolOnlyNudge 安全续写的指令。必须点明「别再用文字解释」——否则模型会再写一段
 // 总结，那段正文会被丢弃，等于白发一次请求。
@@ -74,31 +103,6 @@ func lastMessageIsToolResult(body []byte) bool {
 	return last.Role == "tool" || last.ToolCallID != ""
 }
 
-// toolIntentTail 尾部是否在「预告下一步要动手」。
-//
-// 这是本判据里唯一的语义闸门，也是默认关闭之外的**第二道**收缩：只靠
-// 「末条是工具结果 + 正文短」会把 agent 循环里的正常收尾全部命中（实测 1608B 的
-// 完整回答被判成截断）。这里要求最后 60 字节里出现前瞻动作词，且不出现收尾词
-// （"已完成/如上/总结"），把「说完了」和「马上要动手」分开。
-func toolIntentTail(text string) bool {
-	tail := tailOf(strings.TrimSpace(text), 60)
-	if tail == "" {
-		return false
-	}
-	for _, done := range []string{"完成", "完毕", "如上", "以上", "总结", "结束", "搞定", "通过", "结论"} {
-		if strings.Contains(tail, done) {
-			return false
-		}
-	}
-	for _, act := range []string{"先看", "先查", "先确认", "先读", "我先", "接下来", "下一步",
-		"然后", "再去", "让我", "去看", "查看", "看一下", "检查", "执行", "调用", "跑一下", "试一下"} {
-		if strings.Contains(tail, act) {
-			return true
-		}
-	}
-	return false
-}
-
 // tryToolOnlyRescue 安全续写：只采纳工具调用，正文一律丢弃。
 //
 // **缺省关闭**（features.tool_only_rescue）：只有「末条是工具结果 + 正文短」这一条
@@ -118,12 +122,17 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 	case r.seg >= maxContinueSegments-1:
 		return false
 	}
-	// 尾部落在预告符上：交给 narration（那条会把正文接上去，比这里更合适）。
-	if narrationTailSuspends(r.text.String()) {
+	// 正文里含工具调用标记（DSML / XML 形态）：客户端会自己解析执行，这不是「提前收尾」。
+	if hasToolCallMarkup(r.text.String()) {
 		return false
 	}
-	// 语义闸门：尾部不像「马上要动手」就是正常收尾，不救（见 toolIntentTail）。
-	if !toolIntentTail(r.text.String()) {
+	// 正文已经像最终答复（够长 + 以句末标点收尾）：不救。见 toolOnlyFinalAnswerBytes
+	// 的实测依据——不加这条时 agent 客户端的每个回合都会被推着多调一次工具。
+	if toolOnlyLooksFinished(r.text.String()) {
+		return false
+	}
+	// 尾部落在预告符上：交给 narration（那条会把正文接上去，比这里更合适）。
+	if narrationTailSuspends(r.text.String()) {
 		return false
 	}
 	declared, toolTurn := bodyToolShape(r.body)
@@ -163,13 +172,32 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 
 // settleToolOnly 续写段结束时的裁决：拿到工具调用就采纳，否则整段回滚。
 // 返回 true 表示已回滚（调用方继续走正常收尾路径，回放首段的终态帧）。
+//
+// 采纳前还要过一道闸门（2026-11-11）：续写段的工具调用若与「上一次已执行的调用」同名
+// 同参，说明模型只是把刚跑完的那次原样重发——采纳它等于让客户端把同一个写操作再执行
+// 一遍，回合也永远结束不了。为此 toolOnly 段的工具调用帧不再边到边发，而是先攒在
+// toolCallBuf 里，这里判完再决定补发还是整段丢弃（判重复时客户端一个字节都收不到，
+// 与「没有工具调用」的回滚路径完全一致）。
 func (r *continueReader) settleToolOnly() bool {
 	if !r.toolOnly {
 		return false
 	}
 	r.toolOnly = false
 	if r.toolSeen {
-		// 采纳：续写段的 tool_calls 已经实时发给客户端了，收尾照常（回放本段 tail）。
+		if name, dup := r.duplicatesLastExecutedCall(); dup {
+			r.toolCallBuf = nil
+			r.toolSeen = false
+			r.finish, r.tail = r.origFinish, r.origTail
+			r.origFinish, r.origTail = "", nil
+			log.Printf("[toolonly] acct=%s model=%s seg=%d 续写段要重发上一次的调用（%s）→ 丢弃，按原样收尾",
+				logfmt.Label(r.acct.UID, r.acct.NicknameValue()), bareModelOf(r.body), r.seg, name)
+			return true
+		}
+		// 采纳：把缓存的工具调用帧按原顺序补发，收尾照常（回放本段 tail）。
+		for _, p := range r.toolCallBuf {
+			r.emit(p)
+		}
+		r.toolCallBuf = nil
 		r.origFinish, r.origTail = "", nil
 		log.Printf("[toolonly] acct=%s seg=%d 续写段拿到工具调用 → 采纳",
 			r.label(), r.seg)
@@ -197,6 +225,117 @@ func discardToolOnlyDelta(d map[string]any) bool {
 		changed = true
 	}
 	return changed
+}
+
+// captureToolCallDeltas 累积「只采纳工具调用」段里的工具调用分片：name 与 arguments
+// 都是分多个 chunk 到达的，必须按 index 拼起来才能与历史做过比较。
+func (r *continueReader) captureToolCallDeltas(tcs []any) {
+	if r.toolCallNames == nil {
+		r.toolCallNames = map[int]string{}
+		r.toolCallArgs = map[int]string{}
+	}
+	for _, raw := range tcs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		idx := 0
+		if v, ok := m["index"].(float64); ok {
+			idx = int(v)
+		}
+		fn, ok := m["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if s, ok := fn["name"].(string); ok {
+			r.toolCallNames[idx] += s
+		}
+		if s, ok := fn["arguments"].(string); ok {
+			r.toolCallArgs[idx] += s
+		}
+	}
+}
+
+// recordedToolCall 请求体历史里的一次工具调用。
+type recordedToolCall struct{ Name, Args string }
+
+// lastExecutedToolCalls 取请求体里「最后一个带 tool_calls 的 assistant 消息」的调用列表。
+//
+// 这是「客户端刚刚执行过什么」的唯一权威来源：连续两轮都用同一条消息，模型重发时
+// 名字与参数都会一模一样，可以逐字比对。
+func lastExecutedToolCalls(body []byte) []recordedToolCall {
+	var obj struct {
+		Msgs []struct {
+			Role      string `json:"role"`
+			ToolCalls []struct {
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+			// 旧版单数形态：{"function_call":{"name","arguments"}}
+			FunctionCall *struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function_call"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &obj) != nil {
+		return nil
+	}
+	var out []recordedToolCall
+	for _, m := range obj.Msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		var calls []recordedToolCall
+		for _, tc := range m.ToolCalls {
+			calls = append(calls, recordedToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
+		}
+		if m.FunctionCall != nil {
+			calls = append(calls, recordedToolCall{Name: m.FunctionCall.Name, Args: m.FunctionCall.Arguments})
+		}
+		if len(calls) > 0 {
+			out = calls // 保留最后一个带调用的 assistant 消息
+		}
+	}
+	return out
+}
+
+// duplicatesLastExecutedCall 报告续写段要的第一个工具调用是否与上一次执行过的完全相同。
+func (r *continueReader) duplicatesLastExecutedCall() (string, bool) {
+	if len(r.toolCallNames) == 0 {
+		return "", false
+	}
+	name := strings.TrimSpace(r.toolCallNames[0])
+	if name == "" {
+		return "", false
+	}
+	args := normalizeToolArgs(r.toolCallArgs[0])
+	for _, c := range lastExecutedToolCalls(r.body) {
+		if strings.TrimSpace(c.Name) == name && normalizeToolArgs(c.Args) == args {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// normalizeToolArgs 归一化工具参数用于比较：空串与 "{}" 等价，键序与空白不敏感。
+//
+// 参数是 JSON 文本，比较的是「同一次调用」而不是字节：模型重发时常把 {} 写成 { }，
+// 直接字符串比较会漏判。解析失败时退回「去掉所有空白」，至少挡住逐字重发。
+func normalizeToolArgs(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "{}" {
+		return "{}"
+	}
+	var v any
+	if json.Unmarshal([]byte(s), &v) == nil {
+		if raw, err := json.Marshal(v); err == nil {
+			return string(raw)
+		}
+	}
+	return strings.Join(strings.Fields(s), "")
 }
 
 // trimForLog 截断日志里的正文片段。

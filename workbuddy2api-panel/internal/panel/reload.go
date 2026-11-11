@@ -237,16 +237,26 @@ func (p *Panel) ReloadLoop(stop <-chan struct{}) {
 // relooadEndpointPath 手动重载接口路径（日志文案用；路由注册在 panel.go）。
 const relooadEndpointPath = "POST /panel/api/accounts/reload"
 
-// reloadIfChanged 目录指纹变了才真正重载。
+// reloadIfChanged 目录指纹变了才真正完整重载。
 //
 // 用内容指纹而不是 mtime：auth.LoadDirReport 对空 realm 会 SaveAtomic 回填，自己
 // 就会改 mtime；按 mtime 判断会自激（backfill → mtime 变 → 再 reload → ...）。
+//
+// 但指纹没变时不能一走了之。删除要「连续 N 次扫描确认」，而删掉一个文件只让指纹
+// 变一次：缺勤计到 1 之后，每个 tick 都会被指纹门挡回去，reload_delete_confirm
+// 只要 >1 就永远到不了——删除语义静默失效（issue #199）。所以指纹没变、但缺席
+// 计数表里还有待确认的账号时，走一次只做 stat 的轻量确认：不重解析目录、不刷审计
+// 日志，代价是池大小量级的 stat。
 func (p *Panel) reloadIfChanged(reason string) (ReloadResult, error) {
 	fp := dirContentFingerprint(p.cfg.AuthDir)
 	p.reloadMu.Lock()
 	last := p.reloadFingerprint
+	pending := len(p.reloadMissing) > 0
 	p.reloadMu.Unlock()
 	if fp != "" && fp == last {
+		if pending {
+			return p.confirmMissing(reason)
+		}
 		return ReloadResult{Skipped: true, Reason: "目录未变化"}, nil
 	}
 	res, err := p.ReloadAccountsReason(reason)
@@ -258,6 +268,57 @@ func (p *Panel) reloadIfChanged(reason string) (ReloadResult, error) {
 		p.reloadFingerprint = fp
 		p.reloadMu.Unlock()
 	}
+	return res, nil
+}
+
+// confirmMissing 指纹没变时推进缺席计数，让删除确认能在多个 tick 里走完。
+//
+// 只在 reloadMissing 非空（上一轮完整重载发现账号不在目录里）时被调用。判据与
+// ReloadAccountsReason 的护栏 2/4 完全一致：文件其实还在盘上就清账（面板刚写入、
+// 扫描竞态），连续 confirm 次缺席且在途请求归零才真删。
+func (p *Panel) confirmMissing(reason string) (ReloadResult, error) {
+	p.reloadMu.Lock()
+	defer p.reloadMu.Unlock()
+
+	confirm := p.reloadDeleteConfirm
+	if confirm < 1 {
+		confirm = 1
+	}
+	res := ReloadResult{Skipped: true}
+	var toRemove []string
+	pending := 0
+	for _, st := range p.cfg.Pool.List() {
+		a := p.cfg.Pool.AuthByUID(st.UID)
+		// 护栏 4：文件在盘上 → 视为在场，清掉缺席计数。
+		if a != nil && a.FilePath != "" {
+			if _, statErr := os.Stat(a.FilePath); statErr == nil {
+				delete(p.reloadMissing, st.UID)
+				continue
+			}
+		}
+		p.reloadMissing[st.UID]++
+		if p.reloadMissing[st.UID] < confirm || p.cfg.Pool.InFlight(st.UID) > 0 {
+			pending++
+			continue
+		}
+		toRemove = append(toRemove, st.UID)
+	}
+	if removed := p.cfg.Pool.RemoveMany(toRemove); len(removed) > 0 {
+		res.Skipped = false
+		res.Removed = len(removed)
+		res.RemovedUIDs = removed
+		log.Printf("[reload] %s 已移除（auth 文件不存在，连续 %d 次扫描确认）: %s",
+			reason, confirm, strings.Join(removed, ", "))
+	} else if pending > 0 {
+		res.Reason = fmt.Sprintf("%d 个账号文件不存在，删除确认中（需连续 %d 次）", pending, confirm)
+	}
+	// 已不在池里的 uid 不再占着缺席计数表。
+	for uid := range p.reloadMissing {
+		if p.cfg.Pool.AuthByUID(uid) == nil {
+			delete(p.reloadMissing, uid)
+		}
+	}
+	p.noteReload(res)
 	return res, nil
 }
 
