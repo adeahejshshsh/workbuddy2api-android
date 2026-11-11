@@ -499,3 +499,21 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
    - 弹窗写死 `width:940px`，手机 WebView（CSS 宽约 400px）里只能压窄 flex 项，
      5 个按钮被挤到几十像素宽、文字竖排成「一列字」→ 改成 `width:min(940px,96vw)`，
      并给 `.dlg footer` 加 `flex-wrap: wrap` + 按钮 `white-space: nowrap`（换行而不是压扁）。
+
+## 第十二批：上游 2026-11-11 批次（`c54c517..cf16478`，17 条）
+
+| 上游提交 | 处置 | 说明 |
+|---|---|---|
+| `4f6adc0` 轮询热重载 `reload_delete_confirm>1` 时永不删号 | ✅ 合入 | `reload.go` + 新用例（`reload_poll_delete_test.go`）。本仓 `reload.go` 同源，patch 干净落地 |
+| `cfac370` 单选框被全局 100% 撑开 | ⚠️ 部分 | 只取 `index.html` 的 `.realm-opt input { width:auto; flex:none }`。上游随附的 `frontend_radio_width_test.go` 断言的是**上游 CSS 基线**（`input, select {width:100%}` + `.radios`），本仓 CSS 已改写（`input, select, textarea`），该测试会误红，未收 |
+| `8818458` + `cf16478` buddyapp `isFirstPage` 改布尔 | ✅ 合入 | `desktop.go` + 回归用例 |
+| `b64773e` `/v1/models` 透出 `promo_*` | ✅ 合入 | handler + 用例 |
+| `2b210e9` 请求级错误不解绑会话粘性 | ✅ 合入（适配） | 本仓 `fail()` 里多了出口级归因，新增 `failKeepBinding`（只 `releaseHeld`）。覆盖：内容拦截（含降级重试分支）/ prompt 超长 / 参数错 / 图片无效 / 工具不匹配 / 通用 4xx（429 与 5xx 仍按账号级）。用例 `sticky_request_error_test.go` 通过 |
+| `e8df35b` 正文里的文本化工具调用（DSML）不触发续写 | ✅ 合入 | `hasToolCallMarkup` + 回归用例；与本地 `toolOnlyRescue` 开关共存 |
+| `baf9155` 收尾误救两道闸门 | ✅ 合入 | 采纳端：工具调用先缓存，`settleToolOnly` 与「最后一条带 tool_calls 的 assistant」比对同名同参（JSON 归一化）判为重发即整段丢弃；触发端：正文 ≥120B 且以句末标点收尾视为最终答复不救。**取代**本仓上一版临时加的 `toolIntentTail` 语义闸门（已删）。本仓 `features.tool_only_rescue` 仍**默认关** |
+| `8df99ac` 等首帧期间补 SSE 注释帧 | ⏭ 跳过 | 依赖上游 `max_payload_bytes` 配置重构（本仓仍是 `max_body_mb`），`config.go/main.go/handler.go` 三处冲突；单独移植会把两套请求体上限并存。待上游配置重构整体跟上时一起收 |
+| `cfef70d` 国际版到期批次聚合 | ⏭ 跳过 | `billing_summary.go` / `client.go` / `handler.go` / `index.html` 均冲突（本仓计费口径含本地改动），需逐 hunk 重写；单独做风险高于收益 |
+| `1adfa52` 签到「请稍后重试」自动补签 | ⏭ 跳过 | 依赖 `internal/scheduler/checkin_retry.go` 与上游 `report.go` 新形态，本仓 scheduler 无该文件；单独移植要连 `report.go` 一起改，留待下一批 |
+| `7366740` proxypool 订阅流式数组 | ⏭ 跳过 | 本仓明确不含 proxypool |
+| `849d338` compress v1.20.2 | ⏭ 跳过 | 离线环境取不到模块（`proxy.golang.org` 不可达、本地缓存只有 1.17.4），升了无法构建；联网后可一行升 |
+| `d011fc8` / `cf2b80f` billing 用例时间锚 | ⏭ 跳过 | 断言文件 `billing_expiry_cycle_test.go` 本仓不存在（上游在更早批次引入），无对象可修 |
