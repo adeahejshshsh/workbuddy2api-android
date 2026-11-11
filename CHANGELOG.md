@@ -45,6 +45,18 @@
   取代系统 AlertDialog 的灰色列表。
 - 命中区：按钮 48dp、胶囊 40dp、图标按钮 44dp；图标为 8 个自绘 VectorDrawable。
 
+### 工程结构（源码 / 测试分离）
+
+- 新增 `tests/`：Go 单测入口（原 `patches/test.sh` → `tests/run.sh`）、App 侧自检
+  （`tests/android/{WatchdogSelfCheck,GwConfigSelfCheck}.java`）。
+- 新增 `dist/`：APK 产物统一落这里（`build_apk.sh` 写入、`push_github.sh` 取附件），
+  仓库根不再出现 `.apk` / `.idsig`。
+- `.up_files` → `docs/upstream-file-list.txt`；新增 `docs/LAYOUT.md` 说明每个目录
+  放什么、新增文件该往哪放。
+- Go 的 `*_test.go` 仍与被测包同目录：`go test` 的包加载规则要求如此，搬走只能改成
+  黑盒测试并丢掉对未导出状态（锁 / 队列下标 / 计数口径）的断言。约束与替代方案写在
+  `tests/README.md`。
+
 ### 分层重构
 
 `PanelApi`（传输）→ `PanelService`（路径/解析/模型，零 view 引用）→ `Console` /

@@ -112,7 +112,7 @@ API Key  : 面板里的 key（点「复制密钥」）
 **APK**（不需要 Android Studio / Gradle）：
 
 ```bash
-bash patches/build_apk.sh      # 产出 ./WorkBuddy2API.apk
+bash patches/build_apk.sh      # 产出 dist/WorkBuddy2API.apk
 ```
 
 需要 `aapt2`、`javac`（17）、`android.jar`、`d8`（在 `r8.jar` 里）、`apksigner`、`zip`、`keytool`，

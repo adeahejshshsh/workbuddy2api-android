@@ -1,11 +1,11 @@
 #!/data/data/com.dsharnessmobile.shell/files/usr/bin/bash
-# test.sh 只跑「改动涉及的包」，全量留给发版前。
+# run.sh 只跑「改动涉及的包」，全量留给发版前。
 #
 # 为什么：全量 11 个包 ≈ 15s（编译另算），而多数改动只碰 1-2 个包；
 # 每次无脑全量是纯浪费。用法：
-#   bash patches/test.sh            # 只跑 git 改动涉及的包
-#   bash patches/test.sh all        # 全量（发版前跑）
-#   bash patches/test.sh server pool  # 指定包
+#   bash tests/run.sh            # 只跑 git 改动涉及的包
+#   bash tests/run.sh all        # 全量（发版前跑）
+#   bash tests/run.sh server pool  # 指定包
 set -uo pipefail
 
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

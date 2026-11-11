@@ -133,7 +133,7 @@ cd internal/pool && PATH=/system/bin /system/bin/linker64 $PREFIX/tmp/pool.test 
 
 **cwd 必须是包目录**：测试夹具用相对路径（`app.js`、`testdata/`）。
 
-`CGO_ENABLED=0` 必须显式设（`patches/test.sh` 已带上）：本机没有可 exec 的
+`CGO_ENABLED=0` 必须显式设（`tests/run.sh` 已带上）：本机没有可 exec 的
 `aarch64-linux-android-clang`，任何走到 cgo 的包在编译期就 `fork/exec ... permission
 denied`，表现为「一半包 PASS、一半包编译失败」，很容易误判成改动有问题。
 
@@ -244,9 +244,9 @@ shell 的管道）关掉了读端，网关立刻 141 退出，日志上看不出
 * 面板与 API 都在 `:7863`；默认监听 `127.0.0.1`，对外必须显式改 `listen` + 配 `api_key`。
 * 端口上如果已经有一个不是本服务拉起的实例，服务会判成「运行中（外部）」并**不抢端口**。
 * **测试节奏**（2026-10-22 起）：
-  - 迭代中只跑**改动涉及的包**：`bash patches/test.sh`（自动从 git diff 推包名）；
-    也可显式 `bash patches/test.sh server pool`。
-  - **发版前**跑一次全量：`bash patches/test.sh all`（≈18s，含编译）。
+  - 迭代中只跑**改动涉及的包**：`bash tests/run.sh`（自动从 git diff 推包名）；
+    也可显式 `bash tests/run.sh server pool`。
+  - **发版前**跑一次全量：`bash tests/run.sh all`（≈18s，含编译）。
   - 单包 ≈1s，全量 ≈18s —— 别在迭代里无脑全量。
   - 新增等待/节流类变量时，**必须**在包内测试初始化里把它置 0（`zz_testinit_test.go`）；
     跨包的私有常量用导出的 `...ForTest` 钩子（如 `upstream.SetBillingRetryDelayForTest`）。
@@ -266,7 +266,7 @@ shell 的管道）关掉了读端，网关立刻 141 退出，日志上看不出
   - 绿了再合并（squash），合并后删分支。
   - 绕过 PR 直推 main = 绕过门禁；线上事故的代价远高于多一次点击。
   - **CI 不覆盖 APK 链路**（aapt2 / javac / d8 / apksigner 只在本地有）：动过
-    `apk-src/**` 或面板资源时，本地仍要跑 `bash patches/test.sh all` + `bash patches/build_apk.sh`。
+    `apk-src/**` 或面板资源时，本地仍要跑 `bash tests/run.sh all` + `bash patches/build_apk.sh`。
 * 发布分两档（**默认只提交，不发版**）：
   - **日常改 bug / 小改动 → 只推源码**：`bash push_github.sh`
     （提交并推到 main，**不建 Release、不上传 APK**）。
