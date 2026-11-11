@@ -34,6 +34,19 @@ final class ScreenTasks {
     private String taskMode = "queue";
     private String taskUid = "";
 
+    // 异步一键完成：服务端 202 受理 + 作业记录，这里只轮询与展示。
+    // 之所以要把它做成状态而不是"等一个长请求"：同步请求会把客户端通道占住几分钟，
+    // 期间所有页面都刷不出数据（用户看到的就是"点了之后全站卡住"）。
+    private PanelService.Job autoJob;
+    private String autoUid = "";
+    private boolean autoPolling;
+    private int autoPolls;
+    private TextView autoLine;
+    private LinearLayout autoBar;
+    private final Runnable pollTick = new Runnable() {
+        public void run() { if (autoPolling) pollOnce(); }
+    };
+
     ScreenTasks(Console c) {
         this.c = c;
         this.a = c.a;
@@ -78,6 +91,10 @@ final class ScreenTasks {
             seg.addView(p, lp);
         }
         col.addView(seg);
+
+        autoLine = null;
+        autoBar = null;
+        if (autoJob != null) col.addView(autoBannerCard(), Theme.cardLp(a, Theme.S3));
 
         final LinearLayout list = Theme.list(a);
         list.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
@@ -411,13 +428,132 @@ final class ScreenTasks {
         return Theme.MINT;
     }
 
-    private void autoAll(String uid) {
-        toast("开始执行可自动任务（含真实对话，1–2 分钟）…");
-        svc.autoAll(uid, new PanelService.Cb<PanelService.TaskResult>() {
-            public void ok(PanelService.TaskResult r) {
-                toast("执行完成：成功 " + r.done + " · 跳过 " + r.skipped + " · 失败 " + r.failed);
+    // ── 一键完成（异步 + 轮询）────────────────────────────────────────────
+    private void autoAll(final String uid) {
+        toast("已提交，后台执行；这一页可以离开");
+        svc.autoAllAsync(uid, new PanelService.Cb<PanelService.Job>() {
+            public void ok(PanelService.Job j) {
+                autoJob = j;
+                if (j.jobId.isEmpty()) {
+                    // 旧网关（同步实现）：结果已经在手里，不需要轮询。
+                    autoPolling = false;
+                    toast("一键完成结束：" + summary(j));
+                    if ("tasks".equals(c.screen)) renderTasks();
+                    return;
+                }
+                autoUid = uid;
+                autoPolling = true;
+                autoPolls = 0;
+                if ("tasks".equals(c.screen)) renderTasks();
+                ui.postDelayed(pollTick, 1200);
             }
             public void fail(String m) { toast("一键完成失败：" + m); }
         });
+    }
+
+    /** 轮询作业记录拿进度：3 秒一次，服务端兜 15 分钟，这里 20 分钟收手。 */
+    private void pollOnce() {
+        if (!autoPolling || autoUid.isEmpty()) return;
+        autoPolls++;
+        if (autoPolls > 400) {
+            autoPolling = false;
+            toast("进度轮询超时，结果请看作业历史");
+            return;
+        }
+        svc.taskJob(autoUid, new PanelService.Cb<PanelService.Job>() {
+            public void ok(PanelService.Job j) {
+                if (j == null) {           // 作业刚落盘/网关旧版：再等一轮
+                    ui.postDelayed(pollTick, 2500);
+                    return;
+                }
+                autoJob = j;
+                if ("running".equals(j.status)) {
+                    updateAutoBanner();
+                    ui.postDelayed(pollTick, 3000);
+                } else {
+                    autoPolling = false;
+                    toast("一键完成结束：" + summary(j));
+                    if ("tasks".equals(c.screen)) renderTasks();
+                }
+            }
+            public void fail(String m) {
+                if (autoPolling) ui.postDelayed(pollTick, 5000);
+            }
+        });
+    }
+
+    private static String summary(PanelService.Job j) {
+        return "成功 " + j.completed + " · 跳过 " + j.skipped + " · 失败 " + j.failed;
+    }
+
+    /** 任务页顶部横幅：执行中显示当前项 + 进度条，结束后显示成效。 */
+    private LinearLayout autoBannerCard() {
+        final boolean running = autoPolling && "running".equals(autoJob.status);
+        int color = running ? Theme.INFO
+                : "error".equals(autoJob.status) ? Theme.BAD : Theme.MINT;
+        LinearLayout card = Theme.card(a);
+        card.setBackground(Theme.outlined(a, 0xF21B2336, Theme.R_CARD,
+                (color & 0x00FFFFFF) | 0x80000000, 1f));
+
+        LinearLayout top = new LinearLayout(a);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(Theme.statusChip(a, running ? "执行中" : "上一轮", color));
+        String who = autoJob.uid.isEmpty() ? "" : " · " + autoJob.uid;
+        TextView head = Theme.text(a, (running ? "一键完成后台执行" : "一键完成已结束") + who,
+                12.5f, Theme.INK, 1);
+        head.setPadding(Theme.dp(a, Theme.S2), 0, 0, 0);
+        top.addView(head, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(top);
+
+        autoLine = Theme.text(a, bannerLine(running), 11.5f, Theme.INK2, 0);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        llp.topMargin = Theme.dp(a, Theme.S2);
+        card.addView(autoLine, llp);
+
+        autoBar = Theme.list(a);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = Theme.dp(a, Theme.S2);
+        card.addView(autoBar, blp);
+        fillAutoBar(color);
+
+        card.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { taskMode = "jobs"; renderTasks(); }
+        });
+        return card;
+    }
+
+    private String bannerLine(boolean running) {
+        if (running) {
+            String cur = autoJob.currentTask.isEmpty() ? "准备中" : autoJob.currentTask;
+            return "当前：" + cur + " · 已处理 " + autoJob.handled() + " 项";
+        }
+        if ("error".equals(autoJob.status) && !autoJob.error.isEmpty()) {
+            return summary(autoJob) + " · " + autoJob.error;
+        }
+        if (!autoJob.message.isEmpty() && autoJob.handled() == 0) return autoJob.message;
+        return summary(autoJob) + " · 点这里看作业历史";
+    }
+
+    /** 进度条按「已处理 / 总项数」画；总项数未知时用已处理数当分母（满格）。 */
+    private void fillAutoBar(int color) {
+        if (autoBar == null) return;
+        autoBar.removeAllViews();
+        int total = autoJob.total > 0 ? autoJob.total : Math.max(autoJob.handled(), 1);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Theme.dp(a, 5));
+        autoBar.addView(Theme.progress(a, autoJob.handled(), total, color), lp);
+    }
+
+    /** 只更新横幅文字/进度，不重建整页（轮询每 3 秒一次，重建会打断滚动）。 */
+    private void updateAutoBanner() {
+        if (autoJob == null) return;
+        boolean running = autoPolling && "running".equals(autoJob.status);
+        if (autoLine != null) autoLine.setText(bannerLine(running));
+        fillAutoBar(running ? Theme.INFO
+                : "error".equals(autoJob.status) ? Theme.BAD : Theme.MINT);
     }
 }
