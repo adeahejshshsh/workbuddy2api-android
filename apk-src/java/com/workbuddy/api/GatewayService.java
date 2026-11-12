@@ -218,6 +218,12 @@ public class GatewayService extends Service {
         ReviveJobService.cancel(c);
         // 状态复位（bug B3）：与 ACTION_STOP 分支同语义，否则界面永远「启动中」。
         setState(ST_STOPPED, "已停止", "用户点了停止，不再自愈");
+        // issue #113：停止即撤通知。stopService 之后系统会在服务销毁时撤「前台那条」，
+        // 但 refreshNotification 投递的普通通知不属于前台服务，这里显式兜一层。
+        try {
+            NotificationManager nm = (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel(NOTIF_ID);
+        } catch (Throwable ignored) {}
         try { c.stopService(new Intent(c, GatewayService.class)); } catch (Throwable ignored) {}
     }
 
@@ -273,7 +279,10 @@ public class GatewayService extends Service {
             // 每 2s 尝试加载面板。
             setState(ST_STOPPED, "已停止", "用户在通知栏点了停止，不再自愈");
             appRestarts = 0;
-            refreshNotification();
+            // issue #113：这里原来调 refreshNotification()，等于刚 stopForeground 撤掉
+            // 通知、又用同一个 id 把「已停止 · 端口」挂回去，且 setOngoing 划不掉。
+            // 这条通知的语义是「前台服务存活指示器」：服务停了就该消失，状态进 App 看。
+            cancelNotification();
             appLog(this, "用户主动停止 → 释放保活、取消 alarm/job，不再自愈");
             stopSelf();
             return START_NOT_STICKY;
@@ -360,6 +369,8 @@ public class GatewayService extends Service {
                 userStop ? "用户点了停止，不再自愈" : "服务被系统销毁，等待 alarm/Job 拉起");
         // fgsBlocked：前台服务起不来的设备不再重挂复活链 —— 否则 5 分钟一次
         // 「拉起来 → 起不来 → stopSelf → onDestroy 再挂」的静默无限循环。
+        // issue #113：用户主动停止的那条路径上，服务本来就该「什么都不留」。
+        if (userStop) cancelNotification();
         if (!userStop && !fgsBlocked) {       // 不是用户点的停止 → alarm + job 两条路把服务拉回来
             appLog(this, "服务被销毁（非用户操作）→ 已重挂 alarm + JobScheduler 兜底");
             armAlarm(this);
@@ -1106,6 +1117,20 @@ public class GatewayService extends Service {
 
     void stopForegroundCompat() {
         try { stopForeground(true); } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 撤掉本服务的通知（issue #113）。
+     *
+     * 为什么必须有：`refreshNotification()` 走的是 `nm.notify(NOTIF_ID, …)`，那是本进程
+     * 投递的**普通通知**，所有权不在前台服务身上 —— `stopSelf()` 之后它仍在通知栏，
+     * 且 `buildNotification()` 里 `setOngoing(true)`，用户划不掉。停止路径必须先撤。
+     */
+    void cancelNotification() {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel(NOTIF_ID);
+        } catch (Throwable ignored) {}
     }
 
     void refreshNotification() {

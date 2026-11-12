@@ -1,5 +1,17 @@
 # 变更记录
 
+## 未发布（v1.35.14 待定）
+
+### 修复
+
+- **通知栏残留「已停止」（issue #113）**：在通知上点「停止」后，通知不消失、文案变
+  「已停止 · 端口」，且 `setOngoing(true)` 划不掉。根因是 `ACTION_STOP` 分支在
+  `stopForeground(true)` 撤掉前台通知后，又调 `refreshNotification()` 用同一个 id
+  把「已停止」重新挂回去 —— 而 `nm.notify()` 投递的普通通知不属于前台服务，
+  `stopSelf()` 之后仍在通知栏。现在停止路径改为 `cancelNotification()` 显式撤销，
+  `stop(Context)` 与 `onDestroy()`（userStop 分支）也各兜一层；运行中的
+  `refreshNotification()` 调用点保持不变。
+
 ## v1.35.13（2026-11-11）
 
 > 自 v1.35.12 起 34 个 PR。这一版的重心是**手机端**：原生控制台从零做到覆盖网页
