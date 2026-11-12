@@ -547,5 +547,11 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 | `8125831d` 重复签到不再报「签到已完成」，按回执分四态 | ✅ 合入（适配） | 新增 `upstream/checkin_receipt.go`（四态 + 积分只取上游真实值）；本仓 `apiEnvelope.Code` 是 `flexInt`，`CheckinReceipt.Code` 收窄时显式转换；`report.go` 补 `billingJSONRaw`/`billingMeterRaw`（本仓已有 `doJSONRaw`，且 billing 走 **Ctx** 变体，故同时加 `…RawCtx` 并让老函数委托）；`DailyCheckin` 改为委托 `CheckinReceipt`（保留 `DailyCheckinCtx` 给调度器）；`panel.go` 四态回填**保留本仓的 `checkin_skipped`**（global/企业/API Key 的既有口径），新增 `checkin_state` 与条件性 `checkin_credit`；`app.js` 新增 `checkinResultNote` 纯函数（本仓没有上游的 `taskOutcomeStatus`，函数插在 `renderAccounts` 前），行内按钮与组内批量都走它；客户端把四态透传到原生控制台 toast（原实现把 skipped 说成「今日已签到」，一并修掉）。测试适配：本仓无 `testRealmAuth`/`useRealmForTest`，新增 `realm_test_helper_test.go`（realm 用 domain 表达）；响应结构断言按本仓字段收窄（无 `checkin_error`/`skip_reason`）；前端用例改用 `nodeBin`/`nodeCmd`（本机 node 需 linker64 代跑） |
 | `0fadf989` + `1c007bb0` 运营活动批量读进度 + 一键领奖（星巴克 `activity_code`） | ✅ 合入（后端） | 新增 `internal/upstream/campaign.go`（活动码定位 + 进度读 + 领奖）与 `internal/panel/campaign.go`（`GET /panel/api/campaign`、`POST /panel/api/campaign/claim`），路由插在 `school/vouchers` 后。修一处签名差异：上游 `c.do(req, a, false)`（新版带出口归因），本仓 `do(req)`。**前端未接**：上游这次只提交后端，网页面板与原生控制台都没有入口，先留 API |
 
-未合入：无（本批 6 条全部落地）。下一次能直连 `git fetch upstream` 时，建议顺手把
+补记：`d011fc8` / `cf2b80f`（billing 用例时间锚）在本批**补做**了 —— 第十二批判「无对象
+可修」是因为当时本仓还没有 `billing_expiry_cycle_test.go`；第十三批按本仓模型重写该文件后
+对象就有了，而当时的 `dayAt()` 仍是上游的 12:00 锚 + 固定 168h 窗口，同一个「每天
+00:00–12:00 CST 必红」的坑原样带过来了。现按上游口径改为 00:00 锚 + `dayAt(7)-now` 窗口。
+
+未合入：`849d338`（compress v1.20.2，离线取不到模块）、`7366740`（proxypool，本仓无该模块）、
+`cfac370` 的前端用例与 `cfef70d` 的前端 `est` 标注（本仓 CSS/数据结构不同，按设计不取）。下一次能直连 `git fetch upstream` 时，建议顺手把
 `849d338`（compress v1.20.2）一起升掉 —— 它仍是唯一因离线取不到模块而挂着的依赖。

@@ -92,7 +92,10 @@ func expiryAggregate(t *testing.T, rows []expiryRow, soon time.Duration) (remain
 
 func dayAt(days int) time.Time {
 	base := time.Now().In(softRateResetLoc)
-	return time.Date(base.Year(), base.Month(), base.Day()+days, 12, 0, 0, 0, softRateResetLoc)
+	// 取当日 00:00 而不是 12:00（上游 d011fc8）：到期窗口是「now + N 小时」判的，
+	// 固定 12:00 会让「第 N 天算不算在窗口内」随时钟漂移（上午跑少算一天、下午跑才对）。
+	// 00:00 对任何时刻都稳定落在窗口内，D+8 则稳定落在窗口外。
+	return time.Date(base.Year(), base.Month(), base.Day()+days, 0, 0, 0, 0, softRateResetLoc)
 }
 
 func f64p(v float64) *float64 { return &v }
@@ -125,7 +128,9 @@ func TestGlobalExpiringUsesOwnRemain(t *testing.T) {
 		{code: "PKG-BONUS", end: dayAt(3), remain: 30, total: 30},
 		{code: "PKG-BONUS", end: dayAt(30), remain: 30, total: 30},
 	}
-	_, _, expiring, _, _ := expiryAggregate(t, rows, 7*24*time.Hour)
+	// 窗口锚到日界而不是固定 168h（上游 cf2b80f）：D+7 的 00:00 是否落在「now+168h」内
+	// 取决于此刻是 CST 的哪个时段，固定窗口会让边界断言每天 00:00–12:00 必红。
+	_, _, expiring, _, _ := expiryAggregate(t, rows, dayAt(7).Sub(time.Now()))
 	if expiring != 57 {
 		t.Fatalf("expiring=%d want 57（27 + 30，不能把 30 天那批也算进来）", expiring)
 	}
