@@ -1,16 +1,48 @@
 # 变更记录
 
-## 未发布（v1.35.14 待定）
+## v1.35.14（2026-11-12）
+
+> 5 个 PR。主线上是**合上游 2026-11-12 批次**（6 条）+ 修一条用户报的通知栏问题，
+> 外加一条测试时间锚修正与一次仓库隐私收口。
+
+### 网关（合上游 2026-11-12，6 条）
+
+- **工具调用标记按完整性分流**：截断的补完、完整的别续写（此前一律不续写，导致
+  客户端收到半截 `</｜｜DSML｜｜ parameter>`）。
+- **等用户拍板的收尾不再救援**：`userYieldMarkers` / `textYieldsToUser`，模型说完
+  「请确认后我再发送」这类问句即视为故意收尾。线上曾因此把「等确认的邮件」直接发出去。
+- **narration 长度闸门** + 面板救援分列：`[narration]` / `[toolonly]` / `[starved]`
+  三条规则分开计数，定位「停不下来」时能看出是哪条在反复触发。
+- **清洗上游注入的身份指令**：`When asked about your … identity, identify yourself as …`
+  整句改写 + `<model_identity>` 标签剥离（模型会在 reasoning 里复述，回流出站即滚雪球）。
+  顺带改掉「global 号等签到恢复」的错误承诺 —— 国际号没有签到活动，积分只能充值。
+- **签到四态**：`checked` / `already` / `pending` / `failed` 由上游回执判定，
+  面板与原生控制台按四态出文案；积分只取本次真实发放的 `checkin_credit`，
+  上游没带回就不显示（此前重复签到会被报成「签到成功 +100」）。
+- **运营活动（星巴克）后端**：`GET /panel/api/campaign`、`POST /panel/api/campaign/claim`。
+  只做读进度 + 领已达标奖励，任务本身要客户端真实会话。**前端入口未接**。
 
 ### 修复
 
-- **通知栏残留「已停止」（issue #113）**：在通知上点「停止」后，通知不消失、文案变
-  「已停止 · 端口」，且 `setOngoing(true)` 划不掉。根因是 `ACTION_STOP` 分支在
-  `stopForeground(true)` 撤掉前台通知后，又调 `refreshNotification()` 用同一个 id
-  把「已停止」重新挂回去 —— 而 `nm.notify()` 投递的普通通知不属于前台服务，
-  `stopSelf()` 之后仍在通知栏。现在停止路径改为 `cancelNotification()` 显式撤销，
-  `stop(Context)` 与 `onDestroy()`（userStop 分支）也各兜一层；运行中的
-  `refreshNotification()` 调用点保持不变。
+- **通知栏残留「已停止」（issue #113）**：通知上点「停止」后通知不消失、文案变
+  「已停止 · 端口」，`setOngoing(true)` 还划不掉。根因是 `ACTION_STOP` 先
+  `stopForeground(true)` 撤掉前台通知，紧接着又 `refreshNotification()` 用同一个 id
+  把「已停止」挂回去 —— `nm.notify()` 投递的是普通通知，`stopSelf()` 之后仍在。
+  现在停止路径改 `cancelNotification()` 显式撤销，`stop(Context)` 与 `onDestroy()`
+  （userStop 分支）各兜一层；运行中的刷新点保持不变。
+- **原生控制台签到 toast**：`skipped`（国际版/企业/API Key 无签到体系）此前被显示成
+  「今日已签到」，现在按四态分开说。
+
+### 测试
+
+- `billing_expiry_cycle_test.go` 的时间锚改日界（补上游 `d011fc8` / `cf2b80f`）：
+  `dayAt()` 取当日 00:00、7 天窗口用 `dayAt(7)-now`，修掉「每天 00:00–12:00 CST
+  边界断言必红」的隐患。
+
+### 工程
+
+- 提交署名统一改用 GitHub noreply，文档里不再出现个人邮箱（公开仓库不留个人信息）；
+  `AGENT.md` 写明历史旧邮箱的现状与清理代价。
 
 ## v1.35.13（2026-11-11）
 
