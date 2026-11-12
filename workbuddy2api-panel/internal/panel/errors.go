@@ -124,6 +124,16 @@ func kindOf(line string) (kind, code string, sev string) {
 			kind, sev = "上游流解析失败", sevWarn
 		case strings.Contains(line, "[continue]"):
 			kind, sev = "续写降级", sevWarn
+		case strings.Contains(line, "[narration]"):
+			// 预告句救援：模型停在「……：」上被续写。与 toolonly 分开计数，运维才能
+			// 判断是哪条规则在动（issue #209 的建议 3）。
+			kind, sev = "续写救援（预告句）", sevInfo
+		case strings.Contains(line, "[toolonly]"):
+			// 「说一句就停」的救援：命中说明客户端刚才差点看到中途停下，救回来是好事，
+			// 但要能算出救了多少、救回的是工具调用还是只有正文——按 info 记，进「救援」一栏。
+			kind, sev = "续写救援（说一句就停）", sevInfo
+		case strings.Contains(line, "[starved]"):
+			kind, sev = "续写救援（思考吃光预算）", sevInfo
 		case strings.Contains(line, "fetch models"), strings.Contains(line, "global models"),
 			strings.Contains(line, "models.dev fetch"), strings.Contains(line, "model.json"):
 			kind, sev = "模型目录拉取异常", sevWarn
@@ -174,7 +184,11 @@ func AggregateErrors(lines []LogLine) []ErrStat {
 
 	for _, ln := range lines {
 		txt := strings.TrimSpace(ln.Text)
-		if !strings.HasPrefix(txt, "WARN") && !strings.HasPrefix(txt, "ERR") {
+		// WARN/ERR 之外，只额外放行「续写救援」这三族（它们是 info 级的好消息，
+		// 但必须能数出来，且按入口分开）：其余 INFO 噪音不进汇总。
+		rescue := strings.Contains(txt, "[toolonly]") || strings.Contains(txt, "[narration]") ||
+			strings.Contains(txt, "[starved]")
+		if !rescue && !strings.HasPrefix(txt, "WARN") && !strings.HasPrefix(txt, "ERR") {
 			continue
 		}
 		kind, code, sev := kindOf(txt)

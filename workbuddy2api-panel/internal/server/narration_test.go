@@ -179,3 +179,76 @@ func TestNoNarrationRescueOnToolCalls(t *testing.T) {
 		t.Fatalf("含工具调用的轮次不应续写，实际 %d 次", len(*reqs))
 	}
 }
+
+// issue #209 建议 2：narration 原先没有长度闸门，只要停在冒号/逗号上就续写，
+// agent 客户端的「说明 + 列表」几乎总以冒号收尾，于是每个工具轮都被多续一次。
+func TestNarrationLengthGate(t *testing.T) {
+	short := strings.Repeat("我先看一下这几个文件的改动：", 3)       // ~200B，停在冒号
+	long := strings.Repeat("这一轮我把改动逐条过了一遍，下面是要点：", 20) // >400B，停在冒号
+	if !narrationTailSuspends(short) || !narrationTailSuspends(long) {
+		t.Fatal("前提失败：两条都该被判为尾部悬空")
+	}
+	if len(short) > narrationMaxBytes {
+		t.Fatalf("样本 1 应小于闸门：%d", len(short))
+	}
+	if len(long) <= narrationMaxBytes {
+		t.Fatalf("样本 2 应大于闸门：%d", len(long))
+	}
+	if !narrationTailStructurallyOpen("```go\nfunc x() {") {
+		t.Fatal("未闭合代码块应判为结构上没写完（不受长度闸门限制）")
+	}
+}
+
+// 等用户回话的正文，narration 也不能续（否则「请确认」之后会自己往下写并动手）。
+func TestNarrationSkipsWhenWaitingForUser(t *testing.T) {
+	seg := `data: {"id":"n1","choices":[{"index":0,"delta":{"content":"草稿在下面。发之前请你确认收件人，"}}]}` + "\n\n" +
+		`data: {"id":"n1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":30,"total_tokens":106537}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyText })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("含「请你确认」的正文不该被续写，实际 %d 次", len(*reqs))
+	}
+}
+
+// 长度闸门必须端到端生效：>400B 且停在冒号上 → 一个续写请求都不该发。
+// （上面 TestNarrationLengthGate 只测辅助函数，变异跑不出来，所以另立这条。）
+func TestNarrationLongLeadInNotRescued(t *testing.T) {
+	long := strings.Repeat("这一轮我把三处改动逐条过了一遍，下面是按文件整理的要点清单：", 12) // ~1100B
+	if len(long) <= narrationMaxBytes {
+		t.Fatalf("样本不够长：%d", len(long))
+	}
+	seg := `data: {"id":"n2","choices":[{"index":0,"delta":{"content":"` + long + `"}}]}` + "\n\n" +
+		`data: {"id":"n2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":300,"total_tokens":106807}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyText })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("1.1KB 正文停在冒号上不该续写，实际 %d 次", len(*reqs))
+	}
+}
+
+// 短预告（<400B）仍要救：这是这条救援存在的理由。
+func TestNarrationShortLeadInStillRescued(t *testing.T) {
+	short := "我先看一下这几个文件的实际实现："
+	if len(short) > narrationMaxBytes {
+		t.Fatal("样本超标")
+	}
+	seg := `data: {"id":"n3","choices":[{"index":0,"delta":{"content":"` + short + `"}}]}` + "\n\n" +
+		`data: {"id":"n3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":20,"total_tokens":106527}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyText })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("短预告应救一次，实际 %d 次", len(*reqs))
+	}
+}

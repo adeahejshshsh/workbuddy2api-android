@@ -31,6 +31,8 @@ build/
 # 本机临时/杂物
 .panel-ip
 *.tmp
+*.rej
+*.orig
 *.log
 *.pid
 data/

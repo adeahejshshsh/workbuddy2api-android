@@ -34,6 +34,16 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 // 单次请求仍用无 ctx 的 http.NewRequest + client 120s 超时 —— SIGTERM 时最坏
 // 还要等满一次请求才收尾，挤压 run.sh 的 8s 停机预算。
 func (c *Client) billingJSONCtx(ctx context.Context, a *auth.Auth, method, path string, body any) (json.RawMessage, error) {
+	env, _, err := c.billingJSONRawCtx(ctx, a, method, path, body)
+	return env.Data, err
+}
+
+// billingJSONRawCtx 同 billingJSONCtx，另外把信封与**原始响应体**一并交回。
+//
+// 为什么需要：daily-checkin 的成功回执是**平铺**的（没有 {code,msg,data} 信封），
+// 只交 env.Data 会拿到 null，这次到底发了多少积分就丢了
+// （见 checkin_receipt.go 头注释）。
+func (c *Client) billingJSONRawCtx(ctx context.Context, a *auth.Auth, method, path string, body any) (apiEnvelope, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -41,16 +51,21 @@ func (c *Client) billingJSONCtx(ctx context.Context, a *auth.Auth, method, path 
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return nil, err
+			return apiEnvelope{}, nil, err
 		}
 		rdr = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.billingBase(a)+path, rdr)
 	if err != nil {
-		return nil, err
+		return apiEnvelope{}, nil, err
 	}
 	c.BillingHeaders(req, a)
-	return c.doJSON(req)
+	return c.doJSONRaw(req)
+}
+
+// billingJSONRaw 无 ctx 版本（签到回执读原始 body 用）。
+func (c *Client) billingJSONRaw(a *auth.Auth, method, path string, body any) (apiEnvelope, []byte, error) {
+	return c.billingJSONRawCtx(context.Background(), a, method, path, body)
 }
 
 // billingMeterJSON 仅对 /billing/meter 族端点（get-user-resource / daily-checkin）
@@ -62,20 +77,35 @@ func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, b
 
 // billingMeterJSONCtx 带 ctx（bug-12，语义同 billingJSONCtx）。
 func (c *Client) billingMeterJSONCtx(ctx context.Context, a *auth.Auth, paths []string, method string, body any) (json.RawMessage, error) {
-	var lastErr error
+	env, _, err := c.billingMeterRawCtx(ctx, a, paths, method, body)
+	return env.Data, err
+}
+
+// billingMeterRaw 同 billingMeterJSON，另外交回信封与原始 body（签到回执要用平铺
+// body 里的 credit）。
+func (c *Client) billingMeterRaw(a *auth.Auth, paths []string, method string, body any) (apiEnvelope, []byte, error) {
+	return c.billingMeterRawCtx(context.Background(), a, paths, method, body)
+}
+
+// billingMeterRawCtx 带 ctx 的多路径版本（语义同 billingMeterJSONCtx）。
+func (c *Client) billingMeterRawCtx(ctx context.Context, a *auth.Auth, paths []string, method string, body any) (apiEnvelope, []byte, error) {
+	var (
+		lastErr error
+		lastRaw []byte
+	)
 	for i, path := range paths {
-		data, err := c.billingJSONCtx(ctx, a, method, path, body)
+		env, raw, err := c.billingJSONRawCtx(ctx, a, method, path, body)
 		if err == nil {
-			return data, nil
+			return env, raw, nil
 		}
-		lastErr = err
+		lastErr, lastRaw = err, raw
 		// 仅 404 换路径（路径不存在才值得 fallback）；其他错误直接返回。
 		var ue *Error
 		if !errors.As(err, &ue) || ue.Kind != ErrNotFound || i == len(paths)-1 {
-			return nil, err
+			return env, raw, err
 		}
 	}
-	return nil, lastErr
+	return apiEnvelope{}, lastRaw, lastErr
 }
 
 // billingRetryDelay 签到/余额等维护类计费调用瞬时错误重试的间隔基数。

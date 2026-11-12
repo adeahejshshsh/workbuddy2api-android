@@ -172,6 +172,10 @@ final class PanelService {
 
     static final class TaskResult {
         String message = "", error = "";
+        /** 签到四态：checked / already / pending / failed / skipped（其它接口留空）。 */
+        String state = "";
+        /** 本次真实发放的积分；-1 = 上游没带回（不能当 0 显示）。 */
+        int credit = -1;
         int accepted, done, skipped, failed;
     }
 
@@ -234,11 +238,14 @@ final class PanelService {
             public void ok(JSONObject o) {
                 TaskResult r = new TaskResult();
                 r.message = o.optString("checkin_message");
-                if (o.has("credits")) r.message = r.message + "|" + o.optLong("credits")
-                        + "|" + o.optLong("credits_total");
+                // 四态是权威答复：只凭 checkin_done 会把「今天早就签过」说成签到成功。
+                r.state = o.optString("checkin_state");
+                if (o.has("checkin_credit")) r.credit = o.optInt("checkin_credit");
                 if (o.optBoolean("checkin_skipped")) r.error = "skipped";
                 else if (!o.optBoolean("checkin_done")) r.error = "not_done";
                 if (o.has("balance_error")) r.error = o.optString("balance_error");
+                if (o.has("credits")) r.message = r.message + "|" + o.optLong("credits")
+                        + "|" + o.optLong("credits_total");
                 cb.ok(r);
             }
             public void fail(String msg) { cb.fail(msg); }

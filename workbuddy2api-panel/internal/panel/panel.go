@@ -361,6 +361,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/tasks/claim_sweep", p.claimSweep)
 	p.mux.HandleFunc("GET /panel/api/queue", p.tasksQueueStatus)
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.schoolVouchers)
+	// 运营活动（星巴克等）：批量读进度 + 批量领已达标的奖励。
+	// 只做「读 + 领」——任务本身要客户端真实会话，服务端侧伪造不计数。
+	p.mux.HandleFunc("GET /panel/api/campaign", p.campaignStatus)
+	p.mux.HandleFunc("POST /panel/api/campaign/claim", p.campaignClaim)
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.checkinAll)
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.travelAll)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/travel", p.accountTravel)
@@ -937,6 +941,12 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	checkinMsg := ""
 	checkinDone := false
 	checkinSkipped := false // 无签到体系（global/企业）：不是失败，也不是"签到完成"（bug-13）
+	// checkin_state 是「这次签到到底发生了什么」的权威答复，四态见 upstream.CheckinState：
+	// checked（本次真签到、上游发了积分）/ already（今天早就签过、一个积分都没发）/
+	// pending（上游处理中，可稍后重试）/ failed。前端据此出文案与配色 —— 只凭
+	// checkin_done 会把 already 和 checked 说成同一句话。
+	checkinState := ""
+	checkinCredit, checkinCreditKnown := 0, false
 	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，
 	// 端点退化为「刷新额度」——企业额度走 get-enterprise-user-usage 口径（见 upstream）。
 	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
@@ -955,22 +965,28 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		// 按钮，但外部脚本/旧缓存前端仍可能调这个端点。
 		checkinMsg = "静态 API Key 账号无个人身份（已跳过签到，仅刷新额度）"
 		checkinSkipped = true
-	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
-		// 幂等拒绝（今天已签到）是**正常结果**，不是错误（bug #13）：此前把
-		// err.Error() 原样回给前端，toast 会拼出「（code=10001 msg=今天已签到）」
-		// 这种错误文本，而按钮已经显示「已签」。
-		if upstream.IsAlreadyCheckin(err) {
-			p.cfg.Pool.NoteCheckinDone(uid)
-			checkinDone = true
-			checkinMsg = "今天已签到"
-		} else {
+	} else {
+		// 回执四态：只凭 error 会把 already / checked 说成同一句（bug #13 的根因）。
+		receipt, err := p.cfg.Upstream.CheckinReceipt(a)
+		checkinState = string(receipt.State)
+		checkinMsg = receipt.Msg
+		if checkinMsg == "" && err != nil {
 			checkinMsg = err.Error() // 其它业务错误照常回显，同时继续查余额
 		}
-	} else {
-		p.cfg.Pool.NoteCheckinDone(uid)
-		checkinDone = true
+		// 幂等拒绝（already）同样是「今日已签」，标记后按钮显示「已签」。
+		if receipt.State == upstream.CheckinChecked || receipt.State == upstream.CheckinAlready {
+			p.cfg.Pool.NoteCheckinDone(uid)
+			checkinDone = true
+		}
+		// 积分只取上游这次真实发放的数：already 没发、失败更没发，都不能给数字。
+		if receipt.State == upstream.CheckinChecked && receipt.CreditKnown {
+			checkinCredit, checkinCreditKnown = receipt.Credit, true
+		}
 	}
-	resp := map[string]any{"ok": true, "checkin_done": checkinDone}
+	resp := map[string]any{"ok": true, "checkin_done": checkinDone, "checkin_state": checkinState}
+	if checkinCreditKnown {
+		resp["checkin_credit"] = checkinCredit
+	}
 	if checkinSkipped {
 		resp["checkin_skipped"] = true // 前端据此显示"已跳过"而不是"签到完成/失败"
 	}

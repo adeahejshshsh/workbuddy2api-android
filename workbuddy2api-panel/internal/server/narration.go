@@ -47,9 +47,14 @@ const narrationNudge = "你上一条回复停在一句预告（例如以冒号�
 // 「正文」，又因为尾部不是句末标点就判定「话没说完」→ 补发续写指令 → 模型再发一次
 // 调用 → 客户端再执行一次。用户看到的就是「任务早该结束了，却一直在工具调用」。
 //
-// 所以：正文里只要出现工具调用标记，一律不续写——不管标记是否闭合。闭合的说明这次
-// 调用已经完整（更不该续）；未闭合的说明流在标记中间断了，续写会拼出第二个调用，
-// 同样有害，交给客户端按自己的协议处理。
+// 所以判据必须分两种状态（这也是「DSML 修了又像没修」的来由）：
+//
+//	已有完整块 → "…</｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>"
+//	             客户端会解析执行这条调用，**不能**续写（续写会让模型再发一次，
+//	             用户看到「任务该结束了却一直在工具调用」）。
+//	截断块     → "…2>&1</｜｜DSML｜｜ parameter>"
+//	             调用写到一半流就断了，客户端解析不出来，界面留下半截标记垃圾
+//	             （用户反馈的截图就是这个）。这种**必须**续写把块补完。
 var toolCallMarkupMarkers = []string{
 	"｜｜DSML｜｜", "|DSML|", // DeepSeek 的 DSML 标记（全角/半角竖线两种写法都出现过）
 	"</function_calls>", "<function_calls>",
@@ -57,17 +62,110 @@ var toolCallMarkupMarkers = []string{
 	"</tool_calls>", "<tool_calls>", // 少数 prompt 会把工具调用格式教成这种 XML
 }
 
-// hasToolCallMarkup 正文里是否出现了「写成文本的工具调用」。
-func hasToolCallMarkup(text string) bool {
+// markupState 正文里「写成文本的工具调用」的完整程度。
+type markupState int
+
+const (
+	markupNone     markupState = iota // 没有工具调用标记
+	markupComplete                    // 标记块已闭合：这是一次完整的调用
+	markupPartial                     // 标记中间断了：调用写了一半
+)
+
+// toolCallMarkupState 判断正文里工具调用标记的状态。两类样本的处理方式相反，见上。
+func toolCallMarkupState(text string) markupState {
 	if text == "" {
-		return false
+		return markupNone
 	}
+	found := false
 	for _, m := range toolCallMarkupMarkers {
 		if strings.Contains(text, m) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return markupNone
+	}
+	t := strings.TrimRight(text, " \t\r\n")
+	switch {
+	case strings.HasSuffix(t, "</function_calls>"), strings.HasSuffix(t, "</tool_calls>"):
+		return markupComplete
+	case strings.HasSuffix(t, "calls>") && strings.Contains(t, "DSML"):
+		return markupComplete // DSML 的调用块以 "</｜｜DSML｜｜ calls>" 收尾
+	}
+	return markupPartial
+}
+
+// hasToolCallMarkup 正文里是否出现了「写成文本的工具调用」（不论完整与否）。
+// 供 toolonly 使用：那条只采纳结构化 tool_calls、正文一律丢弃，两种状态都不能碰
+// （截断态需要的是「接着写」，那是 narration 的活）。
+func hasToolCallMarkup(text string) bool {
+	return toolCallMarkupState(text) != markupNone
+}
+
+// userYieldMarkers 正文里「把控制权交回用户」的措辞。
+//
+// 为什么必须有这条判据（2026-11-11 issue #209）：救援的语义是「模型没说完，替它
+// 补上」，但有一类收尾是**故意的**——模型在等用户拍板（"邮件已经写好，请确认后我再
+// 发送。"）。这时补一句"继续执行下一步"会得到工具调用并被采纳，客户端于是真的把
+// 邮件发出去了。线上已发生两例：用户要求先确认再发，结果 agent 直接群发。
+//
+// 判据取「措辞 + 问号」，不猜语义：宁可漏救（客户端自己重试一轮的代价是几秒），
+// 也不能替用户按下发送键。
+var userYieldMarkers = []string{
+	"请确认", "确认后", "等你确认", "待你确认", "等你回复", "等你确认后",
+	"是否需要", "需不需要", "要不要我", "要不要", "你希望", "请告知",
+	"让我知道", "请你确认", "你确认后", "确认无误", "可以吗", "行吗", "好吗",
+}
+
+// userYieldMarkersEN 英文形态（模型偶发用英文收尾）。
+var userYieldMarkersEN = []string{
+	"please confirm", "let me know", "should i ", "do you want", "would you like",
+	"awaiting your", "waiting for your", "confirm before", "shall i ",
+}
+
+// textYieldsToUser 报告这段正文是否在「等用户回话」：以问号收尾，或含请确认类措辞。
+//
+// 注意问号收尾在 narrationTailSuspends 里被判为「说完了」（句末标点），所以这条判据
+// 必须独立成立——它挡的是「模型主动提问后停下」这个正确行为，而不是「话没说完」。
+func textYieldsToUser(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if strings.HasSuffix(t, "？") || strings.HasSuffix(t, "?") {
+		return true
+	}
+	for _, m := range userYieldMarkers {
+		if strings.Contains(t, m) {
+			return true
+		}
+	}
+	low := strings.ToLower(t)
+	for _, m := range userYieldMarkersEN {
+		if strings.Contains(low, m) {
 			return true
 		}
 	}
 	return false
+}
+
+// narrationMaxBytes narration 的长度闸门（只对「标点型尾部」生效）。
+//
+// 这条救援原本没有长度上限：正文多长、只要停在冒号/逗号上就续写一次，而 agent 客户端
+// 的「说明 + 列表」几乎总是以冒号或逗号收尾（issue #209 的复现条件之一）。预告句实测
+// 集中在 40~200B，400B 已覆盖全部真实预告样本，再长的「停在冒号上」更可能是正常排版。
+//
+// 未闭合代码块与截断的工具调用标记不受这条限制：那是结构上确实没写完，与长度无关。
+const narrationMaxBytes = 400
+
+// narrationTailStructurallyOpen 尾部是否「结构上没写完」（未闭合代码块 / 截断的调用标记）：
+// 这类形态长度不设限，见 narrationMaxBytes。
+func narrationTailStructurallyOpen(text string) bool {
+	if toolCallMarkupState(text) == markupPartial {
+		return true
+	}
+	return strings.Count(strings.TrimRight(text, " \t\r\n"), "```")%2 == 1
 }
 
 // narrationTailSuspends 正文尾部是否「话没说完」。
@@ -79,14 +177,23 @@ func hasToolCallMarkup(text string) bool {
 //     "Reading failfirst.sh mutation script" 这种就是这一形态：7 个 token
 //     的现在分词短语，没有任何标点）。
 //
-// 例外：正文里含工具调用标记时**一律**返回 false（见 toolCallMarkupMarkers）——
-// 那种「未说完」是标记的收尾符造成的假象，续写会造出第二次工具调用。
+// 例外：工具调用标记按**完整性**分流（见 toolCallMarkupState）——
+// 完整块返回 false（客户端会执行它，续写会造出第二次调用）；截断块返回 true
+// （调用写到一半断了，必须续写把块补完，否则客户端只看到半截标记）。
 func narrationTailSuspends(text string) bool {
-	if hasToolCallMarkup(text) {
+	switch toolCallMarkupState(text) {
+	case markupComplete:
+		return false
+	case markupPartial:
+		return true
+	}
+	t := strings.TrimRight(text, " \t\r\n")
+	if t == "" {
 		return false
 	}
-	t := strings.TrimRight(text, " 	\r\n")
-	if t == "" {
+	// 结构性收尾：该块已经完整。
+	if strings.HasSuffix(t, "</summary>") || strings.HasSuffix(t, "</details>") ||
+		strings.HasSuffix(t, "</analysis>") {
 		return false
 	}
 	if strings.Count(t, "```")%2 == 1 {
@@ -98,7 +205,7 @@ func narrationTailSuspends(text string) bool {
 		return true
 	}
 	// 句末标点与收尾符：正常说完的形态。
-	if strings.ContainsRune("。.!！?？\"'”’）)》】]}`*~", last) {
+	if strings.ContainsRune("。.!！?？\"'”’）)》】]}`*~&", last) {
 		return false
 	}
 	return true
@@ -152,7 +259,19 @@ func (r *continueReader) tryNarrationRetry() bool {
 	case r.seg >= maxContinueSegments-1:
 		return false
 	}
-	if !narrationTailSuspends(r.text.String()) {
+	txt := r.text.String()
+	// 模型在等用户拍板（问句结尾 / 「请确认后我再…」）：这是**故意的**收尾。
+	// 补一句「继续执行下一步」会拿到工具调用并被采纳，等于替用户按下发送键
+	// （issue #209 两例：要确认的邮件被直接群发）。
+	if textYieldsToUser(txt) {
+		return false
+	}
+	// 长度闸门：预告句实测 40~200B，400B 已覆盖；再长的「停在冒号上」多半是正常排版。
+	// 结构上确实没写完的（未闭合代码块 / 截断的调用标记）不受此限。
+	if !narrationTailStructurallyOpen(txt) && len(txt) > narrationMaxBytes {
+		return false
+	}
+	if !narrationTailSuspends(txt) {
 		return false
 	}
 	declared, toolTurn := bodyToolShape(r.body)
