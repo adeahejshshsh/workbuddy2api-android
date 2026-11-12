@@ -10,17 +10,24 @@
 
 ## 提交署名（务必保持）
 
-本仓的提交必须署名为仓库所有者，否则 GitHub 上会显示成一个未验证的机器人身份：
+公开仓库**不得**出现任何个人邮箱。提交一律用 GitHub 的 noreply 地址：
 
 ```
 git config user.name  adeahejshshsh
-git config user.email 3119479762@qq.com
+git config user.email adeahejshshsh@users.noreply.github.com
 ```
 
-历史教训：本机默认身份是 `dsh-mobile <local@dsh>`，用它提交再开 PR，PR 的 **Commits
-页**会显示 `dsh-bot`（未关联账号的邮箱）；squash 合入后 main 上的提交虽然是正确作者
-（GitHub 取 PR 创建者），但评审页的署名仍然难看，且 PR refs 无法事后改写。换机 /
-重装后先跑一次上面两行。
+两条历史教训：
+
+1. 本机默认身份是 `dsh-mobile <local@dsh>`，用它提交再开 PR，PR 的 **Commits 页**会
+   显示成未验证身份；squash 合入后 main 上的作者才对（GitHub 取 PR 创建者），但
+   PR refs 事后无法改写。
+2. 早期提交直接用个人邮箱署名，等于把邮箱写进了每一条提交的 author 字段 ——
+   公开仓库里这就是泄露。自 2026-11-12 起新提交一律 noreply；**历史里的旧邮箱仍在**
+   （改它要改写全部 commit + force push，会让所有 SHA 失效、PR 链接断裂），
+   是否清理由仓库所有者决定，别擅自跑 `filter-branch`。
+
+换机 / 重装后先跑上面两行；推之前用 `git log -1 --format='%ae'` 自查一眼。
 
 
 ## 一、Go 工具链
