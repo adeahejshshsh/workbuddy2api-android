@@ -8,6 +8,21 @@
 
 ---
 
+## 提交署名（务必保持）
+
+本仓的提交必须署名为仓库所有者，否则 GitHub 上会显示成一个未验证的机器人身份：
+
+```
+git config user.name  adeahejshshsh
+git config user.email 3119479762@qq.com
+```
+
+历史教训：本机默认身份是 `dsh-mobile <local@dsh>`，用它提交再开 PR，PR 的 **Commits
+页**会显示 `dsh-bot`（未关联账号的邮箱）；squash 合入后 main 上的提交虽然是正确作者
+（GitHub 取 PR 创建者），但评审页的署名仍然难看，且 PR refs 无法事后改写。换机 /
+重装后先跑一次上面两行。
+
+
 ## 一、Go 工具链
 
 ### 1. 二进制不能直接 exec（私有目录 + SELinux）
