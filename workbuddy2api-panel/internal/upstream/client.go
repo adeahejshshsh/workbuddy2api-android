@@ -3020,8 +3020,11 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
 // 偶发上游 5xx（code 10000）做有界重试（见 retryBillingTransient）——单次抖动不再
 // 让该账号整天漏签；「已签到」等业务错误不重试。
+// 需要区分「本次真签到 / 今天早就签过发了几分」的调用方用 CheckinReceipt；
+// 本函数只保留 error 语义给不关心回执的老调用方（调度器 / CLI）。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	return c.DailyCheckinCtx(context.Background(), a)
+	_, err := c.CheckinReceipt(a)
+	return err
 }
 
 // DailyCheckinCtx 带 ctx（bug #3）：停机时不必把重试的 2s+4s 睡满。

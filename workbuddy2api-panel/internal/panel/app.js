@@ -612,6 +612,27 @@ function visibleAccounts() {
     : lastAccountsList;
 }
 
+/* 签到四态文案（checkin_state 由后端按回执判定，见 upstream.CheckinState）：
+   checked = 本次真签到、上游发了积分；already = 今天早就签过、一个积分都没发；
+   pending = 上游还在处理；failed = 上游拒签；skipped = 该账号没有签到体系。
+   关键：already 和 checked 的事实不同。以前只凭 checkin_done 一律显示「签到完成」，
+   重复点按钮看起来像能无限刷积分。积分数字只取上游这次真实带回的 checkin_credit，
+   取不到就不显示，绝不硬编码。 */
+function checkinResultNote(r) {
+  if (r.skipped || r.checkin_skipped) {
+    return { message: r.skip_reason || r.checkin_message || '该账号不适用签到', severity: '' };
+  }
+  const balance = r.credits != null ? '，当前积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '';
+  const state = r.checkin_state || (r.checkin_done ? 'checked' : 'failed');
+  if (state === 'skipped') return { message: r.checkin_message || r.skip_reason || '该账号不适用签到', severity: '' };
+  if (state === 'already') return { message: '今天已签到，无需重复，上游不会再发积分' + balance, severity: '' };
+  if (state === 'pending') return { message: '签到未完成：上游还在处理，稍后重试' + balance, severity: 'warn' };
+  if (state !== 'checked') return { message: '签到未完成：' + (r.checkin_message || '请稍后重试') + balance, severity: 'err' };
+  const gain = typeof r.checkin_credit === 'number' ? '，+' + r.checkin_credit + ' 积分' : '';
+  if (r.balance_error) return { message: '签到成功' + gain + '；余额刷新失败：' + r.balance_error, severity: 'err' };
+  return { message: '签到成功' + gain + balance, severity: 'ok' };
+}
+
 function renderAccounts(list) {
   const tb = $('accBody');
   lastAccountsList = Array.isArray(list) ? list : [];
@@ -747,7 +768,7 @@ function renderAccounts(list) {
         // 国际版（realm=global）同样没有签到/成长体系（bug-01）：与 enterprise 同口径隐藏，
         // 否则点了必然吃上游 404/403，看起来像网关坏了。
         ((s.enterprise || s.api_key || s.realm === 'global') ? '' :
-          '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>'),
+          '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到：重复签发不了积分，点击只是重查状态并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>'),
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>',
         // 国际版保留查询入口（上游任务是只读 schema）：按钮照常渲染，写操作在弹窗里
         // 按 capabilities 禁用。企业版/API Key 仍隐藏——它们连查询都没有个人体系。
@@ -883,12 +904,10 @@ $('accBody').addEventListener('click', async ev => {
   try {
     if (a === 'checkin') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/checkin', { method: 'POST' });
-      // 三种结果分开说（bug-13）：跳过（global/企业）/ 成功 / 失败。
-      // 此前一律拼成「签到完成（<上游错误原文>）」，自相矛盾。
-      const bal = (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '');
-      if (r.checkin_skipped) toast((r.checkin_message || '该账号无签到体系') + bal, 'ok');
-      else if (r.checkin_done) toast('签到完成' + bal + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
-      else toast('签到失败' + bal + (r.checkin_message ? '：' + r.checkin_message : ''), 'err');
+      // 四态文案交给纯函数（checkinResultNote）：跳过 / 今日早已签 / 处理中 / 真签到 / 失败。
+      // 此前一律拼成「签到完成（<上游错误原文>）」，把幂等拒绝说成了签到成功。
+      const note = checkinResultNote(r);
+      toast(note.message, note.severity || 'ok');
     } else if (a === 'balance') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/balance', { method: 'POST' });
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');

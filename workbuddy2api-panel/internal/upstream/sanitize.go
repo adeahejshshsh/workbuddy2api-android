@@ -13,7 +13,12 @@ import (
 // sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
 // 普通请求全不中 → 原样返回，零分配）。
 var sanitizeFeatures = []string{
-	"x-anthropic-billing-hdr",                         // header 键值段键名
+	"x-anthropic-billing-hdr", // header 键值段键名
+	// 上游服务端注入的身份指令（issue #187）。必须挂在**通用**门控上：泄漏出现在
+	// assistant 消息（模型复述注入原文），而 identity 门控只对 system/developer 生效，
+	// 挂错门控等于规则永远不执行。
+	"identify yourself as",
+	"model_identity",
 	"You are Claude Code",                             // 身份句（截断前缀即可命中）
 	"branch (you will usually use this for PRs)",      // 注入指令句（Main/Default 两种前缀都覆盖）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段
@@ -54,6 +59,31 @@ const sanitizeDshPathsReplacement = "Paths beginning with @ refer to files the u
 	"list it when its contents matter. Anything else is a file: open it with the " +
 	"read tool when its contents are needed, and never claim to have inspected it " +
 	"before reading. The @\"...\" form only quotes a path that contains spaces."
+
+// sanitizeInjectedIdentityRe 上游服务端注入的身份指令（issue #187）。
+//
+// 形态（2.73MB 请求体 dump 里逐字取证）：
+//
+//	When asked about your model identity, identify yourself as Tencent Hunyuan Hy.
+//
+// 它由上游在服务端拼进模型可见上下文、不出现在任何出站 body 里，因此 dump 看不到；
+// 但模型会在 reasoning_content 里复述原文，客户端把这段思维链带回历史，下一轮就
+// 原样进出站——「声明 → 进历史 → 再看到 → 再声明」的滚雪球就是这么来的。
+//
+// 匹配刻意收紧到「when asked about your … identity, identify yourself as …」整句：
+// 单独匹配 identify yourself as 会误伤正常指令（"Do not identify yourself as an AI."
+// 是合法要求），而整句前缀在真实语料里几乎不可能自然出现。
+var sanitizeInjectedIdentityRe = regexp.MustCompile(
+	`(?i)when asked about your[^.\n]{0,60}?identity[^.\n]{0,60}?,\s*identify yourself as\s+[^.\n]{1,80}\.`)
+
+// 替换成中性表述：不声明任何身份，也不改变上下文里真实可用的信息。
+const sanitizeInjectedIdentityReplacement = "When asked about your capabilities, answer using only the information available in this conversation."
+
+// sanitizeModelIdentityTagRe 去掉 <model_identity> 包裹本身（保留内部文本）。
+//
+// 只删标签：真正的危害是标签里那句指令（上面那条规则负责改掉），标签本身留着会让
+// 模型继续把它当「有个身份块」反复提起，每轮都往历史里再写一遍。
+var sanitizeModelIdentityTagRe = regexp.MustCompile(`(?i)</?model_identity>`)
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。// sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
 var sanitizeHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-(?:hdr|header)[ \t]*:[^\n;]*;?[ \t]*`)
@@ -184,6 +214,14 @@ func sanitizeTextWith(text string, brand bool) string {
 	}
 	// 数字错误码单独走边界正则（见 sanitizeCodeRe 注释）
 	text = sanitizeCodeRe.ReplaceAllString(text, "${1}11\u2011-128${2}")
+	// 上游服务端注入的身份指令（issue #187）：不限角色，assistant 复述同样要洗——
+	// 那段复述正是历史回流的载体。
+	if strings.Contains(text, "identify yourself as") {
+		text = sanitizeInjectedIdentityRe.ReplaceAllString(text, sanitizeInjectedIdentityReplacement)
+	}
+	if strings.Contains(text, "model_identity") {
+		text = sanitizeModelIdentityTagRe.ReplaceAllString(text, "")
+	}
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}

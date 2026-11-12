@@ -531,3 +531,21 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 本批同时补：`config.example.json` 记录 `head_keepalive`。
 
 未做：`d011fc8`/`cf2b80f` 是上游 `billing_expiry_cycle_test.go` 的时间锚修正——本仓该文件按自身模型重写（`expiryAggregate` 直接断言五个返回值），不需要这两个补丁；`849d338` 依赖升级仍需联网。
+
+## 第十四批：上游 2026-11-12 批次（`cf16478..1c007bb0`，6 条）
+
+> 取数方式：本机 `git fetch upstream` 连不上 github.com:443（58s 超时），改走
+> `api.github.com` 的 commits 接口取元数据 + 每文件 patch，本地重组成 unified diff
+> 后按 `internal/…` → `workbuddy2api-panel/internal/…` 重写路径再 apply。
+> 下一次能直连 git 时这里不需要重做。
+
+| 上游提交 | 处置 | 说明 |
+|---|---|---|
+| `92dadae3` 工具调用标记按完整性分流（截断的补完、完整的别续写） | ✅ 合入 | `narration.go` 三处 hunk 干净落地；用例文件因模块路径 `misakano7545`→`linguo2625469` 需重写后 apply。本仓 `narration_markup_test.go` 已是新形态（截断/完整两条端到端），上游那条「删掉旧断言」的 hunk 在本仓无对象，丢弃即可 |
+| `79ba3d62` 等用户拍板的收尾不再救援 + narration 长度闸门 + 面板分列救援入口 | ✅ 合入（适配） | `narration.go`（`userYieldMarkers` / `textYieldsToUser`）与 `toolonly.go`（救援前先判「在等用户」）干净落地；`errors.go` 本仓**没有**救援分类（上游那条来自更早批次），按上游新口径补：`[narration]`/`[toolonly]`/`[starved]` 三类分开计数 + 汇总只放行这三族，并补 `TestAggregateErrorsRescueKinds`。`errors_test.go` 原 hunk 打不上（本仓无旧版测试），改为新增函数 |
+| `8f9fa3c5` 清洗上游注入的身份指令 + 去掉全球号「等签到恢复」的错误承诺 | ✅ 合入（手工） | `hint.go` 文案替换；`sanitize.go` 本仓行内容已与上游不同（`x-anthropic-billing-hdr` 早已收），按语义手工加：两条门控特征（`identify yourself as` / `model_identity`）、`sanitizeInjectedIdentityRe`（收紧到整句，避免误伤 “Do not identify yourself as an AI.”）、`sanitizeModelIdentityTagRe`（只删标签）、`sanitizeTextWith` 里两个替换点；用例文件原样收（3 条全绿） |
+| `8125831d` 重复签到不再报「签到已完成」，按回执分四态 | ✅ 合入（适配） | 新增 `upstream/checkin_receipt.go`（四态 + 积分只取上游真实值）；本仓 `apiEnvelope.Code` 是 `flexInt`，`CheckinReceipt.Code` 收窄时显式转换；`report.go` 补 `billingJSONRaw`/`billingMeterRaw`（本仓已有 `doJSONRaw`，且 billing 走 **Ctx** 变体，故同时加 `…RawCtx` 并让老函数委托）；`DailyCheckin` 改为委托 `CheckinReceipt`（保留 `DailyCheckinCtx` 给调度器）；`panel.go` 四态回填**保留本仓的 `checkin_skipped`**（global/企业/API Key 的既有口径），新增 `checkin_state` 与条件性 `checkin_credit`；`app.js` 新增 `checkinResultNote` 纯函数（本仓没有上游的 `taskOutcomeStatus`，函数插在 `renderAccounts` 前），行内按钮与组内批量都走它；客户端把四态透传到原生控制台 toast（原实现把 skipped 说成「今日已签到」，一并修掉）。测试适配：本仓无 `testRealmAuth`/`useRealmForTest`，新增 `realm_test_helper_test.go`（realm 用 domain 表达）；响应结构断言按本仓字段收窄（无 `checkin_error`/`skip_reason`）；前端用例改用 `nodeBin`/`nodeCmd`（本机 node 需 linker64 代跑） |
+| `0fadf989` + `1c007bb0` 运营活动批量读进度 + 一键领奖（星巴克 `activity_code`） | ✅ 合入（后端） | 新增 `internal/upstream/campaign.go`（活动码定位 + 进度读 + 领奖）与 `internal/panel/campaign.go`（`GET /panel/api/campaign`、`POST /panel/api/campaign/claim`），路由插在 `school/vouchers` 后。修一处签名差异：上游 `c.do(req, a, false)`（新版带出口归因），本仓 `do(req)`。**前端未接**：上游这次只提交后端，网页面板与原生控制台都没有入口，先留 API |
+
+未合入：无（本批 6 条全部落地）。下一次能直连 `git fetch upstream` 时，建议顺手把
+`849d338`（compress v1.20.2）一起升掉 —— 它仍是唯一因离线取不到模块而挂着的依赖。

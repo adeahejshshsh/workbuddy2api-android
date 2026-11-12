@@ -126,6 +126,11 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 	if hasToolCallMarkup(r.text.String()) {
 		return false
 	}
+	// 模型在等用户拍板（问句 / 「请确认后我再…」）：故意的收尾，不能替它继续。
+	// 这条比长度闸门更优先——线上就是这么把「等确认的邮件」直接发出去的（issue #209）。
+	if textYieldsToUser(r.text.String()) {
+		return false
+	}
 	// 正文已经像最终答复（够长 + 以句末标点收尾）：不救。见 toolOnlyFinalAnswerBytes
 	// 的实测依据——不加这条时 agent 客户端的每个回合都会被推着多调一次工具。
 	if toolOnlyLooksFinished(r.text.String()) {

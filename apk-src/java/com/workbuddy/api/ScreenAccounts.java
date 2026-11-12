@@ -215,10 +215,23 @@ final class ScreenAccounts {
         toast("签到中…");
         svc.checkin(s.uid, new PanelService.Cb<PanelService.TaskResult>() {
             public void ok(PanelService.TaskResult r) {
-                if ("skipped".equals(r.error)) toast("今日已签到");
-                else if ("not_done".equals(r.error)) toast("签到未完成，稍后再试");
-                else if (!r.error.isEmpty()) toast("签到异常：" + r.error);
-                else toast("签到完成" + (r.message.isEmpty() ? "" : "：" + r.message));
+                // 四态分开说：already 与 checked 的事实不同（一个积分都没发 vs 本次发了）。
+                String gain = r.credit >= 0 ? " +" + r.credit + " 积分" : "";
+                if ("skipped".equals(r.state) || "skipped".equals(r.error)) {
+                    toast(r.message.isEmpty() ? "该账号无签到体系（已跳过）" : r.message);
+                } else if ("already".equals(r.state)) {
+                    toast("今天已签到（重复签发不了积分）");
+                } else if ("pending".equals(r.state)) {
+                    toast("上游还在处理签到，稍后重试");
+                } else if ("checked".equals(r.state)) {
+                    toast("签到成功" + gain);
+                } else if ("failed".equals(r.state) || "not_done".equals(r.error)) {
+                    toast("签到未完成" + (r.message.isEmpty() ? "，稍后再试" : "：" + r.message));
+                } else if (!r.error.isEmpty()) {
+                    toast("签到异常：" + r.error);
+                } else {
+                    toast("签到完成" + gain);
+                }
                 loadOverview(false);
             }
             public void fail(String m) { toast("签到失败：" + m); }

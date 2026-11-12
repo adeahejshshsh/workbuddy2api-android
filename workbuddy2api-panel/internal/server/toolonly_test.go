@@ -387,3 +387,62 @@ func TestToolOnlyDuplicateIgnoresArgWhitespace(t *testing.T) {
 		t.Fatalf("仅空白差异的同参数调用也应被判为重复:\n%s", string(out))
 	}
 }
+
+// issue #209：模型写完邮件草稿、明确要求用户确认后停下 —— 这是故意的收尾。
+// 救援会补一句「继续执行下一步」，模型于是发一次 send_email，客户端真的把邮件发出去
+// （线上已发生两例）。这类正文绝不能救，哪怕它很短、末条是工具结果。
+func TestToolOnlySkipsWhenWaitingForUser(t *testing.T) {
+	// 短正文 + 句号收尾 + 明说要确认：B 拦不住（<120B），必须靠「等用户」判据。
+	seg := `data: {"id":"t6","choices":[{"index":0,"delta":{"content":"邮件正文已经写好，收件人填的是全体成员。请确认后我再发送。"}}]}` + "\n\n" +
+		`data: {"id":"t6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":40,"total_tokens":106547}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("模型在等用户确认，不该续写（会替用户按下发送键），实际 %d 次", len(*reqs))
+	}
+	if !strings.Contains(string(out), "请确认后我再发送") {
+		t.Fatalf("正文应照常下发:\n%s", string(out))
+	}
+	if strings.Contains(string(out), "tool_calls") {
+		t.Fatalf("不该出现工具调用:\n%s", string(out))
+	}
+}
+
+// 问号结尾同样是「在等用户回话」。
+func TestToolOnlySkipsOnQuestionTail(t *testing.T) {
+	seg := `data: {"id":"t7","choices":[{"index":0,"delta":{"content":"这两处要一起改吗？"}}]}` + "\n\n" +
+		`data: {"id":"t7","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":12,"total_tokens":106519}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyToolCall })
+	r := newToolOnlyReader(t, up, toolLoopBody, seg)
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("问句收尾不该续写，实际 %d 次", len(*reqs))
+	}
+}
+
+func TestTextYieldsToUser(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"邮件已经写好，请确认后我再发送。", true},
+		{"要我把这两处一起改掉吗？", true},
+		{"Should I proceed with the deploy?", true},
+		{"Let me know if you want a different tone.", true},
+		{"改动已经提交并推送，CI 全绿。", false},
+		{"我看完了三个文件，结论是缓存键算错了。", false},
+	}
+	for _, c := range cases {
+		if got := textYieldsToUser(c.text); got != c.want {
+			t.Errorf("%q: got %v want %v", c.text, got, c.want)
+		}
+	}
+}
