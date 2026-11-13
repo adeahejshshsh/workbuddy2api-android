@@ -748,6 +748,8 @@ type StreamOption func(*streamOptions)
 type streamOptions struct {
 	onErrorFrame func(payload string)
 	markup       *MarkupRepair
+	// toolArgRepair 启用 DeferredToolCall 参数修复（见 tool_arg_repair.go）。
+	toolArgRepair bool
 	// modelEcho 非空时把每帧里的 "model":"<real>" 改写成该值（别名回显，
 	// review #25）：客户端按请求名校验响应时，流式与非流式必须一致。
 	modelEcho string
@@ -766,6 +768,14 @@ type streamOptions struct {
 // 传 nil、或传入未启用的修复器（客户端没声明过 tools）→ 与 Stream 行为逐字节一致。
 func WithMarkupRepair(r *MarkupRepair) StreamOption {
 	return func(o *streamOptions) { o.markup = r }
+}
+
+// WithToolArgRepair 启用 DeferredToolCall 参数修复（见 tool_arg_repair.go）。
+//
+// 只缓存/改写 function.name == DeferredToolCall 的调用；其它工具零改写。
+// 关闭时与不挂时逐字节一致。
+func WithToolArgRepair(enabled bool) StreamOption {
+	return func(o *streamOptions) { o.toolArgRepair = enabled }
 }
 
 // WithErrorFrameObserver 注册"上游以 error 帧报错"的观察者：透传该帧之前先用
@@ -857,6 +867,9 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	//   - maxToolIdx：上游已用过的最大 tool_call index，避免合成的 index 与真实调用撞车；
 	//   - toolFinishSent：是否已发出过 finish_reason: tool_calls，供流尾兜底。
 	repair := o.markup
+	// DeferredToolCall 参数修复：只缓存该工具的流式参数，收尾前一次性重建。
+	// 未启用时 Process/Flush 恒等透传（零改写）。
+	toolRepair := NewToolArgRepair(o.toolArgRepair)
 	synthIdx := 0
 	maxToolIdx := -1
 	toolFinishSent := false
@@ -955,7 +968,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 状态：tool_calls name 收敛（每 index 仅首片带 name）、消息 id 续传、以及上游
 	// 已用过的最大 tool_call index（供标记修复接续编号）。
 	// fallback 是规范化失败时的兜底原文（与修复前「marshal 失败即原样透传」一致）。
-	writeChunk := func(obj map[string]any, fallback string) error {
+	emitChunk := func(obj map[string]any, fallback string) error {
 		// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
 		stripToolCallNames(obj, toolCallSeen)
 		// id 续传：首帧非空真实 id 缓存；后续帧缺 id / 空 id 一律用缓存值，
@@ -1001,6 +1014,21 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			return emit(fallback, isContent)
 		}
 		return emit(string(raw), isContent)
+	}
+
+	// writeChunk 在 emitChunk 之前跑 DeferredToolCall 参数修复：Process 可能把一帧
+	// 吸收掉（参数分片）、拆成多帧（首帧登记 + 收尾前补参数 + finish）。补造的帧
+	// 直接走 emitChunk，不能再进 Process（否则刚补的参数又会被当成新分片缓存）。
+	writeChunk := func(obj map[string]any, fallback string) error {
+		if !toolRepair.Enabled() {
+			return emitChunk(obj, fallback)
+		}
+		for _, out := range toolRepair.Process(obj) {
+			if err := emitChunk(out, fallback); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	// repairFrame 在透传前跑标记修复，并把一帧展开成「可能多帧」：正文帧（标记被摘掉
@@ -1275,6 +1303,17 @@ readLoop:
 			// 这里记下读错误、跳出循环，走下方统一的 error 帧 + [DONE] 收尾。
 			readErr = err
 			break
+		}
+	}
+	// DeferredToolCall 参数修复的尾部收尾：上游只发 [DONE]/EOF、没给 finish_reason
+	// 时，把已缓存的参数补成一帧再写 [DONE]/截断终态。已经发过 finish 的流不再补
+	// ——补在终态之后会变成「回合结束后的工具参数」，客户端直接丢弃。
+	if !finishSeen {
+		for _, f := range toolRepair.Flush() {
+			if werr := emitChunk(f, ""); werr != nil {
+				return werr
+			}
+			validFrames++
 		}
 	}
 	// 标记修复的尾部收尾：流结束时仍未判定的字节一律原文回吐（绝不吞字节，未闭合

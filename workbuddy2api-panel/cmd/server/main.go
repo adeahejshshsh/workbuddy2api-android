@@ -187,7 +187,7 @@ func main() {
 	p.SetReserveCreditsByRealm(cfg.Pool.ReserveCreditsByRealm)
 	p.SetAccountRouting(cfg.Pool.AccountPriority, cfg.Pool.AccountShare)
 	p.SetStrategy(cfg.Pool.SelectionStrategy) // 选号策略（weighted/round_robin/sequential）
-	p.SetBalanceWindow(balanceWindowOf(cfg)) // 窗口用量调度（默认 1h，"0" 关停）
+	p.SetBalanceWindow(balanceWindowOf(cfg))  // 窗口用量调度（默认 1h，"0" 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
 
@@ -540,6 +540,12 @@ func main() {
 		RestrictionHold: cfg.RestrictionHoldDur,
 		// 首帧心跳：等上游首帧期间补 SSE 注释帧（server.head_keepalive，缺省 1.5s）。
 		HeadKeepalive: cfg.HeadKeepaliveDur,
+		// 6020/6021 渠道排队：网关内先等一轮（features.busy_retry / busy_wait_seconds）。
+		// DeferredToolCall 残缺参数修复（features.repair_deferred_tool_args，默认关；
+		// 启动时读取）。只影响 DeferredToolCall，其它工具零改写。
+		RepairDeferredToolArgs: cfg.Features.RepairDeferredToolArgs,
+		BusyRetry:              cfg.Features.BusyRetry,
+		BusyWaitMax:            time.Duration(cfg.Features.BusyWaitSeconds) * time.Second,
 		// 运维接口（手动补跑排程）+ 操作审计：整段缺省关闭。
 		AdminEnabled:                  cfg.Admin.Enabled,
 		AdminAPIKey:                   cfg.AdminAPIKey,
@@ -914,7 +920,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetReserveCreditsByRealm(newCfg.Pool.ReserveCreditsByRealm)
 	p.SetAccountRouting(newCfg.Pool.AccountPriority, newCfg.Pool.AccountShare)
 	p.SetStrategy(newCfg.Pool.SelectionStrategy) // 选号策略热生效
-	p.SetBalanceWindow(balanceWindowOf(newCfg)) // 窗口用量调度热生效
+	p.SetBalanceWindow(balanceWindowOf(newCfg))  // 窗口用量调度热生效
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)

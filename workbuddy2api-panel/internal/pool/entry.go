@@ -240,6 +240,13 @@ type entry struct {
 	// group 运维自定义分组标签（面板手填，issue #159）。纯管理维度：不参与选号 /
 	// 计费 / 鉴权，只用于面板按组筛选与组内批量操作。空 = 未分组。持久化（state.json）。
 	group string
+	// 模型规则（面板「模型规则」页）：一批模型的黑/白名单，挂到账号上即刻影响选号。
+	// ruleIDs 是持久化的引用（落 state.json）；*Deny/*Allow 是 recomputeRulesLocked
+	// 从规则本体展开的运行态集合，读时无需再查规则表。
+	ruleIDs      []string
+	ruleDeny     map[string]struct{}
+	ruleAllow    map[string]struct{}
+	ruleHasAllow bool
 	// lastCheckinDay 最近一次签到成功的本地日期（"2006-01-02"）。签到成功与上游
 	// 幂等拒绝（"今天已签到"）都算；statusOf 据此输出 CheckinDone 供面板按钮显示
 	// 签到/已签。持久化：跨重启不丢当日状态。
@@ -420,6 +427,11 @@ func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
 	if e.modelOffed(reqModel) {
 		return false
 	}
+	// 模型规则（黑/白名单）：与手动单点开关取并集，同样是「运维意图优先于自动冷却」。
+	// 放这里而不是 filteredLocked：选号按账号逐个判可用性，规则要影响的就是这一层。
+	if e.blockedByRules(reqModel) {
+		return false
+	}
 	if e.modelCooled(now, reqModel) {
 		// 该模型在 6004 独立冷却中 → 不可选。
 		return false
@@ -515,6 +527,8 @@ type stateAccount struct {
 	CreditsTotal int64     `json:"credits_total,omitempty"`
 	Remark       string    `json:"remark,omitempty"` // 运维备注（上游 PR #178）
 	Group        string    `json:"group,omitempty"`  // 运维分组标签（issue #159）
+	// ModelRules 该账号挂的模型规则 id（持久化；规则本体在 stateFile.ModelRules）。
+	ModelRules []string `json:"model_rules,omitempty"`
 	Disabled     bool      `json:"disabled"`
 	Paused       bool      `json:"paused,omitempty"`
 	Reason       string    `json:"reason,omitempty"`
@@ -615,6 +629,9 @@ func (e *entry) windowTokens(model string, window time.Duration, now time.Time) 
 // stateFile 持久化格式。
 type stateFile struct {
 	Accounts map[string]stateAccount `json:"accounts"`
+	// ModelRules 模型规则表。与账号的 model_rules 引用分开存：规则可被多账号共用，
+	// 改一次所有挂它的账号立刻生效（不想让改规则变成逐账号的批量写）。
+	ModelRules []ModelRule `json:"model_rules,omitempty"`
 }
 
 // flushInterval 后台落盘周期。

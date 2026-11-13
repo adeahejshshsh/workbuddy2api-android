@@ -317,6 +317,13 @@ func (p *Panel) routes() {
 	// (账号 × 模型) 手动开关：运维显式禁用某账号的某模型（永久语义，仅手动解）。
 	// 与上游触发的临时冷却（6004/11102）正交，且手动优先。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_toggle", p.modelToggle)
+	// 模型规则（面板「模型规则」页）：一批模型的黑/白名单，挂到账号上即刻影响选号。
+	// 与 model_toggle 的手动单点开关并存，两者任一命中都会把该 (账号, 模型) 判为不可用。
+	p.mux.HandleFunc("GET /panel/api/model_rules", p.modelRules)
+	p.mux.HandleFunc("POST /panel/api/model_rules", p.modelRuleSave)
+	p.mux.HandleFunc("POST /panel/api/model_rules/delete", p.modelRuleDelete)
+	p.mux.HandleFunc("POST /panel/api/model_rules/apply", p.modelRuleApply)
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_rules", p.accountModelRules)
 	// 手动关闭的模型清单（只读）：原生控制台/脚本据此显示当前开关状态，
 	// 不必先 POST 一次才知道。
 	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/models_off", p.accountModelsOff)
