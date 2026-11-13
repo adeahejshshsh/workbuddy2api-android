@@ -594,3 +594,24 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 本批新增依赖：无（`exclusive`/`paidByUID` 全在既有 `Client` 结构里）。
 
 未合入：`849d338`（compress 依赖升级）仍挂着 —— 本机 `proxy.golang.org` 不可达、本地模块缓存里只有 v1.17.4。
+
+## 第十六批：上游未合并的 PR（#211 #214 #215 #216 #217 #218，2026-11-14 分析）
+
+主线（`main`）仍停在 `7a48d72e`，与第十五批一致 —— 这一批**不在 main 上**，
+而是上游挂着没合的 6 个 PR。逐个看影响面后按下面处置，不看分支名只看改动。
+
+| 上游 PR | 处置 | 说明 |
+|---|---|---|
+| #216 `feat(messages): 转发 output_config.format 为 response_format` | ✅ 合入 | Anthropic 结构化输出映射到 chat 的 `response_format`：`{type:"json_schema",schema}` → 补 `name:"response"` / `strict:true` 的 OpenAI 形状；`json_object`、缺 `schema`、`schema` 非对象一律**不转发**（宁可不结构化，也不把非法 schema 丢给上游）。本仓 `messages.go` 结构与上游一致，改动逐行落地；用例 3 条（含 `TestResponseFormatFromMessages` 的 10 个表驱动分支） |
+| #217 `fix(server): 6020/6021 渠道排队先等一轮再交回客户端` | ✅ 合入（适配） | 上游明说「N 秒后再来」时别把排队当不可重试错误秒杀：`features.busy_retry`（默认 true）+ `busy_wait_seconds`（默认 60，上限 600，负数 = 不等）。等一轮不换号、不罚号、客户端取消即停；仍排队则 429 + `Retry-After`。**已提交响应头**（keepalive 注释帧已写出 200）的路径新增 `writeErrorFrameExtra`，用 `rate_limit_error` + `statusCode:429` + `retry_after` —— ZCode 这类只认状态码/业务码的客户端才不会把整轮对话判死。本仓差异：末端错误出口是 `writeOpenAIErrorFull`/`writeModelQuotaError`（无上游的 `writeOpenAIQuotaError`），故新增 `writeUpstreamBusyError(...)` 并在 dispatch 里按 `code == "upstream_busy"` 分流；`retryAfterSec` 从已设的 `Retry-After` 头回读，避免再穿一遍参数 |
+| #218 `fix(upstream): 修复 DeferredToolCall 的残缺参数` | ✅ 合入 | 新文件 `internal/upstream/tool_arg_repair.go`（427 行）+ 用例（453 行）：只对 `function.name == DeferredToolCall` 生效，两种实测错误——`input` 被写成 JSON 字符串、参数 JSON 截断（只在括号/引号未闭合时补最少的闭合符，`1` 不会补成 `10`）。首帧只登记调用身份，完整参数在 `finish_reason` 之前补一帧；超过 1 MiB 放弃修复、前缀立刻补发后原样透传（绝不吞字节）。`sse.go` 把原 `writeChunk` 改名 `emitChunk`，外面套一层 `writeChunk` 走 `Process`，尾部 `Flush` 用 `emitChunk`（否则补出的参数会被再吸收一次）。开关 `features.repair_deferred_tool_args`（默认 false） |
+| #215 `feat(panel): 余额趋势对失效账号用灰线` | ✅ 合入（适配） | 三件事：① 失效号一律灰线且**不占色板序号**（否则某个健康号会因前面多了个死号而换色）；② 折线/柱状图画全部系列（历史轨迹有诊断价值），**统计只算活号**（禁用号的余额是历史残留，混进「当前合计 / 净变化」会把死钱算成活钱）；③ 表格把失效号移出统计区，加一行「已失效 N 个」分隔后单独陈列（`.bh-dead` 降权 + 去色）。暂停号不算死号（照常保号、余额仍在更新） |
+| #211 `feat(panel): 模型规则页（按账号挂模型黑/白名单）` | ✅ 合入（适配） | 后端整包：`internal/pool/modelrules.go`（400 行，规则表 + `deny`/`allow` 语义 + 运行态展开 `ruleDeny`/`ruleAllow`）、`internal/pool/persist.go`（`stateFile.ModelRules` 与账号 `model_rules` 引用，装载顺序「先账号后规则」否则重启会丢引用）、`internal/pool/entry.go`（`healthyForModel` 里加规则闸门，与手动单点开关取并集、优先于自动冷却）、`internal/panel/modelrules.go` + 5 条路由。前端整页（左栏规则卡 / 右栏账号 + 3 个弹窗）按本仓结构落地：`TITLES` 加 `modelrules`、`go()` 加钩子、CSS/视图/弹窗按标记插入、三个新弹窗登记进 `VEIL_CLOSERS` 并改走 `openVeil`（本仓 `dialog_a11y_test` 会拦「直接 `classList.add('on')`」） |
+| #214 `feat: iOS（RootHide/Dopamine）launchd 常驻支持与诊断` | ⚠️ 只取 1 处 | `cmd/server/iosmem_darwin.go`、`main.go` 的 listen 重试与 iOS 常驻诊断**与 Android 无关**（本仓是 APK 内嵌网关 + 原生控制台，进程生命周期由前台服务管），不引入。但其中的 `panelRootRedirect` 是通用改进：根路径 302 到 `/panel/` 并保留查询串——面板 HTML 的 `theme.js` / `app.js` 是同目录相对路径，直接把 HTML 挂 `/` 会解析成 `/theme.js` → 404 白屏。已合入 + 用例 |
+
+本批新增依赖：无。`features` 新增三个键（`busy_retry` / `busy_wait_seconds` / `repair_deferred_tool_args`），
+两个带默认值的会在 `normalize()` 里回落，`config.example.json` 与 `config_example_test.go` 同步断言。
+
+未合入：`849d338`（compress 升 v1.20.2）仍挂着 —— 本机 `go` 的解析器走 `[::1]:53`（Termux 无 `/etc/resolv.conf`
+可写），`GOPROXY` 拉不到模块；`curl https://proxy.golang.org` 可达但 `go` 自己不可达。要解只能先把模块
+手工落成 `file://` 代理或补 `/etc/resolv.conf`。

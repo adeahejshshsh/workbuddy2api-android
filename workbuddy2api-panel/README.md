@@ -163,9 +163,11 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 =======
 | **官方补偿（先查后领 + 倒计时）** | 面板「官方补偿」卡片：`POST /billing/meter/compensation-status` 查状态（`active && !claimed && credit_num>0` 才领），带领取截止倒计时（≤48h 标红）与逐号 / 全量领取按钮。补偿带截止日，此前签到排程里的**盲领**把「无补偿 / 已领过」打成假的 `+0c` 成功行、真失败静默；现在无待领静默、失败在卡片与日志上显形，查询失败的账号也照样占一行（不把「查不到」显示成「没有」） |
 | **模型繁忙度（面板）** | 「模型与档位」列出官方 `/v2/chat/busy` 的实时繁忙度（idle/normal/busy/congested/unavailable），只在 `繁忙 / 拥堵 / 不可用` 时挂色标——它解释了 chat 侧偶发的 429 / 6021 queue.full。**只读观测**：不参与选号；服务端偶发对整批回 `unknown`（实测同批重查可在 idle/unknown 间跳），故取不到就不标 |
+| **模型规则（面板）** | 「模型规则」页：命名的一组模型 + `deny`/`allow` 两种模式，挂到账号上即刻影响选号（`pool.modelrules.go`）。一个账号可挂多条：多条 deny 取并集、多条 allow 取并集、两者并存时 **deny 优先**；模型名可带 `cn:` / `global:` 前缀区分域，不带前缀 = 两个域都命中。与「模型与档位」里的手动单点开关取并集，都优先于 6004/11102 自动冷却。规则本体与「账号 → 规则」都落 `state.json`（重启不丢），改一条规则所有挂了它的账号一起变。接口：`GET/POST /panel/api/model_rules`、`POST /panel/api/model_rules/{apply,delete}`、`POST /panel/api/accounts/{uid}/model_rules` |
+| **6020/6021 排队请求内等待** | 上游 6020 给出 `retry_after` 时，先在原账号按该口径等一轮再试（上限 `features.busy_wait_seconds`，默认 60 秒，最大 600；负数关闭等待）。等待不算换号、不罚账号，客户端取消立即停。仍排队回 429 + `Retry-After`；首帧保活已提交时以 `rate_limit_error` SSE 帧返回并带 `statusCode=429` 与 `retry_after`。设 `features.busy_retry=false` 可恢复立即交回客户端的旧行为 |
+| **DeferredToolCall 参数修复（实验）** | `features.repair_deferred_tool_args`（默认 false）只处理名为 `DeferredToolCall` 的流式工具调用：把可解析为对象的字符串 `input` 还原成对象，并仅在括号/字符串明确未闭合时补结构。缺失值、截断的数字/布尔值及其他非法 JSON 原样透传；单调用参数超过 1 MiB 后停止缓存并原样透传。其它工具不改写，开启后该工具的参数会在收尾前集中发出 |
 | **联网检索（官方 agenttool）** | `POST /v1/search` 透传官方 `{base}/agenttool/v1/search`（`{query,max_results}` → `{results[].title/url/snippet/date,total_results}`，查询免费；对 DSH（DeepSeek Harness，按 UA 含 `deepseek-harness` 识别）额外启用 DeepSeek Search API 兼容：接受 `count` 作为条数，`date` 缺失时补 `null`、`title`/`snippet` 缺失时补空串；其余客户端保持上游原文逐字节透传）；加 `"deep":true` 则改走官方**综述式**检索 `agentic_search`（服务端多轮检索 + 抓页 + 带引用综述，回 `done` 帧原文：`synthesis.content` + `results` 整页正文 + `statuses` + `partial` 降级标记）——实测单次 18~66s、prompt ~48K tokens，故默认走 snippet 快路径（~1s）。另在 `/v1/messages` 与 `/v1/responses` 上落地服务端联网工具：客户端（Claude Code / Codex）只声明 `{"type":"web_search_20250305","name":"web_search"}`（或 Responses 的托管 `{"type":"web_search"}`），网关侧先让模型自己写检索词（探测）、执行检索、把结果注入上下文，再走既有流式管道出答案。Anthropic 侧按协议回报 `server_tool_use` + `web_search_tool_result` 块（含来源 URL，且**不**降级成客户端可执行的 `tool_use`）；没声明该工具的请求零额外开销；检索失败如实告知模型（不静默当成「网上没有」），联网不可用则降级为普通对话 |
 | **成长任务队列每日排程** | `schedule.growth_hours`（默认 `[11]`）+ `schedule.growth_enabled`：面板任务中心的执行队列按排程每日自动跑一遍（扫描待办 → accept → 动作 → 达标领奖），与手动入口共用同一队列与账号锁；`POST /admin/tasks/growth/run` 可手动补跑 |
->>>>>>> 657e7a4 (fix(server): /v1/search 兼容 DeepSeek Search API（仅 DSH，date/count）)
 | **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |
 | **粘性会话内容回退** | 客户端不发 `conversation_id` 时，用 `system + 首条 user` 哈希派生会话键（`d-` 前缀），通用 OpenAI 客户端也能享受粘性 |
 | **余额后台刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
@@ -387,6 +389,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `upstream.restriction_hold_seconds` | `1800` | 11140 风控连坐的全池暂停时长（秒）。命中 11140 一律就地停手不换号；同一 15 分钟窗内 ≥2 个不同账号被限制 → 全池暂停派发这么久（期间 `503 account_restricted_hold` + `Retry-After`）。`0` = 只停手不暂停 |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
+| `features.busy_retry` / `features.busy_wait_seconds` | `true` / `60` | 6020/6021 渠道排队时先在网关内等一轮再试（上限秒数，最大 600；负数 = 不等，直接 429 + `Retry-After`） |
+| `features.repair_deferred_tool_args` | `false` | DeferredToolCall 参数修复（字符串 `input` 还原成对象 + 只补未闭合结构）。启动时读取 |
 | `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
 | `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错 |
 | `upstash.url` / `upstash.token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
