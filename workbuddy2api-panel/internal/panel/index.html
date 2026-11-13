@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 禁收录（与 setSecurityHeaders 的 X-Robots-Tag 同一条意图）：响应头挡抓取，
+     这条挡的是被缓存/另存后的页面快照。 -->
+<meta name="robots" content="noindex, nofollow">
 <title>WorkBuddy2API · 控制台</title>
 <!-- 首屏主题预热：必须留在样式表之前、且是同步外链脚本。
      html 根节点上的 data-theme="dark" 只是无脚本兜底；真实偏好在 localStorage，

@@ -5,7 +5,7 @@ X-Request-ID: 0accbe2991ba4af9a52603760e505ba9
 X-Product: SaaS
 User-Agent: workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
 Authorization: Bearer <REDACTED>
-X-User-Id: 204af49d-0208-4ed9-a36d-35dfcbbec818
+X-User-Id: 00000000-0000-4000-8000-000000000001
 X-Domain: www.workbuddy.ai
 Content-Length: 724
 Host: www.workbuddy.ai

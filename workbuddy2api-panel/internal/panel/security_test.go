@@ -39,6 +39,10 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 		if h.Get("Referrer-Policy") != "no-referrer" {
 			t.Errorf("%s %s: Referrer-Policy=%q", c.method, c.path, h.Get("Referrer-Policy"))
 		}
+		// 禁收录：面板是公网部署时的可发现入口，抓取要挡在响应头这一层。
+		if h.Get("X-Robots-Tag") != "noindex, nofollow" {
+			t.Errorf("%s %s: X-Robots-Tag=%q", c.method, c.path, h.Get("X-Robots-Tag"))
+		}
 	}
 }
 

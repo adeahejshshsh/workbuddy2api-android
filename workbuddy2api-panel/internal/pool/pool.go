@@ -96,6 +96,11 @@ type Pool struct {
 	// 循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
 	// 仅在持 p.mu 时由 floorBlockedForModel 调用；回调不得反向调用 Pool 方法。
 	modelRateOf func(realm, model string) string
+	// exclusiveModelOf 报告 (域, 模型) 是否「免费号调不通」（modelTiers accessMode=exclusive）；
+	// exclusivePaidOf 报告 uid 是否付费号（第二返回值 false = 不知道）。
+	// 同为注入项、同为 nil = 关闭（缺省）。只在持锁时由 exclusiveBlockedForRealmModel 调用。
+	exclusiveModelOf func(realm, model string) bool
+	exclusivePaidOf  func(uid string) (bool, bool)
 	// 加权路由的闲置补偿调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
@@ -377,6 +382,17 @@ func (p *Pool) SetModelRateOf(fn func(realm, model string) string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.modelRateOf = fn
+}
+
+// SetExclusiveModels 注入「免费号调不通」的模型查表与账号付费状态查表
+// （main 用 upstream.Client.ModelExclusive / PaidUser 装配）。两者任一为 nil 即关闭闸门。
+//
+// 只在**知道**账号免费时才跳过：没观测过付费状态的号照旧参与（宁可按现状打一次上游，
+// 也不因为缺数据把能用的号排除）。
+func (p *Pool) SetExclusiveModels(modelOf func(realm, model string) bool, paidOf func(uid string) (bool, bool)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.exclusiveModelOf, p.exclusivePaidOf = modelOf, paidOf
 }
 
 // SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。

@@ -266,6 +266,9 @@ func main() {
 	// （kimi-k3-1 实案：全池无观测 → 保底全放行 → 两笔打穿并硬冷却到次日 04:00）。
 	// 位于 up 装配之后：倍率表由探测下发，闭包每次调用读实时快照。
 	p.SetModelRateOf(func(realm, model string) string { return up.ModelRate(realm, model) })
+	// 免费号事前不派「免费调不通」的模型（modelTiers accessMode=exclusive）：
+	// 只在付费状态**已知为免费**时跳过，没观测过照旧参与。
+	p.SetExclusiveModels(up.ModelExclusive, up.PaidUser)
 
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
