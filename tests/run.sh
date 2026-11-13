@@ -19,7 +19,7 @@ export GOFLAGS="-toolexec=/system/bin/linker64 -buildvcs=false"
 # rebuild.sh 早已这么设，只有本脚本漏了 —— 表现为「一半包 PASS、一半包编译失败」。
 export CGO_ENABLED=0
 
-ALL_PKGS="server upstream panel pool scheduler auth session reqlog usage redisstore credithist prompt loginsite httpauth alert media"
+ALL_PKGS="server upstream panel pool scheduler auth session reqlog usage redisstore credithist prompt loginsite httpauth alert media proxypool"
 
 pick() {
   if [ "${1:-}" = "all" ]; then echo "$ALL_PKGS"; return; fi

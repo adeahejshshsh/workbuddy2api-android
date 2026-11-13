@@ -566,7 +566,30 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 个 0，
 `X-Refresh-Token` 的 JWT 整段 → `<REDACTED-REFRESH-TOKEN>`，第三方项目路径 → `/Users/dev/project`，
 外部图片直链 → `example.com/sample.png`。本仓命中 9 个文件（含 `errors_test.go` 里 22 处短 uid、`checkin_receipt.go` 的实测注释）—— 脚本按同一套替换规则批量改，`git grep` 复查已为空 |
-| `3d0f293e` proxypool 记出口归属（国家/住宅或机房/ISP） | ⏭ 跳过 | 本仓无 `internal/proxypool` 模块（`intel.go` 175 行全新建、`transport.go`/`pool.go` 都是该模块内部类型），无对象可改 |
+| `3d0f293e` proxypool 记出口归属（国家/住宅或机房/ISP） | ✅ 合入（补模块） | 本仓原本没有 `internal/proxypool`，按上游同 ref 整包补入 12 个文件（`pool.go` 654 + `subscription.go` 516 + `transport.go` 471 + `intel.go` 175 + 4 个测试文件），模块路径改 `linguo2625469`。**唯一外部依赖 `golang.org/x/net/proxy` 换成本仓自带的 SOCKS5 拨号器**（`socks5.go`，RFC 1928/1929），原因见下。用例 32 条全绿 |
+
+### 关于 `golang.org/x/net/proxy`
+
+构建环境拉不到 Go 模块（`proxy.golang.org` 与 goproxy.cn/io/阿里云镜像的 DNS 全部
+`connection refused`），而 `internal/proxypool/transport.go` 只用到它的三个符号
+（`Auth` / `SOCKS5` / `ContextDialer`）。为三个符号让整个包编译不过不值当，于是写了
+`internal/proxypool/socks5.go`：CONNECT + RFC 1929 用户名口令认证，行为与 x/net 对齐
+（目标按域名下发由代理解析、认证失败与 REP≠0 一律报错而不静默降级成直连、`DialContext`
+受同一个 ctx 约束）。**这条替代也让本仓的 proxypool 变成零外部依赖**。
+
+### 尚未接入（本批不含）
+
+模块就位但**还没有调用方**：上游的接入是另一次重构，本仓尚未有那个形态 ——
+
+- `internal/upstream/proxy.go`：上游把 13 个出站点收敛到 `do(req, a, chat)` 再交给
+  `ProxyPool.Do(...)` 按账号选出口；本仓的出站是 `do(req)`（无账号参数），要接入得先把
+  所有出站点改成带账号的三参形态，否则会出现「一部分请求走代理、一部分直连」的
+  指纹不一致 —— 那比不接更危险；
+- `internal/panel/proxies.go`：9 条 `/panel/api/proxies*` 端点 + 账号/域绑定，依赖
+  `p.cfg.ProxyPool`；本仓 `Config` 里还没有这一项；
+- `cmd/server/config.go` 的 proxies 配置段与 `main.go` 的 `Manager` 装配、面板 UI 的代理页。
+
+要接的话按上面顺序做，第一批先把 `do(...)` 收敛（纯重构、可独立验证），再接端点与 UI。
 
 本批新增依赖：无（`exclusive`/`paidByUID` 全在既有 `Client` 结构里）。
 
