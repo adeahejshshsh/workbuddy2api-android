@@ -147,6 +147,11 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 	if uerr := json.Unmarshal(billingInner(raw, "Packages"), &sum); uerr != nil {
 		return 0, 0, 0, time.Time{}, 0, fmt.Errorf("billing summary parse: %w", uerr)
 	}
+	// 顺手记下这个号是不是付费号：选号对 exclusive 模型（免费号调不通）据此跳过它。
+	// 零额外请求——这个字段本来就在 summary 里，此前只解析不用。
+	if a != nil {
+		c.NotePaidUser(a.UID, sum.IsPaidUser)
+	}
 	now := time.Now()
 	// summary 的 Packages 是「当前周期的权威用量」：remain/total 以它为准。
 	remainByCode := make(map[string]int64, len(sum.Packages))

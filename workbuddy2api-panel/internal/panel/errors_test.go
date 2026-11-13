@@ -15,9 +15,9 @@ import (
 func TestAggregateErrorsClientCancelIsInfo(t *testing.T) {
 	ts := time.Date(2026, 10, 14, 1, 2, 3, 0, time.Local)
 	lines := []LogLine{
-		{Text: `ERR: [upstream] chat_stream acct=示例号(11f49997): transport error: Post "https://copilot.tencent.com/v2/chat/completions": context canceled`, TS: ts},
-		{Text: `WARN: [server] sync acct=示例号(11f49997) model=deepseek-v4.1-flash: upstream parse failed: context canceled`, TS: ts},
-		{Text: `WARN: [continue] acct=示例号(11f49997) seg=1 续写失败（status=0 err=Post "https://x": context canceled）→ 降级为截断终态`, TS: ts},
+		{Text: `ERR: [upstream] chat_stream acct=示例号(00000002): transport error: Post "https://copilot.tencent.com/v2/chat/completions": context canceled`, TS: ts},
+		{Text: `WARN: [server] sync acct=示例号(00000002) model=deepseek-v4.1-flash: upstream parse failed: context canceled`, TS: ts},
+		{Text: `WARN: [continue] acct=示例号(00000002) seg=1 续写失败（status=0 err=Post "https://x": context canceled）→ 降级为截断终态`, TS: ts},
 		{Text: `WARN: [server] rotate backoff aborted: ctx cancelled`, TS: ts},
 		// 对照：真传输故障（不是掐断）仍须 bad
 		{Text: `ERR: [upstream] chat_stream acct=备用号(aabbccdd): transport error: Post "https://x/v2/chat/completions": connection refused`, TS: ts},
@@ -36,8 +36,8 @@ func TestAggregateErrorsClientCancelIsInfo(t *testing.T) {
 		t.Errorf("真传输故障应仍是 bad 且排最前：%+v", got[0])
 	}
 	for _, k := range []string{
-		"示例号(11f49997)|客户端中断|",
-		"示例号(11f49997)|客户端中断|deepseek-v4.1-flash",
+		"示例号(00000002)|客户端中断|",
+		"示例号(00000002)|客户端中断|deepseek-v4.1-flash",
 		"|客户端中断|",
 	} {
 		r, ok := byKey[k]
@@ -48,7 +48,7 @@ func TestAggregateErrorsClientCancelIsInfo(t *testing.T) {
 			t.Errorf("%q 的掐断应归 info：%+v", k, r)
 		}
 	}
-	if r := byKey["示例号(11f49997)|客户端中断|"]; r.Count != 2 {
+	if r := byKey["示例号(00000002)|客户端中断|"]; r.Count != 2 {
 		t.Errorf("同账号同形掐断应合并计 2 次：%+v", r)
 	}
 }
@@ -68,7 +68,7 @@ func TestAggregateErrorsCacheRecompute(t *testing.T) {
 // 否则汇总看着正常、错的只是它少了一行（最难发现的漏报）。
 func TestAggregateErrorsUnclassifiedNotDropped(t *testing.T) {
 	got := AggregateErrors([]LogLine{
-		{Text: `WARN: [brand-new] acct=示例号(11f49997) 某个还没写规则的失败: boom`, TS: time.Now()},
+		{Text: `WARN: [brand-new] acct=示例号(00000002) 某个还没写规则的失败: boom`, TS: time.Now()},
 		{Text: `WARN: [brand-new] acct=备用号(aabbccdd) 另一个还没写规则的失败: boom2`, TS: time.Now()},
 	})
 	if len(got) != 2 {
@@ -91,10 +91,10 @@ func TestAggregateErrorsUnclassifiedNotDropped(t *testing.T) {
 // [continue] 行补上 acct= 之后，汇总里这一族（线上 22 条）必须带得出账号。
 func TestAggregateErrorsContinueHasAccount(t *testing.T) {
 	got := AggregateErrors([]LogLine{{
-		Text: `WARN: [continue] acct=示例号(11f49997) 段无 finish 结束（疑似上游断流，按截断终态降级）`,
+		Text: `WARN: [continue] acct=示例号(00000002) 段无 finish 结束（疑似上游断流，按截断终态降级）`,
 		TS:   time.Now(),
 	}})
-	if len(got) != 1 || got[0].Kind != "续写降级" || got[0].Account != "示例号(11f49997)" {
+	if len(got) != 1 || got[0].Kind != "续写降级" || got[0].Account != "示例号(00000002)" {
 		t.Fatalf("续写降级应带账号：%+v", got)
 	}
 }
@@ -105,17 +105,17 @@ func TestAggregateErrors(t *testing.T) {
 	ts := time.Date(2026, 10, 14, 1, 2, 3, 0, time.Local)
 	lines := []LogLine{
 		// 同账号同类型两行 → 合并计 2 次
-		{Text: `WARN: [upstream] chat_stream acct=示例号(11f49997): upstream 429 soft_rate body={"code":6004,"msg":"rate limited"}`, TS: ts},
-		{Text: `WARN: [upstream] chat_stream acct=示例号(11f49997): upstream 429 soft_rate body={"code":6004,"msg":"rate limited"}`, TS: ts.Add(time.Minute)},
+		{Text: `WARN: [upstream] chat_stream acct=示例号(00000002): upstream 429 soft_rate body={"code":6004,"msg":"rate limited"}`, TS: ts},
+		{Text: `WARN: [upstream] chat_stream acct=示例号(00000002): upstream 429 soft_rate body={"code":6004,"msg":"rate limited"}`, TS: ts.Add(time.Minute)},
 		// 另一个账号的传输失败
 		{Text: `ERR: [upstream] chat_stream acct=备用号(aabbccdd): transport error: Post "https://x/v2/chat/completions": connection refused`, TS: ts},
 		// 非账号级：目录拉取
 		{Text: `WARN: [upstream] fetch models: v3/config probe failed (degraded to enterprise endpoint): boom`, TS: ts},
 		// 首帧否决（本仓新增流程）
-		{Text: `WARN: [server] stream acct=示例号(11f49997) model=hy4-preview-f: upstream error frame before first byte kind=soft_rate payload={"error":{"message":"x"}} (rotating)`, TS: ts},
+		{Text: `WARN: [server] stream acct=示例号(00000002) model=hy4-preview-f: upstream error frame before first byte kind=soft_rate payload={"error":{"message":"x"}} (rotating)`, TS: ts},
 		// INFO 行与无法归类的行不得进聚合
-		{Text: `INFO: [server] stream acct=示例号(11f49997) model=x: repaired 1 native tool call(s)`, TS: ts},
-		{Text: `| #007 | 00:06:45 | cn:hy4-preview-f | sync | 200 | 示例号(11f49997) | TTFB=- |`, TS: ts},
+		{Text: `INFO: [server] stream acct=示例号(00000002) model=x: repaired 1 native tool call(s)`, TS: ts},
+		{Text: `| #007 | 00:06:45 | cn:hy4-preview-f | sync | 200 | 示例号(00000002) | TTFB=- |`, TS: ts},
 	}
 	got := AggregateErrors(lines)
 
@@ -126,7 +126,7 @@ func TestAggregateErrors(t *testing.T) {
 	if got[0].Kind != "模型限流(6004)" || got[0].Count != 2 {
 		t.Errorf("首行应为合并后的 6004 限流×2：%+v", got[0])
 	}
-	if got[0].Account != "示例号(11f49997)" || got[0].Code != "429" {
+	if got[0].Account != "示例号(00000002)" || got[0].Code != "429" {
 		t.Errorf("账号/上游状态码抽取错误：%+v", got[0])
 	}
 	if got[0].Last != "01:03:03" { // 取最近一次（第 2 行）
@@ -154,16 +154,16 @@ func TestAggregateErrors(t *testing.T) {
 func TestAggregateErrorsSchedulerFamily(t *testing.T) {
 	ts := time.Now()
 	got := AggregateErrors([]LogLine{
-		{Text: `WARN: keepalive 示例号(11f49997): 连续 3 次 12153 session dead — 禁用`, TS: ts},
+		{Text: `WARN: keepalive 示例号(00000002): 连续 3 次 12153 session dead — 禁用`, TS: ts},
 		{Text: `WARN: checkin 备用号(aabbccdd): Post "https://x": connection refused`, TS: ts},
 		{Text: `WARN: balance 备用号(aabbccdd): context deadline exceeded`, TS: ts},
-		{Text: `checkin 示例号(11f49997): 签到成功`, TS: ts}, // 正常流转无前缀 → 不参与
+		{Text: `checkin 示例号(00000002): 签到成功`, TS: ts}, // 正常流转无前缀 → 不参与
 	})
 	if len(got) != 3 {
 		t.Fatalf("行数=%d want 3：%+v", len(got), got)
 	}
 	// bad 在前：保活连续 12153 禁用
-	if got[0].Kind != "保活失败" || got[0].Sev != sevBad || got[0].Account != "示例号(11f49997)" {
+	if got[0].Kind != "保活失败" || got[0].Sev != sevBad || got[0].Account != "示例号(00000002)" {
 		t.Errorf("first=%+v", got[0])
 	}
 	if got[1].Kind != "签到失败" || got[1].Account != "备用号(aabbccdd)" {
@@ -267,10 +267,10 @@ func TestErrorSummaryWiring(t *testing.T) {
 // 看到「救了多少」，看不出是哪条在反复触发——而定位「停不下来」恰恰需要这个。
 func TestAggregateErrorsRescueKinds(t *testing.T) {
 	got := AggregateErrors([]LogLine{
-		{Text: `2026/11/10 20:31:27 [toolonly] acct=示例号(11f49997) model=deepseek-v4.1-flash seg=1 正文只有 1400B 就收尾（末条是工具结果）→ 试续一次，只采纳工具调用`, TS: time.Now()},
-		{Text: `2026/11/10 20:31:28 [toolonly] acct=示例号(11f49997) model=deepseek-v4.1-flash seg=1 续写段拿到工具调用 → 采纳`, TS: time.Now()},
-		{Text: `2026/11/10 20:31:29 [narration] acct=示例号(11f49997) model=deepseek-v4.1-flash 结果：共 2 段，工具调用=true，正文合计=343B`, TS: time.Now()},
-		{Text: `2026/11/10 20:31:30 [starved] acct=示例号(11f49997) model=deepseek-v4.1-flash seg=1 思考吃光预算（正文 0B）→ 同额度关思考重发`, TS: time.Now()},
+		{Text: `2026/11/10 20:31:27 [toolonly] acct=示例号(00000002) model=deepseek-v4.1-flash seg=1 正文只有 1400B 就收尾（末条是工具结果）→ 试续一次，只采纳工具调用`, TS: time.Now()},
+		{Text: `2026/11/10 20:31:28 [toolonly] acct=示例号(00000002) model=deepseek-v4.1-flash seg=1 续写段拿到工具调用 → 采纳`, TS: time.Now()},
+		{Text: `2026/11/10 20:31:29 [narration] acct=示例号(00000002) model=deepseek-v4.1-flash 结果：共 2 段，工具调用=true，正文合计=343B`, TS: time.Now()},
+		{Text: `2026/11/10 20:31:30 [starved] acct=示例号(00000002) model=deepseek-v4.1-flash seg=1 思考吃光预算（正文 0B）→ 同额度关思考重发`, TS: time.Now()},
 	})
 	want := map[string]int{
 		"续写救援（说一句就停）":  2,

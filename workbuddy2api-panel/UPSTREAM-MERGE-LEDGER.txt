@@ -555,3 +555,16 @@ main 装配点）后按性价比排序补齐。**代理池不移植**（用户�
 未合入：`849d338`（compress v1.20.2，离线取不到模块）、`7366740`（proxypool，本仓无该模块）、
 `cfac370` 的前端用例与 `cfef70d` 的前端 `est` 标注（本仓 CSS/数据结构不同，按设计不取）。下一次能直连 `git fetch upstream` 时，建议顺手把
 `849d338`（compress v1.20.2）一起升掉 —— 它仍是唯一因离线取不到模块而挂着的依赖。
+
+## 第十五批：上游 2026-11-13 批次（`1c007bb0..7a48d72e`，5 条）
+
+| 上游提交 | 处置 | 说明 |
+|---|---|---|
+| `35228b36` 面板响应头禁搜索引擎收录 | ✅ 合入 | `setSecurityHeaders` 加 `X-Robots-Tag: noindex, nofollow`、`index.html` 加 `<meta name="robots">`、`security_test.go` 加断言。面板是公网部署的可发现入口，CSP 管不到抓取 |
+| `7a48d72e` 免费号事前不派「免费调不通」的模型 | ✅ 合入 | 三处：① `ModelInfo.Exclusive` + `v3ModelTier.AccessMode`，`storeModelRates` 同步维护 `exclusive` 桶并导出 `ModelExclusive`；② `NotePaidUser`/`PaidUser` 记录 `summaryReply.IsPaidUser`（`globalUserResource` 顺手写，零额外请求）；③ `Pool.SetExclusiveModels` + `pickLocked` 闸门：**只在付费状态已知为免费**时跳过，未知照旧参与，全池皆免费时放行（宁可撞 11158）。本仓多一道 `reserveBlocked`，闸门放在 `inFlightFull` 之后、`cands` 追加之前。装配在 `cmd/server/main.go` 的 `SetModelRateOf` 旁边。用例 `pick_exclusive_test.go`（3 条）+ `modeltiers_exclusive_test.go`：上游用 `mkPool(2)`，本仓无该夹具，改用既有 `strategyPool(t,"u0","u1")` |
+| `e5bf2c56` + `2b7ac6de` testdata 脱敏 | ✅ 合入（适配） | 真机凭据从夹具里清掉：`204af49d-…`/`11f49997-…` → `00000000-0000-4000-8000-…1`/`…2`，`uin 450701993596` → 12 个 0，`X-Refresh-Token: eyJ…` 整段 → `<REDACTED-REFRESH-TOKEN>`，第三方项目路径 `/Users/haocheng/ZoyProjects/…` → `/Users/dev/project`，钉钉图片直链 → `example.com/sample.png`。本仓命中 9 个文件（含 `errors_test.go` 的 22 处 `11f49997`、`checkin_receipt.go` 注释）—— 脚本按同一套替换规则批量改，`git grep` 复查已为空 |
+| `3d0f293e` proxypool 记出口归属（国家/住宅或机房/ISP） | ⏭ 跳过 | 本仓无 `internal/proxypool` 模块（`intel.go` 175 行全新建、`transport.go`/`pool.go` 都是该模块内部类型），无对象可改 |
+
+本批新增依赖：无（`exclusive`/`paidByUID` 全在既有 `Client` 结构里）。
+
+未合入：`849d338`（compress 依赖升级）仍挂着 —— 本机 `proxy.golang.org` 不可达、本地模块缓存里只有 v1.17.4。

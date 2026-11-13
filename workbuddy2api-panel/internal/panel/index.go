@@ -47,8 +47,11 @@ const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inl
 func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("X-Content-Type-Options", "nosniff") // 禁 MIME 嗅探
-	w.Header().Set("X-Frame-Options", "DENY")           // 老浏览器兜底（CSP frame-ancestors 的等价项）
-	w.Header().Set("Referrer-Policy", "no-referrer")    // 不外泄面板地址给外部站点
+	// 禁收录：公网部署的面板会被搜索引擎与资产测绘平台当成可发现入口（CSP 管不到抓取）。
+	// 只能挡住此后的抓取，已收录的旧快照要在搜索引擎控制台提交移除。
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	w.Header().Set("X-Frame-Options", "DENY")        // 老浏览器兜底（CSP frame-ancestors 的等价项）
+	w.Header().Set("Referrer-Policy", "no-referrer") // 不外泄面板地址给外部站点
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 }
