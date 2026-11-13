@@ -2,6 +2,7 @@
 // ponytail: 不存会话；客户端每轮带全量 messages。上游 reasoning_content 无 signature，
 // 作为 thinking 块下发展示；客户端回传的 thinking 块丢弃（不触发签名校验）。
 // top_k / cache_control / context_management / betas / count_tokens 上游 chat 没有对应物，丢掉。
+// output_config.format=json_schema 映射为 response_format，schema 原样保留并补 name/strict。
 // 服务端工具：web_search 有网关侧执行器（见 searchtool.go，探测→检索→结果注入）；
 // 其余（code_execution / bash_* …）没有执行器，丢掉并在 system 里写明。
 // usage 语义对齐 relaykit：input_tokens 不含缓存读/写（Claude 口径），截断映射 refusal。
@@ -147,6 +148,32 @@ func writeAnthropicError(w http.ResponseWriter, status int, typ, msg string) {
 	})
 }
 
+// responseFormatFromMessages 把 Anthropic 结构化输出 output_config.format
+// 映射成上游 chat 的 response_format。Anthropic 的格式是 {type:"json_schema",schema:...}，
+// 没有 name/strict；这里补齐 OpenAI 形状，其余 output_config 字段仍按原逻辑丢弃。
+func responseFormatFromMessages(obj map[string]any) map[string]any {
+	oc, _ := obj["output_config"].(map[string]any)
+	if oc == nil {
+		return nil
+	}
+	f, _ := oc["format"].(map[string]any)
+	if f == nil || asString(f["type"]) != "json_schema" {
+		return nil
+	}
+	schema, ok := f["schema"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return map[string]any{
+		"type": "json_schema",
+		"json_schema": map[string]any{
+			"name":   "response",
+			"strict": true,
+			"schema": schema,
+		},
+	}
+}
+
 func messagesToChat(src []byte) ([]byte, []serverSearchTool, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(src, &obj); err != nil {
@@ -188,6 +215,9 @@ func messagesToChat(src []byte) ([]byte, []serverSearchTool, error) {
 	}
 	if e := effortFromMessages(obj); e != "" {
 		out["reasoning_effort"] = e
+	}
+	if rf := responseFormatFromMessages(obj); rf != nil {
+		out["response_format"] = rf
 	}
 	msgs := []any{}
 	if sys := systemText(obj["system"]); sys != "" {

@@ -364,6 +364,18 @@ type Config struct {
 		// EmbeddingsEnabled 实验特性 /v1/embeddings 总开关。默认**关**：上游嵌入只注册了
 		// bge-m3 一个模型（1024 维），可用性随账号/租户变化；默认放开等于把实验端点
 		// 暴露给所有客户端。关着回 403 embeddings_disabled（不是 404）。
+
+		// BusyRetry 6020/6021 渠道排队时，先在网关内按上游 retry_after 等一轮再试一次，
+		// 避免把「等 40 秒就好」的排队当成不可重试错误甩给客户端（默认 true）。
+		BusyRetry bool `json:"busy_retry"`
+		// BusyWaitSeconds 单次排队等待上限（秒，默认 60）。0 = 用默认；负数 = 不等。
+		BusyWaitSeconds int `json:"busy_wait_seconds"`
+
+		// RepairDeferredToolArgs 实验特性：修复 DeferredToolCall 的残缺参数——模型把
+		// input 写成 JSON 字符串，或参数 JSON 被截断（见 internal/upstream/tool_arg_repair.go）。
+		// 只影响 DeferredToolCall，其它工具零改写。默认关闭；启动时读取（改完需重启）。
+		RepairDeferredToolArgs bool `json:"repair_deferred_tool_args"`
+
 		EmbeddingsEnabled     bool `json:"embeddings_enabled"`
 		WatermarkStripEnabled bool `json:"watermark_strip_enabled"`
 		// ToolOnlyRescue 「说一句就收尾」的安全续写（只采纳工具调用），默认**关**。
@@ -634,6 +646,10 @@ func Default() *Config {
 	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Features.SanitizeBrandScope = "all"
+	// 6020/6021 排队等待（见 internal/server/handler.go 的 ErrUpstreamBusy 分支）：
+	// 缺省等一轮（60s 上限），避免把上游明说「40 秒后再来」的排队秒变成客户端可见失败。
+	c.Features.BusyRetry = true
+	c.Features.BusyWaitSeconds = 60
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	// 身份首句替换缺省关闭（老配置无该键 → false），但文本预置默认值，
 	// 面板勾选后无需再填。
@@ -947,6 +963,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_SANITIZE_BRAND_SCOPE"); v != "" {
 		c.Features.SanitizeBrandScope = v
 	}
+	if v := os.Getenv("WB2A_REPAIR_DEFERRED_TOOL_ARGS"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Features.RepairDeferredToolArgs = b
+		}
+	}
 	if v := os.Getenv("WB2A_EMBEDDINGS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.EmbeddingsEnabled = b
@@ -1131,6 +1152,14 @@ func (c *Config) normalize() error {
 	}
 	if c.HeadKeepaliveDur < 0 {
 		return fmt.Errorf("server.head_keepalive: 负时长 %q 无意义", c.Server.HeadKeepalive)
+	}
+	// 排队等待上限：0 回落缺省 60s；负数合法（= 不等，直接把排队交给客户端）；
+	// 超过 Retry-After 上报上限（600s）没有意义也无从验证，fail fast。
+	if c.Features.BusyWaitSeconds == 0 {
+		c.Features.BusyWaitSeconds = 60
+	}
+	if c.Features.BusyWaitSeconds > 600 {
+		return fmt.Errorf("features.busy_wait_seconds: %d 超出允许范围 1–600", c.Features.BusyWaitSeconds)
 	}
 	// 优雅关停窗口：空回落 30s（分钟级在途 SSE 远比旧的固定 5s 常见）；"0" 合法
 	// （立即退）；负值 fail fast。

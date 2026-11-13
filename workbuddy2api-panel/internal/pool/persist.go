@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -164,6 +165,26 @@ func (p *Pool) load() {
 		return
 	}
 	p.applyAccountsLocked(sf.Accounts)
+	p.applyRulesLocked(sf.ModelRules)
+}
+
+// applyRulesLocked 装载规则表并重算每个账号的运行态集合。调用方必须已持有 p.mu。
+// 顺序上必须在 applyAccountsLocked 之后（账号引用先落地，再展开），但展开时不改写
+// e.ruleIDs——否则「规则还没装载」会被当成「规则已被删除」，重启一次就丢引用。
+func (p *Pool) applyRulesLocked(rules []ModelRule) {
+	if p.rules == nil {
+		p.rules = map[string]ModelRule{}
+	}
+	for _, r := range rules {
+		if r.ID == "" || len(r.Models) == 0 {
+			continue
+		}
+		if r.Mode != RuleModeAllow {
+			r.Mode = RuleModeDeny
+		}
+		p.rules[r.ID] = r
+	}
+	p.recomputeRulesLocked()
 }
 
 // applyAccountsLocked 用持久化账号状态覆盖/插入 byUID（placeholder 凭证，Add 时换全）。
@@ -182,6 +203,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			needAuth:                 true,                 // 标记占位（bug P1-3）：拿到真实凭证前不参与路由
 			remark:                   s.Remark,
 			group:                    s.Group,
+			ruleIDs:                  append([]string(nil), s.ModelRules...),
 			credits:                  s.Credits,
 			creditsTotal:             s.CreditsTotal,
 			creditsExpiring:          s.CreditsExpiring,
@@ -276,6 +298,7 @@ func (p *Pool) adoptSnapshot(s snapshot) {
 func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
 	p.applyAccountsLocked(s.Accounts)
+	p.applyRulesLocked(s.ModelRules)
 }
 
 // saveLocked 落盘 state.json，返回失败原因（调用方据此回置 dirty 以便重试）。
@@ -351,6 +374,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		s := stateAccount{
 			Remark:                   e.remark,
 			Group:                    e.group,
+			ModelRules:               append([]string(nil), e.ruleIDs...),
 			Credits:                  e.credits,
 			CreditsTotal:             e.creditsTotal,
 			Disabled:                 e.disabled,
@@ -418,6 +442,19 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			}
 		}
 		sf.Accounts[uid] = s
+	}
+	// 规则表整体写出：规则本体 + 每个账号的引用都在一张 state.json 里，
+	// 单文件快照才不会出现「账号指向了不存在的规则」。
+	if len(p.rules) > 0 {
+		ids := make([]string, 0, len(p.rules))
+		for id := range p.rules {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		sf.ModelRules = make([]ModelRule, 0, len(ids))
+		for _, id := range ids {
+			sf.ModelRules = append(sf.ModelRules, p.rules[id])
+		}
 	}
 	return sf
 }

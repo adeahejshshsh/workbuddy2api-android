@@ -13,8 +13,10 @@ import (
 )
 
 type Pool struct {
-	mu      sync.RWMutex
-	byUID   map[string]*entry
+	mu    sync.RWMutex
+	byUID map[string]*entry
+	// rules 模型规则表（id → 规则）。面板「模型规则」页维护，随 state.json 落盘。
+	rules   map[string]ModelRule
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
 	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。

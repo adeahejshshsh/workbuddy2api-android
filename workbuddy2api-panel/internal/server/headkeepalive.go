@@ -186,9 +186,22 @@ func (k *headKeepaliveWriter) stop() {
 // 调用方（writeOpenAIError*）据此不再写 JSON —— 往已提交的 SSE 流里塞 JSON
 // 会让客户端收到既非帧也非 JSON 的脏数据。
 func (k *headKeepaliveWriter) writeErrorFrame(status int, typ, code, msg, hint string) {
+	k.writeErrorFrameExtra(status, typ, code, msg, hint, nil)
+}
+
+// writeErrorFrameExtra 同 writeErrorFrame，另在 error 对象里附加 extra 字段。
+// 响应头已提交后不能再改 HTTP 状态码，而有些客户端（ZCode）只按状态码/业务码
+// 判「能不能重试」——把 statusCode=429 这类信号塞进协议内错误体，客户端才能
+// 按可重试处理，而不是把整轮对话判死。
+func (k *headKeepaliveWriter) writeErrorFrameExtra(status int, typ, code, msg, hint string, extra map[string]any) {
 	e := map[string]any{"message": msg, "type": typ, "code": code}
 	if hint != "" {
 		e["gateway_hint"] = hint
+	}
+	for key, v := range extra {
+		if _, exists := e[key]; !exists {
+			e[key] = v
+		}
 	}
 	body, err := json.Marshal(map[string]any{"error": e})
 	if err != nil {

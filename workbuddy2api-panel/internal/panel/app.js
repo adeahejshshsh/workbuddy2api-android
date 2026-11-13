@@ -423,6 +423,9 @@ const VEIL_CLOSERS = {
   remarkVeil: () => closeRemarks(),
   evCtxVeil: () => { $('evCtxVeil').classList.remove('on'); restoreFocus('evCtxVeil'); },
   keyVeil: () => { $('keyVeil').classList.remove('on'); restoreFocus('keyVeil'); },
+  ruleVeil: () => closeRuleDlg(),
+  accRuleVeil: () => closeAccRuleDlg(),
+  accPickVeil: () => closeAccPickDlg(),
 };
 const VEIL_ESC_LOCKED = new Set(['keyVeil']);
 const veilOpener = new Map(); // veil id -> 打开它的控件（关闭后焦点还回去）
@@ -511,7 +514,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', models: '模型与档位', config: '配置', logs: '运行日志', modelrules: '模型规则' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -521,6 +524,7 @@ function go(v) {
   // 而 loadModels 失败时会写一行错误进去 → children.length 非 0 → 之后
   // 每次切回「模型与档位」都不再自动请求，一直显示那行旧错误，只能手点刷新。
   if (v === 'models' && !mdLoaded) loadModels();
+  if (v === 'modelrules') loadModelRules();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
@@ -4185,8 +4189,11 @@ function renderBalanceChart(series) {
       '" text-anchor="' + (i === 0 ? 'start' : i === tickCount - 1 ? 'end' : 'middle') + '">' + esc(fmtT(t)) + '</text>';
   }
 
+  // 色板序号只按**健康系列**推进：失效号用灰线但不占号，避免健康号换色。
+  let liveIdx = 0;
   rows.forEach((s, si) => {
-    const color = BH_COLORS[si % BH_COLORS.length];
+    const dead = bhIsDead(s);
+    const color = bhColorOf(s.uid, dead ? 0 : liveIdx++, dead);
     const pts = s.points.map(p => ({ x: X(Number(p.t) * 1000), y: Y(Number(p.c)), c: Number(p.c), t: Number(p.t) * 1000, g: p.d }));
     // 平滑 <path>（monotone，不过冲 —— 见 smoothPath 注释）+ 统一线宽/线帽。
     // 线宽按**本图系列数**取档，两处折线共用同一函数，风格不会各走各的。
@@ -4341,7 +4348,8 @@ function renderDailyBars(series) {
     series.forEach((s, si) => {
       const v = (map.get(s.uid) || {})[day];
       if (v === undefined) return;
-      const color = BH_COLORS[si % BH_COLORS.length];
+      const dead = bhIsDead(s);
+      const color = bhColorOf(s.uid, si, dead);
       // 组内柱之间留 1px 缝：无缝隙时相邻两柱会被知觉成一个整体
       // （格式塔共边界效应），看不出"两根独立的柱"。
       const gap = nAcc > 1 ? 1 : 0;
@@ -4518,6 +4526,25 @@ function renderRealmSeg(all) {
      - 最低 / 最高 —— **不可加**！各账号的低谷/高峰不在同一时刻，
        Σ最低 没有任何物理含义（会得出一个从未存在过的水位），故填 "—"。
    不做跨域总计：cn 与 global 的积分不同源、不可互换（见 BH_REALMS）。 */
+// bhIsDead 该账号当前是否已失效（禁用）。暂停**不算** —— 暂停号照常保号、
+// 余额仍在更新，只是暂不接流量，图上应按活号正常着色。
+function bhIsDead(s) {
+  const a = acctStateOf(s && s.uid);
+  return !!(a && a.disabled);
+}
+
+// bhColorOf 余额趋势统一取色：失效账号一律用灰线，且**不占色板序号**。
+//
+// 两个要点：
+//  1. 失效号用灰 —— 与表格里 bh-dead 行的去色一致，图上也不能让死号的颜色
+//     和活号一样鲜；它已经不再更新，艳丽的线会误导人以为「还在跑」。
+//  2. 灰线**不参与色板轮转** —— 否则某个健康号会因前面多了一个死号而换色，
+//     同一账号在不同时间/不同域下颜色飘移，读者对不上。
+function bhColorOf(uid, colorIndex, isDead) {
+  if (isDead) return 'var(--ink-3)';
+  return BH_COLORS[colorIndex % BH_COLORS.length];
+}
+
 // acctStateOf 按 uid 取该账号的最新状态（来自 overview 缓存）。无记录 → null。
 // 余额趋势的「可用 N/M」用它，与账号池列表**共用同一处口径** —— 明细与合计
 // 各算各的，是本仓踩过的坑。
@@ -4601,9 +4628,17 @@ async function loadBalance() {
       bhRealm = pickRealm(all);
     }
     renderRealmSeg(all);
-    const rows = filterRealm(all, bhRealm);
-    renderBalanceChart(rows);
-    renderDailyBars(rows);
+    // 失效账号（禁用）**不参与统计**，但保留记录单独列出。
+    //
+    // 为什么分开：禁用号的余额是历史残留（人已不能干活），混进「当前合计 / 净变化 /
+    // 消耗到账」会把死钱算成活钱，运维据此判断容量必然高估。但历史曲线本身有诊断
+    // 价值（能看出「哪天开始不更新」），所以不是删掉，而是移出统计区单独陈列。
+    // 暂停号不受影响：它照常保号、余额仍会更新，只是暂不接流量。
+    const inRealm = filterRealm(all, bhRealm);
+    const rows = inRealm.filter(s => !bhIsDead(s));
+    const deadRows = inRealm.filter(bhIsDead);
+    renderBalanceChart(inRealm);  // 折线画全部：失效号用灰线保留历史轨迹（表格才做统计剔除）
+    renderDailyBars(inRealm);     // 同上：柱子也画全，灰线/灰柱表示已失效
     // 分域小计：同域内可加（语义成立）；**不做跨域总计**——cn 与 global 的
     // 积分不同源、不可互换，相加得出的数没有意义（见 BH_REALMS 注释）。
     let total = 0, delta = 0;
@@ -4623,8 +4658,8 @@ async function loadBalance() {
       bhCard('窗口净变化', (delta > 0 ? '+' : '') + fmtNum(delta), delta > 0 ? 'ok' : delta < 0 ? 'bad' : '') +
       bhCard('采样点数', fmtNum(rows.reduce((a, s) => a + (s.points || []).length, 0)));
     const tb = $('bhAccBody');
-    if (tb) tb.innerHTML = rows.length ? rows.map((s, i) =>
-      '<tr><td class="mark"><i class="dot" style="background:' + BH_COLORS[i % BH_COLORS.length] + '"></i></td>' +
+    const renderRow = (s, i, dead) =>
+      '<tr' + (dead ? ' class="bh-dead"' : '') + '><td class="mark"><i class="dot" style="background:' + bhColorOf(s.uid, i, dead) + '"></i></td>' +
       '<td>' + esc(s.name || s.uid.slice(0, 8)) + (function () {
         // 每行是一条历史余额曲线：账号被封后曲线停止更新但历史仍在，不标注会把
         // 「号被封」误读成「这段时间没在用」。
@@ -4648,7 +4683,14 @@ async function loadBalance() {
                fmtFlowCell(t, mo, 'consumed', days) +
                fmtFlowCell(t, mo, 'gained', days);
       })() +
-      '<td class="num">' + (s.points || []).length + '</td></tr>').join('')
+      '<td class="num">' + (s.points || []).length + '</td></tr>';
+
+    const deadHtml = deadRows.length
+      ? '<tr class="bh-sep"><td colspan="11">已失效 ' + deadRows.length + ' 个（不计入上方统计，仅保留历史记录）</td></tr>' +
+        deadRows.map((s, i) => renderRow(s, rows.length + i, true)).join('')
+      : '';
+    const liveHtml = rows.map((s, i) => renderRow(s, i, false)).join('');
+    if (tb) tb.innerHTML = (rows.length + deadRows.length) ? (liveHtml + deadHtml)
       : '<tr><td colspan="11"><div class="empty"><div class="big">该域暂无采样</div>' +
         '切到其他域，或等待下一次余额刷新</div></td></tr>';
     renderBalanceFoot(rows, d.now, days);
@@ -4946,3 +4988,389 @@ if ($('btnRemarkClear')) $('btnRemarkClear').onclick = () => {
   renderRemarkBody();
 };
 if ($('btnRemarkSave')) $('btnRemarkSave').onclick = saveRemarkForm;
+// >>> modelrules-app
+/* ── 模型规则（黑/白名单） ────────────────────────────────────────────
+   背景：贵模型只给少数账号用，其余账号只用便宜常用的——一个账号把额度打穿，
+   整个池子连便宜模型都跟着不可用。逐条点 model_toggle 太慢（账号 × 模型几十上百
+   个组合），所以做成「规则」：一批模型的黑/白名单，挂到账号上即刻生效。
+   判定在后端 internal/pool/modelrules.go，与手动单点开关取并集，都优先于自动冷却。 */
+let mrRules = [];        // [{id,name,mode,models,note,accounts}]
+let mrAssign = {};       // uid -> [ruleId]
+let mrCatalog = null;    // [{key,label}] 模型目录，key 带 cn:/global: 前缀
+let mrEditing = null;    // 正在编辑的规则对象；null = 新建
+let mrAccUid = '';       // 正在配置规则的账号
+let mrPick = new Set();  // 编辑弹窗里已勾选的模型 id（带前缀）
+let mrApplyRule = null;   // 「应用」弹窗正在处理的规则
+let mrApplyPick = new Set(); // 应用弹窗里勾选的 uid（勾上 = 要挂这条规则）
+
+/* 模型目录：一次拿全，**保留 cn:/global: 前缀**——两边的同名模型是两套上游、
+   两拨账号，剥掉前缀就分不清「禁的是哪一个」了。失败不抛给调用方：
+   规则列表仍可用（只是勾选面板为空），并给一条可见提示。 */
+async function mrLoadCatalog() {
+  if (mrCatalog) return mrCatalog;
+  const seen = new Map();
+  try {
+    const d = await api('models');
+    for (const m of (d.models || [])) {
+      const id = String(m.id || '').trim();
+      if (!id || seen.has(id)) continue;
+      seen.set(id, { key: id, label: m.name || id });
+    }
+  } catch (e) {
+    toast('模型目录读取失败：' + e.message, 'err');
+  }
+  mrCatalog = [...seen.values()].sort((a, b) => a.key.localeCompare(b.key));
+  return mrCatalog;
+}
+
+async function loadModelRules() {
+  const box = $('mrRuleList');
+  // 账号列取自 overview（与「账号池」页同一份快照）；深链直接进本页时先补一次。
+  if (!overviewData) { try { await loadOverview(true); } catch (e) { /* 失败就空着，下面渲染空态 */ } }
+  if (!mrRules.length) box.innerHTML = '<div class="empty"><div class="big">读取中…</div></div>';
+  try {
+    const d = await api('model_rules');
+    mrRules = d.rules || [];
+    mrAssign = d.assignments || {};
+  } catch (e) {
+    box.innerHTML = '<div class="empty"><div class="big">读取失败</div>' + esc(e.message) + '</div>';
+    return;
+  }
+  renderRuleList();
+  renderRuleAccounts();
+  mrLoadCatalog();
+}
+
+function renderRuleList() {
+  const box = $('mrRuleList');
+  $('mrRuleNote').textContent = mrRules.length ? mrRules.length + ' 条' : '';
+  if (!mrRules.length) {
+    box.innerHTML = '<div class="empty"><div class="big">还没有规则</div>新建一条，勾一批模型，再挂到账号上</div>';
+    return;
+  }
+  box.innerHTML = mrRules.map(r => {
+    const deny = r.mode !== 'allow';
+    const chips = r.models.slice(0, 10).map(m => '<span class="chip">' + esc(m) + '</span>').join('');
+    const more = r.models.length > 10 ? '<span class="chip mute">+' + (r.models.length - 10) + '</span>' : '';
+    return '<div class="rule" data-id="' + esc(r.id) + '">' +
+      '<div class="rule-hd">' +
+        '<span class="tag ' + (deny ? 'bad' : 'ok') + '">' + (deny ? '黑名单' : '白名单') + '</span>' +
+        '<b class="rule-nm">' + esc(r.name) + '</b>' +
+        '<span class="note">' + r.models.length + ' 个模型 · ' + (r.accounts || 0) + ' 个账号</span>' +
+        '<span class="grow"></span>' +
+        '<button class="xs" data-act="apply">应用</button>' +
+        '<button class="xs" data-act="edit">编辑</button>' +
+        '<button class="xs" data-act="del">删除</button>' +
+      '</div>' +
+      '<div class="chips rule-models">' + chips + more + '</div>' +
+      (r.note ? '<div class="hint rule-note">' + esc(r.note) + '</div>' : '') +
+    '</div>';
+  }).join('');
+}
+
+function renderRuleAccounts() {
+  const tb = $('mrAccBody');
+  const list = ((overviewData && overviewData.accounts) || []).slice().sort((a, b) => String(a.uid).localeCompare(String(b.uid)));
+  const byId = new Map(mrRules.map(r => [r.id, r]));
+  $('mrAccNote').textContent = list.length ? list.length + ' 个账号' : '';
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="3"><div class="empty"><div class="big">账号池是空的</div>先到「账号池」添加账号</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map(s => {
+    const ids = mrAssign[s.uid] || [];
+    const chips = ids.map(id => {
+      const r = byId.get(id);
+      if (!r) return '';
+      return '<span class="tag ' + (r.mode === 'allow' ? 'ok' : 'bad') + '">' + esc(r.name) + '</span>';
+    }).filter(Boolean).join(' ');
+    const short = String(s.uid).length > 16 ? String(s.uid).slice(0, 16) + '…' : String(s.uid);
+    const nm = remarkName(s.uid, s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>');
+    return '<tr>' +
+      '<td class="who"><div class="nm">' + nm + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + '</div>' +
+        '<div class="id">' + esc(short) + '</div></td>' +
+      '<td>' + (chips || '<span class="mr-dash">-</span>') + '</td>' +
+      '<td class="num"><button class="xs" data-uid="' + esc(s.uid) + '">配置</button></td>' +
+    '</tr>';
+  }).join('');
+}
+
+/* 规则编辑弹窗。rule 为空 = 新建；models 预勾选。 */
+async function openRuleDlg(rule) {
+  mrEditing = rule || null;
+  mrPick = new Set(rule ? rule.models : []);
+  $('ruleTitle').textContent = rule ? '编辑规则 · ' + rule.name : '新建规则';
+  $('ruleName').value = rule ? rule.name : '';
+  $('ruleMode').value = rule ? (rule.mode === 'allow' ? 'allow' : 'deny') : 'deny';
+  $('ruleQ').value = '';
+  openVeil('ruleVeil', '#ruleName');
+  $('rulePick').innerHTML = '<div class="empty"><div class="big">读取模型目录…</div></div>';
+  await mrLoadCatalog();
+  renderRulePick();
+}
+
+function renderRulePick() {
+  const q = ($('ruleQ').value || '').trim().toLowerCase();
+  const cat = mrCatalog || [];
+  const list = q ? cat.filter(m => m.key.toLowerCase().includes(q) || String(m.label).toLowerCase().includes(q)) : cat;
+  const box = $('rulePick');
+  if (!list.length) {
+    box.innerHTML = '<div class="empty"><div class="big">没有匹配的模型</div>' + (cat.length ? '换个关键词' : '模型目录是空的，可能上游不可达') + '</div>';
+    updateRuleCount();
+    return;
+  }
+  box.innerHTML = list.map(m => {
+    const on = mrPick.has(m.key);
+    return '<label class="pick' + (on ? ' on' : '') + '" data-key="' + esc(m.key) + '">' +
+      '<input type="checkbox"' + (on ? ' checked' : '') + '>' +
+      '<span class="pk-nm">' + esc(m.key) + '</span>' +
+    '</label>';
+  }).join('');
+  const scope = $('pickScopeNote');
+  if (scope) scope.textContent = q ? '全选/反选只作用于筛出的 ' + list.length + ' 个' : '';
+  updateRuleCount();
+}
+
+function updateRuleCount() {
+  const n = mrPick.size;
+  $('ruleCount').textContent = n ? '已选 ' + n + ' 个模型' : '还没勾任何模型';
+}
+
+function closeRuleDlg() { $('ruleVeil').classList.remove('on'); restoreFocus('ruleVeil'); }
+function closeAccRuleDlg() { $('accRuleVeil').classList.remove('on'); restoreFocus('accRuleVeil'); }
+function closeAccPickDlg() { $('accPickVeil').classList.remove('on'); restoreFocus('accPickVeil'); }
+
+async function saveRule() {
+  const name = ($('ruleName').value || '').trim();
+  if (!name) { toast('先给规则起个名字', 'err'); $('ruleName').focus(); return; }
+  if (!mrPick.size) { toast('至少勾一个模型', 'err'); return; }
+  const body = {
+    id: mrEditing ? mrEditing.id : '',
+    name,
+    mode: $('ruleMode').value,
+    models: [...mrPick],
+  };
+  try {
+    await api('model_rules', { method: 'POST', body: JSON.stringify(body) });
+  } catch (e) {
+    toast('保存失败：' + e.message, 'err');
+    return;
+  }
+  closeRuleDlg();
+  toast('已保存规则「' + name + '」', 'ok');
+  loadModelRules();
+}
+
+/* 按规则批量挂账号（规则卡片上的「应用」）。
+   勾选集合就是「这条规则要挂到哪些账号」：勾上 = 挂、取消 = 摘，
+   保存时只把「变了的那部分账号」发给后端（一个请求搞定，不用逐个账号弹窗）。 */
+function openAccPickDlg(rule) {
+  mrApplyRule = rule;
+  const picked = new Set();
+  Object.keys(mrAssign || {}).forEach(uid => {
+    if ((mrAssign[uid] || []).includes(rule.id)) picked.add(uid);
+  });
+  mrApplyPick = picked;
+  $('accPickTitle').textContent = '应用规则 · ' + rule.name;
+  $('accPickQ').value = '';
+  openVeil('accPickVeil', '#accPickQ');
+  renderAccPick();
+}
+
+function accPickRows() {
+  const q = ($('accPickQ').value || '').trim().toLowerCase();
+  const list = ((overviewData && overviewData.accounts) || []).slice();
+  list.sort((a, b) => String(a.nickname || a.uid).localeCompare(String(b.nickname || b.uid)));
+  if (!q) return list;
+  return list.filter(s => String(s.uid).toLowerCase().includes(q) ||
+    String(s.nickname || '').toLowerCase().includes(q) ||
+    String((typeof remarkOf === 'function' && remarkOf(s.uid)) || '').toLowerCase().includes(q));
+}
+
+function renderAccPick() {
+  const box = $('accPickList');
+  const rows = accPickRows();
+  if (!rows.length) {
+    box.innerHTML = '<div class="empty"><div class="big">没有匹配的账号</div></div>';
+    updateAccPickCount();
+    return;
+  }
+  box.innerHTML = rows.map(s => {
+    const on = mrApplyPick.has(s.uid);
+    const nm = remarkName(s.uid, s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>');
+    const realm = s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '';
+    return '<label class="pick' + (on ? ' on' : '') + '" data-uid="' + esc(s.uid) + '">' +
+      '<input type="checkbox"' + (on ? ' checked' : '') + '>' +
+      '<span class="pk-nm">' + nm + realm + '</span>' +
+      '<span class="pk-rm">' + esc(String(s.uid).slice(0, 8)) + '</span>' +
+    '</label>';
+  }).join('');
+  updateAccPickCount();
+}
+
+function updateAccPickCount() {
+  const n = mrApplyPick.size;
+  $('accPickCount').textContent = n ? '已勾 ' + n + ' 个账号' : '还没勾任何账号';
+}
+
+function bulkAccPick(mode) {
+  accPickRows().forEach(s => {
+    const on = mode === 'all' ? true : mode === 'none' ? false : !mrApplyPick.has(s.uid);
+    if (on) mrApplyPick.add(s.uid); else mrApplyPick.delete(s.uid);
+    const el = $('accPickList').querySelector('.pick[data-uid="' + s.uid + '"]');
+    if (!el) return;
+    el.classList.toggle('on', on);
+    const cb = el.querySelector('input');
+    if (cb) cb.checked = on;
+  });
+  updateAccPickCount();
+}
+
+async function saveAccPick() {
+  const rule = mrApplyRule;
+  if (!rule) return;
+  const all = ((overviewData && overviewData.accounts) || []);
+  const add = [], del = [];
+  all.forEach(s => {
+    const had = (mrAssign[s.uid] || []).includes(rule.id);
+    const want = mrApplyPick.has(s.uid);
+    if (want && !had) add.push(s.uid);
+    if (!want && had) del.push(s.uid);
+  });
+  if (!add.length && !del.length) { closeAccPickDlg(); return; }
+  try {
+    if (add.length) {
+      await api('model_rules/apply', { method: 'POST', body: JSON.stringify({ id: rule.id, uids: add, assigned: true }) });
+    }
+    if (del.length) {
+      await api('model_rules/apply', { method: 'POST', body: JSON.stringify({ id: rule.id, uids: del, assigned: false }) });
+    }
+  } catch (e) {
+    toast('保存失败：' + e.message, 'err');
+    return;
+  }
+  closeAccPickDlg();
+  toast('已应用「' + rule.name + '」：新增 ' + add.length + ' 个、移除 ' + del.length + ' 个账号', 'ok');
+  loadModelRules();
+}
+
+/* 账号挂规则 */
+function openAccRuleDlg(uid) {
+  mrAccUid = uid;
+  const s = ((overviewData && overviewData.accounts) || []).find(x => x.uid === uid) || {};
+  $('accRuleTitle').textContent = '配置规则 · ' + (s.nickname || String(uid).slice(0, 16));
+  openVeil('accRuleVeil');
+  renderAccRulePick();
+}
+
+function renderAccRulePick() {
+  const ids = new Set(mrAssign[mrAccUid] || []);
+  const box = $('accRuleList');
+  if (!mrRules.length) {
+    box.innerHTML = '<div class="empty"><div class="big">还没有规则</div>先到左栏新建一条</div>';
+    return;
+  }
+  box.innerHTML = mrRules.map(r => {
+    const on = ids.has(r.id);
+    return '<label class="pick' + (on ? ' on' : '') + '" data-id="' + esc(r.id) + '">' +
+      '<input type="checkbox"' + (on ? ' checked' : '') + '>' +
+      '<span class="pk-nm">' + esc(r.name) + '</span>' +
+      '<span class="pk-rm">' + (r.mode === 'allow' ? '白名单' : '黑名单') + ' · ' + r.models.length + ' 模型</span>' +
+    '</label>';
+  }).join('');
+}
+
+async function saveAccRule() {
+  const ids = [...$('accRuleList').querySelectorAll('.pick.on')].map(el => el.dataset.id);
+  try {
+    await api('accounts/' + encodeURIComponent(mrAccUid) + '/model_rules', {
+      method: 'POST', body: JSON.stringify({ ids }),
+    });
+  } catch (e) {
+    toast('保存失败：' + e.message, 'err');
+    return;
+  }
+  closeAccRuleDlg();
+  toast('已更新该账号的规则', 'ok');
+  loadModelRules();
+}
+
+$('btnRuleNew').onclick = () => openRuleDlg(null);
+$('btnRuleCancel').onclick = closeRuleDlg;
+$('btnRuleSave').onclick = saveRule;
+$('ruleQ').oninput = renderRulePick;
+$('btnAccPickCancel').onclick = () => closeAccPickDlg();
+$('btnAccPickSave').onclick = saveAccPick;
+$('accPickQ').oninput = renderAccPick;
+$('accPickList').addEventListener('change', e => {
+  const label = e.target.closest('.pick');
+  if (!label) return;
+  const uid = label.dataset.uid;
+  if (e.target.checked) mrApplyPick.add(uid); else mrApplyPick.delete(uid);
+  label.classList.toggle('on', e.target.checked);
+  updateAccPickCount();
+});
+Array.from(document.querySelectorAll('.rbar button[data-accpick]')).forEach(btn => {
+  btn.onclick = () => bulkAccPick(btn.dataset.accpick);
+});
+$('btnAccRuleCancel').onclick = () => closeAccRuleDlg();
+$('btnAccRuleSave').onclick = saveAccRule;
+
+$('rulePick').addEventListener('change', e => {
+  const label = e.target.closest('.pick');
+  if (!label) return;
+  const key = label.dataset.key;
+  if (e.target.checked) mrPick.add(key); else mrPick.delete(key);
+  label.classList.toggle('on', e.target.checked);
+  updateRuleCount();
+});
+
+/* 全选 / 取消选择 / 反选：只作用于「当前看得见的模型」（搜索过滤后就是过滤结果），
+   免得用户筛完再点全选却把没显示的也一起选中。 */
+function bulkPick(mode) {
+  const labels = Array.from(document.querySelectorAll('#rulePick .pick'));
+  labels.forEach(label => {
+    const key = label.dataset.key;
+    const on = mode === 'all' ? true : mode === 'none' ? false : !mrPick.has(key);
+    if (on) mrPick.add(key); else mrPick.delete(key);
+    label.classList.toggle('on', on);
+    const cb = label.querySelector('input');
+    if (cb) cb.checked = on;
+  });
+  updateRuleCount();
+}
+Array.from(document.querySelectorAll('.pick-bar button[data-pick]')).forEach(btn => {
+  btn.onclick = () => bulkPick(btn.dataset.pick);
+});
+
+$('accRuleList').addEventListener('change', e => {
+  const label = e.target.closest('.pick');
+  if (label) label.classList.toggle('on', e.target.checked);
+});
+
+$('mrRuleList').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const card = btn.closest('.rule');
+  const rule = mrRules.find(r => r.id === card.dataset.id);
+  if (!rule) return;
+  if (btn.dataset.act === 'apply') { openAccPickDlg(rule); return; }
+  if (btn.dataset.act === 'edit') { openRuleDlg(rule); return; }
+  if (btn.dataset.act === 'del') {
+    if (!confirm('删除规则「' + rule.name + '」？挂了它的账号会立刻恢复按原逻辑选号。')) return;
+    try {
+      await api('model_rules/delete', { method: 'POST', body: JSON.stringify({ id: rule.id }) });
+    } catch (err) {
+      toast('删除失败：' + err.message, 'err');
+      return;
+    }
+    toast('已删除规则「' + rule.name + '」', 'ok');
+    loadModelRules();
+  }
+});
+
+$('mrAccBody').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-uid]');
+  if (btn) openAccRuleDlg(btn.dataset.uid);
+});
+// <<< modelrules-app

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -81,6 +82,17 @@ func TestMessagesToChat(t *testing.T) {
 	if _, ok := obj["output_config"]; ok {
 		t.Fatal("output_config must not be forwarded")
 	}
+	rf, ok := obj["response_format"].(map[string]any)
+	if !ok || rf["type"] != "json_schema" {
+		t.Fatalf("response_format=%v", obj["response_format"])
+	}
+	js, _ := rf["json_schema"].(map[string]any)
+	if js["name"] != "response" || js["strict"] != true {
+		t.Fatalf("json_schema=%v", js)
+	}
+	if s, _ := js["schema"].(map[string]any); s["type"] != "object" {
+		t.Fatalf("schema=%v", js["schema"])
+	}
 	if _, ok := obj["context_management"]; ok {
 		t.Fatal("context_management must not be forwarded")
 	}
@@ -111,6 +123,67 @@ func TestMessagesToChat(t *testing.T) {
 	}
 	if msgs[4].(map[string]any)["content"] != "next" {
 		t.Fatalf("next=%v", msgs[4])
+	}
+}
+
+func TestResponseFormatFromMessages(t *testing.T) {
+	valid := map[string]any{"type": "object", "properties": map[string]any{"answer": map[string]any{"type": "string"}}}
+	tests := []struct {
+		name   string
+		config any
+		want   bool
+	}{
+		{name: "schema", config: map[string]any{"format": map[string]any{"type": "json_schema", "schema": valid}}, want: true},
+		{name: "no output config"},
+		{name: "null output config", config: nil},
+		{name: "wrong output config type", config: "strict"},
+		{name: "no format", config: map[string]any{"effort": "high"}},
+		{name: "wrong format type", config: map[string]any{"format": "json_schema"}},
+		{name: "json object not schema", config: map[string]any{"format": map[string]any{"type": "json_object"}}},
+		{name: "missing schema", config: map[string]any{"format": map[string]any{"type": "json_schema"}}},
+		{name: "null schema", config: map[string]any{"format": map[string]any{"type": "json_schema", "schema": nil}}},
+		{name: "schema array", config: map[string]any{"format": map[string]any{"type": "json_schema", "schema": []any{valid}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := responseFormatFromMessages(map[string]any{"output_config": tt.config})
+			if !tt.want {
+				if got != nil {
+					t.Fatalf("responseFormatFromMessages()=%v, want nil", got)
+				}
+				return
+			}
+			if got["type"] != "json_schema" {
+				t.Fatalf("type=%v", got["type"])
+			}
+			js, _ := got["json_schema"].(map[string]any)
+			if js["name"] != "response" || js["strict"] != true {
+				t.Fatalf("json_schema=%v", js)
+			}
+			if !reflect.DeepEqual(js["schema"], valid) {
+				t.Fatalf("schema changed: %#v", js["schema"])
+			}
+		})
+	}
+}
+
+func TestMessagesToChatJSONSchemaDoesNotForwardInvalidInput(t *testing.T) {
+	for _, format := range []string{
+		`{"type":"json_object"}`,
+		`{"type":"json_schema"}`,
+		`{"type":"json_schema","schema":null}`,
+	} {
+		got, _, err := messagesToChat([]byte(`{"model":"glm-5.2","output_config":{"format":` + format + `},"messages":[{"role":"user","content":"hi"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(got, &obj); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := obj["response_format"]; exists {
+			t.Errorf("format %s was forwarded as %#v", format, obj["response_format"])
+		}
 	}
 }
 

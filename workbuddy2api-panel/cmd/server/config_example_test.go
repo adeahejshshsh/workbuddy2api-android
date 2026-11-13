@@ -38,4 +38,22 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if c.Upstream.RestrictionHoldSeconds != 1800 {
 		t.Errorf("upstream.restriction_hold_seconds 示例值应为 1800，实际 %d", c.Upstream.RestrictionHoldSeconds)
 	}
+	// 6020/6021 排队等待：示例必须给出，否则用户不知道「排队会先在网关内等一轮」。
+	if !c.Features.BusyRetry || c.Features.BusyWaitSeconds != 60 {
+		t.Errorf("features.busy_retry / busy_wait_seconds 示例应为 true / 60: %+v", c.Features)
+	}
+	// DeferredToolCall 参数修复是实验特性：示例里必须显式给成 false（默认关），
+	// 否则用户不知道有这个开关，也无从判断「为什么它没生效」。
+	var example struct {
+		Features map[string]json.RawMessage `json:"features"`
+	}
+	if err := json.Unmarshal(raw, &example); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := example.Features["repair_deferred_tool_args"]; !ok {
+		t.Error("features.repair_deferred_tool_args 示例键缺失")
+	}
+	if c.Features.RepairDeferredToolArgs {
+		t.Error("features.repair_deferred_tool_args 示例应显式关闭")
+	}
 }

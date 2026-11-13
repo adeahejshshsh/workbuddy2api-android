@@ -72,7 +72,10 @@
     "tls_fingerprint": "node"
   },
   "features": {
-    "sanitize_blacklist_fingerprints": true
+    "sanitize_blacklist_fingerprints": true,
+    "busy_retry": true,
+    "busy_wait_seconds": 60,
+    "repair_deferred_tool_args": false
   },
   "prompt": {
     "mode": "passthrough",
