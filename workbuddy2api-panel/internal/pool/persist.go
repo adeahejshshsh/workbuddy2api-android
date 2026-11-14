@@ -165,7 +165,30 @@ func (p *Pool) load() {
 		return
 	}
 	p.applyAccountsLocked(sf.Accounts)
+	p.loadParkedLocked(sf.Parked)
 	p.applyRulesLocked(sf.ModelRules)
+}
+
+// loadParkedLocked 恢复暂存的号：复用 applyAccountsLocked 的整套清洗，再把结果挪进 parked。
+// 同一个 uid 若也在 accounts 里（异常数据），以池里的为准。调用方持 p.mu。
+func (p *Pool) loadParkedLocked(parked map[string]stateAccount) {
+	if len(parked) == 0 {
+		return
+	}
+	live := p.byUID
+	p.byUID = map[string]*entry{}
+	p.applyAccountsLocked(parked)
+	restored := p.byUID
+	p.byUID = live
+	for uid, e := range restored {
+		if _, inPool := live[uid]; inPool || len(p.parked) >= maxParked {
+			continue
+		}
+		if p.parked == nil {
+			p.parked = map[string]*entry{}
+		}
+		p.parked[uid] = e
+	}
 }
 
 // applyRulesLocked 装载规则表并重算每个账号的运行态集合。调用方必须已持有 p.mu。
@@ -297,7 +320,9 @@ func (p *Pool) adoptSnapshot(s snapshot) {
 }
 func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
+	p.parked = nil
 	p.applyAccountsLocked(s.Accounts)
+	p.loadParkedLocked(s.Parked)
 	p.applyRulesLocked(s.ModelRules)
 }
 
@@ -371,77 +396,14 @@ func (p *Pool) stateOverviewLocked() stateFile {
 	now := time.Now()
 	sf := stateFile{Accounts: map[string]stateAccount{}}
 	for uid, e := range p.byUID {
-		s := stateAccount{
-			Remark:                   e.remark,
-			Group:                    e.group,
-			ModelRules:               append([]string(nil), e.ruleIDs...),
-			Credits:                  e.credits,
-			CreditsTotal:             e.creditsTotal,
-			Disabled:                 e.disabled,
-			Paused:                   e.paused,
-			SuccessCount:             e.successCount,
-			ErrTotal:                 e.errTotal,
-			LastSuccess:              e.lastSuccess,
-			LastErr:                  e.lastErr,
-			LastCheckinDay:           e.lastCheckinDay,
-			TokenUsage:               e.tokenUsage,
-			SoftStreak:               e.softStreak,
-			SessionDeadFails:         e.sessionDeadFails,
-			ConsecutiveFails:         e.consecutiveFails,
-			CreditsExpiring:          e.creditsExpiring,
-			CreditsEarliestExpiry:    e.creditsEarliestExpiry,
-			CreditsEarliestRemaining: e.creditsEarliestRemaining,
+		sf.Accounts[uid] = stateOf(e, now)
+	}
+	// 热重载暂存的号也落盘：进程在文件缺席期间重启，文件回来时禁用、暂停、分组照样复活。
+	for uid, e := range p.parked {
+		if sf.Parked == nil {
+			sf.Parked = map[string]stateAccount{}
 		}
-		// 账号级冷却字段：仅禁用或仍在冷却时限内落盘（与熔断/降权同款惰性清洗）。
-		// 软冷却按墙钟到期、字段本身不清理，无条件落盘会让过期 reason 在 state.json 里
-		// 长生不老并被重启原样拾回（issue #207-4）。
-		if e.disabled || (!e.until.IsZero() && now.Before(e.until)) {
-			s.Reason, s.Until, s.CoolKind = e.reason, e.until, e.coolKind
-			s.DisabledAt = e.disabledAt
-		}
-		// 熔断截止：仅未过期才落盘（指针 nil 才能被 omitempty 真省略）。
-		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
-			u := e.breakerUntil
-			s.BreakerUntil = &u
-			s.RetryCount = e.retryCount
-		}
-		// 连败降权截止：仅未过期才落盘。
-		if !e.degradeUntil.IsZero() && now.Before(e.degradeUntil) {
-			u := e.degradeUntil
-			s.DegradeUntil = &u
-		}
-		// 模型级独立冷却：惰性过滤已过期条目（Hits 不落盘，重启后 11102 退避从基数重学）。
-		if len(e.modelCooldowns) > 0 {
-			for m, mc := range e.modelCooldowns {
-				if mc.Until.IsZero() || !now.Before(mc.Until) {
-					continue
-				}
-				if s.ModelCooldowns == nil {
-					s.ModelCooldowns = map[string]stateModelCooldown{}
-				}
-				s.ModelCooldowns[m] = stateModelCooldown{Until: mc.Until, ResetAt: mc.ResetAt, Reason: mc.Reason, AuditOnly: mc.AuditOnly}
-			}
-		}
-		// 手动关闭：全量写出（无过期概念，永久保留）。
-		if len(e.modelOff) > 0 {
-			s.ModelOff = map[string]stateModelOff{}
-			for m, o := range e.modelOff {
-				s.ModelOff[m] = stateModelOff{Since: o.Since, Note: o.Note}
-			}
-		}
-		// 成本账本：惰性过滤过期观测（modelCostTTL 外不写——陈旧价格不复活）。
-		if len(e.modelCost) > 0 {
-			for m, mc := range e.modelCost {
-				if mc.LastSeen.IsZero() || now.Sub(mc.LastSeen) > modelCostTTL {
-					continue
-				}
-				if s.ModelCosts == nil {
-					s.ModelCosts = map[string]stateModelCost{}
-				}
-				s.ModelCosts[m] = stateModelCost{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
-			}
-		}
-		sf.Accounts[uid] = s
+		sf.Parked[uid] = stateOf(e, now)
 	}
 	// 规则表整体写出：规则本体 + 每个账号的引用都在一张 state.json 里，
 	// 单文件快照才不会出现「账号指向了不存在的规则」。
@@ -457,4 +419,80 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		}
 	}
 	return sf
+}
+
+// stateOf 一个条目的持久化形态（落盘与快照镜像共用，池内号与暂存号同一套清洗规则）。
+// 调用方持 p.mu。
+func stateOf(e *entry, now time.Time) stateAccount {
+	s := stateAccount{
+		Remark:                   e.remark,
+		Group:                    e.group,
+		ModelRules:               append([]string(nil), e.ruleIDs...),
+		Credits:                  e.credits,
+		CreditsTotal:             e.creditsTotal,
+		Disabled:                 e.disabled,
+		Paused:                   e.paused,
+		SuccessCount:             e.successCount,
+		ErrTotal:                 e.errTotal,
+		LastSuccess:              e.lastSuccess,
+		LastErr:                  e.lastErr,
+		LastCheckinDay:           e.lastCheckinDay,
+		TokenUsage:               e.tokenUsage,
+		SoftStreak:               e.softStreak,
+		SessionDeadFails:         e.sessionDeadFails,
+		ConsecutiveFails:         e.consecutiveFails,
+		CreditsExpiring:          e.creditsExpiring,
+		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
+		CreditsEarliestRemaining: e.creditsEarliestRemaining,
+	}
+	// 账号级冷却字段：仅禁用或仍在冷却时限内落盘（与熔断/降权同款惰性清洗）。
+	// 软冷却按墙钟到期、字段本身不清理，无条件落盘会让过期 reason 在 state.json 里
+	// 长生不老并被重启原样拾回（issue #207-4）。
+	if e.disabled || (!e.until.IsZero() && now.Before(e.until)) {
+		s.Reason, s.Until, s.CoolKind = e.reason, e.until, e.coolKind
+		s.DisabledAt = e.disabledAt
+	}
+	// 熔断截止：仅未过期才落盘（指针 nil 才能被 omitempty 真省略）。
+	if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
+		u := e.breakerUntil
+		s.BreakerUntil = &u
+		s.RetryCount = e.retryCount
+	}
+	// 连败降权截止：仅未过期才落盘。
+	if !e.degradeUntil.IsZero() && now.Before(e.degradeUntil) {
+		u := e.degradeUntil
+		s.DegradeUntil = &u
+	}
+	// 模型级独立冷却：惰性过滤已过期条目（Hits 不落盘，重启后 11102 退避从基数重学）。
+	if len(e.modelCooldowns) > 0 {
+		for m, mc := range e.modelCooldowns {
+			if mc.Until.IsZero() || !now.Before(mc.Until) {
+				continue
+			}
+			if s.ModelCooldowns == nil {
+				s.ModelCooldowns = map[string]stateModelCooldown{}
+			}
+			s.ModelCooldowns[m] = stateModelCooldown{Until: mc.Until, ResetAt: mc.ResetAt, Reason: mc.Reason, AuditOnly: mc.AuditOnly}
+		}
+	}
+	// 手动关闭：全量写出（无过期概念，永久保留）。
+	if len(e.modelOff) > 0 {
+		s.ModelOff = map[string]stateModelOff{}
+		for m, o := range e.modelOff {
+			s.ModelOff[m] = stateModelOff{Since: o.Since, Note: o.Note}
+		}
+	}
+	// 成本账本：惰性过滤过期观测（modelCostTTL 外不写——陈旧价格不复活）。
+	if len(e.modelCost) > 0 {
+		for m, mc := range e.modelCost {
+			if mc.LastSeen.IsZero() || now.Sub(mc.LastSeen) > modelCostTTL {
+				continue
+			}
+			if s.ModelCosts == nil {
+				s.ModelCosts = map[string]stateModelCost{}
+			}
+			s.ModelCosts[m] = stateModelCost{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
+		}
+	}
+	return s
 }

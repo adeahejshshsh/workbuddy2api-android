@@ -44,6 +44,7 @@ type ReloadResult struct {
 	Added       int      `json:"added"`
 	Updated     int      `json:"updated"`
 	Removed     int      `json:"removed"`
+	Pending     int      `json:"pending"` // 文件已不见、还在等确认或等在途请求结束的号
 	ParseErrors int      `json:"parse_errors"`
 	Files       int      `json:"files"`
 	Skipped     bool     `json:"skipped"`                // 本轮放弃（目录在扫描期间变动 / 无变化）
@@ -51,6 +52,13 @@ type ReloadResult struct {
 	Errors      []string `json:"errors,omitempty"`       // 解析失败明细
 	RemovedUIDs []string `json:"removed_uids,omitempty"` // 便于脚本核对删的是哪些
 }
+
+// reloadMaxRemoveDiv / reloadMinRemoveCap 单轮删除上限：池的 1/5，但至少放行 2 个
+// （小池里删一两个号是正常操作，不该每次都要 force）。
+const (
+	reloadMaxRemoveDiv = 5
+	reloadMinRemoveCap = 2
+)
 
 // errReloadNotConfigured 面板未配置 AuthDir（理论上不会发生）。
 var errReloadNotConfigured = errors.New("auth dir 未配置，无法重载")
@@ -65,6 +73,11 @@ func (p *Panel) ReloadAccounts() (ReloadResult, error) {
 
 // ReloadAccountsReason 同 ReloadAccounts，reason 只用于日志（manual / poll）。
 func (p *Panel) ReloadAccountsReason(reason string) (ReloadResult, error) {
+	return p.ReloadAccountsForce(reason, false)
+}
+
+// ReloadAccountsForce 同 ReloadAccountsReason；force 放开单轮删除上限，其余护栏照旧。
+func (p *Panel) ReloadAccountsForce(reason string, force bool) (ReloadResult, error) {
 	if p.cfg.AuthDir == "" {
 		return ReloadResult{}, errReloadNotConfigured
 	}
@@ -130,14 +143,48 @@ func (p *Panel) ReloadAccountsReason(reason string) (ReloadResult, error) {
 		return res, nil
 	}
 
-	// 护栏 2：缺席计数满 N 次才删；期间有在途请求也往后推。
-	confirm := p.reloadDeleteConfirm
-	if confirm < 1 {
-		confirm = 1
+	// 护栏 2/4/7：缺席计数、在途推迟、单轮上限（与轮询的 confirmMissing 共用）。
+	p.removeMissingLocked(seen, force, &res)
+	// 已不在池里的 uid 不再占着缺席计数表。
+	for uid := range p.reloadMissing {
+		if p.cfg.Pool.AuthByUID(uid) == nil {
+			delete(p.reloadMissing, uid)
+		}
 	}
+
+	p.noteReload(res)
+	if res.Added > 0 || res.Updated > 0 || res.Removed > 0 {
+		// 一行审计日志：内容变动的重载才打（10s 轮询下没变化时不能刷屏）。
+		log.Printf("[reload] added=%d updated=%d removed=%d pending=%d parse_errors=0 files=%d",
+			res.Added, res.Updated, res.Removed, res.Pending, res.Files)
+		if len(res.RemovedUIDs) > 0 {
+			log.Printf("[reload] 已暂存移出（auth 文件不存在，连续 %d 次扫描确认，文件回来时状态复活）: %s",
+				p.confirmRounds(), strings.Join(res.RemovedUIDs, ", "))
+		}
+	} else if res.Reason != "" {
+		log.Printf("[reload] %s：%s", reason, res.Reason)
+	}
+	return res, nil
+}
+
+func (p *Panel) confirmRounds() int {
+	if p.reloadDeleteConfirm < 1 {
+		return 1
+	}
+	return p.reloadDeleteConfirm
+}
+
+// removeMissingLocked 推进缺席计数，把确认过的号暂存出池（pool.ParkMany）。调用方持 reloadMu。
+//
+// seen 是本轮扫描见到的 uid；轮询的 confirmMissing 传 nil，只靠「文件还在盘上」判在场。
+// 判据：文件在盘上 → 清账；连续 confirm 轮缺席且无在途请求 → 待删；待删数超过单轮上限且
+// 没有 force → 一个都不删（宁可不删：误删会持久化，下次启动也不复活）。
+func (p *Panel) removeMissingLocked(seen map[string]bool, force bool, res *ReloadResult) {
+	confirm := p.confirmRounds()
+	list := p.cfg.Pool.List()
 	var toRemove []string
-	for _, st := range p.cfg.Pool.List() {
-		if seen[st.UID] {
+	for _, st := range list {
+		if seen != nil && seen[st.UID] {
 			delete(p.reloadMissing, st.UID)
 			continue
 		}
@@ -149,40 +196,24 @@ func (p *Panel) ReloadAccountsReason(reason string) (ReloadResult, error) {
 			}
 		}
 		p.reloadMissing[st.UID]++
-		if p.reloadMissing[st.UID] < confirm {
-			continue
-		}
-		if p.cfg.Pool.InFlight(st.UID) > 0 {
-			log.Printf("[reload] uid=%s 文件已不存在，但在途请求未结束 → 下一轮再删", st.UID)
+		if p.reloadMissing[st.UID] < confirm || p.cfg.Pool.InFlight(st.UID) > 0 {
+			res.Pending++
 			continue
 		}
 		toRemove = append(toRemove, st.UID)
 	}
-	if removed := p.cfg.Pool.RemoveMany(toRemove); len(removed) > 0 {
+	if limit := max(reloadMinRemoveCap, len(list)/reloadMaxRemoveDiv); len(toRemove) > limit && !force {
+		res.Pending += len(toRemove)
+		res.Reason = fmt.Sprintf("%d 个号的凭证文件不见了，超过单轮上限 %d，未删除；确认无误后手动重载并加 force=1", len(toRemove), limit)
+		return
+	}
+	if removed := p.cfg.Pool.ParkMany(toRemove); len(removed) > 0 {
 		res.Removed = len(removed)
 		res.RemovedUIDs = removed
 		for _, uid := range removed {
 			delete(p.reloadMissing, uid)
 		}
 	}
-	// 已不在池里的 uid 不再占着缺席计数表。
-	for uid := range p.reloadMissing {
-		if p.cfg.Pool.AuthByUID(uid) == nil {
-			delete(p.reloadMissing, uid)
-		}
-	}
-
-	p.noteReload(res)
-	if res.Added > 0 || res.Updated > 0 || res.Removed > 0 {
-		// 一行审计日志：内容变动的重载才打（10s 轮询下没变化时不能刷屏）。
-		log.Printf("[reload] added=%d updated=%d removed=%d parse_errors=0 files=%d",
-			res.Added, res.Updated, res.Removed, res.Files)
-		if len(res.RemovedUIDs) > 0 {
-			log.Printf("[reload] 已移除（auth 文件不存在，连续 %d 次扫描确认）: %s",
-				confirm, strings.Join(res.RemovedUIDs, ", "))
-		}
-	}
-	return res, nil
 }
 
 // noteReload 记录「上次重载时间/结果」供面板展示。
@@ -292,37 +323,14 @@ func (p *Panel) confirmMissing(reason string) (ReloadResult, error) {
 	p.reloadMu.Lock()
 	defer p.reloadMu.Unlock()
 
-	confirm := p.reloadDeleteConfirm
-	if confirm < 1 {
-		confirm = 1
-	}
 	res := ReloadResult{Skipped: true}
-	var toRemove []string
-	pending := 0
-	for _, st := range p.cfg.Pool.List() {
-		a := p.cfg.Pool.AuthByUID(st.UID)
-		// 护栏 4：文件在盘上 → 视为在场，清掉缺席计数。
-		if a != nil && a.FilePath != "" {
-			if _, statErr := os.Stat(a.FilePath); statErr == nil {
-				delete(p.reloadMissing, st.UID)
-				continue
-			}
-		}
-		p.reloadMissing[st.UID]++
-		if p.reloadMissing[st.UID] < confirm || p.cfg.Pool.InFlight(st.UID) > 0 {
-			pending++
-			continue
-		}
-		toRemove = append(toRemove, st.UID)
-	}
-	if removed := p.cfg.Pool.RemoveMany(toRemove); len(removed) > 0 {
+	p.removeMissingLocked(nil, false, &res)
+	if res.Removed > 0 {
 		res.Skipped = false
-		res.Removed = len(removed)
-		res.RemovedUIDs = removed
-		log.Printf("[reload] %s 已移除（auth 文件不存在，连续 %d 次扫描确认）: %s",
-			reason, confirm, strings.Join(removed, ", "))
-	} else if pending > 0 {
-		res.Reason = fmt.Sprintf("%d 个账号文件不存在，删除确认中（需连续 %d 次）", pending, confirm)
+		log.Printf("[reload] %s 已暂存移出（auth 文件不存在，连续 %d 次扫描确认，文件回来时状态复活）: %s",
+			reason, p.confirmRounds(), strings.Join(res.RemovedUIDs, ", "))
+	} else if res.Pending > 0 && res.Reason == "" {
+		res.Reason = fmt.Sprintf("%d 个账号文件不存在，删除确认中（需连续 %d 次）", res.Pending, p.confirmRounds())
 	}
 	// 已不在池里的 uid 不再占着缺席计数表。
 	for uid := range p.reloadMissing {
@@ -398,7 +406,8 @@ func dirContentFingerprint(dir string) string {
 // 返回 ReloadResult；目录不可读/未配置时 500。跳过（Skipped=true）也是 200：
 // 「本轮没动」是正常结果，脚本不该因为目录正在变动就当失败。
 func (p *Panel) reloadAccounts(w http.ResponseWriter, r *http.Request) {
-	res, err := p.ReloadAccountsReason("manual")
+	force := r.URL.Query().Get("force") == "1"
+	res, err := p.ReloadAccountsForce("manual", force)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "重载失败: "+err.Error())
 		return
