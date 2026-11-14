@@ -136,6 +136,11 @@ func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
 			"enable features.embeddings_enabled in config.json or the panel's config page to use /v1/embeddings")
 		return
 	}
+	// 积分闸（审查 B1）：embeddings 是真烧上游额度的入口，此前既不判闸也不入账，
+	// 设了 daily_budget 的部署可以靠它无限绕过唯一成本止损线。
+	if !h.admitBudget(w, r) {
+		return
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, (8<<20)+1))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())

@@ -37,6 +37,10 @@ type fetchRequest struct {
 }
 
 func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
+	// 积分闸（审查 B1）：/v1/fetch 走上游抓取，同样烧额度。
+	if !h.admitBudget(w, r) {
+		return
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())

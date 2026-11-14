@@ -244,6 +244,10 @@ func (h *Handler) threeDGenerations(w http.ResponseWriter, r *http.Request) {
 		writeThreeDDisabled(w)
 		return
 	}
+	// 积分闸（审查 B1）：3D 单次约 20 积分，是最需要判闸的入口之一。
+	if !h.admitBudget(w, r) {
+		return
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, threeDMaxBody+1))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())

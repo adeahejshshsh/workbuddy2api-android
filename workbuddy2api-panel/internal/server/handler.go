@@ -1198,9 +1198,12 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 type budgetAdmittedKey struct{}
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	// 积分闸（在鉴权之后、读体之前）：四个会真烧积分的入口在这里或各自的 handler
-	// 开头判一次。放在鉴权之后是硬要求 —— 拒绝文案会暴露成本水位，不能让未鉴权
-	// 请求拿到；也不能让外部请求把 budget.rejected 计数打脏。
+	// 积分闸（在鉴权之后、读体之前）：**所有会真烧上游额度的入口**在这里或各自的
+	// handler 开头判一次 —— chat / responses / images（生成与改图）/ videos / 3D /
+	// embeddings / search / fetch。此前只有前四个入口判闸，另外四条既不判闸也不入账，
+	// 设了 daily_budget 的部署可以靠它们绕过唯一的成本止损线（审查 B1）。
+	// 放在鉴权之后是硬要求 —— 拒绝文案会暴露成本水位，不能让未鉴权请求拿到；
+	// 也不能让外部请求把 budget.rejected 计数打脏。
 	//
 	// 上游入口（/v1/responses 的托管出图）已经放行过的请求在 ctx 里打了标记：出图入账
 	// 会把累计推高，这里不能再按新累计把整个请求拒掉（见 budgetAdmittedKey）。
