@@ -860,3 +860,62 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 
 **本仓分叉保留**：`features.tool_only_rescue`（默认关）与工具意图尾巴门控不动——那是本仓对
 「agent 正常收尾被误判成截断」的处理，上游这套闸门不涉及。
+
+## 第十八批：62 条总账（终局盘点）
+
+`7a48d72e..7dcae8ed` 的 62 条逐条落到下面五类，没有「待定」项。合并纪律不变：每条都要么进了
+main（带用例、CI 绿），要么有明确的不合理由。
+
+### A. 已合（35 条，14 批）
+
+| 批次 | 提交 |
+|---|---|
+| 一（11） | `de24d38f` `7dcae8ed` `d700ec56` `084176e4` `a98ab36c` `6a3a58c0` `3fd3680a` `afda7e9c` `bc8e1417` `56f76319` `1ad68a0e` |
+| 二（3+等价 1） | `def074c5` `ab679742`（段内多帧 usage 那半）`d3edea90`（11140 判据/首帧停手/11134 文案）+ `629390de` 已等价 |
+| 三（2） | `767056cc` `a7983640` |
+| 四（1） | `1f67b377` |
+| 五（1.5） | `1414e9f7` `e4f7edae`（后端那半） |
+| 六（3，两批） | `47cc7e22`：护栏三块 + 暂存/单轮上限两半 |
+| 七（2） | `d2628962` `8a39572f`（去重那半） |
+| 八（1） | `ee74f54c` |
+| 九（2） | `9ba108fb` `0befb2b0` |
+| 十（3+编码器） | `320f5d4d` `0e863d83` `10d01b48` + `eecc7299` 的 QR 编码器与 golden |
+| 十一（1） | `93bbef3d` |
+| 十二（3） | `5d04ad21` `2603cbff`（库侧）`03a50ce0`（库侧） |
+| 十三（1） | `2d03e4bd` |
+| 十四（1） | `b4012ceb` |
+
+### B. 已等价（4 条，本仓早就是同一行为，无需改动）
+
+| 提交 | 证据 |
+|---|---|
+| `629390de` 6020 等待不提前写注释帧 | `busy_retry` 走 `sleepCtx`，从不写注释帧 |
+| `fa4d62ce` /v1/messages 转发 output_config.format | `responseFormatFromMessages`（含 name/strict 补齐）与接线、文档行都已在 |
+| `b957e32b` 6020/6021 排队先等一轮 | `writeUpstreamBusyError` + `busy_wait_seconds` + `queuebusy_test.go` 已在 |
+| `ff398789` 折线/柱状图灰线 | `bhIsDead`/`bhColorOf`/`liveIdx` 与 `.bh-dead`/`.bh-sep` 样式都已在 |
+
+### C. 缺载体（4 条：修的是本仓还没有的功能）
+
+| 提交 | 缺什么 |
+|---|---|
+| `8622073e` 加密 auth 回写仍保密 | 本仓没有 `wbencrypted` 加密 auth（`wbSealed` 字段都不存在） |
+| `67386ae5` 到期推算标记/告警限频 | 本仓没有 `upstream.ExpiryBucket`（按自然日聚合的到期桶） |
+| `6be18704` 导入覆盖前求证改有界并发 | 本仓 `importCockpit` 没有「覆盖前逐号求证」这一步 |
+| `b60f1c0b` 预算下限按目录 maxOutputTokens 封顶 | 本仓 `ensureMinOutputBudget(obj)` 是旧口径，`Client` 没有 `modelMaxOut` 快照 |
+| `3bab4f8c` 窗口探针对齐闸门 | 本仓没有额度窗口登记与探针（`pool/window.go`、`scheduler/windowprobe.go`） |
+
+### D. 不适用（3 条：本仓没有那条链路）
+
+| 提交 | 为什么 |
+|---|---|
+| `69b3a1e9` 新号判定在入池前 | 本仓没有 `isNewAccount` 那条分支 |
+| `798458f8` 出图回合不判「只有思考」 | 本仓 `responses.go` 没有 `reasoningOnlyNoOutput` |
+| `1e1ee4db` 活跃会话上限按业务码判 | 本仓没有「清理活跃会话」的调用方 |
+
+### E. 未搬（1 条：整块新功能）
+
+`557b3d55` 混元 3D 端点（3194 行 / 24 文件：`upstream/three_d*`、`server/three_d.go`、`probe.go`
+抽取、MCP 工具、临时云凭证签发、配置与面板）。它依赖本仓没有的传输层原语
+（`do(req,a,bool)` / `doJSONRaw` / `RefreshTokenIfNeeded` / `needsRefresh`），不是「搬文件」而是
+按本仓原语重写；且是纯新增产品面（3D 生成），与本仓主线（账号池 + 续写 + 风控）无关。
+要接的话建议单独一批、按「客户端 → 端点 → MCP 工具 → 配置」四步走。
