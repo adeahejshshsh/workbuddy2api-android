@@ -48,7 +48,11 @@ type CampaignTask struct {
 	Progress  int    `json:"progress"`
 	PeriodKey string `json:"period_key,omitempty"`
 	ViewedAt  string `json:"viewed_at,omitempty"`
-	Status    string `json:"status,omitempty"` // pending / done / claimed
+	// CompletedAt / ClaimedAt 同样来自 progress：领奖后**回读这两个字段**才算真到账，
+	// POST 返回 200 不等于积分入账（见 CampaignClaimVerified）。
+	CompletedAt string `json:"completed_at,omitempty"`
+	ClaimedAt   string `json:"claimed_at,omitempty"`
+	Status      string `json:"status,omitempty"` // pending / done / claimed
 }
 
 // CampaignStage 分阶段任务（邀请类：clicked → logged_in → joined）。
@@ -203,10 +207,12 @@ func (c *Client) CampaignTasks(a *auth.Auth, module, code string) (CampaignSnaps
 			Open  bool `json:"open"`
 		} `json:"invite"`
 		Progress []struct {
-			TaskCode  string `json:"task_code"`
-			PeriodKey string `json:"period_key"`
-			Progress  int    `json:"progress"`
-			ViewedAt  string `json:"viewed_at"`
+			TaskCode    string `json:"task_code"`
+			PeriodKey   string `json:"period_key"`
+			Progress    int    `json:"progress"`
+			ViewedAt    string `json:"viewed_at"`
+			CompletedAt string `json:"completed_at"`
+			ClaimedAt   string `json:"claimed_at"`
 		} `json:"progress"`
 		Tasks []CampaignTask `json:"tasks"`
 	}
@@ -218,22 +224,28 @@ func (c *Client) CampaignTasks(a *auth.Auth, module, code string) (CampaignSnaps
 	// progress 是按账号的独立数组，按 task_code 合并进任务表（没有进度条目的任务
 	// 说明还没开始，progress 保持 0）。
 	byCode := map[string]struct {
-		Progress  int
-		PeriodKey string
-		ViewedAt  string
+		Progress    int
+		PeriodKey   string
+		ViewedAt    string
+		CompletedAt string
+		ClaimedAt   string
 	}{}
 	for _, p := range body.Progress {
 		byCode[p.TaskCode] = struct {
-			Progress  int
-			PeriodKey string
-			ViewedAt  string
-		}{p.Progress, p.PeriodKey, p.ViewedAt}
+			Progress    int
+			PeriodKey   string
+			ViewedAt    string
+			CompletedAt string
+			ClaimedAt   string
+		}{p.Progress, p.PeriodKey, p.ViewedAt, p.CompletedAt, p.ClaimedAt}
 	}
 	for i := range body.Tasks {
 		if p, ok := byCode[body.Tasks[i].Code]; ok {
 			body.Tasks[i].Progress = p.Progress
 			body.Tasks[i].PeriodKey = p.PeriodKey
 			body.Tasks[i].ViewedAt = p.ViewedAt
+			body.Tasks[i].CompletedAt = p.CompletedAt
+			body.Tasks[i].ClaimedAt = p.ClaimedAt
 		}
 	}
 	snap.Tasks = body.Tasks
@@ -261,12 +273,13 @@ func (c *Client) CampaignTasks(a *auth.Auth, module, code string) (CampaignSnaps
 	return snap, nil
 }
 
-// CampaignTaskReady 报告任务是否已达标（含 viewed 前置）。
-// CampaignTaskReady 报告任务是否已达标且还没领。已领的（status=claimed）不算：否则每次点「领取」
-// 都对每个号的每个已领任务再发一遍 viewed + claim，徒增上游写调用。
-// shortcut: claimed 取自任务表的 status 字段（CampaignTask.Status 注释给出的取值 pending/done/claimed），未逐账号实测。
+// CampaignTaskReady 报告任务是否已达标且还没领。已领的（claimed_at 有值 / status=claimed）
+// 不算：否则每次点「领取」都对每个号的每个已领任务再发一遍 viewed + claim，徒增上游写调用。
+//
+// claimed_at 优先于 status：status 只有注释里的一种取值约定、从未逐账号实测，而 claimed_at
+// 是服务端给的领奖时间戳（回读验证也用它）。
 func CampaignTaskReady(t CampaignTask) bool {
-	if t.Target <= 0 || strings.EqualFold(strings.TrimSpace(t.Status), "claimed") {
+	if t.Target <= 0 || strings.TrimSpace(t.ClaimedAt) != "" || strings.EqualFold(strings.TrimSpace(t.Status), "claimed") {
 		return false
 	}
 	return t.Progress >= t.Target
@@ -284,6 +297,44 @@ func (c *Client) CampaignClaimTask(a *auth.Auth, module, code, taskCode string) 
 	q := url.Values{"activity_code": {code}}
 	path := campaignBase(module) + "/tasks/" + url.PathEscape(taskCode) + "/claim?" + q.Encode()
 	return c.campaignJSON(a, http.MethodPost, path, nil)
+}
+
+// campaignClaimPoll/Gap 领奖后回读 claimed_at 的次数与间隔。
+//
+// 取 3×2s 而不是更久：批量领奖是逐号串行的，每个任务多等 6 秒在几十个号上就是几分钟；
+// 服务端写 progress 是同步的（实测 view/claim 后立刻重读就能看到 viewed_at），两次读不到
+// 基本就是这次没入账，留给下一轮比在这里干等更划算。
+var (
+	campaignClaimPoll = 3
+	campaignClaimGap  = 2 * time.Second
+)
+
+// CampaignClaimVerified 领奖并回读确认入账，返回 (是否已入账, 错误)。
+//
+// 为什么要回读：claim 的 POST 返回 200/code=0 只说明请求被接受，积分是否入账要看
+// progress[].claimed_at。把「请求已提交」当成「已领到」会让面板报喜、实际没到账，
+// 而且下一轮 CampaignTaskReady 仍为真时会再领一次（幂等但白打上游）。
+//
+// 未达标（409/12304）按 IsCampaignNotMet 返回，调用方据此区分「不该领」与「领了没到账」。
+func (c *Client) CampaignClaimVerified(a *auth.Auth, module, code, taskCode string) (bool, error) {
+	if err := c.CampaignClaimTask(a, module, code, taskCode); err != nil {
+		return false, err
+	}
+	for i := 0; i < campaignClaimPoll; i++ {
+		if i > 0 {
+			time.Sleep(campaignClaimGap)
+		}
+		snap, err := c.CampaignTasks(a, module, code)
+		if err != nil {
+			continue // 回读失败不推翻已提交的事实，再试一次
+		}
+		for _, t := range snap.Tasks {
+			if t.Code == taskCode && strings.TrimSpace(t.ClaimedAt) != "" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // truncateBody 截断响应体用于错误信息（保留可读前缀）。

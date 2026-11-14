@@ -51,7 +51,37 @@ func (s *Scheduler) checkinOne(ctx context.Context, a *auth.Auth, uid string) (b
 //
 // 必须是后台 goroutine：不能阻塞主批返回（摊开启用时 spreadRunning 要等它返回才清，
 // 阻塞会让下一个时点整批被跳过），也不能拖住优雅停机——ctx 取消即退。
+// queueCheckinRetry 把本批瞬时失败的号排进补签队列，返回**真正新排进**的 uid。
+//
+// 去重是必须的：手动签到与排程签到各自失败时会各排一次补签，同一个号被两条队列同时
+// 追打只是白撞上游风控。已在队列里的号不再重复排。
+func (s *Scheduler) queueCheckinRetry(uids []string) []string {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	if s.retryPending == nil {
+		s.retryPending = map[string]bool{}
+	}
+	var queued []string
+	for _, uid := range uids {
+		if s.retryPending[uid] {
+			continue
+		}
+		s.retryPending[uid] = true
+		queued = append(queued, uid)
+	}
+	return queued
+}
+
+// checkinRetryLoop 在后台按 checkinRetryDelays 补签瞬时失败的账号。
 func (s *Scheduler) checkinRetryLoop(ctx context.Context, pending []string) {
+	all := append([]string(nil), pending...) // 退出时整批出队（pending 会逐轮缩短）
+	defer func() {
+		s.retryMu.Lock()
+		for _, uid := range all {
+			delete(s.retryPending, uid)
+		}
+		s.retryMu.Unlock()
+	}()
 	prev := time.Duration(0)
 	for round := 0; round < len(checkinRetryDelays); round++ {
 		// 偏移是绝对的（10m、40m），所以这里睡的是与上一轮的差值。

@@ -158,6 +158,9 @@ func (p *Panel) campaignClaim(w http.ResponseWriter, r *http.Request) {
 		UID      string   `json:"uid"`
 		Nickname string   `json:"nickname"`
 		Claimed  []string `json:"claimed,omitempty"`
+		// Pending 上游已接受领奖请求、但回读不到 claimed_at（未确认入账）——
+		// 不算 Claimed，下一轮会再试。
+		Pending []string `json:"pending,omitempty"`
 		Would    []string `json:"would_claim,omitempty"`
 		Skipped  []string `json:"skipped,omitempty"`
 		Errors   []string `json:"errors,omitempty"`
@@ -204,12 +207,20 @@ func (p *Panel) campaignClaim(w http.ResponseWriter, r *http.Request) {
 				row.Errors = append(row.Errors, t.Code+" viewed: "+err.Error())
 				continue
 			}
-			if err := p.cfg.Upstream.CampaignClaimTask(a, module, code, t.Code); err != nil {
-				if upstream.IsCampaignNotMet(err) {
+			claimOK, cerr := p.cfg.Upstream.CampaignClaimVerified(a, module, code, t.Code)
+			if cerr != nil {
+				if upstream.IsCampaignNotMet(cerr) {
 					row.Skipped = append(row.Skipped, t.Code+"（未达标）")
 					continue
 				}
-				row.Errors = append(row.Errors, t.Code+" claim: "+err.Error())
+				row.Errors = append(row.Errors, t.Code+" claim: "+cerr.Error())
+				continue
+			}
+			if !claimOK {
+				// 请求被接受但没回读到 claimed_at：不报成已领，下一轮再试。
+				row.Pending = append(row.Pending, t.Code)
+				log.Printf("campaign claim: uid=%s task=%s 已提交但未回读 claimed_at → 下轮重试",
+					a.UID[:min8(len(a.UID))], t.Code)
 				continue
 			}
 			row.Claimed = append(row.Claimed, t.Code)

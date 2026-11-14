@@ -107,6 +107,11 @@ type Scheduler struct {
 	// stampMu 串行化补跑标记文件的读写（见 runstamps.go）。
 	stampMu sync.Mutex
 
+	// retryMu/retryPending 正在延后补签的账号（checkin_retry.go）：手动与排程签到各自排
+	// 补签时去重——同一个号不能被两条补签队列重复打。
+	retryMu      sync.Mutex
+	retryPending map[string]bool
+
 	// authHealMu/authHealAt 余额 401 → refresh 求证的退避时刻（uid → 上次求证成功时刻）。
 	// 见 balance_401.go：降级 token 每轮探测都会 401，不做退避就会一天轮换 288 次 RT。
 	authHealMu sync.Mutex
@@ -793,8 +798,8 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
 	}
 	// 补签只在本批结束后起一次后台循环（ctx 取消即退，不阻塞返回）。
-	if len(pending) > 0 {
-		go s.checkinRetryLoop(ctx, pending)
+	if queued := s.queueCheckinRetry(pending); len(queued) > 0 {
+		go s.checkinRetryLoop(ctx, queued)
 	}
 	// 连登管家与主循环共用 ctx：账号间节流被取消（停机/客户端断连）时整轮都不会执行。
 	// 此前静默跳过，日志里看不出「连登这轮为什么没跑」（报告 #13）。

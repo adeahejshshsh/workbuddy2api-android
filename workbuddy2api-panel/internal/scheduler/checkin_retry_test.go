@@ -153,3 +153,24 @@ func TestCheckinNonTransientErrorNotQueued(t *testing.T) {
 		}
 	}
 }
+
+// 补签去重：手动签到与排程签到各自失败时会各排一次补签，同一个号不能被两条队列同时
+// 追打（白撞上游风控）。
+func TestQueueCheckinRetryDedupes(t *testing.T) {
+	s := &Scheduler{}
+	if got := s.queueCheckinRetry([]string{"u1", "u1", "u2"}); len(got) != 2 {
+		t.Fatalf("同批内应去重成 2 个，实际 %v", got)
+	}
+	if got := s.queueCheckinRetry([]string{"u1", "u3"}); len(got) != 1 || got[0] != "u3" {
+		t.Fatalf("已在队列里的 u1 不该重复排，实际 %v", got)
+	}
+	// 循环退出后整批出队：下一轮失败还能再排。
+	s.retryMu.Lock()
+	for uid := range map[string]bool{"u1": true, "u2": true, "u3": true} {
+		delete(s.retryPending, uid)
+	}
+	s.retryMu.Unlock()
+	if got := s.queueCheckinRetry([]string{"u1"}); len(got) != 1 {
+		t.Fatalf("出队后应能重新排队，实际 %v", got)
+	}
+}
