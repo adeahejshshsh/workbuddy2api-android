@@ -2,6 +2,7 @@ package panel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -152,10 +154,52 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var total, imported, skipped int
-	var errs []string
+	var errs, warnings []string
+	// 覆盖已有凭据的号先收集，循环后统一有界并发求证（见 verifyImportOverwrites）：
+	// 串行时几百个号每个都要等一次 refresh，请求会先被反代/浏览器掐断。
+	var toVerify []importAcct
+	var vmu sync.Mutex // 保护 imported/skipped/errs/warnings：求证回调并发进来
 
 	// 后置动作并发上限（bug 18）：与 packages / syncNicknames 同款 sem=3
 	importSem := make(chan struct{}, 3)
+	// postImport 后置动作（签到/注册激活/领 trial/查余额）丢到后台并限并发（bug #23 / bug 18）：
+	// 每号 2 次上游调用、几十个号串行就是几十秒到几分钟，全部跑完才返回 → 浏览器/反代先超时，
+	// 前端报失败但账号其实已导入一半，用户重试又重复导入。抢槽必须在 goroutine 内部，
+	// 否则后台化被同步信号量抵消。
+	postImport := func(ia importAcct) {
+		go func(a *auth.Auth, realm string) {
+			importSem <- struct{}{}
+			defer func() { <-importSem }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERR: [panel] postImportActivate panic uid=%s: %v", a.UID, r)
+				}
+			}()
+			p.postImportActivate(a, realm)
+		}(ia.a, ia.realm)
+	}
+
+	// commit 落盘并入池（调用方持 vmu）。落盘在前、入池在后：入池后选号就会用新凭据。
+	// verified 表示新凭据刚被 refresh 求证过：上游已把文件里的 refresh token 轮换，池里原有
+	// 那份多半随之作废（旧导出与池里是同一条登录链时），此时落盘失败也必须把新凭据放进内存，
+	// 否则这个号就真的只能重新登录了。
+	commit := func(ia importAcct, verified bool) {
+		if err := ia.a.SaveAtomic(); err != nil {
+			if !verified {
+				skipped++
+				errs = append(errs, fmt.Sprintf("uid=%s: save auth failed: %v", ia.uid, err))
+				return
+			}
+			log.Printf("WARN: panel: import uid=%s 新凭据已求证但落盘失败，仅放入内存: %v", ia.uid, err)
+			warnings = append(warnings, fmt.Sprintf("uid=%s 凭据落盘失败（%v），新令牌只在内存里生效，请检查凭证目录后重新导入一次", ia.uid, err))
+		}
+		p.reloadMu.Lock()
+		p.cfg.Pool.Add(ia.a)
+		p.reloadMu.Unlock()
+		p.cfg.Pool.Revive(ia.uid)
+		imported++
+		postImport(ia)
+	}
 	for _, acc := range accounts {
 		uid := strings.TrimSpace(acc.UID)
 		at := strings.TrimSpace(acc.AccessToken)
@@ -244,51 +288,40 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		// upstream.VerifyVerdict：alive 才覆盖；dead（上游明确拒绝）与 inconclusive
 		// （网络/5xx/429 没判词）都保留原凭据 —— 主动销毁时没有判词就不能动手。
 		// 顺带：alive 分支里 a 已被 refresh 轮换过 RT，下面落盘存的就是新值。
-		existing := p.cfg.Pool.AuthByUID(uid)
-		if existing != nil && p.cfg.Upstream != nil {
-			verdict := p.cfg.Upstream.VerifySessionByRefresh(a)
-			if verdict != upstream.VerifyAlive {
-				skipped++
-				errs = append(errs, fmt.Sprintf("uid=%s: 新凭据校验未通过（%s），保留原有凭据", uid, verdict))
-				continue
-			}
-		}
-
-		if err := a.SaveAtomic(); err != nil {
-			skipped++
-			errs = append(errs, fmt.Sprintf("uid=%s: save auth failed: %v", uid, err))
+		ia := importAcct{a: a, uid: uid, realm: realm}
+		if existing := p.cfg.Pool.AuthByUID(uid); existing != nil && p.cfg.Upstream != nil {
+			// 覆盖要先求证，统一在循环后有界并发地做（见 verifyImportOverwrites）：
+			// 串行时几百个已有号每个都要等一次最长 30s 的 refresh。
+			toVerify = append(toVerify, ia)
 			continue
 		}
-
-		p.reloadMu.Lock()
-		p.cfg.Pool.Add(a)
-		p.reloadMu.Unlock()
-		p.cfg.Pool.Revive(uid)
-
-		imported++
-		// 后置动作（签到/注册激活/领 trial/查余额）**丢到后台**（bug #23）：
-		// 每号 2 次上游调用，几十个号串行 = 几十秒到几分钟，全部跑完才返回 →
-		// 浏览器/反代先超时，前端报失败但账号其实已导入一半，用户重试又重复导入。
-		//
-		// 但要限并发（bug 18）：导入几百个号时裸 go 会同时发起几百组上游请求，
-		// 正是仓库其它地方用 sem=3/4 专门防的 WAF 频控形态。
-		// 抢槽必须在 goroutine **内部**（BUG-01）：放在外面时，从第 4 个账号起
-		// handler 会卡在 channel 上等前 3 个后台动作跑完 —— 后台化被同步信号量抵消，
-		// 100 个账号的导入接口要几分钟才回包，浏览器/反代先超时，用户重试又重复导入。
-		go func(a *auth.Auth, realm string) {
-			importSem <- struct{}{}
-			defer func() { <-importSem }()
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("ERR: [panel] postImportActivate panic uid=%s: %v", a.UID, r)
-				}
-			}()
-			p.postImportActivate(a, realm)
-		}(a, realm)
-		continue
+		vmu.Lock()
+		commit(ia, false)
+		vmu.Unlock()
 	}
 
-	// 后置动作已异步化（见上面的 go p.postImportActivate）。
+	// 覆盖前求证：有界并发 + 总时限。每个号求证完**立刻**落盘入池，不等整批——求证已把
+	// 文件里的 refresh token 轮换了，拖着不提交会让新令牌只活在内存里。
+	if len(toVerify) > 0 {
+		ctx, cancel := context.WithTimeout(r.Context(), importVerifyBudget)
+		p.verifyImportOverwrites(ctx, toVerify, func(k int, verdict upstream.VerifyVerdict, ran bool) {
+			ia := toVerify[k]
+			vmu.Lock()
+			defer vmu.Unlock()
+			switch {
+			case ran && verdict == upstream.VerifyAlive:
+				commit(ia, true)
+			case !ran:
+				skipped++
+				errs = append(errs, fmt.Sprintf("uid=%s: 批量求证超时（开工总限 %s）或请求已断开，保留原有凭据，请分批重试", ia.uid, importVerifyBudget))
+			default:
+				skipped++
+				errs = append(errs, fmt.Sprintf("uid=%s: 新凭据校验未通过（%s），保留原有凭据", ia.uid, verdict))
+			}
+		})
+		cancel()
+	}
+
 	total = len(accounts)
 	log.Printf("panel: cockpit import finished total=%d imported=%d skipped=%d", total, imported, skipped)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -297,6 +330,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		"imported": imported,
 		"skipped":  skipped,
 		"errors":   errs,
+		"warnings": warnings, // 已入池但凭据没能落盘的号（新令牌只在内存里）
 	})
 }
 
@@ -511,4 +545,50 @@ func validImportUID(uid string) bool {
 		}
 	}
 	return true
+}
+
+// importAcct 一个通过本地校验、待落盘的导入账号。
+type importAcct struct {
+	a     *auth.Auth
+	uid   string
+	realm string
+}
+
+// importVerifyConcurrency 覆盖前求证（每号一次 refresh）的并发上限：串行时几百个已有号要等几十分钟，
+// 请求先被反向代理 / 浏览器掐断；并发太高又像批量刷 refresh 端点。
+// importVerifyBudget 是求证「开工」的总时限：到点后不再为没轮到的号发 refresh，它们一律保留原凭据、
+// 由人分批重试。已发出的 refresh 不打断（打断会丢掉已轮换的令牌），所以请求最坏要等
+// importVerifyBudget + 一次 refresh 的超时。两者是变量只为让测试不必真等 60 秒。
+var (
+	importVerifyConcurrency = 8
+	importVerifyBudget      = 60 * time.Second
+)
+
+// verifyImportOverwrites 用 refresh 求证导入的新凭据还活着，有界并发，开工受 ctx 约束。每号求证完
+// 立刻调 done（并发调用，调用方自己加锁）；没轮到的号也调一次（ran=false），保证每个号恰好一次回调。
+func (p *Panel) verifyImportOverwrites(ctx context.Context, list []importAcct, done func(k int, verdict upstream.VerifyVerdict, ran bool)) {
+	sem := make(chan struct{}, importVerifyConcurrency)
+	var wg sync.WaitGroup
+	k := 0
+loop:
+	for ; k < len(list); k++ {
+		// select 在两路都就绪时随机选一路，先判一次 ctx，已结束就一个也不再发。
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break loop
+		}
+		wg.Add(1)
+		go func(k int) {
+			defer func() { <-sem; wg.Done() }()
+			done(k, p.cfg.Upstream.VerifySessionByRefresh(list[k].a), true)
+		}(k)
+	}
+	for ; k < len(list); k++ {
+		done(k, upstream.VerifyInconclusive, false)
+	}
+	wg.Wait()
 }
