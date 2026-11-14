@@ -679,3 +679,15 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 | `9ba108fb` 首帧心跳后置、`0befb2b0` 粘帧 error 触发首帧否决 | 两者都建立在 `upstream.HeadVetoError` + 把 `headKeepaliveWriter` 迁进 `upstream` 包的重构上；本仓没有 HeadVeto 这套结构（首帧否决是另一套实现），先要把那层移植过来才谈得上叠这两条 |
 | `1f67b377` 安全续写裁决前不漏字节、`b4012ceb` 续写闸门按限额区分 | 要整段重写 `toolonly.go` / `continue.go` 的段裁决，而本仓在这块有分叉（`features.tool_only_rescue` 缺省**关**、`atSegmentCap` 上限口径）。上游那份 `toolonly.go` 直接换进来会把救援默认打开——线上实测会用一次额外上游调用换一段被丢弃的正文，不能默默改默认值 |
 | `798458f8` 出图回合不判失败 | 本仓 `responses.go` 没有 `reasoningOnlyNoOutput` / `responsesReasoningOnly` 这套判据（那批代码来自更早的上游提交，本仓未合）；等把 responses 适配器补齐再接 |
+
+### 第四批（已合，1 条）
+
+| 上游提交 | 说明 |
+|---|---|
+| `1f67b377` 安全续写段裁决前不漏任何字节 | toolOnly 段此前只在「还没见到工具分片」时剥正文/思考，工具分片之后的正文/思考直接透传；error 帧与非法 JSON 也原样透传——客户端会在首段完整回答后面看到半截续写或一条错误，还可能多出一个终态。现在整段改道 `toolOnlyFrame`：裁决前客户端收不到这一段的任何字节（只有保活注释）。usage 照常入账；带工具分片或 `finish_reason` 的帧剥掉正文/思考/usage 后暂存；error 帧 / 流内失败帧 / 非法 JSON 记为失败（整段回滚）；其余帧丢弃且**不进** `r.text` / `r.reason`（否则后续续写前缀会混进被丢弃的内容）。采纳条件同步收紧：无报错帧 + 以 `[DONE]` 正常收尾且 `finish ∈ {tool_calls, stop}` + 每个调用有名字且参数是空或完整 JSON + 不是重发上一次已执行的调用。**本仓保留分叉**：`features.tool_only_rescue` 缺省关、`toolIntentTail` 语义闸门、段号判断都不动——上游那份 `toolonly.go` 直接换进来会把救援默认打开 |
+
+### 第四批看过没接
+
+| 上游提交 | 为什么 |
+|---|---|
+| `b4012ceb` 续写闸门按限额区分 | 它是「无限额请求 3 段 / 带限额请求 8 段 + `outputCap = max(客户端限额, 档位下限) × 4`」这一整套策略。本仓的 `canContinue` 已经分叉出自己的判据（`clientLimitLongAnswer` + `starvedByThinking` + `budgetWasRaised`），两套并存的下一步是把「什么算客户端真的要这么短」重新定一遍——那是产品决策，不是搬运工。要接得先写一组对照用例把两种策略的差异钉出来 |
