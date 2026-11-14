@@ -724,3 +724,16 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 用例：护栏 6（空目录三轮不删、目录恢复后账号照旧）、目录读不动要报错而不是当空目录、
 `AdoptNewer` 四种形态、`Reconcile` 三态 + 指针不变。既有 reload 用例按新护栏补了
 「留一个在场文件」的前提；修复轮改用更晚的到期时刻（同到期不再算更新）。
+
+### 第六批补齐（`47cc7e22` 的另一半）
+
+| 部分 | 说明 |
+|---|---|
+| `pool.ParkMany` + `stateFile.Parked` | 热重载移出的号改为「暂存」：条目挪进 `parked`（上限 4096），随 `state.json` 的 `parked_accounts` 落盘——文件缺席期间重启也不丢；`upsertLocked` 见到 parked 里的 uid 就沿用原条目复活（禁用/暂停/分组原样回来）。`loadParkedLocked` 复用 `applyAccountsLocked` 的整套清洗，同一个 uid 同时在 accounts 里时以池里的为准 |
+| `stateOverviewLocked` 抽 `stateOf` | 池内号与暂存号共用同一套惰性清洗（冷却过期不落盘、熔断/降权只写未过期的、模型冷却与成本账本按 TTL 过滤），不会出现「暂存号的清洗口径和池内号不一样」 |
+| 单轮删除上限 + `force=1` | 一轮要删的号超过池的 1/5（至少放行 2 个）就一个都不删，返回 `pending` + 「加 force=1」的说明；`POST /panel/api/accounts/reload?force=1` 放行。宁可不删：误删会落盘，下次启动也不复活 |
+| `removeMissingLocked` 抽出 | 手动重载与轮询共用同一套判据（文件在盘上即在场、缺席计数、在途推迟、单轮上限），两条路径不再各写一份 |
+
+用例直接搬入上游的 `park_test.go` 与 `reload_guard_test.go`（只改模块路径）：
+暂存号跨重启复活、复活后不留在 parked、单轮上限拦下并要求 force、force 后放行、
+重载不覆盖刚刷新的令牌且不换 `*Auth` 指针。全绿。
