@@ -39,22 +39,30 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
-// maxContinueSegments 单请求最多上游段数（1 段原生 + 最多 7 次续写）。
-// 段数不是主要闸门——真正管住开销的是 continueTotalCap（累计输出 token）；
-// 这里只是防「续写自己也在截断」时无限套娃的硬上限。
+// noLimitContinueSegments 客户端没带输出限额时单请求最多上游段数（1 段原生 + 最多 2 次续写）。
+// 这类请求（Codex 等）每段都能写到上游的单段上限（实测 32000），段数本身就是开销闸门：
+// 3 段 ≈ 3×32000 输出。累计输出上限（outputCap）不管它们——按档位下限算的上限（如 low
+// 档 4096×4=16384）比一段还小，会让「不带限额的长文」一次都续不了。
+const noLimitContinueSegments = 3
+
+// maxContinueSegments 客户端带了限额、但属于可续写例外（见 canContinue）时的段数硬上限
+// （1 段原生 + 最多 7 次续写）。这类请求每段只有几千 token，真正管住开销的是 outputCap；
+// 这里只是防「续写自己也在截断」时无限套娃。
 const maxContinueSegments = 8
 
-// defaultContinueTotalCap 没有档位下限时（客户端未指定档位、也就没算下限）
-// 累计输出 token 的兜底上限。
+// defaultContinueTotalCap 带限额、但限额不可解析且没有档位下限时累计输出 token 的兜底上限。
 const defaultContinueTotalCap = 32768
 
-// continueTotalCapRatio 累计输出上限 = 该轮输出预算下限 × 这个系数。
+// continueTotalCapRatio 带限额续写时的累计输出上限 = 单段有效额度 × 这个系数，
+// 单段有效额度 = max(客户端限额, 档位下限)。
 //
 // 为什么按 token 而不是按段数管：固定 3 段时，低档位（下限 4096）每段只有 ~4096
 // 正文，写到第 3 段就撞上限收工——线上实测 effort=low + max_tokens=1024 写
 // 「3000 字以上」的文档，3 段合计正文 9414 token 处还是半句（finish=length，尾
 // 巴停在「### 5.3 …- 正常请求」）。同样的段数在高档位（下限 8192）够用，说明
 // 该管的是「一共准写多少」，不是「允许问上游几次」。
+// 取客户端限额与下限的较大者：额度 ≥32k 的「长文」请求每段本身就有 32k，只按下限算的
+// 上限（low 档 16384）连一段都装不下，「≥32k 照常续写」就成了空话。
 const continueTotalCapRatio = 4
 
 // continueThinkingShare 思考占「本段输出」的比例达到这个值，就认为这次截断是
@@ -158,6 +166,11 @@ type continueReader struct {
 
 	// continueCapped 本请求因累计输出到顶而停止续写（用于日志与终态归因）。
 	continueCapped bool
+
+	// switchable 惰性求值的「本请求能不能关思考」（见 thinkingSwitchable）；0 = 未求值。
+	// clientThinkingOff 客户端请求体自己写了 thinking.type=disabled（同一次解析）。
+	switchable        int8
+	clientThinkingOff bool
 
 	// wrote 本请求是否已经向客户端写出过任何字节（含 keepalive 注释帧）。
 	// 只有「一个字节都没写」时，读错误才继续向上冒（见 endSegment 末尾）：
@@ -439,35 +452,47 @@ func (r *continueReader) starvedByThinking() bool {
 	return r.segThink >= continueThinkingShare*r.segCompletion
 }
 
-// budgetWasRaised 客户端原本给的额度是否低于本轮下限（即网关抬过额度）。
+// budgetWasRaised 网关是否在出站时把客户端额度抬到过下限（即真正生效的上限是网关选的数）。
 //
 // 用途：抬过额度时，真正生效的上限是网关选的数，不是客户端意图——被它切断就该续写，
 // 否则只是把断点从客户端的 1024 挪到 8192，长回答照样停在半句。
+//
+// 必须与出站抬额度（upstream.ensureMinOutputBudget）同口径：探活级额度（< minStarvedBudget）
+// 与客户端自己关了思考的请求出站时不会被抬，这里也不能当成「抬过」——下限只按生效档位算，
+// 看不到这两条，单比大小会把「客户端关思考、只要 2048」误判成网关的上限。
 func (r *continueReader) budgetWasRaised() bool {
-	if r.budgetFloor <= 0 {
+	if r.budgetFloor <= 0 || r.limit < minStarvedBudget || r.limit >= r.budgetFloor {
 		return false
 	}
-	v, ok := clientOutputBudget(r.body)
-	return ok && v > 0 && v < r.budgetFloor
+	r.parseThinking()
+	return !r.clientThinkingOff
 }
 
-// clientOutputBudget 读客户端原始请求体里的输出额度（三个别名）。
-func clientOutputBudget(body []byte) (int64, bool) {
-	var obj map[string]any
-	if json.Unmarshal(body, &obj) != nil {
-		return 0, false
+// thinkingSwitchable 本请求的思考关不关得掉：客户端自己带了 thinking 对象（上游认它的开关），
+// 或模型在「可关思考」名单里（与 continuationBodyWithNudge / starvedRetryBody 同口径）。
+func (r *continueReader) thinkingSwitchable() bool {
+	r.parseThinking()
+	return r.switchable > 0
+}
+
+// parseThinking 从客户端请求体取思考相关的两件事；只在带限额续写的判定里用到，解析一次。
+func (r *continueReader) parseThinking() {
+	if r.switchable != 0 {
+		return
 	}
-	for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
-		switch v := obj[k].(type) {
-		case float64:
-			return int64(v), true
-		case int:
-			return int64(v), true
-		case int64:
-			return v, true
-		}
+	r.switchable = -1
+	var obj struct {
+		Model    string         `json:"model"`
+		Thinking map[string]any `json:"thinking"`
 	}
-	return 0, false
+	if json.Unmarshal(r.body, &obj) != nil {
+		return
+	}
+	if obj.Thinking != nil || upstream.ThinkingSwitchSupported(obj.Model) {
+		r.switchable = 1
+	}
+	t, _ := obj.Thinking["type"].(string)
+	r.clientThinkingOff = strings.EqualFold(strings.TrimSpace(t), "disabled")
 }
 
 // billedUsage 本请求各段 usage 的纯求和（记账口径，见 billed 字段），含还没结束的当前段；
@@ -585,8 +610,8 @@ func (r *continueReader) endSegment(sawDone bool) {
 	} else if r.continueCapped {
 		// 撞的是网关自己的累计输出上限，不是上游故障——写清楚，免得排障时
 		// 把它当成「又在半句处断了」。
-		log.Printf("INFO: [continue] acct=%s 累计输出 %d token 已达上限（下限 %d × %d）→ 停止续写，按截断收尾",
-			r.label(), int(r.totalOutput()), r.budgetFloor, continueTotalCapRatio)
+		log.Printf("INFO: [continue] acct=%s 累计输出 %d token 已达上限 %d → 停止续写，按截断收尾",
+			r.label(), int(r.totalOutput()), int(r.outputCap()))
 	}
 	// 段在没有任何 finish 的情况下以 EOF/读错误结束：疑似上游断流（正常收尾都带
 	// finish_reason）。客户端此前会看到「被标 completed 的中途截断」——这里把
@@ -692,21 +717,60 @@ func (r *continueReader) totalOutput() float64 {
 	return 0
 }
 
-// outputCapped 累计输出是否已达本请求上限（下限 × continueTotalCapRatio，兜底
-// defaultContinueTotalCap）。没算下限时（客户端没指定档位）用兜底值。
-func (r *continueReader) outputCapped() bool {
-	capTokens := float64(defaultContinueTotalCap)
-	if r.budgetFloor > 0 {
-		capTokens = float64(r.budgetFloor * continueTotalCapRatio)
+// atSegmentCap 本请求的上游段数是否已用完（无限额请求 noLimitContinueSegments，带限额的
+// 续写例外 maxContinueSegments）。续写、盲重试与各类救援共用这一个判据。
+func (r *continueReader) atSegmentCap() bool {
+	if !r.limitSet {
+		return r.seg >= noLimitContinueSegments-1
 	}
-	return r.totalOutput() >= capTokens
+	return r.seg >= maxContinueSegments-1
+}
+
+// outputCap 带限额请求的累计输出上限（token）= max(客户端限额, 档位下限) × continueTotalCapRatio，
+// 两者都没有时兜底 defaultContinueTotalCap；无限额请求返回 0 = 不按 token 封顶（只看段数，
+// 见 noLimitContinueSegments）。
+func (r *continueReader) outputCap() float64 {
+	if !r.limitSet {
+		return 0
+	}
+	per := max(r.limit, r.budgetFloor)
+	if per <= 0 {
+		return defaultContinueTotalCap
+	}
+	return float64(per * continueTotalCapRatio)
+}
+
+// outputCapped 累计输出是否已达本请求上限（见 outputCap）。
+func (r *continueReader) outputCapped() bool {
+	c := r.outputCap()
+	return c > 0 && r.totalOutput() >= c
+}
+
+// limitedButContinuable 客户端带了限额，但这次截断不代表它「只要这么多」，三种例外：
+//  1. 额度 ≥ clientLimitLongAnswer：这一档额度只是随手给的上限（见该常量）；
+//  2. 本段思考占了大头（starvedByThinking）：客户端要的那份回答没写出来；
+//  3. 网关把额度抬到过下限（budgetWasRaised）：生效的上限是网关选的数，不是客户端意图。
+//
+// 2、3 的续写段要关掉思考才有意义；关不掉思考的模型（glm、hy3 等）续写段会拿同一份额度
+// 把思考再烧一遍，几段合计还是半句，所以不续——零正文的形态交给 starved.go 的救援。
+//
+// 探活级额度（< minStarvedBudget，如官方客户端 max_tokens=1 的 key 探活）一律不续：出站时
+// 它不会被抬，思考占比再高也只是一句探活，续写只会白付最多 7 次上游调用。
+func (r *continueReader) limitedButContinuable() bool {
+	if r.limit > 0 && r.limit < minStarvedBudget {
+		return false
+	}
+	if r.limit >= clientLimitLongAnswer {
+		return true
+	}
+	return (r.starvedByThinking() || r.budgetWasRaised()) && r.thinkingSwitchable()
 }
 
 // canContinue 续写资格判定（sawDone=false 表示 EOF/读错误收尾——只有显式
 // finish_reason=length 才续，读错误不续，避免把故障流当截断流续错）。
 func (r *continueReader) canContinue(sawDone bool) bool {
 	switch {
-	case r.seg >= maxContinueSegments-1:
+	case r.atSegmentCap():
 		return false
 	case r.outputCapped():
 		// 累计输出到顶：再续就是无节制地烧配额了。标出来，让终态归因能区分
@@ -720,14 +784,9 @@ func (r *continueReader) canContinue(sawDone bool) bool {
 		return false
 	case r.errSeen:
 		return false
-	case r.limitSet && r.limit < clientLimitLongAnswer && !r.starvedByThinking() && !r.budgetWasRaised():
+	case r.limitSet && !r.limitedButContinuable():
 		// 客户端显式带限额 = 它只要这么多，截断是预期语义（Claude 客户端必带
-		// max_tokens，每回合 8192）。两种例外都续写：
-		//   1) 额度被思考吃光（见 continueThinkingShare）——客户端要的那份回答没写出来；
-		//   2) 网关把这个额度抬到过下限（budgetWasRaised）——此时生效的上限是**网关**
-		//      选的数，不是客户端的意图，被它切断就该接着写（否则「抬了额度还是断」
-		//      只是把断点从 1024 挪到 8192，问题没真正解决）；
-		//   3) 额度 ≥ clientLimitLongAnswer——这一档额度不代表「只要这么短」（见该常量）。
+		// max_tokens，每回合 8192）。例外见 limitedButContinuable。
 		return false
 	case r.cutNoFinish(sawDone):
 		// 段无 finish 结束 = 上游偶发断流（线上实测：15 次续写里 1 次）。已产出内容时
