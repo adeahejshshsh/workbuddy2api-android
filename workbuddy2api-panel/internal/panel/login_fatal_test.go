@@ -119,8 +119,13 @@ func TestLoginStartDecoratesAuthURL(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	u, _ := got["url"].(string)
-	if !strings.Contains(u, "version="+loginsite.ClientVersion) {
+	// version 用**裸版本号**（真机 CN 5.9.3）；UA 那串 "WorkBuddy/5.9.3" 带进链接是错指纹。
+	if !strings.Contains(u, "version="+strings.TrimPrefix(loginsite.ClientVersionWorkBuddyCN, "WorkBuddy/")) {
 		t.Fatalf("授权链接缺 version: %s", u)
+	}
+	// CN 站要带 loginSessionId（官方只对 platform=workbuddy 追加，授权页读它进回调）。
+	if !strings.Contains(u, "loginSessionId=") {
+		t.Fatalf("授权链接缺 loginSessionId: %s", u)
 	}
 }
 

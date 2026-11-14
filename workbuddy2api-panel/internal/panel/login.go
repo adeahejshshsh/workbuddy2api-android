@@ -197,7 +197,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	p.loginMu.Unlock()
 	// 授权链接补官方参数（version，以及部署侧给了 nonce 时的 ww_device_nonce）：
 	// 官方登录页按 version 做灰度与埋点，写旧版本可能拿到旧登录页。
-	authURL := loginsite.DecorateAuthURL(st.AuthURL, loginsite.ForRealm(realm), loginDeviceNonce())
+	authURL := loginsite.DecorateAuthURL(st.AuthURL, loginsite.ForRealm(realm), loginDeviceNonce(), loginsite.NewLoginSessionID())
 	log.Printf("panel: 发起 OAuth 添加账号 realm=%s（state=%s...）", realm, st.State[:min(8, len(st.State))])
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": authURL, "state": st.State, "realm": realm})
 }

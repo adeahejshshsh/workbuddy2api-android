@@ -67,6 +67,13 @@ type Site struct {
 	Platform string
 	// UserAgent 该站点登录三端点出站的桌面端 RPC 族 UA（空 = 回落 ClientUA）。
 	UserAgent string
+	// Version 授权链接的 version 参数（官方客户端写自己的包版本）。
+	//
+	// 2026-11-14 真机实测：CN 的授权页把这个值原样转给
+	// `console/auth/risk-context?platform=workbuddy&version=…` 并编进回调地址——它确实
+	// 被读取，不是装饰；GL 侧同样带自己那版。空 = 不加（未复核站点）。
+	Version string
+
 	// Domain 设备码端点的 X-Domain 取值（**不是 API base 主机名**）：真机 CN
 	// auth/state 打 copilot.tencent.com，但 `x-domain: www.workbuddy.cn` ——
 	// 该头声明「哪个前端在调用」。空则回落 Origin 主机名。
@@ -79,6 +86,7 @@ var (
 		ID: "cn", Realm: RealmCN,
 		API: "https://copilot.tencent.com", Origin: "https://www.codebuddy.cn",
 		Platform:  "workbuddy",
+		Version:   strings.TrimPrefix(ClientVersionWorkBuddyCN, "WorkBuddy/"),
 		Domain:    "www.workbuddy.cn",
 		UserAgent: ClientVersionWorkBuddyCN + " " + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLI,
 	}
@@ -87,6 +95,7 @@ var (
 		ID: "workbuddy", Realm: RealmGlobal,
 		API: "https://www.workbuddy.ai", Origin: "https://www.workbuddy.ai",
 		Platform:  "workbuddy-ai",
+		Version:   strings.TrimPrefix(ClientVersionWorkBuddyGL, "workbuddy-ai/"),
 		Domain:    "www.workbuddy.ai",
 		UserAgent: ClientVersionWorkBuddyGL + " " + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLI,
 	}
@@ -140,15 +149,26 @@ func CodeFatal(code int) bool {
 	return false
 }
 
-// DecorateAuthURL 按官方 CLI 行为补齐授权链接参数：
+// DecorateAuthURL 按真机实测补齐授权链接参数（对应官方的
+// appendHostLoginJourneyParams / appendAuthUrlParams / appendLoginPageHintParams）：
 //
-//	version=<ClientVersion>   官方对每个站点都加
-//	ww_device_nonce=<nonce>   官方仅 platform=workbuddy 且拿到设备 nonce 时加
+//	version=<site.Version>   官方写自己的包版本；CN 授权页会把它转给
+//	                         console/auth/risk-context 并编进回调地址
+//	loginSessionId=<id>      官方客户端本地生成的登录会话标识；只对 platform=workbuddy
+//	                         （CN）追加，授权页读它并原样带进 signin-callback
+//	ww_device_nonce=<nonce>  官方仅 platform=workbuddy 且拿到设备 nonce 时加
 //
-// 本仓没有桌面端 Turing 设备 SDK，nonce 只能由部署侧提供（环境变量
-// CODEBUDDY_LOGIN_DEVICE_NONCE）；为空则不加 —— 不伪造设备指纹，错值比缺值更容易
-// 被上游风控判异常。raw 解析失败时原样返回（宁可少一个参数，不要弄坏链接）。
-func DecorateAuthURL(raw string, s Site, nonce string) string {
+// 2026-11-14 两侧真机链接原文（脱敏）：
+//
+//	CN : /login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
+//	          &traceparent=00-…&login_owner_id=<uuid>&ww_device_nonce=<nonce>
+//	GL : /login/?platform=workbuddy-ai&state=…&version=5.9.4
+//
+// traceparent / login_owner_id 是客户端自己的链路与宿主标识，本仓没有等价物，
+// 不伪造（错值比缺值更容易被判异常）。本仓没有桌面端 Turing 设备 SDK，nonce 只能由
+// 部署侧提供（环境变量 CODEBUDDY_LOGIN_DEVICE_NONCE）；为空则不加。
+// raw 解析失败时原样返回（宁可少一个参数，不要弄坏链接）。
+func DecorateAuthURL(raw string, s Site, nonce, sessionID string) string {
 	if raw == "" {
 		return raw
 	}
@@ -157,14 +177,33 @@ func DecorateAuthURL(raw string, s Site, nonce string) string {
 		return raw
 	}
 	q := u.Query()
-	if q.Get("version") == "" {
-		q.Set("version", ClientVersion)
+	if s.Version != "" && q.Get("version") == "" {
+		q.Set("version", s.Version)
+	}
+	// loginSessionId 与 nonce 同一道闸：官方 appendHostLoginJourneyParams 只对
+	// platform=workbuddy 追加（GL 的真机链接里没有它）。
+	if s.Platform == "workbuddy" && sessionID != "" && q.Get("loginSessionId") == "" {
+		q.Set("loginSessionId", sessionID)
 	}
 	if s.Platform == "workbuddy" && nonce != "" && q.Get("ww_device_nonce") == "" {
 		q.Set("ww_device_nonce", nonce)
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// NewLoginSessionID 生成 uuid v4 形态的登录会话标识。
+//
+// 官方由客户端本地生成、只做透传（授权页读它再编进回调），不是服务端签发的凭证，
+// 所以本地随机即可；用 v4 形状只是为了与真机同一形态。
+func NewLoginSessionID() string {
+	var b [16]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return ""
+	}
+	b[6] = b[6]&0x0f | 0x40 // version 4
+	b[8] = b[8]&0x3f | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // EndpointHeaders 设备码三端点的**公共**头。

@@ -2537,10 +2537,12 @@ const QR_EXP = new Array(512), QR_LOG = new Array(256);
 })();
 const gmul = (a, b) => (a && b) ? QR_EXP[QR_LOG[a] + QR_LOG[b]] : 0;
 
-// 各版本参数（下标 = 版本-1）：[数据码字数, 纠错码字数]，ECC L 单块
-const QR_V = [[19, 7], [34, 10], [55, 15], [80, 20], [108, 26]];
+// 各版本参数（下标 = 版本-1）：[数据码字总数, 每块纠错码字数, 块数]，ECC L。
+// v1-5 单块（免交织）；v6 两块相等各 68 数据字。授权链接约 108 字节，v5 上限 106
+// 差两个字节，正好卡在版本边界上，所以必须补 v6。
+const QR_V = [[19, 7, 1], [34, 10, 1], [55, 15, 1], [80, 20, 1], [108, 26, 1], [136, 18, 2], [156, 20, 2], [194, 24, 2], [232, 30, 2]];
 // 对齐图案中心坐标（v2+；与定位图案重叠的位置在放置时跳过）
-const QR_ALIGN = [[], [6, 18], [6, 22], [6, 26], [6, 30]];
+const QR_ALIGN = [[], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34], [6, 22, 38], [6, 24, 42], [6, 26, 46]];
 const QR_MASK = (r, c) => (r + c) % 2 === 0; // 掩码模式 0
 
 // 生成多项式（最高次系数在前，g[0] 恒为 1）
@@ -2593,8 +2595,8 @@ function qrMatrix(text) {
   // 版本选择：需求 ≈ 2 码字头 + 文本长度，取首个放得下的版本
   let ver = 0;
   for (let v = 0; v < QR_V.length; v++) { if (bytes.length + 2 <= QR_V[v][0]) { ver = v + 1; break; } }
-  if (!ver) throw new Error('QR: text too long (>' + QR_V[4][0] + ' bytes)');
-  const [dataCap, ecCap] = QR_V[ver - 1];
+  if (!ver) throw new Error('QR: text too long (>' + (QR_V[QR_V.length - 1][0] - 2) + ' bytes)');
+  const [dataCap, ecCap, nblk] = QR_V[ver - 1];
   const n = 17 + 4 * ver;
 
   const M = Array.from({ length: n }, () => new Array(n).fill(false));
@@ -2614,10 +2616,13 @@ function qrMatrix(text) {
   // 校正图形（仅贯穿两定位图案之间：8..n-9，不得覆盖定位图案本体）
   for (let r = 8; r <= n - 9; r++) setF(r, 6, r % 2 === 0);
   for (let c = 8; c <= n - 9; c++) setF(6, c, c % 2 === 0);
-  // 对齐图案（v2+，跳过与定位重叠处）
+  // 对齐图案（v2+，只跳过与三个定位图案重叠的位置；v7+ 的中心会落在贯穿线上，
+  // 那时按 F 判定会整块漏掉，所以判据只看是否压到定位图案的 9×9 区域）
   const align = QR_ALIGN[ver - 1] || [];
+  const hitsFinder = (r, c) =>
+    (r <= 8 && c <= 8) || (r <= 8 && c >= n - 9) || (r >= n - 9 && c <= 8);
   for (const ar of align) for (const ac of align) {
-    if (F[ar][ac]) continue;
+    if (hitsFinder(ar, ac)) continue;
     for (let r = -2; r <= 2; r++) for (let c = -2; c <= 2; c++)
       setF(ar + r, ac + c, Math.max(Math.abs(r), Math.abs(c)) !== 1);
   }
@@ -2639,11 +2644,28 @@ function qrMatrix(text) {
   for (let i = 9; i <= 14; i++) setF(8, 14 - i, !!fb(i));
   // 暗模块（恒为深色，位于副本一垂直段末端）
   setF(n - 8, 8, true);
-
+  // 版本信息块（v7+ 必填，18 位 BCH(6,18) 多项式 0x1F25，两份副本：
+  // 右上 6×3 与左下转置位置）。低版本没有这块，多写会破坏数据区。
+  if (ver >= 7) {
+    let vi = ver << 12;
+    for (let i = 17; i >= 12; i--) if ((vi >> i) & 1) vi ^= 0x1F25 << (i - 12);
+    vi = (ver << 12) | (vi & 0xFFF);
+    for (let i = 0; i < 18; i++) {
+      const bit = ((vi >> i) & 1) === 1;
+      setF((i / 3) | 0, n - 11 + i % 3, bit);
+      setF(n - 11 + i % 3, (i / 3) | 0, bit);
+    }
+  }
 
   // 数据码字 + 纠错码字 → 位流
   const dcw = qrDataCodewords(text, dataCap);
-  const cw = dcw.concat(rsRem(dcw, ecCap));
+  // 分块独立算纠错，再按规范交织：先逐列取数据字，再逐列取纠错字（单块时即原顺序）
+  const per = dataCap / nblk;
+  const blk = Array.from({ length: nblk }, (_, i) => dcw.slice(i * per, (i + 1) * per));
+  const ecs = blk.map(b => rsRem(b, ecCap));
+  const cw = [];
+  for (let i = 0; i < per; i++) for (const b of blk) cw.push(b[i]);
+  for (let i = 0; i < ecCap; i++) for (const e of ecs) cw.push(e[i]);
   const bits = [];
   for (const b of cw) for (let i = 7; i >= 0; i--) bits.push((b >> i) & 1);
 
