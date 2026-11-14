@@ -87,6 +87,7 @@ func (p *Panel) logsExportHandler(w http.ResponseWriter, r *http.Request) {
 		tmp.Close()
 		os.Remove(tmp.Name())
 	}()
+	p.logs.Flush() // 排队中的行先写下去，导出才含最新的尾巴
 	files, err := store.Export(tmp, from, to)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "打包日志: "+err.Error())

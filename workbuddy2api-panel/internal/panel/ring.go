@@ -55,6 +55,14 @@ func classifyLine(line string) string {
 }
 
 // Ring 日志环形缓冲。
+// storeQueueMax 待落盘队列上限：磁盘卡住时内存不无界增长，超出的行只留在环里。
+const storeQueueMax = 10000
+
+// Ring 日志环形缓冲。
+//
+// 落盘**不在 Write 里做**：Ring 是 log 的输出，Write 运行时调用方还持着 logger 的锁，
+// 落盘路径上任何一次慢盘都会让整个进程的日志随之卡死。所以 Write 只入环、排队并发信号，
+// 由后台 goroutine 在锁外写；写得慢时多次变更合成一次。进程退出前调 Flush 把尾巴写完。
 type Ring struct {
 	mu      sync.Mutex
 	entries []LogEntry
@@ -62,7 +70,13 @@ type Ring struct {
 	size    int // 已写入条数（<= cap）
 	cap     int
 	// store 全频道按天落盘（见 logstore.go）。nil = 未启用（纯内存）。
-	store *LogStore
+	store        *LogStore
+	storeQ       []LogEntry // 待落盘的行，FIFO
+	storeDropped int        // 磁盘跟不上、队列满时丢掉的行数（面板展示）
+
+	wake    chan struct{} // 容量 1：有待落盘的内容
+	flushMu sync.Mutex    // 串行化落盘：队列按 FIFO 写，文件里的顺序就是入环顺序
+	loop    sync.Once
 }
 
 // SetLogStore 挂上按天落盘存储，并用它回填最近日志。
@@ -72,6 +86,7 @@ type Ring struct {
 func (r *Ring) SetLogStore(store *LogStore) error {
 	r.mu.Lock()
 	r.store = store
+	r.loop.Do(func() { go r.persistLoop() })
 	r.mu.Unlock()
 	if store == nil {
 		return nil
@@ -101,7 +116,7 @@ func NewRing(capacity int) *Ring {
 	if capacity <= 0 {
 		capacity = 500
 	}
-	return &Ring{cap: capacity}
+	return &Ring{cap: capacity, wake: make(chan struct{}, 1)}
 }
 
 // Write 按 \n 切分入环（实现 io.Writer）。空行丢弃；超容量淘汰最旧行。
@@ -128,17 +143,51 @@ func (r *Ring) Write(p []byte) (int, error) {
 		}
 		entry := LogEntry{TS: now, Ch: classifyLine(text), Text: text}
 		r.entries[r.head] = entry
-		// 落盘在**锁内**做：同一把锁保证「入环顺序 = 文件顺序」。swap 出去写会让
-		// 两条并发日志在文件里倒序，事故复盘按时间读就错位了。
+		// 只入队，不在锁内落盘（见 Ring 注释）。队列按入环顺序 FIFO，文件里的顺序
+		// 就是入环顺序；写慢了多次变更合成一次 Flush。
 		if r.store != nil {
-			r.store.Append(entry)
+			if len(r.storeQ) < storeQueueMax {
+				r.storeQ = append(r.storeQ, entry)
+			} else {
+				r.storeDropped++
+			}
 		}
 		r.head = (r.head + 1) % r.cap
 		if r.size < r.cap {
 			r.size++
 		}
 	}
+	if r.store != nil && len(r.storeQ) > 0 {
+		select {
+		case r.wake <- struct{}{}:
+		default: // 已有待处理的信号：后台 goroutine 会把所有排队行一起写掉
+		}
+	}
 	return len(p), nil
+}
+
+// Flush 同步把排队的行写盘（后台 goroutine 与停机、导出前调用）。
+// 不能在持有 logger 锁时调用：写盘本身不能再回流进日志。
+func (r *Ring) Flush() {
+	r.flushMu.Lock()
+	defer r.flushMu.Unlock()
+	r.mu.Lock()
+	q, store := r.storeQ, r.store
+	r.storeQ = nil
+	r.mu.Unlock()
+	if store == nil {
+		return
+	}
+	for _, e := range q {
+		store.Append(e)
+	}
+}
+
+// persistLoop 后台落盘：信号容量为 1，多行变更自然合成一次写。
+func (r *Ring) persistLoop() {
+	for range r.wake {
+		r.Flush()
+	}
 }
 
 // Snapshot 按写入顺序返回缓冲内全部条目（拷贝，调用方可安全持有）。
