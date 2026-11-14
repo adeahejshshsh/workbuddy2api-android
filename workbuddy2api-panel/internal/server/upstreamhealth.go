@@ -39,21 +39,24 @@ const (
 	// upHealthFailRatio 5xx 占比阈值（且至少 upHealthMinFail 条）。
 	upHealthFailRatio = 0.10
 	upHealthMinFail   = 3
-	// upHealthMaxSamples 样本硬上限：窗口内流量突增时防止切片无限长。
-	upHealthMaxSamples = 4096
+	// upHealthBuckets 滑窗按固定桶计数：每次 record 只动一个桶、扫 20 个桶，
+	// 与流量无关。此前逐样本存切片，窗口满载时每个请求在全局锁内拷贝并扫描 4096 条（约 66µs）。
+	// 代价是窗口边界粗到一个桶（15s）。
+	upHealthBuckets = 20
+	upHealthBucket  = upHealthWindow / upHealthBuckets
 )
 
-// upSample 一次 chat 请求的观测样本。
-type upSample struct {
-	at   time.Time
-	ttfb time.Duration
-	fail bool // 5xx：上游侧失败
+// upBucket 一个时间桶内的请求计数；id 是桶的序号（Unix 纳秒 / 桶宽），环上复用时据此识别过期。
+type upBucket struct {
+	id                int64
+	total, slow, fail int
+	worst             time.Duration
 }
 
 // upHealth 滑窗状态。
 type upHealth struct {
 	mu       sync.Mutex
-	samples  []upSample
+	buckets  [upHealthBuckets]upBucket
 	lastWarn time.Time
 	// now 可注入（测试用固定时钟推进窗口）；nil 回退 time.Now。
 	now func() time.Time
@@ -89,35 +92,22 @@ func (u *upHealth) record(status int, outcome string, ttfb time.Duration) {
 
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.samples = append(u.samples, upSample{at: now, ttfb: ttfb, fail: fail})
-	// 窗口裁剪 + 硬上限：窗口内是几十到几百条，线性扫描足够。
-	cut := now.Add(-upHealthWindow)
-	drop := 0
-	for drop < len(u.samples) && u.samples[drop].at.Before(cut) {
-		drop++
+	id := now.UnixNano() / int64(upHealthBucket)
+	b := &u.buckets[id%upHealthBuckets]
+	if b.id != id {
+		*b = upBucket{id: id}
 	}
-	if over := len(u.samples) - drop - upHealthMaxSamples; over > 0 {
-		drop += over
-	}
-	if drop > 0 {
-		u.samples = append([]upSample(nil), u.samples[drop:]...)
+	b.total++
+	if fail {
+		b.fail++
+	} else {
+		if ttfb >= upHealthSlowTTFB {
+			b.slow++
+		}
+		b.worst = max(b.worst, ttfb)
 	}
 
-	total, slow, fails := 0, 0, 0
-	var worst time.Duration
-	for _, s := range u.samples {
-		total++
-		if s.fail {
-			fails++
-			continue
-		}
-		if s.ttfb >= upHealthSlowTTFB {
-			slow++
-		}
-		if s.ttfb > worst {
-			worst = s.ttfb
-		}
-	}
+	total, slow, fails, worst := u.windowLocked(id)
 	if total < upHealthMinSample {
 		return
 	}
@@ -139,6 +129,20 @@ func (u *upHealth) record(status int, outcome string, ttfb time.Duration) {
 		worst.Round(100*time.Millisecond), percent(fails, total))
 }
 
+// windowLocked 汇总桶序号 (cur-upHealthBuckets, cur] 内的计数，更早的桶视为已滑出窗口。
+func (u *upHealth) windowLocked(cur int64) (total, slow, fails int, worst time.Duration) {
+	for _, b := range u.buckets {
+		if b.total == 0 || b.id <= cur-upHealthBuckets || b.id > cur {
+			continue
+		}
+		total += b.total
+		slow += b.slow
+		fails += b.fail
+		worst = max(worst, b.worst)
+	}
+	return
+}
+
 // percent 整数百分比（日志够用，避免 %.0f 的浮点噪音）。
 func percent(n, total int) int {
 	if total == 0 {
@@ -151,17 +155,7 @@ func percent(n, total int) int {
 func (u *upHealth) summary() string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	total, slow, fails := 0, 0, 0
-	for _, s := range u.samples {
-		total++
-		if s.fail {
-			fails++
-			continue
-		}
-		if s.ttfb >= upHealthSlowTTFB {
-			slow++
-		}
-	}
+	total, slow, fails, _ := u.windowLocked(u.clock().UnixNano() / int64(upHealthBucket))
 	return fmt.Sprintf("samples=%d slow=%d fails=%d lastWarn=%s",
 		total, slow, fails, u.lastWarn.Format(time.RFC3339))
 }

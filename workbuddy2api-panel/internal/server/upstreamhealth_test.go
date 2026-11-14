@@ -62,8 +62,8 @@ func TestUpstreamHealthIgnoresInterrupted(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		h.record(499, reqlog.OutcomeInterrupted, 0)
 	}
-	if len(h.samples) != 0 {
-		t.Fatalf("499 不该进样本，实际 %d 条", len(h.samples))
+	if total, _, _, _ := h.windowLocked(now.UnixNano() / int64(upHealthBucket)); total != 0 {
+		t.Fatalf("499 不该进样本，实际 %d 条", total)
 	}
 	if !h.lastWarn.IsZero() {
 		t.Fatal("499 不该触发告警")
@@ -125,9 +125,8 @@ func TestUpstreamHealthWindowSlides(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		h.record(200, reqlog.OutcomeSuccess, 2*time.Second)
 	}
-	for _, s := range h.samples {
-		if s.ttfb >= upHealthSlowTTFB {
-			t.Fatalf("窗口外的慢样本未被裁掉: %+v", s)
-		}
+	total, slow, _, _ := h.windowLocked(now.UnixNano() / int64(upHealthBucket))
+	if slow != 0 || total != 10 {
+		t.Fatalf("窗口外的慢样本未被裁掉: total=%d slow=%d", total, slow)
 	}
 }
