@@ -686,6 +686,39 @@ func LoadDir(dir string) ([]*Auth, error) {
 	return r.Auths, nil
 }
 
+// AdoptNewer 用 src（同一账号从磁盘新读出的凭证）原地更新 a，仅当 src 的令牌更新时才动。
+// 返回是否更新。
+//
+// 为什么原地改而不是换指针：池里的 *Auth 被在途请求与令牌刷新共享，刷新在 a.mu 内原地
+// 写新令牌。换成一个从文件读出的新对象有两种坏结果：扫描早于刷新写回时，新对象带的是
+// 已被轮换作废的 refresh token；刷新还在旧对象上进行时，结果写进了没人用的对象。
+// 所以只在锁内、只在磁盘上的令牌更新（过期时刻更晚，典型为外部重新登录）时拷字段。
+// 过期时刻都为 0 的静态 API Key 以令牌不同为准。
+func (a *Auth) AdoptNewer(src *Auth) bool {
+	if a == src {
+		return false
+	}
+	src.mu.Lock()
+	in := Auth{
+		AccessToken: src.AccessToken, RefreshToken: src.RefreshToken, ExpiresAt: src.ExpiresAt,
+		Domain: src.Domain, realm: src.realm, EnterpriseID: src.EnterpriseID,
+		Nickname: src.Nickname, DeviceToken: src.DeviceToken,
+	}
+	src.mu.Unlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if in.AccessToken == "" || in.AccessToken == a.AccessToken {
+		return false
+	}
+	if in.ExpiresAt <= a.ExpiresAt && !(in.ExpiresAt == 0 && a.ExpiresAt == 0) {
+		return false
+	}
+	a.AccessToken, a.RefreshToken, a.ExpiresAt = in.AccessToken, in.RefreshToken, in.ExpiresAt
+	a.Domain, a.realm, a.EnterpriseID = in.Domain, in.realm, in.EnterpriseID
+	a.Nickname, a.DeviceToken = in.Nickname, in.DeviceToken
+	return true
+}
+
 // LoadReport 一次账号目录扫描的结果。
 //
 // ParseError 非空表示「本次有文件读不动/解析不了」：账号可能**还在**，只是这一轮
@@ -699,9 +732,17 @@ type LoadReport struct {
 
 // LoadDirReport 同 LoadDir，另外回报文件数与解析失败的条目（热重载用来判断能否删号）。
 func LoadDirReport(dir string) (LoadReport, error) {
-	files, err := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
-	if err != nil {
+	// 目录不存在视为空目录；其余读目录错误（挂载掉了、权限丢了）原样返回。filepath.Glob 会把
+	// 这类 I/O 错误吞成「0 个文件」，热重载随后就把整个池删光，所以这里改用 os.ReadDir。
+	entries, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return LoadReport{}, err
+	}
+	var files []string
+	for _, e := range entries {
+		if ok, _ := filepath.Match("workbuddy*.json", e.Name()); ok && !e.IsDir() {
+			files = append(files, filepath.Join(dir, e.Name()))
+		}
 	}
 	report := LoadReport{Files: len(files)}
 	// seenUID 重复 UID 检测：同 UID 出现在多个文件时（双 realm 同名 UID 概率近零）
