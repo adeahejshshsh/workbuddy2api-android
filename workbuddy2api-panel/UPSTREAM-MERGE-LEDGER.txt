@@ -833,3 +833,11 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 
 用例：Clash 三种形态（tls http / 嵌套 alpn / socks5+tls 必须 unsupported）；出口画像
 「关着零请求 / 开着经代理且直连为零 / TTL 内不重查」；`IsAlreadyCheckin` 九组文案。
+
+### 第十三批（已合：`2d03e4bd`；`fa4d62ce` 已等价；`b60f1c0b` 缺载体）
+
+| 上游提交 | 结论 |
+|---|---|
+| `2d03e4bd` 劣化滑窗改固定桶 | **已合**。`record` 此前在全局锁内做窗口裁剪 + 全量扫描（窗口满载 4096 条 ≈ 66µs/请求，跑在请求主路径上，流量越大越慢）。改成 20 个固定桶（桶宽 15s），record 只动一个桶、判定扫 20 个；`summary()` 走同一个 `windowLocked` |
+| `fa4d62ce` /v1/messages 转发 output_config.format | **已等价**：本仓 `responseFormatFromMessages`（含 name/strict 补齐）与接线、文档行都已在，无需改动 |
+| `b60f1c0b` 输出预算下限按目录 maxOutputTokens 封顶 | **缺载体**：本仓 `ensureMinOutputBudget(obj)` 是旧口径（没有按档位 + 目录上限取 min 的那套），`Client` 里也没有 `modelMaxOut` 快照。先补「目录 maxOutputTokens 抬额度」那套前置，才有得改 |
