@@ -951,6 +951,9 @@ type Client struct {
 	// modelRates 缓存各模型当前生效积分倍率（规范化数值，如 "0.5"）。
 	// 与 efforts 共用 realm 分层和锁；每次成功刷新模型目录时整体替换对应域。
 	modelRates map[string]map[string]string
+	// modelMaxOut (域 → 模型 → 目录 maxOutputTokens)：输出预算下限按它封顶，见 output_budget.go
+	// 的 outputFloor。目录刷新整体替换；未知 = 不封顶也不抬（见 outputFloor 的说明）。
+	modelMaxOut map[string]map[string]int64
 	// exclusive 该域里「免费号调不通」的模型（modelTiers 的 accessMode=exclusive）。
 	// 与 modelRates 同口径：目录刷新即整体替换，共用锁。
 	exclusive map[string]map[string]bool
@@ -1169,7 +1172,7 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID, cacheKeyID
 	// 只展开、不裁剪任何工具（裁剪某部署的工具名会让其它用户的 MCP 工具静默消失）。
 	body = prepareKimiTools(body, realm)
 	body = prepareBodyOptFull(body, c.SanitizeFingerprints.Load(), efforts, defs, realm,
-		c.effortPolicy.Load(), !c.SanitizeBrandIdentityOnly.Load())
+		c.effortPolicy.Load(), !c.SanitizeBrandIdentityOnly.Load(), c.modelMaxOutSnapshot(realm))
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	// 缓存槽会话段：优先网关派生的 CacheKeyID（sessKey 或内容派生键），
@@ -1922,6 +1925,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
 	c.storeModelRates(a.Realm(), out)
+	c.storeModelMaxOut(a.Realm(), out)
 	// 刷新 effort 能力缓存（供请求体降级；无 supportedEfforts 的模型不入桶）。
 	// 空桶时跳过写：避免「某探测无档位数据」清掉既有桶。
 	cache := make(map[string][]string, len(out))
@@ -2385,6 +2389,44 @@ func (c *Client) storeModelRates(realm string, infos []ModelInfo) {
 	}
 	c.modelRates[realmKey(realm)] = rates
 	c.exclusive[realmKey(realm)] = excl
+}
+
+// storeModelMaxOut 记录本域各模型的目录输出上限（maxOutputTokens）。只收正数：
+// 目录没给或给了 0 的模型视为「上限未知」，输出预算下限对它不抬也不封顶（见 outputFloor）。
+func (c *Client) storeModelMaxOut(realm string, infos []ModelInfo) {
+	m := make(map[string]int64, len(infos))
+	for _, mi := range infos {
+		if mi.ID == "" || mi.MaxTokens <= 0 {
+			continue
+		}
+		m[mi.ID] = mi.MaxTokens
+	}
+	c.effortsMu.Lock()
+	defer c.effortsMu.Unlock()
+	if c.modelMaxOut == nil {
+		c.modelMaxOut = make(map[string]map[string]int64)
+	}
+	c.modelMaxOut[realmKey(realm)] = m
+}
+
+// StoreModelMaxOutForTest 跨包测试钩子：直接写入某域的模型输出上限快照（真实路径由
+// FetchModels 刷新目录时写入）。仅测试引用。
+func (c *Client) StoreModelMaxOutForTest(realm string, maxOut map[string]int64) {
+	infos := make([]ModelInfo, 0, len(maxOut))
+	for id, n := range maxOut {
+		infos = append(infos, ModelInfo{ID: id, MaxTokens: n})
+	}
+	c.storeModelMaxOut(realm, infos)
+}
+
+// modelMaxOutSnapshot 返回输出上限快照副本；nil 表示未知（不补默认，行为同旧路径）。
+func (c *Client) modelMaxOutSnapshot(realm string) map[string]int64 {
+	if c == nil {
+		return nil
+	}
+	c.effortsMu.RLock()
+	defer c.effortsMu.RUnlock()
+	return c.modelMaxOut[realmKey(realm)]
 }
 
 // ModelExclusive 报告 (域, 模型) 是否「免费号调不通」（modelTiers accessMode=exclusive）。

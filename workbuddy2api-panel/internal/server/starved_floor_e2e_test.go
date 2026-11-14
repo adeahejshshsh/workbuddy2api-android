@@ -29,6 +29,8 @@ func TestChatStarvedRescueCarriesBudgetFloor(t *testing.T) {
 	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
+	// 下限只对目录里有输出上限的模型生效（见 upstream.OutputBudgetFloor / outputFloor）。
+	up.StoreModelMaxOutForTest("cn", map[string]int64{"deepseek-v4.1-flash": 131072, "m": 131072})
 	// 首段由 fakeUpstream 风格的 transport 提供：这里直接让 ChatStreamContext 的第一次
 	// 调用返回「纯思考」段，第二次（救援段）返回正常收尾段。
 	up.HTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -75,6 +77,8 @@ func TestChatStarvedRescueStreamCarriesBudgetFloor(t *testing.T) {
 	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
+	// 下限只对目录里有输出上限的模型生效（见 upstream.OutputBudgetFloor / outputFloor）。
+	up.StoreModelMaxOutForTest("cn", map[string]int64{"deepseek-v4.1-flash": 131072, "m": 131072})
 	up.HTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		raw, _ := io.ReadAll(r.Body)
 		*reqs = append(*reqs, string(raw))

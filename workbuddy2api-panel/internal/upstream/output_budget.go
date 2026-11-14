@@ -43,7 +43,7 @@ const minOutputBudgetProbe = 16
 //   - 额度是探活级（< 16）；
 //   - 关闭思考（thinking.type=disabled / effort=off/none/disabled）；
 //   - 档位为空或未知。
-func ensureMinOutputBudget(obj map[string]any) {
+func ensureMinOutputBudget(obj map[string]any, maxOut map[string]int64) {
 	effort := effortValue(obj)
 	if effort == "" {
 		return
@@ -56,8 +56,9 @@ func ensureMinOutputBudget(obj map[string]any) {
 			return
 		}
 	}
-	floor, ok := minBudgetByEffort[effort]
-	if !ok {
+	model, _ := obj["model"].(string)
+	floor := outputFloor(effort, model, maxOut)
+	if floor <= 0 {
 		return
 	}
 	cur, ok := maxTokensValue(obj)
@@ -80,6 +81,32 @@ func ensureMinOutputBudget(obj map[string]any) {
 // 1024 → 正文 1946 字就断。
 func MinOutputBudget(effort string) int64 {
 	return minBudgetByEffort[strings.ToLower(strings.TrimSpace(effort))]
+}
+
+// outputFloor 某档位在某模型上的输出预算下限（出站抬额度与续写/救援段共用这一处口径）：
+//   - 档位未知 → 0；
+//   - 模型不在目录里（目录还没拉到、或没给 maxOutputTokens）→ 0，不抬：不知道模型最多能写
+//     多少，按档位直接抬到 16384 可能超过它的上限、换来一个上游参数错误，宁可保留客户端
+//     自己的额度；
+//   - 目录值更小时以目录为准——不把额度抬到模型物理上写不了的值。
+func outputFloor(effort, model string, maxOut map[string]int64) int64 {
+	floor := MinOutputBudget(effort)
+	c, ok := maxOut[model]
+	if floor <= 0 || !ok || c <= 0 {
+		return 0
+	}
+	return min(floor, c)
+}
+
+// OutputBudgetFloor 本轮生效档位在该域该模型上的输出预算下限（已按目录 maxOutputTokens 封顶，
+// 口径见 outputFloor）。续写/救援段用它补 max_tokens，必须与出站时 ensureMinOutputBudget 抬到的
+// 值一致：只按档位取 MinOutputBudget 的话，目录上限更小的模型续写段会被抬到它写不了的额度。
+func (c *Client) OutputBudgetFloor(realm, model, effort string) int64 {
+	if MinOutputBudget(effort) <= 0 {
+		return 0
+	}
+	// 模型名可能带 cn:/global: 路由前缀，目录键是裸名（见 trimRealmPrefix）。
+	return outputFloor(effort, trimRealmPrefix(model), c.modelMaxOutSnapshot(realm))
 }
 
 // EnsureMinBudget 把 obj 的 max_tokens 抬到不低于 floor（floor<=0 或当前额度是
@@ -121,7 +148,9 @@ func (c *Client) BudgetFloorFor(body []byte, realm string) int64 {
 	applyEffortPolicy(obj, modelName, efforts[modelName], c.effortPolicy.Load(), realm)
 	injectThinking(obj, lookupDefaultEffort(defs, modelName))
 	normalizeReasoningEffort(obj, efforts)
-	return MinOutputBudget(effortValue(obj))
+	// 与出站抬额度同口径：按目录 maxOutputTokens 封顶、目录里没有的模型不抬（见 outputFloor）。
+	// 只按档位取 MinOutputBudget 的话，目录上限更小的模型续写段会被抬到它写不了的额度。
+	return outputFloor(effortValue(obj), trimRealmPrefix(modelName), c.modelMaxOutSnapshot(realm))
 }
 
 // effortValue 取最终生效的思考档位（snake/camel 双字段，小写归一）。

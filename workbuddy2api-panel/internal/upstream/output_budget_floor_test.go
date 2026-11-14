@@ -68,6 +68,8 @@ func TestEnsureMinBudget(t *testing.T) {
 
 func TestBudgetFloorForFollowsEffortPipeline(t *testing.T) {
 	c := &Client{}
+	// 下限只对目录里有输出上限的模型生效（见 outputFloor）；这里给足上限，走的仍是档位表。
+	c.StoreModelMaxOutForTest("cn", map[string]int64{"deepseek-v4.1-flash": 131072})
 	// 客户端显式 high → 8192。
 	if got := c.BudgetFloorFor([]byte(`{"model":"deepseek-v4.1-flash","reasoning_effort":"high"}`), "cn"); got != 8192 {
 		t.Fatalf("effort=high floor=%d want 8192", got)
@@ -83,5 +85,14 @@ func TestBudgetFloorForFollowsEffortPipeline(t *testing.T) {
 	// 不可解析 → 0（不猜）。
 	if got := c.BudgetFloorFor([]byte(`not json`), "cn"); got != 0 {
 		t.Fatalf("非法 body floor=%d want 0", got)
+	}
+	// 目录里没有这个模型 → 0：不知道它最多能写多少，不能按档位抬到 16384。
+	if got := c.BudgetFloorFor([]byte(`{"model":"unknown-model","reasoning_effort":"max"}`), "cn"); got != 0 {
+		t.Fatalf("目录外模型 floor=%d want 0", got)
+	}
+	// 目录上限比档位下限小 → 以目录为准。
+	c.StoreModelMaxOutForTest("cn", map[string]int64{"small-model": 6000})
+	if got := c.BudgetFloorFor([]byte(`{"model":"small-model","reasoning_effort":"max"}`), "cn"); got != 6000 {
+		t.Fatalf("目录封顶 floor=%d want 6000", got)
 	}
 }
