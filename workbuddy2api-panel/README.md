@@ -713,11 +713,46 @@ http://127.0.0.1:7863/panel/
 | `POST /v1/videos` · `POST /v1/videos/generations` | 提交视频任务（同一份实现）。缺省 `wait=true` 阻塞到出片回 200，`wait=false` 秒回 `task_id` |
 | `GET /v1/videos/{task_id}` · `POST /v1/videos/tasks` | 查任务（`queued` / `in_progress` / `completed` / `failed`） |
 | `GET /v1/videos/{task_id}/content` | 取成品字节：流式转发签名直链、不落盘；任务没出片回 409，成品超限回 502 而不是截断 |
+| `POST /v1/3d/generations` | 文生 / 图生 3D；默认异步返回 `job_id`（需 `features.three_d_enabled`） |
+| `POST /v1/3d/tasks` · `GET /v1/3d/{job_id}` | 查 3D 任务（`SUBMITTED` / `RUNNING` / `DONE` / `FAILED`） |
 | `POST /mcp` | MCP（JSON-RPC 2.0，Streamable HTTP 形态） |
 
 视频回执按 OpenAI Videos 的 Video 资源出（`object:"video"`、`status` 四态、`seconds` 是**字符串**、`progress` 只有 0/100、`error` 是 `{code,message}` 对象），另带 `data[].url` / `videos[].url` / `usage.credit` 这几个自解释字段 —— OpenAI 的 Videos API 已于 2026-09-24 关停，这里对齐的是它还留在各家 SDK 里的形状。
 
 图片侧 `response_format:"b64_json"` 由网关取直链后转 base64（上游无视该参数）；`n>1` 直接回 400 —— 上游一次只出一张，宁可拒绝也不静默少给。所有「网关主动回读上游直链」的路径（b64 转换、`image_generation` 工具、视频 `/content`）统一走 `media_fetch.go`：只认产物域、不跟随重定向、绑定请求 ctx、超限报错不截断、同时最多 4 路、错误文本不含签名 URL。
+
+### 生 3D（异步任务，默认关闭）
+
+> **为什么默认关**：这条链路要的是官方签发的 `ck_t_` 形式**临时云凭证**，不是账号的 OAuth
+> access token。默认由网关用已登录账号自己的 access token 调官方 `/v2/api-keys` 自动签发
+> （与官方客户端 `connect_cloud_service` 同款行为），变更开关需要重启。
+
+```json
+{ "features": { "three_d_enabled": true } }
+```
+
+| 端点 | 说明 |
+|---|---|
+| `POST /v1/3d/generations` | 文生 / 图生 / 多视角 3D；默认 `wait=false` 即刻返回 `job_id` |
+| `POST /v1/3d/tasks` · `GET /v1/3d/{job_id}` | 查任务；只对提交它的账号可见（同视频的「task → 账号」台账 + 有界探测自愈） |
+
+```bash
+curl -s http://127.0.0.1:7863/v1/3d/generations \
+  -H "Authorization: Bearer $WB2API_KEY" -H 'Content-Type: application/json' \
+  -d '{"prompt":"Q版古代灯笼，PBR材质","model":"3.1","enable_pbr":true}'
+# → {"job_id":"…","status":"SUBMITTED"}
+```
+
+凭证三条规则：**自动签发**（`features.three_d_auto_token`，默认 true，按账号缓存到过期前、
+上游 401/403 自动重签、并发同账号单飞）；**手工覆盖**（`features.three_d_temp_tokens`，键=账号 UID、
+`"*"` 兜底，填了就不再签发）；**拿不到就不发请求**——开关关回 `403 three_d_disabled`，凭证缺回
+`503 three_d_credential_missing`，都不打上游。凭证只进内存，不写日志、不回显面板、不进错误信息。
+静态 API Key 账号（`ck_`/`pt_` 前缀）没有 OAuth 身份，签不出来。
+
+`LowPoly` 需要 `model=3.0`；`Sketch` 需要 prompt 加图片、不支持 3.1；多视角要同时给单图且不能与
+prompt 同时提供，视角枚举 `back`/`left`/`right`/`top`/`bottom`/`left_front`/`right_front`。
+MCP 对应 `generate_3d` / `get_3d_task`，开关关闭时这两个工具不出现在 `tools/list` 里。
+
 
 Responses 的托管出图（`{"type":"image_generation"}`）也在这套端点上：客户端只声明工具，网关先让模型自己写提示词（探测），再走与 `/v1/images/generations` 同口径的出图管道（选号 / 白名单 / 记账），成品以 `image_generation_call` 输出项交付（`result` 是 base64）。单请求只出一张。
 

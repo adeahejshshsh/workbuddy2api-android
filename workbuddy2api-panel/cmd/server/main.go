@@ -228,6 +228,20 @@ func main() {
 	if err := up.SetTLSFingerprint(cfg.Upstream.TLSFingerprint); err != nil {
 		log.Fatalf("CONFIG: %v", err)
 	}
+	// 3D 临时云凭证：手工表（features.three_d_temp_tokens）优先，自动签发兜底
+	// （features.three_d_auto_token，默认 true——用账号自己的 access token 调官方
+	// /v2/api-keys 换 ck_t_，协议见 internal/upstream/three_d_credential.go）。
+	// 两条路径都拿不到时 3D 链路在发请求前就回 503。凭证内容不进日志。
+	static3D := configureThreeDCredentials(up, cfg)
+	if static3D.Empty() && cfg.Features.ThreeDEnabled {
+		if cfg.Features.ThreeDAutoToken {
+			log.Printf("[3d] 已开启 features.three_d_enabled：临时凭证将用账号 access token 自动签发（features.three_d_auto_token=true）")
+		} else {
+			log.Printf("[3d] 已开启 features.three_d_enabled，但没有配置 features.three_d_temp_tokens 且自动签发已关闭；" +
+				"3D 请求会回 503 three_d_credential_missing")
+		}
+	}
+
 	if up.TLSFingerprint == upstream.TLSFingerprintNode {
 		log.Printf("[upstream] TLS 指纹复刻已启用（JA3 %s / JA4 %s）",
 			upstream.OfficialJA3MD5, upstream.OfficialJA4)
@@ -398,6 +412,7 @@ func main() {
 		SanitizeFingerprints:   cfg.Features.SanitizeBlacklistFingerprints,
 		EmbeddingsEnabled:      cfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled:  cfg.Features.WatermarkStripEnabled,
+		ThreeDEnabled:          cfg.Features.ThreeDEnabled,
 		ToolOnlyRescue:         cfg.Features.ToolOnlyRescue,
 		RecordClientInfo:       cfg.Logging.RequestClientInfo,
 		RecordContext:          cfg.Logging.RequestArchiveContext,
@@ -553,6 +568,7 @@ func main() {
 		AdminEnabled:                  cfg.Admin.Enabled,
 		AdminAPIKey:                   cfg.AdminAPIKey,
 		WatermarkStripEnabled:         cfg.Features.WatermarkStripEnabled,
+		ThreeDEnabled:                 cfg.Features.ThreeDEnabled,
 		EmbeddingsEnabled:             cfg.Features.EmbeddingsEnabled,
 		ToolOnlyRescue:                cfg.Features.ToolOnlyRescue,
 		Tasks:                         sch,
@@ -757,6 +773,17 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 
 // panelListenPath 从 listen 地址提取 ":port" 形式，用于启动日志拼面板 URL
 // （":7863" 或 "0.0.0.0:7863" → ":7863"；异常输入原样返回）。
+// configureThreeDCredentials 装配一次 3D 凭证来源；自动开关的变化需要重启。
+func configureThreeDCredentials(up *upstream.Client, cfg *Config) *upstream.StaticThreeDCredentials {
+	static := upstream.NewStaticThreeDCredentials(cfg.Features.ThreeDTempTokens)
+	if cfg.Features.ThreeDAutoToken {
+		up.ThreeDCredential = upstream.NewAutoThreeDCredentials(up.FetchClientTempKey, static)
+	} else {
+		up.ThreeDCredential = static
+	}
+	return static
+}
+
 func panelListenPath(listen string) string {
 	for i := len(listen) - 1; i >= 0; i-- {
 		if listen[i] == ':' {
@@ -896,6 +923,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		SanitizeFingerprints:  newCfg.Features.SanitizeBlacklistFingerprints,
 		EmbeddingsEnabled:     newCfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
+		ThreeDEnabled:         newCfg.Features.ThreeDEnabled,
 		ToolOnlyRescue:        newCfg.Features.ToolOnlyRescue,
 		RecordClientInfo:      newCfg.Logging.RequestClientInfo,
 		RecordContext:         newCfg.Logging.RequestArchiveContext,
@@ -911,6 +939,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		ThinkingOverrideScope:  newCfg.Thinking.OverrideScope,
 		ThinkingModelDefaults:  newCfg.Thinking.ModelDefaults,
 	})
+	// 3D 临时凭证热生效：面板保存后整体替换手工凭证表（内容不进日志）。
+	// 自动签发开关（three_d_auto_token）走重启生效——它决定装配哪个实现。
+	if auto, ok := up.ThreeDCredential.(*upstream.AutoThreeDCredentials); ok {
+		auto.ReplaceManual(newCfg.Features.ThreeDTempTokens)
+	} else if static, ok := up.ThreeDCredential.(*upstream.StaticThreeDCredentials); ok {
+		static.Replace(newCfg.Features.ThreeDTempTokens)
+	}
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	up.SanitizeBrandIdentityOnly.Store(newCfg.Features.SanitizeBrandScope == "identity")
 	// 思考档位策略热生效：改默认档 / 切换客户端优先或作用域后，下一次 chat 即按新策略。
@@ -1013,6 +1048,9 @@ func restartRequiredFields(prev, next map[string]any) []string {
 		"upstream.client_version", "upstream.cli_version", "upstream.client_name",
 		"upstream.device_token", "upstream.device_token_file", "upstream.passthrough_ip",
 		"global.enabled", "global.chat_base", "global.billing_base",
+		// 3D 自动签发开关决定装配哪个凭证实现（手工表 / 手工+自动），只有重启才换得掉；
+		// 手工凭证表本身热生效（见 saveConfig）。
+		"features.three_d_auto_token",
 		"cn.chat_base", "cn.billing_base", // base 在启动时注入（上游 PR #220）
 		"models.hidden",        // 列表过滤与点名拒绝在 Handler 构造时快照（上游 PR #225）
 		"models.allowed",       // 同上（issue #68）

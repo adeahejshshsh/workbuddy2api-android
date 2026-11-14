@@ -51,6 +51,19 @@ const mcpInstructions = `WorkBuddy 媒体网关（生图 / 改图 / 生视频）
   并给出实测像素数，此时先用 edit_image 把下方约 1/3 涂白再调一次。
 - 每次生成都真实扣上游积分（生图约 5.7/张、视频 4 秒约 57），别拿它当免费接口刷。`
 
+// threeDInstructions 3D 已开启时追加的说明（默认关闭，避免模型去调不存在的工具）。
+const threeDInstructions = `
+- 生 3D（可选功能，已开启）：generate_3d 默认立刻返回 job_id，用 get_3d_task 查询；
+  wait=true 最多阻塞 600 秒。成品是 GLB/OBJ 等文件的签名直链，约 24 小时有效；
+  普通生成约 20 积分。`
+
+func mcpInstructionsFor(threeD bool) string {
+	if threeD {
+		return mcpInstructions + threeDInstructions
+	}
+	return mcpInstructions
+}
+
 // —— JSON-RPC 2.0 线格式 ——
 
 type mcpRequest struct {
@@ -167,7 +180,7 @@ func (h *Handler) mcpInitialize(params json.RawMessage) map[string]any {
 			"name":    mcpServerName,
 			"version": BuildVersion,
 		},
-		"instructions": mcpInstructions,
+		"instructions": mcpInstructionsFor(h.loadLive().ThreeDEnabled),
 	}
 }
 
@@ -199,6 +212,10 @@ func (h *Handler) mcpCallTool(ctx context.Context, params json.RawMessage) (any,
 		return h.mcpProxyCall(ctx, args, "/v1/videos/generations", h.videos)
 	case "get_video_task":
 		return h.mcpVideoTask(ctx, args)
+	case "generate_3d":
+		return h.mcpProxyCall(ctx, args, "/v1/3d/generations", h.threeDGenerations)
+	case "get_3d_task":
+		return h.mcpThreeDTask(ctx, args)
 	case "strip_watermark":
 		return h.mcpStripWatermark(ctx, args)
 	}
@@ -240,6 +257,17 @@ func (h *Handler) mcpProxyCall(ctx context.Context, args map[string]any, path st
 		"structuredContent": parsed,
 		"isError":           false,
 	}, nil
+}
+
+func (h *Handler) mcpThreeDTask(ctx context.Context, args map[string]any) (any, *mcpRPCError) {
+	id, _ := args["job_id"].(string)
+	if id == "" {
+		id, _ = args["id"].(string)
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, &mcpRPCError{Code: -32602, Message: "Invalid params: job_id is required"}
+	}
+	return h.mcpProxyCall(ctx, map[string]any{"job_id": id}, "/v1/3d/tasks", h.threeDTasks)
 }
 
 // mcpVideoTask 查视频任务：复用 POST /v1/videos/tasks 的实现（含台账与计费）。
@@ -327,6 +355,15 @@ func (h *Handler) mcpListModels(args map[string]any) any {
 			"成品是签名直链：图片约 24h、视频约 12h 有效。",
 			"生图约 5.7 积分/张（cn:hunyuan-image-alpha），视频 4 秒约 57 积分（cn:minimax-video-h3）。",
 		},
+	}
+	// 3D 是开关功能：关着时不列出，免得模型以为能调。
+	if h.loadLive().ThreeDEnabled {
+		payload["3d_models"] = []map[string]any{
+			{"id": "hy-3d", "kind": "3d", "versions": []string{"3.0", "3.1"}, "tool": "generate_3d"},
+		}
+		payload["notes"] = append([]string{
+			"3D：generate_3d 使用原 cn 账号池，model 参数填版本 3.0 / 3.1；默认异步返回 job_id，普通生成约 20 积分。",
+		}, payload["notes"].([]string)...)
 	}
 	return map[string]any{
 		"content":           []map[string]any{{"type": "text", "text": prettyJSON(payload)}},
@@ -474,6 +511,11 @@ func (h *Handler) mcpTools() []map[string]any {
 			},
 		},
 	}
+	// 3D 是开关功能（features.three_d_enabled，默认关闭）：关着时**不列出**这两个工具，
+	// 免得模型以为能用、白试一次（点了会回 403 three_d_disabled）。
+	if h.loadLive().ThreeDEnabled {
+		tools = append(tools, threeDTools()...)
+	}
 	// 水印裁切是开关功能（features.watermark_strip_enabled，默认关闭）：
 	// 关着时不出现在工具面里，免得模型以为能用、白试一次。
 	if h.loadLive().WatermarkStripEnabled {
@@ -515,4 +557,43 @@ func (h *Handler) mcpTools() []map[string]any {
 		})
 	}
 	return tools
+}
+
+// threeDTools 混元 3D 的两个工具（generate_3d / get_3d_task）。仅当
+// features.three_d_enabled 打开时才进工具面。
+func threeDTools() []map[string]any {
+	return []map[string]any{
+		{
+			"name":  "generate_3d",
+			"title": "生成 3D 模型（异步任务）",
+			"description": "用 WorkBuddy 原账号生成混元 3D 模型。文生 3D 给 prompt，图生 3D 给 image_url / image_base64，" +
+				"也可传多视角图。默认立刻返回 job_id，用 get_3d_task 查询；wait=true 可等待完成。产物含 GLB/OBJ，URL 约 24 小时有效。",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"prompt":            map[string]any{"type": "string", "description": "物体外观、结构、材质、风格描述"},
+					"image_url":         map[string]any{"type": "string", "description": "参考图公网 URL，128～5000 像素，最大 8MB"},
+					"image_base64":      map[string]any{"type": "string", "description": "参考图 base64（可带 data:image 前缀），解码后最大 6MiB"},
+					"multi_view_images": map[string]any{"type": "array", "description": "多视角图：[{ViewType:\"back\",ViewImageUrl:\"https://...\"}]"},
+					"model":             map[string]any{"type": "string", "enum": []string{"3.0", "3.1"}, "description": "默认 3.1；LowPoly 需用 3.0"},
+					"enable_pbr":        map[string]any{"type": "boolean", "description": "生成 PBR 材质"},
+					"face_count":        map[string]any{"type": "integer", "minimum": 10000, "maximum": 1500000},
+					"generate_type":     map[string]any{"type": "string", "enum": []string{"Normal", "LowPoly", "Geometry", "Sketch"}},
+					"polygon_type":      map[string]any{"type": "string", "enum": []string{"triangle", "quadrilateral"}},
+					"result_format":     map[string]any{"type": "string", "enum": []string{"STL", "USDZ", "FBX"}},
+					"wait":              map[string]any{"type": "boolean", "description": "默认 false；true 时阻塞至完成或超时"},
+					"timeout_seconds":   map[string]any{"type": "integer", "minimum": 1, "maximum": 600},
+				},
+			},
+		},
+		{
+			"name":        "get_3d_task",
+			"title":       "查 3D 生成任务",
+			"description": "按 generate_3d 返回的 job_id 查询。DONE 时 result_url / result_files 是模型产物；不要重复提交未完成任务。",
+			"inputSchema": map[string]any{
+				"type": "object", "required": []string{"job_id"},
+				"properties": map[string]any{"job_id": map[string]any{"type": "string"}},
+			},
+		},
+	}
 }

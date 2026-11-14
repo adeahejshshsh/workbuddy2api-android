@@ -27,6 +27,9 @@ type Snapshot struct {
 	// 缺省 false）。热生效：关着时端点回 403 embeddings_disabled——不是 404，
 	// 「功能存在、只是没开」与「上游没有这个协议」必须能区分开。
 	EmbeddingsEnabled bool
+	// ThreeDEnabled 混元 3D 生成总开关（features.three_d_enabled）；默认 false。
+	// 关着时端点回 403 three_d_disabled，不碰上游、不签发凭证。
+	ThreeDEnabled bool
 	// ToolOnlyRescue 「说一句就收尾」的安全续写（只采纳工具调用）。
 	// 见 internal/server/toolonly.go：features.tool_only_rescue，**缺省关闭**——
 	// 判据只能看「末条是工具结果 + 正文短」，而 agent 循环里正常收尾也长这样，
