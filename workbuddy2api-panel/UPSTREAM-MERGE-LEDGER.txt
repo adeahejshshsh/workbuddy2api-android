@@ -765,3 +765,19 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 
 **注意**：本仓 `Ring` 没有上游那套「任务频道快照落盘（taskArchive）」，那一块来自更早的上游提交、本仓未合；
 本批只搬了与 `LogStore` 相关的那半（也就是这次事故相关的半）。
+
+### 第九批（已合：`9ba108fb` + `0befb2b0` 的可搬部分）
+
+| 部分 | 说明 |
+|---|---|
+| 首帧心跳收进 `upstream.StreamHint` | 此前 server 侧的 `headKeepaliveWriter` 自带心跳 goroutine 且**在选号之前**就起——上游还没回头就把 200 提交出去，之后所有 429/503/400 只能变成「200 + error 帧」，`Retry-After` 也再写不进去。现在新增 `upstream/headkeepalive.go` + `WithHeadKeepalive`：只在本账号上游已回 200 之后启动，辅助协程只替它读下一行（一问一答），注释帧全部由 handler 协程写；首个 data 帧一到就停手。服务端只剩 69 行的 `sseCommitWriter`，原来 211 行的心跳状态机整块删除 |
+| 粘帧拆开（`continue.go`） | `continueReader.frame` 整行解析失败时用 `upstream.SplitConcatenatedJSON` 拆开逐份递归处理。此前粘在里面的 error / finish_reason / usage 都记不到，续写层会把这段当成「无 finish 断流」去续写 |
+| 粘帧拆开（`Aggregate`） | 非流式聚合同样拆开逐份并入。此前一段粘帧里两份内容被整段静默丢掉 |
+
+**没搬**：`HeadVetoError` 那套首帧否决（`0befb2b0` 的探测分支及其用例、`9ba108fb` 的否决相关用例）。
+本仓没有这个结构（更早的上游提交未合）。相应地 `X-Wb-Account` 响应头也不在本仓，
+心跳用例改为钉「SSE 头正确 + 心跳不抢先提交 200 + 首帧后停手」三条。
+
+用例：上游 `upstream/headkeepalive_test.go`（迟到有注释、及时零注释；否决那条按本仓能力删去）、
+`server/headkeepalive_handler_test.go`（回头前写心跳会抢状态码 / 回头后正常补且首帧后停手）、
+`continue_glued_test.go`（粘帧拆开逐份记账、粘在首位的 error 帧不进正文累积）。
