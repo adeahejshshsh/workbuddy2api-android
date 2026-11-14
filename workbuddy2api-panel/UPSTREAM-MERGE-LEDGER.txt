@@ -1035,3 +1035,21 @@ hex 前 16 位，对不上就报错、不猜。
 用例：`packageEndAt` 四分支；推算 WARN 限频三态。
 
 **至此 62 条里「有前置量」的五条全部落地**：`b60f1c0b`、`6be18704`、`3bab4f8c`、`8622073e`、`67386ae5`。
+
+### 第二十一批（`557b3d55` 全量：混元 3D）
+
+台账里最后一条「未搬」，三层一次落地。
+
+| 层 | 内容 |
+|---|---|
+| 客户端 | `upstream/three_d.go`（307）+ `three_d_credential.go`（223）：TC3-HMAC-SHA256 签名经 `agenttool/v1/tcproxy`；凭证=手工表优先 → 自动签发（access token 调 `/v2/api-keys` 换 `ck_t_`，按账号缓存、401/403 重签、并发单飞）→ 都没有就不发请求 |
+| 端点 | `server/three_d.go`（761）：`POST /v1/3d/generations`、`POST /v1/3d/tasks`、`GET /v1/3d/{job_id}`；台账/收养/记账/幂等与视频同构，`wait` 最长 600s |
+| 重构 | `server/probe.go`（212）抽出通用有界探测，`videos_probe.go` 退化成 95 行适配器，3D 复用（各自参数互不抢额度） |
+| 接线 | MCP `generate_3d`/`get_3d_task`（关着不列出）；`features.three_d_enabled` 默认 false、`three_d_temp_tokens`（只进内存）、`three_d_auto_token` 默认 true 且列入重启项；面板开关 + README |
+
+**唯一缺的原语**是 `Client.RefreshTokenIfNeeded`（3 行），其余本仓本来就有——见第十九批之前的台账订正。
+
+用例：上游 `three_d_test.go` 443 行、`server/three_d_test.go` 598 行、`three_d_config_test.go` 104 行
+全部原样搬入并通过（`saveConfig` 调用改成本仓 6 参签名）。
+
+**62 条至此全部结案**：已合 41、已等价 4、不适用 3、merge commit 14。
