@@ -340,6 +340,7 @@ func (m *Manager) Probe(ctx context.Context, id string) error {
 		return err
 	}
 	version, settings := m.generation[id], m.data.Settings
+	lookupExit := m.exitDueLocked(id, time.Now())
 	m.checking[id] = true
 	delete(m.requested, id)
 	h := m.health[id]
@@ -371,8 +372,8 @@ func (m *Manager) Probe(ctx context.Context, id string) error {
 	elapsed := time.Since(start)
 	// 出口画像顺手刷新（过期才查，见 intel.go）：还没打开、或这次探测本身就失败，都不查。
 	var intel ExitInfo
-	if fn := m.exitLookup(); message == "" && fn != nil && m.exitStale(id, time.Now()) {
-		intel = fn(ctx)
+	if lookupExit && message == "" {
+		intel = fetchExitInfo(ctx, tr) // 经该节点自己的 transport：查到的才是这个节点的出口
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
