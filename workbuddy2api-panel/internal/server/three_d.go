@@ -279,13 +279,15 @@ func (h *Handler) threeDGenerations(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	tried := map[string]bool{}
 	for attempt := 0; attempt < threeDAttempts; attempt++ {
-		a := h.cfg.Pool.PickExcludingForRealm(tried, "hy-3d", "cn")
+		// 占在途名额（审查 B3）：3D 是最贵的端点之一，不占位等于 max_in_flight 对它失效。
+		a := h.cfg.Pool.PickAcquireExcludingForRealm(tried, "hy-3d", "cn")
 		if a == nil {
 			break
 		}
 		tried[a.UID] = true
 		st.uid, st.nick, st.attempts = a.UID, a.Nickname, attempt+1
 		data, err := h.cfg.Upstream.ThreeDGenerations(r.Context(), a, body)
+		h.cfg.Pool.Release(a.UID) // 在途名额只覆盖上游调用本身
 		if err != nil {
 			// 没有临时凭证是网关侧缺配置，换号也没用：如实回 503，不罚号、不重试。
 			if errors.Is(err, upstream.ErrThreeDNoCredential) {
@@ -703,7 +705,9 @@ func (h *Handler) recordThreeDUsage(st *chatStat, uid string, state upstream.Thr
 		return
 	}
 	st.credit, st.hasCredit = state.Credit, true
-	h.cfg.Pool.NoteModelCost(uid, "hy-3d", state.Credit, 0)
+	// tokens 传 0：3D 上游只回 credit、不回 token 数。pool 侧对 tokens=0 仍会下账
+		// （余额插值/保底/成本分），只是不更新每千 token 单价（审查 B2）。
+		h.cfg.Pool.NoteModelCost(uid, "hy-3d", state.Credit, 0)
 	if h.cfg.Usage != nil {
 		h.cfg.Usage.Add(time.Now(), "cn", uid, "hy-3d", usage.Delta{
 			Credit: state.Credit, HasCredit: true,

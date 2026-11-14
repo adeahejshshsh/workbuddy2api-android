@@ -277,12 +277,23 @@ func (p *Pool) NoteSuccess(uid string) {
 // 打空撞 402；global 账号不签到，credits 曾是终身冻结。签到仍定期覆盖
 // （ReenableIfCredits/SetCreditsDetailed 以 authoritative 余额重置），扣减只是
 // 两次签到之间的内插估计；credit=0（免费请求）不动余额。
+//
+// tokens=0 表示「上游只回了 credit、没回 token 数」（3D 与部分视频任务就是这样，
+// 审查 B2）：此时**仍要下账**（余额插值、credit_floor 保底、选号成本分都靠它），
+// 只是不更新「每千 token 单价」那份账本——没有分母，per1k 无从计算，硬算出来的
+// 天文数字会污染成本分。
 func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
-	if uid == "" || model == "" || tokens <= 0 {
+	if uid == "" || model == "" {
 		return
 	}
-	// 单价按每千 token 归一，消除请求长度差异。
-	per1k := credit / float64(tokens) * 1000
+	if tokens < 0 {
+		tokens = 0
+	}
+	// 单价按每千 token 归一，消除请求长度差异；无 token 数时留 0（不参与成本分）。
+	per1k := 0.0
+	if tokens > 0 {
+		per1k = credit / float64(tokens) * 1000
+	}
 	if per1k < 0 {
 		per1k = 0
 	}
@@ -336,7 +347,17 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	}
 	const alpha = 0.3
 	prev, seen := e.modelCost[model]
-	if !seen {
+	if tokens == 0 {
+		// 没有 token 数：只更新「最近一次见到」，不动单价账本（per1k 无意义）。
+		// 余额侧的扣减与脏标记在此之前的代码里已经做完，那条路径不依赖 tokens。
+		if !seen {
+			e.modelCost[model] = modelCostEntry{LastSeen: time.Now(), Samples: 1}
+		} else {
+			prev.LastSeen = time.Now()
+			prev.Samples++
+			e.modelCost[model] = prev
+		}
+	} else if !seen {
 		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastSeen: time.Now(), Samples: 1}
 	} else {
 		// 限免结束事件（判定在写入口，只看覆盖前值）：此前 tier 0（实测免费，

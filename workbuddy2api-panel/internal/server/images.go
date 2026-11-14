@@ -144,7 +144,10 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	tried := map[string]bool{}
 	var lastErr error
 	for attempt := 0; attempt < imageAttempts; attempt++ {
-		a := h.cfg.Pool.PickExcludingForRealm(tried, bare, realm)
+		// 选号与在途占位在同一把锁内（审查 B3）：此前用不占位的 PickExcludingForRealm，
+		// max_in_flight 对「最贵的三个端点」完全失效——单号并发可无限突破，自己打出
+		// 上游 14003，面板「在途」指标也看不见这些调用。
+		a := h.cfg.Pool.PickAcquireExcludingForRealm(tried, bare, realm)
 		if a == nil {
 			break
 		}
@@ -158,6 +161,7 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 		} else {
 			data, err = h.cfg.Upstream.ImageGenerations(a, json.RawMessage(out))
 		}
+		h.cfg.Pool.Release(a.UID) // 在途名额只覆盖上游调用本身
 		if err != nil {
 			lastErr = err
 			var ue *upstream.Error
@@ -271,13 +275,14 @@ func (h *Handler) imageGenerate(ctx context.Context, req map[string]any) ([]byte
 			lastErr = err
 			break
 		}
-		a := h.cfg.Pool.PickExcludingForRealm(tried, bare, realm)
+		a := h.cfg.Pool.PickAcquireExcludingForRealm(tried, bare, realm) // 占在途名额，见上
 		if a == nil {
 			break
 		}
 		tried[a.UID] = true
 		st.uid, st.nick, st.attempts = a.UID, a.Nickname, attempt+1
 		data, ierr := h.cfg.Upstream.ImageGenerations(a, json.RawMessage(out))
+		h.cfg.Pool.Release(a.UID)
 		if ierr != nil {
 			lastErr = ierr
 			var ue *upstream.Error
