@@ -166,6 +166,12 @@ type continueReader struct {
 	// pendingErr 待冒给上层的读错误（每请求至多一次，见 endSegment）。
 	pendingErr error
 
+	// billed 已结束各段 usage 的纯求和（记账口径）。续写、盲重试、各类救援每段都是一次单独计费的
+	// 上游调用，prompt 也是每段各算一次；客户端看到的 usage（见 mergeUsage）为了不虚报上下文
+	// 占用只取末段 prompt，记到账号 / 用量 / 预算上的必须是这一份。segUsage 当前段的 usage。
+	billed   map[string]any
+	segUsage map[string]any
+
 	done bool
 }
 
@@ -461,6 +467,34 @@ func clientOutputBudget(body []byte) (int64, bool) {
 	return 0, false
 }
 
+// billedUsage 本请求各段 usage 的纯求和（记账口径，见 billed 字段），含还没结束的当前段；
+// 没有任何 usage 时为 nil。
+func (r *continueReader) billedUsage() map[string]any {
+	if r.segUsage == nil {
+		return r.billed
+	}
+	return sumUsage(sumUsage(nil, r.billed), r.segUsage)
+}
+
+// sumUsage 把 u 的数字叶子逐项加进 acc 并返回（acc 为 nil 时新建，不改 u）。
+func sumUsage(acc, u map[string]any) map[string]any {
+	if acc == nil {
+		acc = map[string]any{}
+	}
+	if u != nil {
+		sumInto(acc, u)
+	}
+	return acc
+}
+
+// flushSegUsage 段结束：把本段 usage 计入记账合计 billed 并清空。必须在任何换段之前调用。
+func (r *continueReader) flushSegUsage() {
+	if r.segUsage != nil {
+		r.billed = sumUsage(r.billed, r.segUsage)
+		r.segUsage = nil
+	}
+}
+
 func (r *continueReader) emit(payload string) {
 	r.lastClientAt = time.Now()
 	r.wrote = true
@@ -491,6 +525,8 @@ func (r *continueReader) endSegment(sawDone bool) {
 	if r.cur != nil {
 		r.cur.Close()
 	}
+	// 本段 usage 计入记账合计：必须在任何换段（救援、续写、盲重试）之前。
+	r.flushSegUsage()
 	// 安全续写段的裁决：拿到工具调用就采纳（继续正常收尾），否则回滚到首段终态。
 	r.settleToolOnly()
 	if r.tryStarvedRetry() {
@@ -765,43 +801,53 @@ func (r *continueReader) continuationBodyWithNudge(nudge string) ([]byte, error)
 // 值误触发压缩（与真实上下文长度无关地提前全量压缩）。total_tokens 按
 // 「末段 prompt + 累计 completion」重算，保持口径自洽。
 func (r *continueReader) mergeUsage(u map[string]any) {
-	if r.usage == nil {
-		r.usage = map[string]any{}
+	r.usage = mergeUsageInto(r.usage, u)
+	// 记账口径的段内合并与客户端可见的合计同一规则（段内多帧 usage 时与改动前记的一样），
+	// 段结束时再按段求和进 billed（见 flushSegUsage）。
+	r.segUsage = mergeUsageInto(r.segUsage, u)
+}
+
+// mergeUsageInto 把一个 usage 帧并入 dst 并返回（dst 为 nil 时新建）：prompt 侧取最新值，
+// 其余数字叶子求和，total_tokens 按 prompt+completion 重算（口径见 mergeUsage）。
+func mergeUsageInto(dst, u map[string]any) map[string]any {
+	if dst == nil {
+		dst = map[string]any{}
 	}
 	for k, v := range u {
 		switch k {
 		case "prompt_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "prompt_tokens_details":
-			r.usage[k] = v // 末段值
+			dst[k] = v // 末段值
 		case "total_tokens":
 			// 先按末段留作兜底（段里没有 prompt_tokens 时不会重算），末尾统一
 			// 按 prompt(末段)+completion(累计) 覆盖。
-			r.usage[k] = v
+			dst[k] = v
 		default:
 			if f, ok := v.(float64); ok {
-				if d, ok2 := r.usage[k].(float64); ok2 {
-					r.usage[k] = d + f
+				if d, ok2 := dst[k].(float64); ok2 {
+					dst[k] = d + f
 					continue
 				}
-				r.usage[k] = f
+				dst[k] = f
 				continue
 			}
 			if m, ok := v.(map[string]any); ok {
-				if dm, ok2 := r.usage[k].(map[string]any); ok2 {
+				if dm, ok2 := dst[k].(map[string]any); ok2 {
 					sumInto(dm, m)
 				} else {
 					nm := map[string]any{}
 					sumInto(nm, m)
-					r.usage[k] = nm
+					dst[k] = nm
 				}
 				continue
 			}
-			r.usage[k] = v
+			dst[k] = v
 		}
 	}
-	if p, ok := r.usage["prompt_tokens"].(float64); ok {
-		c, _ := r.usage["completion_tokens"].(float64)
-		r.usage["total_tokens"] = p + c
+	if p, ok := dst["prompt_tokens"].(float64); ok {
+		c, _ := dst["completion_tokens"].(float64)
+		dst["total_tokens"] = p + c
 	}
+	return dst
 }
 
 func sumInto(dst, src map[string]any) {

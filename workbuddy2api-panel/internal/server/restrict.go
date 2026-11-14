@@ -4,6 +4,9 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // 11140 风控连坐保护（吸收 workbuddy2api-hub 的 restriction hold）。
@@ -149,6 +152,16 @@ func (g *restrictionGate) reset() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.m = nil
+}
+
+// noteRestriction 账号处置之后调用：本次失败若是 11140 账号限制（任一形态），计入所属域的
+// 连坐判定并返回 true，调用方据此停止换号——换下一个号等于把它也送进风控。
+func (h *Handler) noteRestriction(acct *auth.Auth, kind upstream.ErrKind, body string) bool {
+	if kind != upstream.ErrAccountFault || !upstream.IsAccountRestriction(body) {
+		return false
+	}
+	h.restrict.note(acct.Realm(), acct.UID, h.cfg.RestrictionHold, h.realmHealthy(acct.Realm()))
+	return true
 }
 
 // realmHealthy 本域可用号数，供连坐阈值缩放；拿不到（未配池子）返回 0 = 用固定下限。

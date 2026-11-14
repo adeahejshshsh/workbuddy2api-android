@@ -1675,8 +1675,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// silentBudget 静默回合救援的**额外**名额，不占轮转额度：MaxRotate=1 的部署
 	// 也该有一次救援机会（否则这条修复在最保守的配置下等于不存在）。
 	silentBudget := 0
+	// stopRotate 就地停手（11140 设备/出口级风控，见 restrict.go）：本轮结束后不再换号。
+	// 用标志而不是直接 break，是为了让当前这次尝试照常走完记账/日志，下一轮开头再退出。
+	stopRotate := false
 
 	for i := 0; i < h.cfg.MaxRotate+silentBudget; i++ {
+		if stopRotate {
+			break
+		}
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
@@ -2185,7 +2191,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 在流开始前就做了，于是一个正在限流的号被当成健康号，粘性还会把
 				// 整个会话钉在它身上，后续每轮都失败。
 				kind := upstream.FrameKind(errFrame)
-				h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, nil)
+				restricted := h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, nil)
+				// 11140 风控限制与 HTTP 路径同口径（d3edea90）：就地停手，不把下一个号
+				// 也送进去；并把这笔限制计入本域连坐判定。此前这条路径只 fail 不停止轮转，
+				// 首帧 11140 照样能顺着轮转把池子挨个撞一遍。
+				if restricted && h.noteRestriction(acct, kind, errFrame) {
+					stopRotate = true
+				}
 				// 粘性必须解绑（报告 #3）：这一跳以 error 帧收尾，若策略是零动作
 				// （ErrNone/ErrClient/内容拦截），账号侧既不罚也不记，粘性仍钉在刚
 				// 失败的号上，下一轮继续撞。惩罚与否由 applyErrorPolicy 判。
@@ -2270,7 +2282,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if hit, miss, ok := stats.CacheTokens(); ok {
 				st.cacheHit, st.cacheMiss, st.hasCache = hit, miss, true
 			}
-			recordAttempt(acct.UID, stats.Usage(), credit, hasCredit, attemptStarted, stats.TTFB())
+			bill := stats.Usage()
+			// 记账取续写层的各段纯求和（见 continueReader.billed）：续写、盲重试、各类救援每段
+			// 都是一次计费的上游调用，客户端可见的合计 usage 只留末段 prompt；客户端中途断开时
+			// 那条合计帧根本没发出来，已结束各段的用量也不能丢。
+			if u := cont.billedUsage(); u != nil {
+				bill, credit, _, hasCredit = billedDelta(u)
+			}
+			recordAttempt(acct.UID, bill, credit, hasCredit, attemptStarted, stats.TTFB())
 			// WARN 信号放 recordAttempt 之后：st.promptTokens 此时才是本次的观测值。
 			if st.hasCache {
 				cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
@@ -2342,6 +2361,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 空截断救援（starved.go）：额度被思考吃光、正文零字节、finish_reason=length。
 		// 非流式这一侧没有续写通道，救援在这里做 —— 同预算关思考重发一次、重新聚合。
 		// 只在客户端**显式给了**输出限额时做（没给限额的空回复另有成因，不替它决定）。
+		// billUsage 救援重发成功时两次调用 usage 的纯求和（记账口径，与流式 continueReader.billed
+		// 同理）：被丢弃的首个聚合体也是一次计费的上游调用。nil = 只有一次调用，按 resp 记。
+		var billUsage map[string]any
 		if err == nil && !starvedTried && aggregateStarved(resp) && bodySetsOutputLimit(body) {
 			if rb, ok := starvedRetryBodyWithFloor(body, h.cfg.Upstream.BudgetFloorFor(body, acct.Realm())); ok {
 				starvedTried = true
@@ -2349,6 +2371,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if e2 == nil && st2 < 400 && rc2 != nil {
 					if resp2, e3 := upstream.Aggregate(rc2); e3 == nil {
 						rc2.Close()
+						// 客户端只收到救援这次的内容，看到的 usage 也只是这次的；记账两次相加。
+						u1, _ := resp["usage"].(map[string]any)
+						u2, _ := resp2["usage"].(map[string]any)
+						if u1 != nil || u2 != nil {
+							billUsage = sumUsage(sumUsage(nil, u1), u2)
+						}
 						resp = resp2
 						log.Printf("INFO: [starved] non-stream acct=%s model=%s: 预算被思考吃光（正文 0B）→ 同额度关思考重发成功",
 							logfmt.Label(acct.UID, acct.NicknameValue()), bareModel)
@@ -2468,7 +2496,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.cacheHit, st.cacheMiss, st.hasCache = hit, miss, true
 			}
 		}
-		recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, 0)
+		ud := usageDeltaFromResponse(resp)
+		if billUsage != nil {
+			ud, credit, _, hasCredit = billedDelta(billUsage)
+		}
+		recordAttempt(acct.UID, ud, credit, hasCredit, attemptStarted, 0)
 		if st.hasCache {
 			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
 		}
@@ -2916,6 +2948,17 @@ func promptTooLongMessage(body string) string {
 		return "prompt is too long"
 	}
 	return body
+}
+
+// billedDelta 把一份记账口径的 usage（多次上游调用的纯求和；nil = 没有观测）转成记账入参，
+// 与非流式聚合体同一套解析与合法性闸门。
+func billedDelta(u map[string]any) (delta pool.TokenUsageDelta, credit float64, total int, hasCredit bool) {
+	if u == nil {
+		return
+	}
+	resp := map[string]any{"usage": u}
+	credit, total, hasCredit = usageCreditTotal(resp)
+	return usageDeltaFromResponse(resp), credit, total, hasCredit
 }
 
 // usageCreditTotal 从聚合响应取 usage.credit 与 total_tokens（成本台账非流式入口）。
