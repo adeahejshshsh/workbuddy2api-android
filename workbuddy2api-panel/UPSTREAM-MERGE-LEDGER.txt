@@ -781,3 +781,23 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 用例：上游 `upstream/headkeepalive_test.go`（迟到有注释、及时零注释；否决那条按本仓能力删去）、
 `server/headkeepalive_handler_test.go`（回头前写心跳会抢状态码 / 回头后正常补且首帧后停手）、
 `continue_glued_test.go`（粘帧拆开逐份记账、粘在首位的 error 帧不进正文累积）。
+
+### 第十批（已合：`320f5d4d` + `0e863d83`；`eecc7299` 的编码器部分）
+
+真机链接口径（2026-11-14）：
+
+	CN : /login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>&ww_device_nonce=…
+	GL : /login/?platform=workbuddy-ai&state=…&version=5.9.4
+
+| 部分 | 说明 |
+|---|---|
+| `version` 改裸版本号 | 此前填的是 UA 那串 `WorkBuddy/5.9.3`。授权页把这个值原样转给 `console/auth/risk-context` 并编进回调地址——多一层前缀就是错的指纹。改成 per-site `Site.Version`（CN/GL 各取自己的常量去前缀），未配 Version 的站点不加 |
+| `loginSessionId` | 官方客户端本地生成、只做透传（授权页读它再编进回调），不是服务端签发的凭证，本地随机 uuid v4 即可。与 `ww_device_nonce` 同一道闸——只对 `platform=workbuddy`（CN）追加 |
+| QR 编码器升到 v9 | 本仓原先是 v1–v5 单块（v6 两块交织那段 issue #94 未合）。CN 链接加 loginSessionId 后 ~158 字节、带 nonce ~207 字节，v5 上限 106 字节编不出来，面板会退化成「链接过长」。升到 v9 后两档都能编码（含 v7+ 的版本信息块与对齐图案判据修正） |
+
+用例：`loginsite` 的 version 断言改裸版本号；面板 `loginStart` 断言 version + CN 带 loginSessionId；
+新增 `qr_matrix_test.go`（上游 golden，v5/v6/v8/v9 逐像素 + 231 字节必须报错），
+用本仓的 `nodeCmd`（Termux 需 linker64 代跑）与本地分节注释取块——四档全部 diff=0。
+
+未合：`eecc7299` 的**前端登录二维码**那半（`app.js` 的 `addQr`/`qrSVG` 接线）——本仓还没有
+「面板显示授权链接二维码」这个功能（更早的上游提交未合），故只搬了编码器与 golden。
