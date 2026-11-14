@@ -167,7 +167,10 @@ func parseClashProxies(text string) ([]SubEntry, error) {
 	var out []SubEntry
 	inProxies := false
 	// baseIndent 「- 」列表项的缩进；块式条目的字段缩进必须比它深。
+	// fieldIndent 当前条目字段的缩进（「- 」之后第一个键的列）：只收这一层的键，更深的是嵌套值
+	// （alpn 列表、ws-opts 映射），不能当成新条目，也不能让里面的同名键盖掉外层字段。
 	baseIndent := -1
+	fieldIndent := -1
 	var cur map[string]string
 	var curLine int
 	var curName string
@@ -208,15 +211,19 @@ func parseClashProxies(text string) ([]SubEntry, error) {
 			}
 			continue
 		}
+		isItem := strings.HasPrefix(trimmed, "- ") || trimmed == "-"
 		// 段结束：出现非列表项、且缩进不比列表项深的 key（如 proxy-groups:）。
-		if !strings.HasPrefix(trimmed, "- ") && trimmed != "-" {
-			if baseIndent < 0 || indent <= baseIndent {
-				flush()
-				inProxies = false
-				continue
+		if !isItem && (baseIndent < 0 || indent <= baseIndent) {
+			flush()
+			inProxies = false
+			continue
+		}
+		// 比列表项深的行属于当前条目：与首个键同列的是字段，更深的（含嵌套列表的「- 」）是嵌套值，跳过。
+		if baseIndent >= 0 && indent > baseIndent {
+			if cur != nil && !isItem && fieldIndent < 0 {
+				fieldIndent = indent
 			}
-			// 块式条目的字段行。
-			if cur != nil {
+			if cur != nil && !isItem && indent == fieldIndent {
 				if k, v, ok := splitYAMLKV(trimmed); ok {
 					cur[k] = v
 				}
@@ -229,6 +236,10 @@ func parseClashProxies(text string) ([]SubEntry, error) {
 			baseIndent = indent
 		}
 		item := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+		fieldIndent = len(line) - len(strings.TrimLeft(strings.TrimLeft(line, " \t")[1:], " \t"))
+		if item == "" {
+			fieldIndent = -1 // 「-」独占一行：字段从下一行起，取第一行字段的缩进
+		}
 		curLine = lineNo
 		cur = map[string]string{}
 		curName = ""
@@ -413,11 +424,34 @@ func splitYAMLKV(s string) (string, string, bool) {
 	if k == "" {
 		return "", "", false
 	}
-	// 去掉 yaml 注释（值里的人名/密码带 # 的情况极少，且带引号时下面的 Trim 会先处理）。
-	if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
-		v = v[1 : len(v)-1]
+	return strings.ToLower(k), yamlScalar(v), true
+}
+
+// yamlScalar 去掉标量值的引号与行尾注释。YAML 的注释要求 # 前有空白，所以 `p#ss` 是值本身，
+// `1080 # 备用` 的值是 1080；引号内的 # 不是注释。只处理单行标量。
+func yamlScalar(v string) string {
+	if v != "" && (v[0] == '"' || v[0] == '\'') {
+		q := v[0]
+		for i := 1; i < len(v); i++ {
+			if q == '"' && v[i] == '\\' {
+				i++
+				continue
+			}
+			if v[i] == q {
+				return v[1:i]
+			}
+		}
+		return v
 	}
-	return strings.ToLower(k), v, true
+	if strings.HasPrefix(v, "#") {
+		return ""
+	}
+	for i := 1; i < len(v); i++ {
+		if v[i] == '#' && (v[i-1] == ' ' || v[i-1] == '\t') {
+			return strings.TrimSpace(v[:i])
+		}
+	}
+	return v
 }
 
 // clashEntryToSubEntry 把一条 Clash 代理定义转成受支持的代理 URL，或给出不支持的说明。
@@ -447,7 +481,20 @@ func clashEntryToSubEntry(line int, name string, m map[string]string) SubEntry {
 		e.Reason = "port 字段缺失或不是 1-65535 的整数"
 		return e
 	}
-	u := &url.URL{Scheme: kind, Host: net.JoinHostPort(host, strconv.Itoa(port))}
+	// Clash 的 http 节点用 tls: true 表示 HTTPS 代理：照原样导出成 http:// 会把代理账号密码明文发出去。
+	// socks5 over TLS 本网关的传输层不支持，也不能降级成明文 socks5。
+	scheme := kind
+	if tls, _ := strconv.ParseBool(strings.TrimSpace(m["tls"])); tls {
+		switch kind {
+		case "http":
+			scheme = "https"
+		case "socks5", "socks5h":
+			e.Unsupported = true
+			e.Reason = kind + " over TLS 不由本网关解析（传输层只支持明文 socks5）"
+			return e
+		}
+	}
+	u := &url.URL{Scheme: scheme, Host: net.JoinHostPort(host, strconv.Itoa(port))}
 	if user := strings.TrimSpace(m["username"]); user != "" {
 		u.User = url.UserPassword(user, strings.TrimSpace(m["password"]))
 	}

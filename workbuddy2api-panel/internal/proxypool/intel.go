@@ -8,8 +8,14 @@
 // 地址的网络被标为机房），不是注册事实，所以 ISP/ASN 一并存下来给运维自己判。查询失败
 // 记 unknown（空值），绝不猜——一个查不到归属的代理照样能跑流量。
 //
-// 请求**直连**发出而不经被描述的那个代理：查询要在「该代理只通上游」时仍然可用，也不能
-// 由被询问的那个出口来回答自己。
+// 两条约束：
+//   - **经被描述的那个代理去查**：查询的意义就是「这个代理的出口是谁」，直连查到的永远是
+//     网关自己的 IP（每个节点都显示同一个地址），还把网关的真实 IP 报给了第三方；
+//   - **缺省关闭**（features.proxy_exit_lookup，热生效）：每个节点每 6 小时一次第三方请求，
+//     部署要自己决定。
+//
+// 注意 ip-api 免费档只有明文 HTTP：请求经代理发出，代理运营方能看到、也能改这份回包。
+// 所以画像只作观测，不参与任何选号或冷却决策。
 package proxypool
 
 import (
@@ -97,7 +103,7 @@ func classifyExit(raw []byte, now time.Time) ExitInfo {
 //
 // 用 Manager 自己的 base transport（与「直连」账号同一条链路）：整套部署要走本机代理
 // 才能出网时，新起一个默认 client 只会一直查不到，画像永远是 unknown。
-func (m *Manager) fetchExitInfo(ctx context.Context) ExitInfo {
+func fetchExitInfo(ctx context.Context, tr http.RoundTripper) ExitInfo {
 	now := time.Now()
 	c, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -105,7 +111,7 @@ func (m *Manager) fetchExitInfo(ctx context.Context) ExitInfo {
 	if err != nil {
 		return ExitInfo{At: now}
 	}
-	client := &http.Client{Transport: m.base}
+	client := &http.Client{Transport: tr}
 	resp, err := client.Do(req)
 	if err != nil {
 		return ExitInfo{At: now}
@@ -125,28 +131,18 @@ func (m *Manager) fetchExitInfo(ctx context.Context) ExitInfo {
 	return info
 }
 
-// EnableExitLookup 打开「健康探测时顺手查出口画像」。
+// SetExitLookup 打开/关闭「健康探测时顺手查出口画像」（features.proxy_exit_lookup，热生效）。
 //
-// 默认关闭：它是一次真实的出网请求，单元测试里的代理节点都不该因此打到外网。生产装配
-// 在起代理池之后调一次即可（cmd/server）。
-func (m *Manager) EnableExitLookup() {
+// 默认关闭：它是一次真实的第三方出网请求，部署要自己决定；单元测试里的代理节点也不该因此打到外网。
+func (m *Manager) SetExitLookup(on bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.lookupExitFn = m.fetchExitInfo
+	m.exitLookupOn = on
 }
 
-// exitLookup 读当前查询函数（EnableExitLookup 会改它，故要持锁）。
-func (m *Manager) exitLookup() func(context.Context) ExitInfo {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.lookupExitFn
-}
-
-// exitStale 报告该节点的画像是否需要重查（不含已禁用/从未探测的节点语义，只问时间）。
-func (m *Manager) exitStale(id string, now time.Time) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return !m.exit[id].fresh(now)
+// exitDueLocked 该节点是否该查画像：开关打开且画像过期。调用方持 m.mu。
+func (m *Manager) exitDueLocked(id string, now time.Time) bool {
+	return m.exitLookupOn && !m.exit[id].fresh(now)
 }
 
 // setExitLocked 写入新画像（调用方持 m.mu）；出口 IP 变化时打一行日志——换出口是

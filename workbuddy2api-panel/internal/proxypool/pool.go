@@ -2,7 +2,6 @@
 package proxypool
 
 import (
-	"context"
 	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -167,8 +166,8 @@ type Manager struct {
 	// exit 每个节点的出口画像（ip / 国家 / 住宅或机房 / ISP），见 intel.go。
 	// 持久化不必要：重启后第一次探测会重新取。
 	exit map[string]ExitInfo
-	// lookupExitFn 出口画像的查询函数；nil = 关闭（默认，见 EnableExitLookup）。
-	lookupExitFn func(context.Context) ExitInfo
+	// exitLookupOn 是否在健康探测时查出口画像；缺省关闭（见 SetExitLookup）。
+	exitLookupOn bool
 }
 
 func New(path string, base *http.Transport, dialer *net.Dialer) (*Manager, error) {

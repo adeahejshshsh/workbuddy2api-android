@@ -1,6 +1,10 @@
 package proxypool
 
 import (
+	"sync/atomic"
+	"strings"
+	"net/http/httptest"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -59,5 +63,48 @@ func TestExitInfoFresh(t *testing.T) {
 	}
 	if (ExitInfo{At: now.Add(-2 * intelTTL)}).fresh(now) {
 		t.Error("超过 intelTTL 应过期")
+	}
+}
+
+// 画像必须经被描述的那个代理去查：直连查到的是网关自己的出口，每个节点都会显示同一个地址。
+// 开关关着（缺省）时一个第三方请求都不发。
+func TestProbeLooksUpExitThroughProxy(t *testing.T) {
+	var direct, viaProxy atomic.Int32
+	intel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		direct.Add(1)
+		_, _ = w.Write([]byte(`{"status":"success","query":"198.51.100.1"}`))
+	}))
+	defer intel.Close()
+	old := intelURL
+	intelURL = intel.URL + "/"
+	t.Cleanup(func() { intelURL = old })
+	intelHost := strings.TrimPrefix(intel.URL, "http://")
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Host == intelHost {
+			viaProxy.Add(1)
+			_, _ = w.Write([]byte(`{"status":"success","query":"203.0.113.9","countryCode":"jp","isp":"Example Cloud","hosting":true}`))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent) // 健康检查
+	}))
+	defer proxy.Close()
+
+	m := testManager(t, "")
+	id := addProxy(t, m, proxy.URL)
+	probe(t, m, id)
+	if viaProxy.Load()+direct.Load() != 0 {
+		t.Fatal("exit lookup ran while disabled")
+	}
+	m.SetExitLookup(true)
+	probe(t, m, id)
+	if viaProxy.Load() != 1 || direct.Load() != 0 {
+		t.Fatalf("via proxy=%d direct=%d", viaProxy.Load(), direct.Load())
+	}
+	if got := m.Snapshot().Proxies[0].Exit; got.IP != "203.0.113.9" || got.Kind != "datacenter" {
+		t.Fatalf("exit = %+v", got)
+	}
+	probe(t, m, id) // 6 小时内不重查
+	if viaProxy.Load() != 1 {
+		t.Fatalf("lookup repeated within TTL: %d", viaProxy.Load())
 	}
 }

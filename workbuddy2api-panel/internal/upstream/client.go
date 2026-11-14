@@ -3113,23 +3113,9 @@ func IsAlreadyCheckin(err error) bool {
 	if !errors.As(err, &ue) {
 		return false
 	}
-	msg := strings.ToLower(ue.Msg)
-	for _, m := range alreadyCheckinMarkers {
-		if strings.Contains(strings.ToLower(ue.Msg), strings.ToLower(m)) {
-			// 命中幂等文案后还要排除反向语义（bug B4）。
-			negated := false
-			for _, n := range alreadyNegativeMarkers {
-				if strings.Contains(msg, n) {
-					negated = true
-					break
-				}
-			}
-			if !negated {
-				return true
-			}
-		}
-	}
-	return false
+	// 判据与回执分类共用 isAlreadyCheckinMsg：失败硬词与反向语义在两条出口上口径一致，
+	// 否则调度器/CLI 走这里仍会把「签到失败，已签到天数不足」当成幂等成功。
+	return isAlreadyCheckinMsg(ue.Msg)
 }
 
 // businessCodeStatus 把「HTTP 200 + 业务 code」映射成等价的语义 HTTP 状态（bug #10）。

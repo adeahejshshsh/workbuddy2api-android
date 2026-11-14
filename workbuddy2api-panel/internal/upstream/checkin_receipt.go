@@ -46,6 +46,21 @@ const (
 // 不能被 already 抢走（同类项目踩过的坑，判定顺序必须 failed 先于 already）。
 var checkinFailureMarkers = []string{"失败", "fail", "not started", "未开启", "不支持"}
 
+// isAlreadyCheckinMsg 文案是否表示「今天已签到」：含「已签到」类词，且不含失败硬词。
+// IsAlreadyCheckin 与回执分类共用这一处，失败硬词压过 already 的规则不会在两个出口各写一份：
+// 只在回执分类里排除的话，调度器 / CLI 走 IsAlreadyCheckin 仍会把「签到失败，已签到天数不足」当成幂等成功。
+func isAlreadyCheckinMsg(msg string) bool {
+	lower := strings.ToLower(msg)
+	// 两道否决都要先看：失败硬词（「签到失败，已签到天数不足」）与反向语义（bug B4）。
+	if containsAnyText(lower, checkinFailureMarkers) {
+		return false
+	}
+	if containsAnyText(lower, alreadyNegativeMarkers) {
+		return false
+	}
+	return containsAnyText(lower, alreadyCheckinMarkers)
+}
+
 // CheckinReceipt 一次签到调用的回执。
 type CheckinReceipt struct {
 	State CheckinState
@@ -66,6 +81,11 @@ func (c *Client) CheckinReceipt(a *auth.Auth) (CheckinReceipt, error) {
 	err := c.retryBillingTransient(func() error {
 		env, raw, e := c.billingMeterRaw(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
 		rec = classifyCheckin(env, raw, e)
+		// HTTP 200 且 code=0 的失败回执（文案是失败词）没有 error：补一个，
+		// 否则 DailyCheckin 的老调用方（调度器 / CLI）会把它当成签到成功。
+		if e == nil && rec.State == CheckinFailed {
+			e = &Error{Kind: ErrClient, Msg: rec.Msg}
+		}
 		return e
 	})
 	return rec, err
@@ -96,7 +116,13 @@ func classifyCheckin(env apiEnvelope, raw []byte, err error) CheckinReceipt {
 		}
 		return rec
 	}
-	if containsAnyText(strings.ToLower(rec.Msg), alreadyCheckinMarkers) {
+	// 没有 error 的回执同样要先看失败硬词：签到端点对失败也可能回 200，
+	// 「签到失败，已签到天数不足 7 天」若只凭「已签到」判，会被当成幂等成功。
+	switch {
+	case containsAnyText(strings.ToLower(rec.Msg), checkinFailureMarkers):
+		rec.State = CheckinFailed
+		return rec
+	case isAlreadyCheckinMsg(rec.Msg):
 		rec.State = CheckinAlready
 		return rec
 	}
