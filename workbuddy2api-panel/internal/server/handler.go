@@ -3119,6 +3119,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
 			if modelRateLimited {
 				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, modelReason)
+				// 登记额度窗口（见 pool/window.go）：窗口按**首次请求**起算，到点后若没有请求进来，
+				// 新一轮窗口就不会开始——额度空转到下一次真实请求为止。排程到点发一次探针把它顶开。
+				// 只登记模型级（6004 额度满）：普通 429 是临时限流，没有「新一轮配额」这回事。
+				h.cfg.Pool.ScheduleModelWindow(uid, model, resetAt, true, time.Now()) // 走进本分支即 6004 额度满
 				return
 			}
 			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
