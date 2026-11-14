@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -261,8 +262,11 @@ func (c *Client) CampaignTasks(a *auth.Auth, module, code string) (CampaignSnaps
 }
 
 // CampaignTaskReady 报告任务是否已达标（含 viewed 前置）。
+// CampaignTaskReady 报告任务是否已达标且还没领。已领的（status=claimed）不算：否则每次点「领取」
+// 都对每个号的每个已领任务再发一遍 viewed + claim，徒增上游写调用。
+// shortcut: claimed 取自任务表的 status 字段（CampaignTask.Status 注释给出的取值 pending/done/claimed），未逐账号实测。
 func CampaignTaskReady(t CampaignTask) bool {
-	if t.Target <= 0 {
+	if t.Target <= 0 || strings.EqualFold(strings.TrimSpace(t.Status), "claimed") {
 		return false
 	}
 	return t.Progress >= t.Target

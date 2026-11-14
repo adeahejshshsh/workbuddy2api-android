@@ -84,6 +84,25 @@ func TestLoggingDefaults(t *testing.T) {
 	}
 }
 
+// 回归：request_archive_max_mb<=0 的回落不能顺手把 panel_log_enabled 的显式 false 改回 true；
+// 面板日志的保留天数/总量各自回落。
+func TestPanelLogSettingsIndependentOfRequestArchive(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"logging":{"request_archive_max_mb":0,"panel_log_enabled":false,"panel_log_retention_days":3,"panel_log_max_mb":20}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Logging.PanelLogEnabled || c.Logging.PanelLogRetentionDays != 3 || c.Logging.PanelLogMaxMB != 20 {
+		t.Fatalf("panel log 设置被请求归档的回落改写: %+v", c.Logging)
+	}
+	fallback, err := ParseConfig([]byte(`{"logging":{"panel_log_retention_days":0,"panel_log_max_mb":0}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fallback.Logging.PanelLogEnabled || fallback.Logging.PanelLogRetentionDays != 7 || fallback.Logging.PanelLogMaxMB != 50 {
+		t.Fatalf("panel log 回落: %+v", fallback.Logging)
+	}
+}
+
 func TestLoadFile(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")

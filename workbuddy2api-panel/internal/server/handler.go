@@ -1375,7 +1375,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 11140 风控连坐暂停（restrict.go）：同一窗口里已经有多个账号被上游判「异常行为」，
 	// 说明这轮扫荡是冲设备/出口来的。此时再拿账号去试只会扩大损失，直接快速失败。
-	if d := h.restrict.remaining(); d > 0 {
+	if d := h.restrict.remaining(realm); d > 0 {
 		secs := int(d.Seconds() + 0.999)
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
 		writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "account_restricted_hold",
@@ -1734,6 +1734,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 在这里取一次快照，供下方错误构造区分；按 realm 统计，否则另一域的
 			// 健康号会把「本域全被模型级冷却挡住」掩盖成还有号可服务。
 			modelBlock = h.cfg.Pool.ModelBlockedForRealm(curModel, realm)
+			h.logNoSelectable(realm, curModel, modelBlock.Blocked)
 			break
 		}
 		// 在途名额已在选号时**锁内占好**（PickAcquireExcludingForRealm）：此前是
@@ -2041,7 +2042,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 11140 风控连坐（restrict.go）：上游判的是设备/出口而不是单个账号，换号等于
 			// 把下一个号也送进去 → 就地停手，并把这次限制喂给全池暂停判定。
 			if restricted {
-				h.restrict.note(acct.UID, h.cfg.RestrictionHold)
+				h.restrict.note(acct.Realm(), acct.UID, h.cfg.RestrictionHold, h.realmHealthy(acct.Realm()))
 				break
 			}
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：

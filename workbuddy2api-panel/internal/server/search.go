@@ -129,9 +129,15 @@ func compatDeepSeekSearch(raw []byte) []byte {
 		kept = append(kept, it)
 	}
 	if len(kept) != len(items) {
-		// 有条目被丢弃：total_results 跟着修正，避免「说 8 条只回 7 条」。
-		if n, err := json.Marshal(len(kept)); err == nil {
-			obj["total_results"] = n
+		// 有条目被丢弃：total_results 只扣掉丢弃数，而不是覆盖成 len(kept)——
+		// 上游的它是命中总数（实测可大于本页条数，如 results 1 条而 total_results 5），
+		// 覆盖会把「共 5 条」谎报成「共 1 条」。下限取 len(kept)，避免「说 7 条回 8 条」。
+		var total int
+		if raw, has := obj["total_results"]; has && json.Unmarshal(raw, &total) == nil {
+			total = max(total-(len(items)-len(kept)), len(kept))
+			if n, err := json.Marshal(total); err == nil {
+				obj["total_results"] = n
+			}
 		}
 	}
 	patchedResults, err := json.Marshal(kept)

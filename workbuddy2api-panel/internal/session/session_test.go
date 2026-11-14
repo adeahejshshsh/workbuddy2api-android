@@ -415,4 +415,17 @@ func TestDeriveCacheKeyGivesUserIDClientsPerConversationSlots(t *testing.T) {
 	if DeriveCacheKey(b3) == k1 {
 		t.Fatal("不同对话必须落在不同缓存槽")
 	}
+	// 同一份内容、不同调用方（#234）：必须分槽，否则不同下游用户被钉到同一账号。
+	b4, _ := json.Marshal(map[string]any{
+		"metadata": map[string]any{"user_id": "u-2"},
+		"messages": []any{
+			map[string]any{"role": "system", "content": "你是助手。"},
+			map[string]any{"role": "user", "content": "第一问"},
+			map[string]any{"role": "assistant", "content": "ok"},
+			map[string]any{"role": "user", "content": "第二问"},
+		},
+	})
+	if DeriveCacheKey(b4) == k1 {
+		t.Fatal("不同 user_id 的同一段内容必须分槽（#234 跨用户碰撞）")
+	}
 }

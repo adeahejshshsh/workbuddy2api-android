@@ -100,16 +100,18 @@ func TestCampaignTasksMergesProgress(t *testing.T) {
 func TestCampaignTaskReady(t *testing.T) {
 	cases := []struct {
 		progress, target int
+		status           string
 		want             bool
 	}{
-		{3, 3, true},
-		{2, 3, false},
-		{0, 1, false},
-		{1, 1, true},
-		{5, 0, false}, // target 缺失（上游没下发）不算达标
+		{3, 3, "", true},
+		{2, 3, "", false},
+		{0, 1, "", false},
+		{1, 1, "done", true},
+		{5, 0, "", false},        // target 缺失（上游没下发）不算达标
+		{3, 3, "claimed", false}, // 已领过：不再 viewed + claim 一遍
 	}
 	for _, c := range cases {
-		got := CampaignTaskReady(CampaignTask{Progress: c.progress, Target: c.target})
+		got := CampaignTaskReady(CampaignTask{Progress: c.progress, Target: c.target, Status: c.status})
 		if got != c.want {
 			t.Fatalf("ready(%d/%d)=%v want %v", c.progress, c.target, got, c.want)
 		}

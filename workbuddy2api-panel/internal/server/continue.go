@@ -572,7 +572,7 @@ func (r *continueReader) endSegment(sawDone bool) {
 		}
 	}
 	// 不续/续写失败：回放 tail（含 finish/末端帧，客户端行为与未接线时一致），
-	// 再补一条跨段合计 usage，最后 EOF（[DONE] 由 StreamHint 统一补）。
+	// 再补一条跨段合计 usage，最后 EOF（[DONE] 由 StreamHint 统一写出，恰好一条）。
 	for _, f := range r.tail {
 		r.emit(f)
 	}
@@ -580,6 +580,12 @@ func (r *continueReader) endSegment(sawDone bool) {
 	if r.usage != nil {
 		raw, _ := json.Marshal(map[string]any{"id": r.id, "object": "chat.completion.chunk", "choices": []any{}, "usage": r.usage})
 		r.emit(string(raw))
+	}
+	// 末段上游显式发了 [DONE]（正常收尾）就把它交给下游：StreamHint 只在「没见到 [DONE] 也
+	// 没见到终态」时补截断终态。中间各段的 [DONE] 照旧吞掉（续写接缝），唯独末段这一条是
+	// 「上游说完了」的事实——吞掉它，下游会把每条「没带 finish_reason 的正常流」都当成断流。
+	if sawDone {
+		r.out = append(r.out, "data: [DONE]\n\n"...)
 	}
 	// 救援效果的可观测性：本次命中的是「预告句收尾」时，记录续写后到底拿到了什么。
 	// 没有这行就分不清「救回来是工具调用（回合继续）」和「只是多打了一段正文」。

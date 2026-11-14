@@ -499,8 +499,22 @@ func deriveKey(obj map[string]any) string {
 	if firstUserText == "" {
 		return "" // 无用户消息：无从归属会话
 	}
-	sum := sha256.Sum256([]byte(systemText + "\x00" + firstUserText))
+	// 掺入调用方（user_id）：键只由 system + 首条 user 决定时，不同下游用户的开场白
+	// 相同就会撞同一个键、被钉到同一个账号（#234）。掺入后不同用户不再合并，同一用户
+	// 的同一段对话仍然稳定 —— 这是把维度**加细**，不是退回「user 一维」。
+	sum := sha256.Sum256([]byte(callerIDOf(obj) + "\x00" + systemText + "\x00" + firstUserText))
 	return derivedKeyPrefix + hex.EncodeToString(sum[:16])
+}
+
+// callerIDOf 请求侧能拿到的「谁在发」：metadata.user_id 优先，其次顶层 user_id。
+// 都没有返回空串（键与掺入前一致，老客户端零回归）。
+func callerIDOf(obj map[string]any) string {
+	if meta, ok := obj["metadata"].(map[string]any); ok {
+		if v := strOrEmpty(meta["user_id"]); v != "" {
+			return v
+		}
+	}
+	return strOrEmpty(obj["user_id"])
 }
 
 // userContentSignature 把已解析的 content（any）转回 RawMessage 后取**会话级稳定**
