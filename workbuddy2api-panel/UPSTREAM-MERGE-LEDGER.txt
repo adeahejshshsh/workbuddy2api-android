@@ -919,3 +919,17 @@ main（带用例、CI 绿），要么有明确的不合理由。
 （`do(req,a,bool)` / `doJSONRaw` / `RefreshTokenIfNeeded` / `needsRefresh`），不是「搬文件」而是
 按本仓原语重写；且是纯新增产品面（3D 生成），与本仓主线（账号池 + 续写 + 风控）无关。
 要接的话建议单独一批、按「客户端 → 端点 → MCP 工具 → 配置」四步走。
+
+### 第十五批（`b60f1c0b` + 前置：目录输出上限快照）
+
+补上前置后这条才搬得动：`Client` 里原先没有目录 `maxOutputTokens` 快照。
+
+| 层 | 改动 |
+|---|---|
+| 前置 | `Client.modelMaxOut`（域 → 模型 → maxOutputTokens），`FetchModels` 刷新目录时整体替换；只收正数，目录没给/给 0 视为「上限未知」。配套 `StoreModelMaxOutForTest`（跨包测试钩子）与 `modelMaxOutSnapshot` |
+| 口径 | `outputFloor(effort, model, maxOut)`：档位未知 → 0；**模型不在目录 → 0，不抬**（不知道它最多能写多少，按档位抬到 16384 可能超上限换来上游参数错误，宁可保留客户端额度）；目录值更小时以目录为准 |
+| 接线 | `ensureMinOutputBudget(obj, maxOut)` 与 `BudgetFloorFor` 都走 `outputFloor`——出站抬额度与续写/救援段补额度同源；`Client.OutputBudgetFloor(realm, model, effort)` 给跨包调用方（按域分桶、容忍 `cn:`/`global:` 前缀） |
+
+用例：`OutputBudgetFloor` 六档（小上限按目录 / 带前缀 / 大上限按档位 / 档位空 0 / 目录外 0 /
+另一个域 0）；`ensureMinOutputBudget` 补「模型不在目录里不抬」；`BudgetFloorFor` 补「目录外 0」与
+「目录封顶 6000」；既有抬额度/不动用例全部改成带目录（新口径下无目录即不抬，这正是改动要点）。
