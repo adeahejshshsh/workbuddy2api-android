@@ -174,6 +174,10 @@ func ensureJSONString(item map[string]json.RawMessage, key string) {
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
+	// 积分闸（审查 B1）：联网搜索按次计费，此前不在闸门覆盖范围里。
+	if !h.admitBudget(w, r) {
+		return
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
