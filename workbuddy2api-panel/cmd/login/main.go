@@ -241,7 +241,7 @@ func runURL(base, origin, realm, statePath string, client *http.Client, out io.W
 		fatal("write state: %v", err)
 	}
 	// 授权链接补官方参数（version，以及部署侧给了 nonce 时的 ww_device_nonce）。
-	fmt.Fprintln(out, loginsite.DecorateAuthURL(st.AuthURL, loginsite.ForRealm(realm), loginDeviceNonce()))
+	fmt.Fprintln(out, loginsite.DecorateAuthURL(st.AuthURL, loginsite.ForRealm(realm), loginDeviceNonce(), loginsite.NewLoginSessionID()))
 }
 
 // loginDeviceNonce 部署侧提供的桌面端设备 nonce（可选，不伪造）。

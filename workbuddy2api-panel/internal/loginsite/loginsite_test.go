@@ -73,8 +73,10 @@ func TestEndpoints(t *testing.T) {
 }
 
 func TestDecorateAuthURLAddsVersion(t *testing.T) {
-	got := DecorateAuthURL("https://example.test/login?state=abc", ForRealm("cn"), "")
-	if !strings.Contains(got, "version="+ClientVersion) {
+	got := DecorateAuthURL("https://example.test/login?state=abc", ForRealm("cn"), "", "")
+	// 授权链接里的 version 是**裸版本号**（真机 CN 5.9.3 / GL 5.9.4），不是 UA 那串
+	// "WorkBuddy/5.9.3"——授权页把它原样转给 risk-context，多一层前缀就是错的指纹。
+	if !strings.Contains(got, "version="+strings.TrimPrefix(ClientVersionWorkBuddyCN, "WorkBuddy/")) {
 		t.Fatalf("缺 version: %s", got)
 	}
 	if !strings.Contains(got, "state=abc") {
@@ -84,8 +86,8 @@ func TestDecorateAuthURLAddsVersion(t *testing.T) {
 
 // 上游已经给了 version 就不覆盖（以官方返回为准）。
 func TestDecorateAuthURLKeepsExistingVersion(t *testing.T) {
-	got := DecorateAuthURL("https://example.test/login?version=9.9.9", ForRealm("cn"), "")
-	if strings.Contains(got, ClientVersion) {
+	got := DecorateAuthURL("https://example.test/login?version=9.9.9", ForRealm("cn"), "", "")
+	if strings.Contains(got, "version="+strings.TrimPrefix(ClientVersionWorkBuddyCN, "WorkBuddy/")) {
 		t.Fatalf("不该覆盖已有 version: %s", got)
 	}
 	if !strings.Contains(got, "version=9.9.9") {
@@ -100,15 +102,15 @@ func TestDecorateAuthURLKeepsExistingVersion(t *testing.T) {
 func TestDecorateAuthURLNonce(t *testing.T) {
 	base := "https://example.test/login?state=abc"
 	// CN 站 = platform=workbuddy → 给了 nonce 就加
-	if got := DecorateAuthURL(base, ForRealm("cn"), "n-123"); !strings.Contains(got, "ww_device_nonce=n-123") {
+	if got := DecorateAuthURL(base, ForRealm("cn"), "n-123", ""); !strings.Contains(got, "ww_device_nonce=n-123") {
 		t.Fatalf("cn 站（platform=workbuddy）应带 nonce: %s", got)
 	}
 	// GL 站 = platform=workbuddy-ai → 不加
-	if got := DecorateAuthURL(base, ForRealm("global"), "n-123"); strings.Contains(got, "ww_device_nonce") {
+	if got := DecorateAuthURL(base, ForRealm("global"), "n-123", ""); strings.Contains(got, "ww_device_nonce") {
 		t.Fatalf("global 站（platform=workbuddy-ai）不该带 ww_device_nonce: %s", got)
 	}
 	// 没给就不加（不伪造）
-	if got := DecorateAuthURL(base, ForRealm("global"), ""); strings.Contains(got, "ww_device_nonce") {
+	if got := DecorateAuthURL(base, ForRealm("global"), "", ""); strings.Contains(got, "ww_device_nonce") {
 		t.Fatalf("没给 nonce 不该加: %s", got)
 	}
 }
@@ -116,10 +118,10 @@ func TestDecorateAuthURLNonce(t *testing.T) {
 // 解析失败原样返回：宁可少一个参数，不要弄坏链接。
 func TestDecorateAuthURLBadURLPassthrough(t *testing.T) {
 	bad := "://not a url"
-	if got := DecorateAuthURL(bad, ForRealm("cn"), ""); got != bad {
+	if got := DecorateAuthURL(bad, ForRealm("cn"), "", ""); got != bad {
 		t.Fatalf("坏 URL 应原样返回，got %q", got)
 	}
-	if got := DecorateAuthURL("", ForRealm("cn"), ""); got != "" {
+	if got := DecorateAuthURL("", ForRealm("cn"), "", ""); got != "" {
 		t.Fatalf("空串应原样返回，got %q", got)
 	}
 }
