@@ -948,3 +948,21 @@ main（带用例、CI 绿），要么有明确的不合理由。
 
 用例（上游原样搬入）：落盘失败时池里 RT 已是求证轮换后的新值且带 1 条 warning；6 个号求证并发
 峰值落在 [2,3]；总时限到点只发 1 次 refresh、其余保留原凭据。
+
+### 第十七批（`3bab4f8c` 的前置：窗口登记侧）
+
+上游的免费额度窗口按**首次请求**起算：6004 的 429 给出「将在 … 重置」的绝对时刻，到点后
+若没有请求进来，新一轮窗口就不会开始——额度空转到下一次真实请求。本仓此前只到「解除冷却」
+（`CooldownSoftForModel` 到点放行），那是被动允许请求进来，不是让窗口开始计时。
+
+| 部分 | 说明 |
+|---|---|
+| `pool/window.go`（新） | `ScheduleModelWindow` / `ModelWindows` / `DueModelWindows` / `NextModelWindowDue` / `RecordWindowProbe` / `DropModelWindow` / `ClearQuotaCooldown` / `WindowProbeBlocked`。窗口是**排程语义**，独立于 `modelCooldowns`（路由语义，Until 到期就被 prune） |
+| 持久化 | `state.json` 顶层 `windows` 表；与账号记录分开，删号重加不删窗口（窗口是上游客观事实）。7 天未处理惰性丢弃 |
+| 登记点 | handler 的 6004 分支：只有带重置时刻的模型级限额才登记（普通 429 无「新一轮配额」）；同一窗口重复 429 不重写、不置 dirty |
+| `WindowProbeBlocked` | 复用选号那套闸门：停用/暂停/保留积分/积分保底/免费号碰订阅专属模型都不自动唤醒（探针是真实计费请求） |
+
+用例：上游 `window_test.go` 原样搬入 + 新增「6004 带重置时刻要登记、普通 429 不登记」。
+
+**未搬**：探针执行（`scheduler/windowprobe.go` 316 行）——下一批在本仓排程循环里接
+「按 `NextModelWindowDue` 唤醒」的循环，接完才闭环。
