@@ -187,7 +187,7 @@ func (r *continueReader) tryStarvedRetry() bool {
 	case r.text.Len() > 0:
 		// 有正文的截断是额度语义的正常结果，不救。
 		return false
-	case r.seg >= maxContinueSegments-1:
+	case r.atSegmentCap():
 		return false
 	}
 	body, ok := starvedRetryBodyWithFloor(r.body, r.budgetFloor)

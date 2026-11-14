@@ -841,3 +841,22 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 | `2d03e4bd` 劣化滑窗改固定桶 | **已合**。`record` 此前在全局锁内做窗口裁剪 + 全量扫描（窗口满载 4096 条 ≈ 66µs/请求，跑在请求主路径上，流量越大越慢）。改成 20 个固定桶（桶宽 15s），record 只动一个桶、判定扫 20 个；`summary()` 走同一个 `windowLocked` |
 | `fa4d62ce` /v1/messages 转发 output_config.format | **已等价**：本仓 `responseFormatFromMessages`（含 name/strict 补齐）与接线、文档行都已在，无需改动 |
 | `b60f1c0b` 输出预算下限按目录 maxOutputTokens 封顶 | **缺载体**：本仓 `ensureMinOutputBudget(obj)` 是旧口径（没有按档位 + 目录上限取 min 的那套），`Client` 里也没有 `modelMaxOut` 快照。先补「目录 maxOutputTokens 抬额度」那套前置，才有得改 |
+
+### 第十四批（已合：`b4012ceb` 续写闸门）
+
+| 问题 | 修法 |
+|---|---|
+| 不带限额的请求被档位下限误伤 | 累计上限原先一律按「档位下限 × 4」算，而 Codex 这类每段就能写到上游单段上限（32000）：low 档 16384 比一段还小 → 一次都续不了。现在不带限额的**不按 token 封顶**，只看段数（`noLimitContinueSegments=3`，3 段 ≈ 3×32000 输出） |
+| 带限额时累计上限口径 | 改为 `max(客户端限额, 档位下限) × 4`——额度 ≥32k 的「要长文」请求每段本身就有 32k，只按下限算的上限连一段都装不下 |
+| 探活请求被续满 | `max_tokens<16` 的 key 探活出站不被抬额度，但思考占比一高就能续满 8 段（每段一次计费调用）。现在探活级额度一律不续 |
+| 关不掉思考的模型白烧额度 | glm/hy3 这类「额度被抬过 / 思考吃光」时续写会拿同一份额度再烧一遍思考。这两条例外现在只在**思考关得掉**时才续；零正文形态交给 `starved.go` 的救援 |
+| `budgetWasRaised` 口径 | 与出站 `upstream.ensureMinOutputBudget` 对齐：探活级额度、客户端自己关思考的请求出站不被抬，这里也不能算「抬过」 |
+
+收口统一：`atSegmentCap()`（续写、盲重试、narration/starved/toolonly 三类救援共用一个判据）、
+`outputCap()`（token 上限）、`limitedButContinuable()`（带限额时到底续不续）。
+
+用例：不带限额 × 五档位都续满 3 段且只有一个终态；额度 32000 + low 档续 3 次；`budgetWasRaised`
+七个分支；`outputCap` 四档。
+
+**本仓分叉保留**：`features.tool_only_rescue`（默认关）与工具意图尾巴门控不动——那是本仓对
+「agent 正常收尾被误判成截断」的处理，上游这套闸门不涉及。

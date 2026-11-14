@@ -26,9 +26,16 @@ func TestBudgetWasRaisedDetection(t *testing.T) {
 		{"没给额度（目录补的，不算抬）", `{"model":"m"}`, upstream.MinOutputBudget("high"), false},
 		{"没有下限（档位未知）", highClientBody, 0, false},
 		{"别名 max_completion_tokens", `{"model":"m","max_completion_tokens":1024}`, upstream.MinOutputBudget("max"), true},
+		// 出站抬额度对这两种请求不动（见 upstream.ensureMinOutputBudget），这里也不能当成「抬过」。
+		{"探活级额度 max_tokens=1", `{"model":"m","max_tokens":1}`, upstream.MinOutputBudget("high"), false},
+		{"客户端自己关了思考", `{"model":"m","max_tokens":2048,"thinking":{"type":"disabled"}}`, upstream.MinOutputBudget("high"), false},
+		// 关不掉思考的模型：抬过额度也没法用「关思考续写」补回来，判定仍为 true（是否续写由
+		// limitedButContinuable 再看 thinkingSwitchable）。
+		{"模型不在可关思考名单里但客户端带了 thinking", `{"model":"glm-5.2","max_tokens":2048,"thinking":{"type":"enabled"}}`, upstream.MinOutputBudget("high"), true},
 	}
 	for _, c := range cases {
 		r := &continueReader{body: []byte(c.body), budgetFloor: c.floor}
+		r.limitSet, r.limit = bodyOutputLimit(r.body)
 		if got := r.budgetWasRaised(); got != c.want {
 			t.Errorf("%s: budgetWasRaised=%v want %v", c.name, got, c.want)
 		}

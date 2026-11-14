@@ -119,7 +119,7 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 		return false
 	case r.text.Len() == 0 || r.text.Len() > toolOnlyMaxBytes:
 		return false
-	case r.seg >= maxContinueSegments-1:
+	case r.atSegmentCap():
 		return false
 	}
 	// 正文里含工具调用标记（DSML / XML 形态）：客户端会自己解析执行，这不是「提前收尾」。
