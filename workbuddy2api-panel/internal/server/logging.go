@@ -44,13 +44,14 @@ func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
-	start            time.Time
-	model            string
+	start time.Time
+	model string
 	// modelEff 降级后实际发往上游的模型（applyFallback 写入）；空 = 未降级。
-	modelEff string
+	modelEff         string
 	mode             string // "stream" | "sync"
 	uid              string // 完整 uid，展示时只取前 8 位
 	nick             string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
+	realm            string // 选中账号所在域（cn / global），写入归档事件供面板区分同名模型
 	ttfb             time.Duration
 	toks             int // <0 表示 usage 缺失 → 显示 "-"
 	status           int
@@ -129,9 +130,9 @@ func (s *chatStat) done() {
 	if s.budget != nil {
 		s.budget.add(s.credit, s.hasCredit)
 		s.budget.observeCache(int64(s.cacheHit), int64(s.cacheMiss), s.hasCache)
-	// 上游劣化滑窗采样（见 upstreamhealth.go）：收口处唯一能同时拿到 status /
-	// outcome / TTFB 的地方。纯观测，不改路径。
-	chatUpHealth.record(s.status, s.outcome, s.ttfb)
+		// 上游劣化滑窗采样（见 upstreamhealth.go）：收口处唯一能同时拿到 status /
+		// outcome / TTFB 的地方。纯观测，不改路径。
+		chatUpHealth.record(s.status, s.outcome, s.ttfb)
 	}
 	noteProm(s, total)
 }
@@ -659,6 +660,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.Account = logfmt.Label(s.uid, s.nick)
 		e.Model = s.model
 		e.ModelEff = s.modelEff
+		e.Realm = s.realm
 		e.Outcome = s.outcome
 		e.TTFBMs = s.ttfb.Milliseconds()
 		e.Attempts = s.attempts

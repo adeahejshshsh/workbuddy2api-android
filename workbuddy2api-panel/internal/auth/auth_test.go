@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseNested(t *testing.T) {
@@ -308,5 +309,54 @@ func TestSaveAtomicPreservesUnknownSubKeys(t *testing.T) {
 	}
 	if _, ok := doc["topLevelUnknown"]; !ok {
 		t.Errorf("顶层未知键被抹掉了: %v", doc)
+	}
+}
+
+// 同 uid 多文件时，realm 迁移落盘只能作用在**胜出的那一份**上：给落败文件写盘会刷新它的
+// mtime，下次启动它就成了「最新」，胜负来回翻（上游 1414e9f7 的回归点）。
+// 本仓的胜出判定是「保留先出现的」（见 LoadDirReport 的 seenUID），所以落败文件不该被写过。
+func TestLoadDirRealmBackfillOnlyTouchesWinner(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, mt time.Time) string {
+		body := `{"auth":{"accessToken":"at","refreshToken":"r","expiresAt":1800000000,"domain":"www.workbuddy.ai"},"account":{"uid":"u9"}}`
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	first := write("workbuddy-a.json", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	loser := write("workbuddy-z.json", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	loserBefore, err := os.ReadFile(loser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loserStatBefore, err := os.Stat(loser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadDir(dir); err != nil {
+		t.Fatalf("load err=%v", err)
+	}
+	loserAfter, err := os.ReadFile(loser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loserStatAfter, err := os.Stat(loser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(loserBefore) != string(loserAfter) || !loserStatBefore.ModTime().Equal(loserStatAfter.ModTime()) {
+		t.Fatalf("落败文件被写过（contents/mtime 变了）：%s", loser)
+	}
+	winRaw, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(winRaw), `"realm"`) {
+		t.Fatalf("胜出文件应被补上 realm: %s", winRaw)
 	}
 }
