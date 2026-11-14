@@ -915,10 +915,29 @@ main（带用例、CI 绿），要么有明确的不合理由。
 ### E. 未搬（1 条：整块新功能）
 
 `557b3d55` 混元 3D 端点（3194 行 / 24 文件：`upstream/three_d*`、`server/three_d.go`、`probe.go`
-抽取、MCP 工具、临时云凭证签发、配置与面板）。它依赖本仓没有的传输层原语
-（`do(req,a,bool)` / `doJSONRaw` / `RefreshTokenIfNeeded` / `needsRefresh`），不是「搬文件」而是
-按本仓原语重写；且是纯新增产品面（3D 生成），与本仓主线（账号池 + 续写 + 风控）无关。
-要接的话建议单独一批、按「客户端 → 端点 → MCP 工具 → 配置」四步走。
+抽取、MCP 工具、临时云凭证签发、配置与面板）。**是纯新增产品面**（3D 生成），与本仓主线
+（账号池 + 续写 + 风控）无关，不接不影响任何现有能力。
+
+**订正**：此处原先写「依赖本仓没有的传输层原语（`do(req,a,bool)` / `doJSONRaw` /
+`RefreshTokenIfNeeded` / `needsRefresh`），是重写而不是搬文件」——这条判断是错的，复核后：
+
+| 上游依赖 | 本仓现状 |
+|---|---|
+| `doJSONRaw(req)` | **有**（`server→client.go`，签名同为 1 参） |
+| `a.NeedsRefresh(within)` | **有**（`internal/auth`） |
+| `CommonHeaders` / `chatBase` / `Classify` / `AuthByUID` | **有** |
+| `c.do(req, a, false)` | 本仓 `do(req)` 单参（无需改写调用语义） |
+| `RefreshTokenIfNeeded(a, within)` | 缺，但等价实现只有 3 行（`NeedsRefresh` + `refreshTokenOnce`） |
+
+所以 3D 客户端层**搬得动**，真正的原因是规模与验证成本而不是不可能：约 1400 行新代码 +
+约 1000 行上游用例；且真机跑通 3D 生成需要账号、真实计费与 3D 任务队列，本机只能靠上游用例
+背书，把握低于前面各批。按三步走即可，每步都能独立验证：
+
+1. **客户端层**（`upstream/three_d.go` + `three_d_credential.go` + 用例，约 970 行）：纯库，
+   不暴露端点、不发任何请求；
+2. **端点层**（`server/three_d.go` + `probe.go` 从 `videos_probe.go` 抽取 + 用例）；
+3. **接线层**（MCP 工具 `generate_3d`/`get_3d_task`、`features.three_d_enabled` 默认关、
+   面板与 README）。
 
 ### 第十五批（`b60f1c0b` + 前置：目录输出上限快照）
 

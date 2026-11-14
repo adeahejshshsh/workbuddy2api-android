@@ -2,6 +2,7 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -12,10 +13,14 @@ import (
 func TestModelRateLimitSchedulesWindow(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
-	body := `{"code":6004,"msg":"使用量已超出频率限制，将在 2026-11-14 20:30:00 重置"}`
+	// 重置时刻必须是**未来**：ScheduleModelWindow 拒绝已过去的重置点（那说明窗口已经开始，
+	// 或解析有偏差，登记它只会在下一轮巡检里立刻触发一次无意义探针）。以前这里写死成
+	// 「2026-11-14 20:30:00」，CI 跑到 20:32 就红——定时炸弹式夹具。
+	resetAt := time.Now().In(rateResetLoc()).Add(45 * time.Minute).Truncate(time.Second)
+	body := `{"code":6004,"msg":"使用量已超出频率限制，将在 ` + resetAt.Format("2006-01-02 15:04:05") + ` 重置"}`
 	want, ok := upstream.ParseRateReset(body)
 	if !ok {
-		t.Fatal("夹具的重置文案应能解析出时刻")
+		t.Fatalf("夹具的重置文案应能解析出时刻: %s", body)
 	}
 
 	h.applyErrorPolicy("u1", upstream.ErrSoftRate, body, "deepseek-v4.1-flash", &upstream.Error{Kind: upstream.ErrSoftRate, Status: 429, Msg: body})
@@ -33,10 +38,14 @@ func TestModelRateLimitSchedulesWindow(t *testing.T) {
 	}
 	// 普通 429（没有模型级限额）不该登记窗口：临时限流没有「新一轮配额」这回事。
 	before := len(p.ModelWindows())
-	h.applyErrorPolicy("u1", upstream.ErrSoftRate,
-		`{"code":11102,"msg":"请求过于频繁，将在 2026-11-14 20:40:00 重置"}`, "deepseek-v4.1-flash",
-		&upstream.Error{Kind: upstream.ErrSoftRate, Status: 429, Msg: `{"code":11102,"msg":"请求过于频繁，将在 2026-11-14 20:40:00 重置"}`})
+	otherReset := time.Now().In(rateResetLoc()).Add(55 * time.Minute).Truncate(time.Second)
+	otherBody := `{"code":11102,"msg":"请求过于频繁，将在 ` + otherReset.Format("2006-01-02 15:04:05") + ` 重置"}`
+	h.applyErrorPolicy("u1", upstream.ErrSoftRate, otherBody, "deepseek-v4.1-flash",
+		&upstream.Error{Kind: upstream.ErrSoftRate, Status: 429, Msg: otherBody})
 	if got := len(p.ModelWindows()); got != before {
 		t.Fatalf("非 6004 限流不该新增窗口：%d → %d", before, got)
 	}
 }
+
+// rateResetLoc 上游重置时刻按 UTC+8 解释（ParseRateReset 的口径），夹具按同一时区拼文案。
+func rateResetLoc() *time.Location { return time.FixedZone("CST", 8*3600) }
