@@ -1,0 +1,31 @@
+{
+  "account": {
+    "uid": "uid-wb-1",
+    "uin": "10001",
+    "nickname": {
+      "$wbEncrypted": 1,
+      "envelope": "eyJzdWl0ZSI6MSwia2V5SWQiOiI5MTI3ZGVhMWI0NDAyMGE3Iiwibm9uY2UiOiJBQkVpTTBSVlpuZUltYXE3IiwiYXV0aFRhZyI6IkdaSTVGQ21wK1NiSmFISGk5bjZxRHc9PSIsImNpcGhlcnRleHQiOiJmRTJTKzJUd3p2TTN0NkZpT2NXZ1VLV2NleGtqRUk0TjF2Nkw0L1V5QURibFNFUzNlNEd6RGpZMjN4YXZ3NDhNQ3YwPSJ9"
+    },
+    "phoneNumber": {
+      "$wbEncrypted": 1,
+      "envelope": "eyJzdWl0ZSI6MSwia2V5SWQiOiI5MTI3ZGVhMWI0NDAyMGE3Iiwibm9uY2UiOiJBQkVpTTBSVlpuZUltYXE4IiwiYXV0aFRhZyI6Im52a1RZZTNHODZraUMvVzZ2SFdEU0E9PSIsImNpcGhlcnRleHQiOiIyNmtIT3haSTM3ejJrQzVsZU8zUHE4Z2ZEQkxkSFh3Y2FwTHRDZ2dzS0tSRWllWXJQaHNmM25zUHZhQ2Z0TnRpVmcrNCtPVHBRa0NmRHBJPSJ9"
+    }
+  },
+  "auth": {
+    "accessToken": {
+      "$wbEncrypted": 1,
+      "envelope": "eyJzdWl0ZSI6MSwia2V5SWQiOiI5MTI3ZGVhMWI0NDAyMGE3Iiwibm9uY2UiOiJBQkVpTTBSVlpuZUltYXE5IiwiYXV0aFRhZyI6ImJJQzJ1blJXVGdZMkxjN2JoUjBnUVE9PSIsImNpcGhlcnRleHQiOiJuWDRaYW8xLyttYndYT2xwRWZWRVIrcWlVUT09In0="
+    },
+    "refreshToken": {
+      "$wbEncrypted": 1,
+      "envelope": "eyJzdWl0ZSI6MSwia2V5SWQiOiI5MTI3ZGVhMWI0NDAyMGE3Iiwibm9uY2UiOiJBQkVpTTBSVlpuZUltYXErIiwiYXV0aFRhZyI6ImY5TjdMbjN5OEtpSzRhTVRmQk84UWc9PSIsImNpcGhlcnRleHQiOiJnQ2tnOWtmM1BYeWdjZVFnOUw1dXM0MmNEUT09In0="
+    },
+    "expiresAt": {
+      "$wbEncrypted": 1,
+      "envelope": "eyJzdWl0ZSI6MSwia2V5SWQiOiI5MTI3ZGVhMWI0NDAyMGE3Iiwibm9uY2UiOiJBQkVpTTBSVlpuZUltYXEvIiwiYXV0aFRhZyI6IlRDaStDN3BHSXpMZjQ1T0NUck1YS0E9PSIsImNpcGhlcnRleHQiOiJPN0RhR1ozemVCSWF5Rm9JQnc9PSJ9"
+    },
+    "domain": "workbuddy.cn",
+    "realm": "cn"
+  },
+  "device_token": "v3:test-device-token"
+}
