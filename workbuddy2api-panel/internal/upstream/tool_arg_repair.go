@@ -47,6 +47,10 @@ type ToolArgRepair struct {
 	pending  map[int]*pendingToolArg
 	order    []int
 	template map[string]any // 最近一帧，用于补造帧的 created/model
+	// closed finalize/Flush 之后置位：此后再来 DeferredToolCall 帧一律**原样透传**。
+	// 否则 pending 已是 nil，写进去就是 assignment to entry in nil map（审查 C7）——
+	// 多 choice 混流时那条响应会直接中断。
+	closed bool
 }
 
 // NewToolArgRepair enabled=false 时 Enabled() 恒 false，Process/Flush 零改写。
@@ -63,7 +67,7 @@ func (r *ToolArgRepair) Enabled() bool { return r != nil && r.enabled }
 // arguments 分片全部缓存。遇到 finish_reason 时先把完整参数补成一帧，再写
 // finish 帧——顺序反了客户端会在读到参数前结束回合。
 func (r *ToolArgRepair) Process(obj map[string]any) []map[string]any {
-	if !r.Enabled() {
+	if !r.Enabled() || r.closed {
 		return []map[string]any{obj}
 	}
 	r.template = obj
@@ -218,6 +222,7 @@ func (r *ToolArgRepair) finalizeAll() []map[string]any {
 	}
 	r.pending = nil
 	r.order = nil
+	r.closed = true
 	return out
 }
 

@@ -451,3 +451,33 @@ func TestStreamLeavesOtherToolUntouched(t *testing.T) {
 		t.Fatalf("other tool touched: %#v", calls)
 	}
 }
+
+// finalize 之后再来 DeferredToolCall 帧不能 panic（审查 C7）：pending 已被置 nil，
+// 继续写就是 assignment to entry in nil map，多 choice 混流时整条响应中断。
+func TestToolArgRepairIgnoresFramesAfterFinalize(t *testing.T) {
+	r := NewToolArgRepair(true)
+	// 一帧正常的延迟工具调用。
+	frame := map[string]any{
+		"choices": []any{map[string]any{
+			"index": float64(0),
+			"delta": map[string]any{
+				"tool_calls": []any{map[string]any{
+					"index": float64(0),
+					"function": map[string]any{
+						"name":      deferredToolName,
+						"arguments": `{"a":`,
+					},
+				}},
+			},
+		}},
+	}
+	_ = r.Process(frame)
+	if out := r.Flush(); len(out) == 0 {
+		t.Fatal("Flush 应补出收尾帧")
+	}
+	// 收尾后再来一帧：必须原样透传，不 panic、不改写。
+	out := r.Process(frame)
+	if len(out) != 1 {
+		t.Fatalf("finalize 之后的帧应原样透传，实际 %d 帧", len(out))
+	}
+}

@@ -21,7 +21,7 @@ type Pool struct {
 
 	// parked 被账号目录热重载移出池的条目（uid → 原条目，见 ParkMany）。文件回来时原样复活，
 	// 禁用、暂停、分组、冷却都还在；随 state.json 的 parked_accounts 落盘，文件缺席期间重启也不丢。
-	parked  map[string]*entry
+	parked map[string]*entry
 	// rules 模型规则表（id → 规则）。面板「模型规则」页维护，随 state.json 落盘。
 	rules   map[string]ModelRule
 	stateFp string
@@ -472,6 +472,12 @@ func (p *Pool) Acquire(uid string) bool {
 func (p *Pool) Release(uid string) {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
+	if !ok {
+		// 账号可能正被热重载暂存（ParkMany）：此时按 uid 查不到，但 inFlight 仍挂在原
+		// entry 上，不在这里减一次就是永久泄漏——复活后该号一直满载、再不被选中，
+		// 直到进程重启（审查 C3）。
+		e, ok = p.parked[uid]
+	}
 	p.mu.RUnlock()
 	if !ok {
 		return

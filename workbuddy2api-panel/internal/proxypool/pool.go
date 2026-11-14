@@ -258,6 +258,14 @@ func (m *Manager) copyLocked() disk {
 	for k, v := range m.data.Bindings {
 		d.Bindings[k] = v
 	}
+	// Realms 也必须深拷（审查 C1）：此前只拷 Nodes/Bindings，Realms 仍是**同一个 map**。
+	// BindRealm 在写锁内原地改它，而 Snapshot() 把这个 map 直接交给调用方（锁外遍历）——
+	// 一次并发绑定就是 concurrent map read and map write，Go 运行时直接 fatal（不可 recover，
+	// 整进程退出、所有在途 SSE 一起断）。
+	d.Realms = make(map[string]Binding, len(m.data.Realms))
+	for k, v := range m.data.Realms {
+		d.Realms[k] = v
+	}
 	return d
 }
 
