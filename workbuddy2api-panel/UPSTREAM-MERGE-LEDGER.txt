@@ -651,3 +651,16 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 | 记账 | `def074c5`（续写/救援每段都记账）、`ab679742`（段内多帧 usage 不重复计 prompt）、`629390de`（6020 等待不提前写注释帧） | `629390de` 直接改我们上一批刚合的 `busy_retry` 路径，值得优先；记账两条要动 `usage` 聚合 |
 | 新功能 | `557b3d55`（混元 3D 端点 + MCP 工具 + 临时云凭证，3194 行 / 24 文件） | 整块新端点，按 `internal/media`+`internal/server` 新文件铺，建议等上面几批稳定后再接 |
 | 暂不适用 | `1e1ee4db`（10105 按业务码判） | 本仓没有「清理活跃会话」的调用方（`webActiveConversationLimit` 只有常量），加了也没人用；等那套逻辑一起进来再接 |
+
+### 第二批（已合，3 条 + 1 条等价）
+
+| 上游提交 | 说明 |
+|---|---|
+| `def074c5` 续写/救援每段都记账 | 续写、盲重试、各类救援每段都是一次单独计费的上游调用，prompt 也各算一次。此前只按「客户端可见的合计 usage」记账：前段 prompt 全丢；客户端在续写段中途断开时那条合计帧根本没发出来，已结束各段一笔都没记。现在 `continueReader` 维护 `billed`（已结束段纯和）+ `segUsage`（当前段），段结束时 `flushSegUsage` 进 billed，`recordAttempt` 按 `billedUsage()` 记；非流式空截断救援把被丢弃的首个聚合体 usage 与救援结果相加。**客户端看到的 usage 口径不变**（仍只留末段 prompt，不虚报上下文占用）——账与展示分开，这是这条改动的要点 |
+| `ab679742` 段内多帧 usage 不重复计 prompt | 只取了 `continue.go` 部分（`mergeUsageInto` 拆出 + `segUsage` 按段合并）。**handler 里的缓存告警那半没接**：本仓 `pool.TokenUsageDelta` 没有 `HasCacheTokens/CacheHitTokens` 字段，缓存告警另有自己的口径（`st.hasCache` + `cacheMissWarn`），硬塞会让「各段 prompt 之和」去比「末段 miss」 |
+| `d3edea90` 11140 判据收紧 + 首帧停手 + 11134 文案 | ① `FrameKind` 识别 11140 限制文书 → `ErrAccountFault`，流内 error 帧路径按 `noteRestriction` 判定后置 `stopRotate`（此前「记 stream error 然后换下一个号」，而上游判在设备/出口上）；② 判据收紧：泛化措辞「已被限制」不再算账号级限制——它也出现在「该模型已被限制使用」这类模型级文案里，按它判会误停整个域；③ 新增 `IsAccountRestriction` 统一两种形态（限制文书 / request illegal），11-128 渠道校验的同一句文案不在内；④ 新增 `IsProviderOverloaded`（只认结构化 code 11134），hint 不再把供应商过载说成队列满。本仓 `restrict.go` 的按域状态机在第一批已按 `de24d38f` 的最终形态落地，这条只补了判据与首帧路径 |
+| `629390de` 6020 等待不提前写注释帧 | **本仓已等价**：第一批的 `busy_retry` 一开始就用 `sleepCtx`、等待期间不写注释帧（我们从来没有 `sleepWithKeepalive`），再次排队时仍是 429 + `Retry-After` 而不是「200 + error 帧」 |
+
+未合（本批有意跳过）：`def074c5` 的 `continue_billing_test.go`（158 行）依赖上游的
+`fakeContinueUpstream` / `StoreModelMaxOutForTest` 夹具，本仓没有对应 helper；记账路径由
+`restrict_firstframe_test` 之外的全量用例间接覆盖，后续要补得先把夹具补齐。
