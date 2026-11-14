@@ -818,3 +818,18 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 
 用例（上游原样搬入）：重复查询走缓存、持锁时未缓存查询 409、三种护栏都不发上游写调用、
 两个号间隔 ≥ gap、断开后只领完在途那一个且不干等。
+
+### 第十二批（已合：`5d04ad21` + `2603cbff` + `03a50ce0` 的库侧）
+
+| 上游提交 | 说明 |
+|---|---|
+| `5d04ad21` Clash 订阅导入 | ① `tls: true` 的 http 节点导出成 `https://`（照原样导出 `http://` 会把代理账号密码明文发出去），`socks5 over TLS` 标 unsupported 而不降级明文；② 新增 `fieldIndent`：嵌套列表/映射（`alpn`、`ws-opts`）里的「- 」与同名键不再被当成新条目或盖掉外层字段；③ 新增 `yamlScalar`：按 YAML 规则处理行尾注释（`#` 前须有空白），引号内的 `#` 保留 |
+| `2603cbff` 出口画像 | 此前经 Manager 的 base transport **直连**查 → 永远查到网关自己的 IP，还把网关真实 IP 报给第三方。改为经**被描述节点**的 transport 查；`EnableExitLookup()` → `SetExitLookup(on bool)`，缺省关闭、可热改；判定收成 `exitDueLocked`（开关开 + 画像过期） |
+| `03a50ce0` 签到失败回执 | 签到端点对失败也可能回 200 + code=0（「签到失败，已签到天数不足 7 天」），此前只凭「已签到」判 → 记成 `CheckinAlready`，真实失败被静默掩盖。现在分类先看失败硬词，并给这种没有 error 的失败回执补 `ErrClient`；`IsAlreadyCheckin` 与分类共用 `isAlreadyCheckinMsg`（失败硬词 + 反向语义两道否决），两条出口口径一致 |
+
+**没搬**：`03a50ce0` 的 `cmd/signin` 与面板分组签到统计（本仓无这两个入口）；
+`2603cbff` 的 `cmd/server` 装配与 `features.proxy_exit_lookup` 配置项（本仓 `proxypool`
+包尚未接进 server，只有库本身）。
+
+用例：Clash 三种形态（tls http / 嵌套 alpn / socks5+tls 必须 unsupported）；出口画像
+「关着零请求 / 开着经代理且直连为零 / TTL 内不重查」；`IsAlreadyCheckin` 九组文案。
