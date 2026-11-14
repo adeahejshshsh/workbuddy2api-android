@@ -737,3 +737,18 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 用例直接搬入上游的 `park_test.go` 与 `reload_guard_test.go`（只改模块路径）：
 暂存号跨重启复活、复活后不留在 parked、单轮上限拦下并要求 force、force 后放行、
 重载不覆盖刚刷新的令牌且不换 `*Auth` 指针。全绿。
+
+### 第七批（已合：`d2628962` + `8a39572f` 的去重部分）
+
+| 上游提交 | 说明 |
+|---|---|
+| `d2628962` 领奖后回读 claimed_at 才算入账 | claim 的 POST 返回 200/code=0 只说明请求被接受，积分是否入账要看 `progress[].claimed_at`。新增 `CampaignClaimVerified`：提交后 3×2s 回读任务表，读到 `claimed_at` 才算 Claimed；读不到返回 `(false, nil)`，面板记 `Pending` 下一轮重试。此前把「请求已提交」当成「已领到」——面板报喜而用户没到账，且下一轮 `CampaignTaskReady` 仍为真、再白打一次上游。`CampaignTask` 补 `completed_at` / `claimed_at`（progress 按 task_code 合并），`CampaignTaskReady` 以 `claimed_at` 优先（status 只是注释约定、从未逐账号实测） |
+| `8a39572f` 补签去重（一半） | 手动签到与排程签到各自失败时会各排一次补签，同一个号被两条队列同时追打只是白撞风控。新增 `retryPending` + `queueCheckinRetry`，循环退出时整批出队。**没搬**「按账号错开间隔」：它依赖上游的 `spreadParams`（账号摊开调度那套功能本仓未合） |
+
+### 第七批跳过
+
+| 上游提交 | 为什么 |
+|---|---|
+| `8622073e` 加密 auth 回写保持加密 | 本仓**没有** `wbencrypted` 那套加密 auth 支持（`wbSealed` 字段都不存在），这条是对那个功能的修补，缺载体 |
+| `67386ae5` 到期日推算标记 / 告警限频 | 本仓没有 `upstream.ExpiryBucket`（按自然日聚合的到期桶，更早的上游提交未合），`Estimated` 无处可挂 |
+| `6be18704` 导入覆盖前求证有界并发 | 本仓 `importCockpit` 没有「覆盖前逐号求证」这一步，先把功能本身补齐才有得改 |
