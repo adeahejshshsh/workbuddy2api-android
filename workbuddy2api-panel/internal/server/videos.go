@@ -487,7 +487,8 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 	for attempt := 0; attempt < videoAttempts; attempt++ {
-		a := h.cfg.Pool.PickExcludingForRealm(tried, bare, realm)
+		// 占在途名额（审查 B3）：出片是最贵的端点，不占位等于 max_in_flight 对它失效。
+		a := h.cfg.Pool.PickAcquireExcludingForRealm(tried, bare, realm)
 		if a == nil {
 			break
 		}
@@ -496,6 +497,7 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 		st.attempts = attempt + 1
 
 		data, err := h.cfg.Upstream.VideoGenerations(a, json.RawMessage(out))
+		h.cfg.Pool.Release(a.UID) // 在途名额只覆盖上游调用本身
 		if err != nil {
 			lastErr = err
 			var ue *upstream.Error
