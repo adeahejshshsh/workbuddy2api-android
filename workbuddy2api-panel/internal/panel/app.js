@@ -4342,14 +4342,21 @@ function renderDailyBars(series) {
     out += '<text class="tk" x="' + (PL - 6) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' +
       (v > 0 ? '+' : '') + fmtNum(Math.round(v)) + '</text>';
   }
+  // 色板序号只按健康系列推进，与折线同一口径（见 bhColorOf 注释）——
+  // 否则同一账号在两张图上颜色不同。
+  const barColor = new Map();
+  let barLive = 0;
+  series.forEach(s => {
+    const dead = bhIsDead(s);
+    barColor.set(s.uid, bhColorOf(s.uid, dead ? 0 : barLive++, dead));
+  });
   // 每日一组柱
   days.forEach((day, di) => {
     const gx = PL + di * groupW;
     series.forEach((s, si) => {
       const v = (map.get(s.uid) || {})[day];
       if (v === undefined) return;
-      const dead = bhIsDead(s);
-      const color = bhColorOf(s.uid, si, dead);
+      const color = barColor.get(s.uid) || 'var(--ink-3)';
       // 组内柱之间留 1px 缝：无缝隙时相邻两柱会被知觉成一个整体
       // （格式塔共边界效应），看不出"两根独立的柱"。
       const gap = nAcc > 1 ? 1 : 0;

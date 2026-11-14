@@ -32,48 +32,48 @@ func TestRestrictionGate(t *testing.T) {
 	hold := 30 * time.Minute
 
 	// 同一个号反复命中只更新时间，不算「多个账号」——否则一个号被重试几次就把全池停了
-	if g.note("u1", hold) {
+	if g.note("cn", "u1", hold, 0) {
 		t.Fatal("单号首次命中不应暂停全池")
 	}
-	if g.note("u1", hold) {
+	if g.note("cn", "u1", hold, 0) {
 		t.Fatal("同一个号重复命中不应算连坐")
 	}
-	if d := g.remaining(); d != 0 {
+	if d := g.remaining("cn"); d != 0 {
 		t.Fatalf("不应处于暂停态，remaining=%s", d)
 	}
 
 	// 窗口内第二个**不同**账号命中 → 全池暂停
-	if !g.note("u2", hold) {
+	if !g.note("cn", "u2", hold, 0) {
 		t.Fatal("窗口内第二个账号被限制应触发全池暂停")
 	}
-	if d := g.remaining(); d <= 0 || d > hold {
+	if d := g.remaining("cn"); d <= 0 || d > hold {
 		t.Fatalf("remaining=%s，应在 (0, %s]", d, hold)
 	}
 
 	// 判定成立后窗口清空：解除后需要全新一轮才再触发
 	g.reset()
-	if d := g.remaining(); d != 0 {
+	if d := g.remaining("cn"); d != 0 {
 		t.Fatalf("reset 后不应仍暂停: %s", d)
 	}
-	if g.note("u3", hold) {
+	if g.note("cn", "u3", hold, 0) {
 		t.Fatal("reset 后单号命中不应立即暂停")
 	}
 
 	// hold=0 = 只保留「命中即停手」，不做全池暂停
 	g.reset()
-	if g.note("u4", 0) || g.note("u5", 0) {
+	if g.note("cn", "u4", 0, 0) || g.note("cn", "u5", 0, 0) {
 		t.Fatal("hold=0 时不应暂停全池")
 	}
-	if d := g.remaining(); d != 0 {
+	if d := g.remaining("cn"); d != 0 {
 		t.Fatalf("hold=0 仍暂停了: %s", d)
 	}
 
 	// 窗口外的旧命中要被剪掉
 	g.reset()
 	restrictionWaveWindow = 10 * time.Millisecond
-	g.note("u6", hold)
+	g.note("cn", "u6", hold, 0)
 	time.Sleep(30 * time.Millisecond)
-	if g.note("u7", hold) {
+	if g.note("cn", "u7", hold, 0) {
 		t.Fatal("窗口外的命中不应计入连坐")
 	}
 }
@@ -98,7 +98,7 @@ func TestChatStopsRotatingOnRestrictedAccount(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("11140 应就地停手（只打 1 个账号），实际打了 %d 个 —— 换号会把下一个号也送进风控", calls)
 	}
-	if d := h.restrict.remaining(); d != 0 {
+	if d := h.restrict.remaining("cn"); d != 0 {
 		t.Fatalf("只有 1 个账号被限制时不应全池暂停，remaining=%s", d)
 	}
 	// 被上游判异常的那个号必须硬禁用（不是软冷却 10 分钟后又回到轮转里）。
@@ -126,10 +126,10 @@ func TestChatFailsFastDuringRestrictionHold(t *testing.T) {
 	h := NewHandler(Config{Pool: testPoolWith(a1, a2), Upstream: fake, RestrictionHold: 30 * time.Minute})
 
 	// 制造一轮连坐扫荡（两个不同账号被限制）
-	if h.restrict.note("x1", 30*time.Minute) {
+	if h.restrict.note("cn", "x1", 30*time.Minute, 0) {
 		t.Fatal("首个账号不应触发暂停")
 	}
-	if !h.restrict.note("x2", 30*time.Minute) {
+	if !h.restrict.note("cn", "x2", 30*time.Minute, 0) {
 		t.Fatal("第二个账号应触发暂停")
 	}
 
@@ -163,7 +163,7 @@ func TestChatKeepsRotatingWhenHoldDisabled(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("hold=0 时仍应「命中即停手」（只打 1 个账号），实际 %d", calls)
 	}
-	if d := h.restrict.remaining(); d != 0 {
+	if d := h.restrict.remaining("cn"); d != 0 {
 		t.Fatalf("hold=0 不应进入全池暂停: %s", d)
 	}
 }

@@ -1134,6 +1134,14 @@ func (c *Config) normalize() error {
 	if c.Logging.RequestArchiveMaxMB <= 0 {
 		c.Logging.RequestArchiveMaxMB = 100
 	}
+	// 面板日志的回落与请求归档各管各的：request_archive_max_mb<=0 不能顺手把
+	// panel_log_enabled 的显式 false 改回 true（false 是合法取值，不回落）。
+	if c.Logging.PanelLogRetentionDays <= 0 {
+		c.Logging.PanelLogRetentionDays = 7
+	}
+	if c.Logging.PanelLogMaxMB <= 0 {
+		c.Logging.PanelLogMaxMB = 50
+	}
 	// 入站读取上限（issue #100）：空值回落默认 300s；"0" 合法（不限制）；
 	// 负值无语义，fail fast（静默钳 0 会把保护悄悄关掉）。
 	if c.Server.ReadTimeout == "" {

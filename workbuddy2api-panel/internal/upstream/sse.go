@@ -846,7 +846,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			fl.Flush()
 		case n < 8192:
 			// 帧很小（~200B），缓冲还有 8KB 以上时必然含完整帧，不必扫。
-			if p, _ := br.Peek(n); bytes.IndexByte(p, '\n') < 0 {
+			p, _ := br.Peek(n)
+			if bytes.IndexByte(bytes.TrimLeft(p, "\r\n"), '\n') < 0 {
 				fl.Flush()
 			}
 		}
@@ -1101,6 +1102,9 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// finishSeen 本层是否已向客户端写出过非空 finish_reason。与 upstreamDone 合起来判
 	// 「这段流是不是被截断」：两者都没有 = 上游连接说到一半断了。
 	finishSeen := false
+	// errorSent 本流已向客户端写出过 error 帧（上游 error 透传 / 流内失败帧）：error 帧本身
+	// 就是终态，流尾不得再补截断终态——客户端按最后一个终态判结果，「截断」会盖掉「失败」。
+	errorSent := false
 	setFinishSeen := func(ch map[string]any) {
 		chs, ok := ch["choices"].([]any)
 		if !ok || len(chs) == 0 {
@@ -1159,6 +1163,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 		// 同样要求「键存在且值非 nil」（bug B3）："error":null 是正常 chunk。
 		if e, hasErr := obj["error"]; hasErr && e != nil {
+			errorSent = true
 			// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
 			if o.onErrorFrame != nil {
 				o.onErrorFrame(payload)
@@ -1174,6 +1179,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// 否则收尾的静默回合判定会把这个失败当成「模型没说话」再重发一遍。
 		if code, msg, ok := StreamErrorFrame(obj); ok {
 			log.Printf("WARN: [upstream] 流内失败帧（HTTP 200 内嵌）code=%d msg=%q → 如实透出为 error 帧", code, msg)
+			errorSent = true
 			if o.onErrorFrame != nil {
 				o.onErrorFrame(payload)
 			}
@@ -1345,7 +1351,7 @@ readLoop:
 	// 表现就是「说到一半停了、也不报错」。补一帧 finish_reason=length（三边适配器已有
 	// 映射：chat=length / responses=incomplete / messages=max_tokens），把决定权交回客户端。
 	// 只在本层一个终态都没发过时补（否则两个 finish_reason，后一个会洗掉前一个）。
-	if readErr == nil && !upstreamDone && !finishSeen && !toolFinishSent && validFrames > 0 {
+	if readErr == nil && !upstreamDone && !finishSeen && !toolFinishSent && !errorSent && validFrames > 0 {
 		if werr := writeChunk(finishOnlyFrame(map[string]any{}, TruncationFinishReason), ""); werr != nil {
 			return werr
 		}

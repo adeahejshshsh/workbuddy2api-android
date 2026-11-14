@@ -30,6 +30,10 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if !c.Features.SanitizeBlacklistFingerprints {
 		t.Error("features.sanitize_blacklist_fingerprints 示例值应为 true")
 	}
+	// models.allowed：示例里要能让用户看到白名单开关（nil = 键缺失，无从发现）。
+	if c.Models.Allowed == nil {
+		t.Error("models.allowed 示例应存在（空数组即可），否则用户不知道有白名单")
+	}
 	if c.Pool.ModelFallback == nil {
 		t.Error("pool.model_fallback 示例应存在（空对象即可），否则用户不知道有这张表")
 	}

@@ -106,7 +106,6 @@ func (p *Pool) pickRoundRobinLocked(order []*entry, key string) *entry {
 	}
 	selected := order[next]
 	p.scheduling[key] = scheduleCursor{Strategy: StrategyRoundRobin, UID: selected.a.UID}
-	p.dirty.Store(true)
 	return selected
 }
 
@@ -127,7 +126,6 @@ func (p *Pool) pickSequentialLocked(order []*entry, key string) *entry {
 	for _, e := range order {
 		if cur.UID != "" && e.a.UID == cur.UID {
 			p.scheduling[key] = scheduleCursor{Strategy: StrategySequentialExhaust, UID: cur.UID}
-			p.dirty.Store(true)
 			return e
 		}
 	}
@@ -141,7 +139,6 @@ func (p *Pool) pickSequentialLocked(order []*entry, key string) *entry {
 		}
 	}
 	p.scheduling[key] = scheduleCursor{Strategy: StrategySequentialExhaust, UID: selected.a.UID}
-	p.dirty.Store(true)
 	return selected
 }
 
