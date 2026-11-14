@@ -46,6 +46,7 @@
     "activity_enabled": true,
     "keepalive_enabled": true,
     "balance_refresh_enabled": true,
+    "window_probe_enabled": false,
     "balance_refresh_minutes": 5,
     "balance_refresh_jitter_permill": 0,
     "include_disabled_in_tasks": false

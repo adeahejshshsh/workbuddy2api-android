@@ -194,6 +194,10 @@ type Config struct {
 		// 上游实测每日 30 积分的判据是活跃上报本身，网页会话不是必要条件；而这条腿每天
 		// 为每个国际号建一条真实会话、占一条活跃名额（上限 10，漏收尾就永久少一条）。
 		WebActivityEnabled    bool `json:"web_activity_enabled"`
+		// WindowProbeEnabled 额度窗口探针：6004 限流的重置时刻到点后，为那个 (账号, 模型)
+		// 发一个最小请求把新一轮配额窗口顶开（见 scheduler/windowprobe.go）。
+		// 缺省 **false**：探针是真实计费的对话请求，自动发等于替部署花钱，必须显式开。
+		WindowProbeEnabled bool `json:"window_probe_enabled"`
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
 

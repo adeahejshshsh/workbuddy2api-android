@@ -966,3 +966,17 @@ main（带用例、CI 绿），要么有明确的不合理由。
 
 **未搬**：探针执行（`scheduler/windowprobe.go` 316 行）——下一批在本仓排程循环里接
 「按 `NextModelWindowDue` 唤醒」的循环，接完才闭环。
+
+### 第十八批（`3bab4f8c` 执行侧：额度窗口探针，缺省关）
+
+| 部分 | 说明 |
+|---|---|
+| `scheduler/windowprobe.go`（新） | `StartModelWindowProbe` 独立 goroutine 巡检；有窗口时按 `NextModelWindowDue` 精确唤醒（固定周期等于平均半个周期空转）。`RunModelWindowProbeNow` 供面板/测试手动跑一轮 |
+| 探针请求 | `"Hi"` + `max_tokens=16` + `stream=true`，`AgentType=auxiliary`，单次 60s 上限 |
+| 结果处置 | 按**首个有效帧**判（上游常把限流塞进 HTTP 200 的 SSE 帧）：开窗 → 清 6004 冷却 + 删窗口；仍限流且时刻更晚 → 换 ResetAt；仍限流时刻没变 → 15s 重试、20 次后放弃；其它错误 → 不重试删记录 |
+| 闸门 | `WindowProbeBlocked`：停用/暂停/保留积分/积分保底/免费号碰订阅专属模型不发 |
+| 开关 | `schedule.window_probe_enabled`，**缺省 false**——探针是真实计费请求，自动发等于替部署花钱（与本仓 `web_activity_enabled`、`task_sweep_enabled` 同一取舍） |
+
+用例：上游 `windowprobe_test.go` 原样搬入（开窗/仍限流/时刻未变重试/其它错误放弃/闸门拦截/首个有效帧判定）。
+
+至此 `3bab4f8c` 闭环：登记（6004 带重置时刻）→ 到点探针（开关开时）→ 开窗清冷却。
