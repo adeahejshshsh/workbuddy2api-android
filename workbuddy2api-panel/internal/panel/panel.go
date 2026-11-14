@@ -156,6 +156,12 @@ type Panel struct {
 	// 任务跳过名单（taskgate.go）：attempt 开关 + 反复无效的 (账号,任务码) 跳过。
 	skipOnce sync.Once
 	skip     *skipStore
+
+	// campaignMu 活动查询与领奖同一时刻只跑一轮（campaign.go）。
+	campaignMu sync.Mutex
+	// campaignCacheMu/campaignCache 活动进度查询的短时缓存（campaign.go）。
+	campaignCacheMu sync.Mutex
+	campaignCache   campaignCacheEntry
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
