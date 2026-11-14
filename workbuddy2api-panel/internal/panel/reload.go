@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // ReloadResult 一次重载的结果（直接作为接口响应体）。
@@ -100,12 +101,13 @@ func (p *Panel) ReloadAccountsReason(reason string) (ReloadResult, error) {
 	seen := make(map[string]bool, len(report.Auths))
 	for _, a := range report.Auths {
 		seen[a.UID] = true
-		if p.cfg.Pool.AuthByUID(a.UID) == nil {
+		// 已在池的号只在磁盘令牌更新时原地更新，不换指针：换指针会把刚刷新的令牌盖回旧值。
+		switch p.cfg.Pool.Reconcile(a) {
+		case pool.ReconcileAdded:
 			res.Added++
-		} else {
+		case pool.ReconcileUpdated:
 			res.Updated++
 		}
-		p.cfg.Pool.Add(a) // upsert：已存在只换凭证，保留 credits/cooling 状态
 	}
 
 	// 护栏 1：本轮有解析失败 → 只增不删。此时「不在扫描结果里」可能只是「文件读不动」。
@@ -115,6 +117,16 @@ func (p *Panel) ReloadAccountsReason(reason string) (ReloadResult, error) {
 		p.noteReload(res)
 		log.Printf("[reload] %s added=%d updated=%d removed=0 parse_errors=%d（解析失败时禁止删除）",
 			reason, res.Added, res.Updated, res.ParseErrors)
+		return res, nil
+	}
+
+	// 护栏 6：目录里一个账号文件都没有而池不空 → 不删，也不累计缺席（挂载没上时
+	// 每个号都「缺席」，计数一满就是整池被清）。
+	if res.Files == 0 && len(p.cfg.Pool.List()) > 0 {
+		res.Reason = "目录里没有账号文件（疑似未挂载），本轮不删"
+		clear(p.reloadMissing)
+		p.noteReload(res)
+		log.Printf("[reload] %s：%s", reason, res.Reason)
 		return res, nil
 	}
 

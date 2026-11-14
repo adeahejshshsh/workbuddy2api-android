@@ -90,6 +90,13 @@ func TestReloadAddsUpdatesAndRemoves(t *testing.T) {
 		t.Fatalf("凭证没更新：%q", got)
 	}
 
+	// 护栏 6 之后，「删掉最后一个文件」不再触发删除（目录空 ≈ 没挂载）。这里留一个 u2
+	// 的凭据文件在场，才能测到「连续确认后真删」这条路径。
+	e.writeAuth("u2", "at2", now)
+	if res := e.reload(); res.Added != 1 {
+		t.Fatalf("准备阶段 added=%d want 1", res.Added)
+	}
+
 	// 删文件：第 1 次只挂账，第 2 次才删（连续确认）。
 	if err := os.Remove(filepath.Join(e.dir, "workbuddy-u1.json")); err != nil {
 		t.Fatal(err)
@@ -170,8 +177,9 @@ func TestReloadResumesAfterFileRepaired(t *testing.T) {
 	if res := e.reload(); res.ParseErrors != 1 || res.Removed != 0 {
 		t.Fatalf("坏文件轮 parse_errors=%d removed=%d want 1/0", res.ParseErrors, res.Removed)
 	}
-	// 修好（换一份新凭证）
-	e.writeAuth("u1", "at1-fixed", now)
+	// 修好（换一份新凭证）。过期时刻必须比内存里的**更晚**才叫「更新」——auth.AdoptNewer
+	// 只在磁盘令牌更新时原地覆盖，同到期时刻的不同令牌不覆盖（那通常是扫描早于刷新的竞态）。
+	e.writeAuth("u1", "at1-fixed", now+3600)
 	res := e.reload()
 	if res.ParseErrors != 0 || res.Removed != 0 || res.Updated != 1 {
 		t.Fatalf("修复轮 parse_errors=%d removed=%d updated=%d want 0/0/1", res.ParseErrors, res.Removed, res.Updated)
@@ -185,6 +193,8 @@ func TestReloadResumesAfterFileRepaired(t *testing.T) {
 func TestReloadSkipsRemovalWhileInFlight(t *testing.T) {
 	e := newReloadEnv(t)
 	now := time.Now().Add(24 * time.Hour).Unix()
+	// 留一个在场文件：护栏 6 会把「目录里一个文件都没有」判成没挂载、拒绝删除。
+	e.writeAuth("keep", "atk", now)
 	e.writeAuth("u1", "at1", now)
 	e.reload()
 

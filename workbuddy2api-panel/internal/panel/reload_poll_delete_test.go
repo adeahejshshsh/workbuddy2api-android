@@ -60,6 +60,7 @@ func TestReloadPollRemovesExactlyAtConfirmCount(t *testing.T) {
 	e.panel.SetReloadConfig(0, 3) // 用 3 才能区分「第 2 次」「第 3 次」
 	now := time.Now().Add(24 * time.Hour).Unix()
 
+	e.writeAuth("keep", "atk", now)
 	e.writeAuth("solo", "at", now)
 	if _, err := e.panel.reloadIfChanged("poll"); err != nil {
 		t.Fatal(err)
@@ -108,11 +109,13 @@ func TestReloadPollRemovesLastAccount(t *testing.T) {
 	e.panel.SetReloadConfig(0, 2)
 	now := time.Now().Add(24 * time.Hour).Unix()
 
+	// 留一个在场文件：护栏 6 会把「目录里一个文件都没有」判成没挂载、拒绝删除。
+	e.writeAuth("keep", "atk", now)
 	e.writeAuth("solo", "at", now)
 	if res, err := e.panel.reloadIfChanged("poll"); err != nil {
 		t.Fatal(err)
-	} else if res.Added != 1 {
-		t.Fatalf("准备阶段 added=%d want 1", res.Added)
+	} else if res.Added != 2 {
+		t.Fatalf("准备阶段 added=%d want 2", res.Added)
 	}
 	if err := os.Remove(filepath.Join(e.dir, "workbuddy-solo.json")); err != nil {
 		t.Fatal(err)
@@ -135,6 +138,8 @@ func TestReloadPollSkipsRemovalWhileInFlight(t *testing.T) {
 	e.panel.SetReloadConfig(0, 2)
 	now := time.Now().Add(24 * time.Hour).Unix()
 
+	// 同上：留一个在场文件，别让护栏 6 把这一轮判成「没挂载」。
+	e.writeAuth("keep", "atk", now)
 	e.writeAuth("u1", "at1", now)
 	if _, err := e.panel.reloadIfChanged("poll"); err != nil {
 		t.Fatal(err)
@@ -171,6 +176,7 @@ func TestReloadPollClearsMissingTableAfterRemoval(t *testing.T) {
 	e.panel.SetReloadConfig(0, 2)
 	now := time.Now().Add(24 * time.Hour).Unix()
 
+	e.writeAuth("keep", "atk", now)
 	e.writeAuth("u1", "at1", now)
 	if _, err := e.panel.reloadIfChanged("poll"); err != nil {
 		t.Fatal(err)

@@ -586,6 +586,35 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 	p.byUID[a.UID] = &entry{a: a}
 }
 
+// ReconcileResult Reconcile 对单个账号做了什么。
+type ReconcileResult int
+
+const (
+	ReconcileUnchanged ReconcileResult = iota // 池里已有且磁盘上的令牌不比内存新
+	ReconcileAdded                            // 新入池
+	ReconcileUpdated                          // 池里已有，换上了磁盘上更新的令牌
+)
+
+// Reconcile 账号目录热重载的入池：新号加入；已在池的号只在磁盘令牌更新时原地更新
+// （auth.AdoptNewer），**不换指针**——换指针会把刚刷新的令牌盖回磁盘上的旧值。
+//
+// 原地更新在 p.mu 之外做：auth 的锁不嵌在池锁里，不引入新的锁序。
+func (p *Pool) Reconcile(a *auth.Auth) ReconcileResult {
+	p.mu.Lock()
+	e, ok := p.byUID[a.UID]
+	if !ok {
+		p.upsertLocked(a)
+		p.mu.Unlock()
+		return ReconcileAdded
+	}
+	cur := e.a
+	p.mu.Unlock()
+	if cur.AdoptNewer(a) {
+		return ReconcileUpdated
+	}
+	return ReconcileUnchanged
+}
+
 // Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
 
 // defaultBalanceWindow 窗口用量调度的缺省窗口（1h）。
