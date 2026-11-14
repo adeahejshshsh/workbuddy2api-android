@@ -385,17 +385,17 @@ func Parse(raw []byte) (*Auth, error) {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
 		}
 		a = Auth{
-			AccessToken:  n.Auth.AccessToken,
-			RefreshToken: n.Auth.RefreshToken,
-			ExpiresAt:    n.Auth.ExpiresAt,
-			Domain:       n.Auth.Domain,
-			realm:        n.Auth.Realm,
-			UID:          n.Account.UID,
-			EnterpriseID:      NormalizeEnterpriseID(n.Account.EnterpriseID),
-			AccountType:       strings.TrimSpace(n.Account.Type),
-			Nickname:          n.Account.Nickname,
+			AccessToken:        n.Auth.AccessToken,
+			RefreshToken:       n.Auth.RefreshToken,
+			ExpiresAt:          n.Auth.ExpiresAt,
+			Domain:             n.Auth.Domain,
+			realm:              n.Auth.Realm,
+			UID:                n.Account.UID,
+			EnterpriseID:       NormalizeEnterpriseID(n.Account.EnterpriseID),
+			AccountType:        strings.TrimSpace(n.Account.Type),
+			Nickname:           n.Account.Nickname,
 			EnterpriseOverride: NormalizeEnterpriseOverride(firstNonEmptyStr(n.Account.EnterpriseOverride, n.Account.EnterpriseOverride2)),
-			DeviceToken:  n.DeviceToken,
+			DeviceToken:        n.DeviceToken,
 		}
 	} else {
 		var f struct {
@@ -417,16 +417,16 @@ func Parse(raw []byte) (*Auth, error) {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
 		}
 		a = Auth{
-			AccessToken:  f.AccessToken,
-			RefreshToken: f.RefreshToken,
-			ExpiresAt:    f.ExpiresAt,
-			Domain:       f.Domain,
-			realm:        f.Realm,
-			UID:          f.UID,
-			EnterpriseID:      NormalizeEnterpriseID(f.EnterpriseID),
-			AccountType:       strings.TrimSpace(f.Type),
-			Nickname:          f.Nickname,
-			DeviceToken:       f.DeviceToken,
+			AccessToken:        f.AccessToken,
+			RefreshToken:       f.RefreshToken,
+			ExpiresAt:          f.ExpiresAt,
+			Domain:             f.Domain,
+			realm:              f.Realm,
+			UID:                f.UID,
+			EnterpriseID:       NormalizeEnterpriseID(f.EnterpriseID),
+			AccountType:        strings.TrimSpace(f.Type),
+			Nickname:           f.Nickname,
+			DeviceToken:        f.DeviceToken,
 			EnterpriseOverride: NormalizeEnterpriseOverride(firstNonEmptyStr(f.EnterpriseOverride, f.EnterpriseOverride2)),
 		}
 	}
@@ -740,16 +740,28 @@ func LoadDirReport(dir string) (LoadReport, error) {
 			continue
 		}
 		seenUID[a.UID] = f
-		if a.RealmStored() == "" {
-			if changed, r := a.BackfillRealm(); changed {
-				if err := a.SaveAtomic(); err != nil {
-					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
-				} else if r == "global" {
-					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.NicknameValue()), a.Domain)
-				}
+		out = append(out, a)
+	}
+	// 只给「胜出的那一份」做 realm 迁移落盘（上游 1414e9f7 的同款约束）。本仓的胜出判定
+	// 更早一步：上面 seenUID 直接把后来的同 uid 文件**丢弃**（保留先出现的），所以 out 里
+	// 每个 uid 只有一份，落败文件根本不在这里——不会出现「给落败文件写盘刷新 mtime、
+	// 下次启动胜负翻面」的问题。这里的 winner 判据保留成显式不变量：将来若改成
+	// 「全部载入 + 后写覆盖」，它会自动兜住。
+	winner := make(map[string]*Auth, len(out))
+	for _, a := range out {
+		winner[a.UID] = a
+	}
+	for _, a := range out {
+		if winner[a.UID] != a || a.RealmStored() != "" {
+			continue
+		}
+		if changed, r := a.BackfillRealm(); changed {
+			if err := a.SaveAtomic(); err != nil {
+				log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
+			} else if r == "global" {
+				log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.NicknameValue()), a.Domain)
 			}
 		}
-		out = append(out, a)
 	}
 	report.Auths = out
 	return report, nil

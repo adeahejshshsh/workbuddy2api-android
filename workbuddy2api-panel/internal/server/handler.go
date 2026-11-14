@@ -1753,6 +1753,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.NicknameValue()
+		st.realm = acct.Realm()
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {

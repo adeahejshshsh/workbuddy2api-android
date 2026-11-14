@@ -65,24 +65,28 @@ type Config struct {
 // 归档里不会出现来源字段）——来源信息比 token 计数敏感，运营可自行决定是否落盘。
 // 仍然不写提示词、响应正文、Authorization 或其它凭证。
 type Event struct {
-	Time             time.Time `json:"time"`
-	RequestID        string    `json:"request_id"`
-	Path             string    `json:"path"`
-	Account          string    `json:"account,omitempty"`
-	Model            string    `json:"model,omitempty"`
+	Time      time.Time `json:"time"`
+	RequestID string    `json:"request_id"`
+	Path      string    `json:"path"`
+	Account   string    `json:"account,omitempty"`
+	Model     string    `json:"model,omitempty"`
 	// ModelEff 模型降级（pool.model_fallback）后**实际**发往上游的模型名；
 	// 与 Model 不同才填充。记录的是出站线协议原值（通常裸名），不造域前缀——
 	// 造前缀会让「面板显示的名字」与「上游真正收到的名字」不一致，排障时对不上。
 	ModelEff string `json:"model_eff,omitempty"`
-	Status           int       `json:"status"`
-	OK               bool      `json:"ok"`
-	Outcome          string    `json:"outcome"`
-	DurationMs       int64     `json:"duration_ms"`
-	TTFBMs           int64     `json:"ttfb_ms,omitempty"`
-	Attempts         int       `json:"attempts,omitempty"`
-	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
-	CompletionTokens int64     `json:"completion_tokens,omitempty"`
-	TotalTokens      int64     `json:"total_tokens,omitempty"`
+	// Realm 实际服务本次请求的账号所在域（cn / global）。cn 与 global 有同名模型，
+	// 而 Model / ModelEff 常是不带域前缀的裸名：面板的模型可用性靠它区分
+	// 「这条成功流量属于哪个域的模型」，缺了它裸名只能两边都认。空 = 没选到账号。
+	Realm            string `json:"realm,omitempty"`
+	Status           int    `json:"status"`
+	OK               bool   `json:"ok"`
+	Outcome          string `json:"outcome"`
+	DurationMs       int64  `json:"duration_ms"`
+	TTFBMs           int64  `json:"ttfb_ms,omitempty"`
+	Attempts         int    `json:"attempts,omitempty"`
+	PromptTokens     int64  `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64  `json:"completion_tokens,omitempty"`
+	TotalTokens      int64  `json:"total_tokens,omitempty"`
 	// ToolsDeclared / ToolCalls 本轮的「工具面」观测量（issue #44）：声明了几个工具、
 	// 实际拿到几个工具调用。ToolsDeclared>0 且 ToolCalls==0 就是一次「零工具调用
 	// 收尾」—— 上游把本该调工具的回合当成正常完成，客户端据此认为任务做完、工具一次
