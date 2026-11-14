@@ -603,6 +603,12 @@ func main() {
 	// 人味化参数（缺省 0 = 旧行为）：抖动比例先设，StartBalanceRefresh 每轮现读。
 	sch.SetBalanceJitter(cfg.Schedule.BalanceRefreshJitterPermill)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
+	// 额度窗口探针（缺省关，见 schedule.window_probe_enabled）：6004 的重置时刻到点后
+	// 发一个最小请求把新一轮窗口顶开——窗口按首次请求起算，没人发就一直空转。
+	if cfg.Schedule.WindowProbeEnabled {
+		sch.StartModelWindowProbe(ctx)
+		log.Printf("[scheduler] 额度窗口探针已启用（每个已登记窗口到点发一次最小请求，真实计费）")
+	}
 	// 补领清扫（缺省 15 分钟）：人工不点按钮时，达标未领的奖励也照样被领掉。
 	sch.SetTaskSweepJitter(cfg.Schedule.TaskSweepJitterPermill)
 	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)
