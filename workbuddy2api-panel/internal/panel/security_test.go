@@ -9,7 +9,9 @@ import (
 
 func newTestPanel() *Panel {
 	// 启用鉴权：未带 key 的请求一律 401，不进入依赖 Pool/Upstream 的 handler。
-	return New(Config{Version: "test", APIKey: "test-key"})
+	// AdminAPIKey 与 APIKey 同值：这些用例测的是「有没有鉴权」，不是「用哪把 key」。
+	// 敏感接口（本文件的 tasks/run_queue 等）要求独立管理员密钥，给它一把。
+	return New(Config{Version: "test", APIKey: "test-key", AdminAPIKey: "test-key"})
 }
 
 // 面板安全响应头必须覆盖：页面、静态脚本、鉴权失败响应。
@@ -198,8 +200,10 @@ func TestPanelDefaultDeny(t *testing.T) {
 	} {
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%s: code=%d, want 401（默认拒绝）", path, rec.Code)
+		// 未登记路径 = 401；敏感接口在「没有独立 admin_api_key」时更早被 403 挡下。
+		// 两者都是拒绝；这里只排除「2xx/3xx = 匿名可达」。
+		if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusForbidden {
+			t.Errorf("%s: code=%d, want 401/403（默认拒绝）", path, rec.Code)
 		}
 	}
 	for _, path := range []string{"/panel/", "/panel/app.js", "/panel/theme.js"} {

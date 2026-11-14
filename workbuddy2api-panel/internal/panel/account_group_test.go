@@ -16,7 +16,7 @@ import (
 func TestAccountGroupEndpoint(t *testing.T) {
 	pl := pool.New("")
 	pl.Add(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
-	p := New(Config{Version: "test", APIKey: "k", Pool: pl})
+	p := New(Config{Version: "test", APIKey: "k", AdminAPIKey: "k", Pool: pl})
 	call := func(path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", path, strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer k")

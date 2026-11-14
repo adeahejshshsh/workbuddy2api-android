@@ -22,7 +22,12 @@ import (
 type Config struct {
 	Listen string `json:"listen"`  // ":7863"
 	APIKey string `json:"api_key"` // 空 = 不鉴权
-	// AdminAPIKey 运维面（/status、/admin/*）专用密钥；空 = 回退 api_key（旧行为）。
+	// AdminAPIKey 管理员密钥：运维面（/status、/admin/*）与**面板**共用。
+	// **与发给下游的 api_key 分开**——面板会导出全池凭据、改写整份配置，
+	// 拿客户端 key 当门禁等于「任一客户端 = 全池管理员」。
+	//
+	// 空 = 运维面回退 api_key（旧行为），但面板的**敏感接口**（导出/配置/导入/登录/
+	// 账号增删停改/上游写动作）一律 403，直到配上本字段。
 	//
 	// 为什么值得单独配：api_key 是要发给下游客户端与 Agent 的，而 /status 会回全池
 	// 账号清单（uid/昵称/积分/模型冷却/成本表）、admin 一开还能触发上游动作。
