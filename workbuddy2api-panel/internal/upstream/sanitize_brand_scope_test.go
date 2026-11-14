@@ -118,7 +118,7 @@ func TestPrepareBodyBrandScope(t *testing.T) {
 	}
 
 	// 新管线：identity（不动用户消息）。
-	out2 := prepareBodyOptFull(body, true, nil, nil, "", nil, false)
+	out2 := prepareBodyOptFull(body, true, nil, nil, "", nil, false, nil)
 	if err := json.Unmarshal(out2, &obj); err != nil {
 		t.Fatal(err)
 	}

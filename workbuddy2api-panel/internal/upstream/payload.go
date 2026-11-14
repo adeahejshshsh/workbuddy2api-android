@@ -31,7 +31,7 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 // （deepseek 缺档回退硬编码 high）。
 func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) []byte {
 	// 旧入口没有作用域概念：按 "all"（所有角色）处理，行为逐字节不变。
-	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, "", nil, true)
+	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, "", nil, true, nil)
 }
 
 // PrepareBodyOptWithEffortPolicy 在 …AndDefault 之上接入网关思考档位策略
@@ -40,12 +40,12 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 // realm 用于 thinking.model_defaults 的 "realm:model" 精确匹配；policy 为 nil
 // 或未启用时与 …AndDefault 完全一致。
 func PrepareBodyOptWithEffortPolicy(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, realm string, policy *EffortPolicy) []byte {
-	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, realm, policy, true)
+	return prepareBodyOptFull(src, sanitize, efforts, defaultEfforts, realm, policy, true, nil)
 }
 
 // brandAll 对应 features.sanitize_brand_scope=all：true 时身份类规则（品牌词 / 身份句式）
 // 作用于所有消息角色（缺省、与旧行为一致）；false 时只作用于 system/developer。
-func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, realm string, policy *EffortPolicy, brandAll bool) []byte {
+func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, realm string, policy *EffortPolicy, brandAll bool, maxOut map[string]int64) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -115,7 +115,7 @@ func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, 
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
 	normalizeReasoningEffort(obj, efforts)
 	// 档位定下来之后再兜输出预算：高档位思考会把同一份额度吃掉，正文断在半句（2b9b773）。
-	ensureMinOutputBudget(obj)
+	ensureMinOutputBudget(obj, maxOut)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)
