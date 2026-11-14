@@ -98,6 +98,48 @@ func TestGuardEmptyTextPartsSniffedString(t *testing.T) {
 	}
 }
 
+// TestGuardEmptyTextPartsSniffedStringPreservesBytes 嗅探补位只改空段本身：工具输出里的
+// 大整数、HTML 字符、键序、空白必须逐字节保留——整体重新序列化会把 2^64 级整数变成
+// 浮点、把 < 转义成 \u003c、把键按字母序重排，模型看到的就不是原来的工具结果。
+func TestGuardEmptyTextPartsSniffedStringPreservesBytes(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{
+			` [{"type":"text", "text":""}, {"z":1,"id":12345678901234567890,"html":"<b>a&b</b>","a":2}]`,
+			` [{"type":"text", "text":" "}, {"z":1,"id":12345678901234567890,"html":"<b>a&b</b>","a":2}]`,
+		},
+		// null、缺失、键序颠倒、转义键名都要认；重复键按最后一次为准。
+		{`[{"text":null,"type":"text","n":1.50}]`, `[{"text":" ","type":"text","n":1.50}]`},
+		{`[{"type":"text","n":1e400}]`, `[{"text":" ","type":"text","n":1e400}]`},
+		{`[{"text":"","type":"text"}]`, `[{"text":" ","type":"text"}]`},
+		{`[{"type":"text","text":"","text":"x"}]`, `[{"type":"text","text":"","text":"x"}]`},
+	}
+	for _, c := range cases {
+		msgs := []any{map[string]any{"role": "tool", "content": c.in}}
+		guardEmptyTextParts(msgs)
+		if got := msgs[0].(map[string]any)["content"]; got != c.want {
+			t.Errorf("补位结果\n got %s\nwant %s", got, c.want)
+		}
+	}
+}
+
+// TestGuardEmptyTextPartsAfterSanitize 只含指纹的 text 段会被净化洗成空串；补位必须在
+// 净化之后，否则出站仍带 "" → 11151。
+func TestGuardEmptyTextPartsAfterSanitize(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"x-anthropic-billing-header: cc_version=1;"},{"type":"text","text":"hi"}]}]}`
+	out := PrepareBodyOpt([]byte(body), true)
+	var obj struct {
+		Messages []struct {
+			Content []map[string]any `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("输出不是合法 JSON: %v (%s)", err, out)
+	}
+	if got := obj.Messages[0].Content[0]["text"]; got != " " {
+		t.Fatalf("净化后的空段应被补位，实际 %q（%s）", got, out)
+	}
+}
+
 // TestGuardEmptyTextPartsKeepsNonTextParts 多模态：图片等非 text 段必须原引用保留
 // （只克隆要改的 text 段）。同时钉住「同一消息里 text 与 image 混排时下标不变」——
 // 删段派生的实现会在这里红。
