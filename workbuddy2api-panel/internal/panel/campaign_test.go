@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -25,18 +26,31 @@ const campaignConfigJSON = `{"code":0,"msg":"OK","data":{"config":{"title":"星�
 
 func campaignPanel(t *testing.T, claimed *atomic.Int32) *Panel {
 	t.Helper()
+	// claimedUIDs 哪些号已经领过（进度按号独立，夹具也要按号记）。
+	var claimedUIDs sync.Map
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.Contains(r.URL.Path, "/config"):
 			_, _ = w.Write([]byte(campaignConfigJSON))
 		case strings.HasSuffix(r.URL.Path, "/tasks"):
-			_, _ = w.Write([]byte(campaignTasksJSON))
+			// 领过之后服务端会在 progress 里写 claimed_at；面板据此判定「真入账」
+			// （CampaignClaimVerified），所以夹具必须跟着变，否则回读永远为空。
+			// 按账号记（X-User-Id）：进度是**每号独立**的，共用一个开关会让第二个号
+			// 看到第一个号的 claimed_at 而整轮跳过。
+			body := campaignTasksJSON
+			if _, done := claimedUIDs.Load(r.Header.Get("X-User-Id")); done {
+				body = strings.Replace(body,
+					`{"task_code":"ai_chat","progress":3}`,
+					`{"task_code":"ai_chat","progress":3,"claimed_at":"2026-11-12T09:05:00+08:00"}`, 1)
+			}
+			_, _ = w.Write([]byte(body))
 		case strings.HasSuffix(r.URL.Path, "/vouchers"):
 			_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":{"items":[]}}`))
 		case strings.HasSuffix(r.URL.Path, "/viewed"):
 			_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":{"ok":true}}`))
 		case strings.HasSuffix(r.URL.Path, "/claim"):
 			claimed.Add(1)
+			claimedUIDs.Store(r.Header.Get("X-User-Id"), true)
 			_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":{}}`))
 		default:
 			http.NotFound(w, r)
