@@ -14,9 +14,9 @@
 // 「马上要动手」，也有大量正常短答（角色扮演闲聊、明确在等用户回话、拒绝回答）。
 // 接正文 = 把正常回答续成一段废话。
 //
-// 所以这里的采用条件是**只认工具调用**：
-//   - 续写段拿到 tool_calls → 采纳（客户端立刻就能继续执行下一步）；
-//   - 续写段只有正文 → 整段丢弃，客户端看到的内容与接线前**一模一样**。
+// 所以这里的采用条件是**只认完整的工具调用**：
+//   - 续写段以完整的 tool_calls 正常收尾 → 采纳（客户端立刻就能继续执行下一步）；
+//   - 其余（只有正文、截断、断流、报错）→ 整段丢弃，客户端看到的内容与接线前**一模一样**。
 //
 // 判据刻意压窄，且误命中的代价只有「多打一次上游」（前缀缓存命中，费用接近 0）：
 //  1. finish=stop、正文非空、零 tool_calls、无 error 帧；
@@ -34,8 +34,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
-
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // toolOnlyMaxBytes 首段正文超过这个长度就不算「一句预告/一次提前收尾」。
@@ -46,6 +45,7 @@ import (
 //     （≈1400B / 950B），句号收尾、零工具调用；
 //   - 按 25 分钟样本放宽到 N token 的覆盖率（prompt≥8k 那批 46 条）：
 //     ≤650(2000B) 41% / ≤1000 76% / ≤2500 87% / 不设限 100%。
+//
 // 上限取 2000B。曾试过放到 7500B（覆盖 41%→77%），但上线后出现反向副作用：
 // 已经写完的任务被推着再调一次工具（用户反馈「任务该结束了却一直在工具调用」），
 // 因为「模型肯再调一次」并不等于「它还没做完」。在没有可靠判据区分「提前收尾」与
@@ -169,67 +169,136 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 	r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
 	r.finish, r.tail = "", nil
 	r.toolOnly = true
+	r.toolOnlyFailed = false
+	r.toolCallBuf, r.toolCallNames, r.toolCallArgs = nil, nil, nil
 	r.segCompletion, r.segThink = 0, 0
 	log.Printf("[toolonly] acct=%s model=%s seg=%d 正文 %dB 且尾部预告动手 → 试续一次，只采纳工具调用",
 		r.label(), bareModelOf(r.body), r.seg, r.text.Len())
 	return true
 }
 
-// settleToolOnly 续写段结束时的裁决：拿到工具调用就采纳，否则整段回滚。
+// settleToolOnly 续写段结束时的裁决：拿到完整的工具调用就采纳，否则整段回滚到首段终态。
 // 返回 true 表示已回滚（调用方继续走正常收尾路径，回放首段的终态帧）。
 //
-// 采纳前还要过一道闸门（2026-11-11）：续写段的工具调用若与「上一次已执行的调用」同名
-// 同参，说明模型只是把刚跑完的那次原样重发——采纳它等于让客户端把同一个写操作再执行
-// 一遍，回合也永远结束不了。为此 toolOnly 段的工具调用帧不再边到边发，而是先攒在
-// toolCallBuf 里，这里判完再决定补发还是整段丢弃（判重复时客户端一个字节都收不到，
-// 与「没有工具调用」的回滚路径完全一致）。
-func (r *continueReader) settleToolOnly() bool {
+// 采纳要同时满足：
+//   - 没有报错帧 / 非法帧；
+//   - 以 [DONE] 正常收尾且 finish 为 tool_calls / stop——length 或断流说明参数可能只写了
+//     一半，拼给客户端就是半截 JSON，而且会在首段的 stop 之外再多出一个终态；
+//   - 每个调用都有名字、参数是空或完整的 JSON；
+//   - 不是把上一次已执行的调用原样重发（2026-11-11：同名同参 = 模型只是把刚跑完的那次
+//     重发，采纳等于让客户端把同一个写操作再执行一遍，回合也永远结束不了）。
+func (r *continueReader) settleToolOnly(sawDone bool) bool {
 	if !r.toolOnly {
 		return false
 	}
 	r.toolOnly = false
-	if r.toolSeen {
+	buf := r.toolCallBuf
+	r.toolCallBuf = nil
+	reason := ""
+	switch {
+	case r.toolOnlyFailed:
+		reason = "续写段报错或含非法帧"
+	case len(r.toolCallNames) == 0:
+		reason = "续写段没有工具调用"
+	case !sawDone || (r.finish != "tool_calls" && r.finish != "stop"):
+		reason = "续写段未正常收尾（finish=" + r.finish + "）"
+	case !r.toolCallsComplete():
+		reason = "续写段的工具调用不完整"
+	default:
 		if name, dup := r.duplicatesLastExecutedCall(); dup {
-			r.toolCallBuf = nil
-			r.toolSeen = false
-			r.finish, r.tail = r.origFinish, r.origTail
-			r.origFinish, r.origTail = "", nil
-			log.Printf("[toolonly] acct=%s model=%s seg=%d 续写段要重发上一次的调用（%s）→ 丢弃，按原样收尾",
-				logfmt.Label(r.acct.UID, r.acct.NicknameValue()), bareModelOf(r.body), r.seg, name)
-			return true
+			reason = "续写段要重发上一次的调用（" + name + "）"
 		}
-		// 采纳：把缓存的工具调用帧按原顺序补发，收尾照常（回放本段 tail）。
-		for _, p := range r.toolCallBuf {
-			r.emit(p)
-		}
-		r.toolCallBuf = nil
-		r.origFinish, r.origTail = "", nil
-		log.Printf("[toolonly] acct=%s seg=%d 续写段拿到工具调用 → 采纳",
-			r.label(), r.seg)
-		return false
 	}
-	// 回滚：续写段只有正文（或什么都没有）→ 丢掉，客户端看到的内容与接线前一致。
-	r.finish, r.tail = r.origFinish, r.origTail
+	if reason != "" {
+		r.toolSeen = false
+		r.finish, r.tail = r.origFinish, r.origTail
+		r.origFinish, r.origTail = "", nil
+		log.Printf("[toolonly] acct=%s model=%s seg=%d %s → 丢弃，按原样收尾",
+			r.label(), bareModelOf(r.body), r.seg, reason)
+		return true
+	}
+	// 采纳：缓存的工具调用帧（含本段终态帧）按原顺序补发，之后照常收尾。
+	for _, p := range buf {
+		r.emit(p)
+	}
+	r.toolSeen = true
+	r.tail = nil // 终态帧已随 buf 发出
 	r.origFinish, r.origTail = "", nil
-	log.Printf("[toolonly] acct=%s seg=%d 续写段没有工具调用（正文 %dB）→ 丢弃，按原样收尾",
-		r.label(), r.seg, r.text.Len())
-	return true
+	log.Printf("[toolonly] acct=%s model=%s seg=%d 续写段拿到工具调用 → 采纳",
+		r.label(), bareModelOf(r.body), r.seg)
+	return false
 }
 
-// discardToolOnlyDelta 在「只采纳工具调用」阶段剥掉正文/思考增量：这些字节不给客户端，
-// 也不进本地累积（否则后续续写前缀里会混进被丢弃的内容）。
-// 返回 true 表示该 delta 被改动过，需要重新序列化。
-func discardToolOnlyDelta(d map[string]any) bool {
-	changed := false
-	if s, ok := d["content"].(string); ok && s != "" {
-		delete(d, "content")
-		changed = true
+// toolOnlyFrame 「只采纳工具调用」段的全部 data 帧都走这里（frame() 入口改道）。
+//
+// 不变量：裁决前客户端收不到这一段的任何字节（只有保活注释）。此前只在「还没见到工具
+// 分片」时剥正文，工具分片之后的正文/思考直接透传；error 帧与非法 JSON 也原样透传——
+// 客户端于是在首段的完整回答后面看到半截续写或一条错误。
+//   - usage 照常入账（这一段不管采不采纳都是一次真实的上游调用）；
+//   - 带工具分片或 finish_reason 的帧：剥掉正文/思考与 usage 后暂存，等 settleToolOnly 裁决；
+//   - error 帧 / 流内失败帧 / 非法 JSON：记为失败（整段回滚，首段本来就是完整回答）；
+//   - 其余（正文、思考、空帧）：丢弃，不进 r.text / r.reason（否则后续续写前缀会混进
+//     被丢弃的内容），只按需补保活注释。
+func (r *continueReader) toolOnlyFrame(payload string) {
+	var obj map[string]any
+	if json.Unmarshal([]byte(payload), &obj) != nil {
+		r.toolOnlyFailed = true
+		return
 	}
-	if s, ok := d["reasoning_content"].(string); ok && s != "" {
-		delete(d, "reasoning_content")
-		changed = true
+	if _, hasErr := obj["error"]; hasErr {
+		r.toolOnlyFailed = true
+		return
 	}
-	return changed
+	if _, _, ok := upstream.StreamErrorFrame(obj); ok {
+		r.toolOnlyFailed = true
+		return
+	}
+	if u, ok := obj["usage"].(map[string]any); ok {
+		r.mergeUsage(u)
+		r.noteSegmentUsage(u)
+		delete(obj, "usage")
+	}
+	keep := false
+	if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
+		if c, ok := chs[0].(map[string]any); ok {
+			if d, ok := c["delta"].(map[string]any); ok {
+				delete(d, "content")
+				delete(d, "reasoning_content")
+				delete(d, "reasoning")
+				if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+					r.captureToolCallDeltas(tcs)
+					keep = true
+				}
+			}
+			if fr, ok := c["finish_reason"].(string); ok && fr != "" {
+				r.finish = fr
+				keep = true
+			}
+		}
+	}
+	if !keep {
+		r.maybeKeepalive()
+		return
+	}
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		r.toolOnlyFailed = true
+		return
+	}
+	r.toolCallBuf = append(r.toolCallBuf, string(raw))
+}
+
+// toolCallsComplete 续写段里每个工具调用都有名字、参数是空或完整的 JSON。
+func (r *continueReader) toolCallsComplete() bool {
+	for idx, name := range r.toolCallNames {
+		if strings.TrimSpace(name) == "" {
+			return false
+		}
+		if a := strings.TrimSpace(r.toolCallArgs[idx]); a != "" && !json.Valid([]byte(a)) {
+			return false
+		}
+	}
+	return true
 }
 
 // captureToolCallDeltas 累积「只采纳工具调用」段里的工具调用分片：name 与 arguments

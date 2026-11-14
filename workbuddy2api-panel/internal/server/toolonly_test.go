@@ -446,3 +446,64 @@ func TestTextYieldsToUser(t *testing.T) {
 		}
 	}
 }
+
+// toolOnly 段的工具分片（参数完整）：下面几个用例在它前后拼出各种「不该采纳」的形态。
+const toolOnlyCallFrame = `data: {"id":"t8","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_8","function":{"name":"read_file","arguments":"{\"path\":\"/etc/hosts\"}"}}]}}]}` + "\n\n"
+
+// TestToolOnlySettleRules 安全续写段的裁决：只有「正常收尾 + 完整工具调用」才采纳；
+// 正文/思考在任何位置都不能漏给客户端；截断、断流、报错、非法帧一律回滚到首段终态。
+// 每个用例都钉「终态恰好一个」——只查 Contains 抓不到「首段 stop + 续写段 length」双终态。
+func TestToolOnlySettleRules(t *testing.T) {
+	usage := `,"usage":{"prompt_tokens":106600,"completion_tokens":20,"total_tokens":106620}`
+	finish := func(fr string) string {
+		return `data: {"id":"t8","choices":[{"index":0,"delta":{},"finish_reason":"` + fr + `"}]` + usage + "}\n\n"
+	}
+	cases := []struct {
+		name   string
+		seg    string
+		adopt  bool
+		leak   string // 续写段里绝不能下发的片段
+		finish string // 期望的唯一终态
+	}{
+		{"工具分片之后的正文", toolOnlyCallFrame +
+			`data: {"id":"t8","choices":[{"index":0,"delta":{"content":"顺便解释一下这个调用。"}}]}` + "\n\n" +
+			`data: {"id":"t8","choices":[{"index":0,"delta":{"reasoning_content":"再想想别的。"}}]}` + "\n\n" +
+			finish("tool_calls") + "data: [DONE]\n\n", true, "顺便解释", "tool_calls"},
+		{"length 截断的工具调用", toolOnlyCallFrame + finish("length") + "data: [DONE]\n\n", false, "call_8", "stop"},
+		{"断流（无 finish 无 DONE）", toolOnlyCallFrame, false, "call_8", "stop"},
+		{"error 帧", toolOnlyCallFrame +
+			`data: {"error":{"message":"upstream boom","type":"server_error"}}` + "\n\n" + "data: [DONE]\n\n", false, "upstream boom", "stop"},
+		{"非法 JSON 帧", `data: {not json 泄漏片段` + "\n\n" + finish("stop") + "data: [DONE]\n\n", false, "泄漏片段", "stop"},
+		{"参数不是完整 JSON", `data: {"id":"t8","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_8","function":{"name":"read_file","arguments":"{\"path\":\"/etc"}}]}}]}` + "\n\n" +
+			finish("tool_calls") + "data: [DONE]\n\n", false, "call_8", "stop"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, c.seg })
+			r := newToolOnlyReader(t, up, toolLoopBody, segToolOnlyStop)
+			out, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if len(*reqs) != 1 {
+				t.Fatalf("应尝试续写一次，实际 %d 次", len(*reqs))
+			}
+			s := string(out)
+			if strings.Contains(s, c.leak) {
+				t.Fatalf("续写段的 %q 不该下发:\n%s", c.leak, s)
+			}
+			if n := strings.Count(s, `"finish_reason":`); n != 1 {
+				t.Fatalf("终态帧应恰好 1 个，实际 %d:\n%s", n, s)
+			}
+			if !strings.Contains(s, `"finish_reason":"`+c.finish+`"`) {
+				t.Fatalf("终态应为 %s:\n%s", c.finish, s)
+			}
+			if got := strings.Contains(s, "read_file"); got != c.adopt {
+				t.Fatalf("采纳=%v want %v:\n%s", c.adopt, got, s)
+			}
+			if !strings.Contains(s, "先看完整表单。") {
+				t.Fatalf("首段正文应照常保留:\n%s", s)
+			}
+		})
+	}
+}
