@@ -22,6 +22,7 @@
 package pool
 
 import (
+	"log"
 	"sort"
 	"time"
 )
@@ -273,6 +274,14 @@ func (p *Pool) loadWindowsLocked(windows map[string]stateModelWindow, now time.T
 		}
 		if p.windows == nil {
 			p.windows = map[string]*ModelWindow{}
+		}
+		// key 一律用 uid/model 重算，不信文件里的 key（审查 C6）：旧版分隔符或手改文件
+		// 会留下查不到的僵尸窗口，每轮巡检都对它发一次**真实计费**的探针。
+		want := windowKey(s.UID, s.Model)
+		if k != want {
+			log.Printf("WARN: [pool] 忽略窗口记录：key 与 uid/model 不一致（file=%q want=%q uid=%s model=%s）",
+				k, want, s.UID, s.Model)
+			continue
 		}
 		p.windows[k] = &ModelWindow{
 			UID:        s.UID,

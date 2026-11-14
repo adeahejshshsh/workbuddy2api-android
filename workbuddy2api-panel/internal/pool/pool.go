@@ -594,6 +594,9 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 	if e, ok := p.byUID[a.UID]; ok {
 		e.a = a            // 保留 credits/cooling 状态
 		e.needAuth = false // 拿到真实凭证：解除占位标记（bug P1-3）
+		// 换凭证可能换了域（占位期 realm 为空，规则按「两域全命中」展开）：必须重算，
+		// 否则规则会越权放行或误拦（审查 C5）。
+		p.recomputeRulesLocked()
 		return
 	}
 	if e, ok := p.parked[a.UID]; ok {
@@ -602,6 +605,7 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 		e.a = a
 		e.needAuth = false
 		p.byUID[a.UID] = e
+		p.recomputeRulesLocked() // 同 C5：域可能变了
 		p.dirty.Store(true)
 		return
 	}
