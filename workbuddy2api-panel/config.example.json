@@ -1,6 +1,7 @@
 {
   "listen": "127.0.0.1:7863",
   "api_key": "",
+  "admin_api_key": "",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": {

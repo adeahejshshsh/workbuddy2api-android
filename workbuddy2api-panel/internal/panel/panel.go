@@ -45,8 +45,18 @@ type Config struct {
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
-	RedisMode string               // "upstash" / "noop"，仅观测透出
-	Version   string               // 面板版本号（展示用）
+	// AdminAPIKey 面板专用门禁（admin_api_key）。**与下游客户端那把 api_key 分开**：
+	// 此前面板只认 api_key，于是「发给下游 Agent 的 key」等同于「全池管理员」——
+	// 任一客户端都能导出全池 refresh token、改写整份配置、删号停号。
+	//
+	// 语义：
+	//   - 配了 → /panel/* 全部要求这把 key；
+	//   - 没配 → 读接口回落到 api_key（保持既有部署可用），但**敏感接口一律 403**：
+	//     导出凭据、读写配置、导入、OAuth 登录、账号增删停改、以及任何上游写动作。
+	//     启动日志会打一条 WARN 提示补上 admin_api_key。
+	AdminAPIKey string
+	RedisMode   string // "upstash" / "noop"，仅观测透出
+	Version     string // 面板版本号（展示用）
 
 	// CreditHistory 积分历史账本（只读展示；写入由 upstream 的余额观察者完成）。
 	// nil 时接口返回空列表，不影响其它功能。（qcgzxw `826aaded`）
@@ -413,9 +423,21 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 此前是 60 多条路由逐条包 withAuth —— 哪天新增一条忘了包，就是**静默匿名公开**：
 	// 失效方向不安全，而且从代码上看不出来。收到这里之后，「未登记」的语义是 401
 	// 而不是 404，也顺带不暴露路径是否存在。
-	if !panelPublicPath(r.URL.Path) && !httpauth.VerifyBearer(r, p.apiKey()) {
-		writeErr(w, http.StatusUnauthorized, "invalid_api_key")
-		return
+	if !panelPublicPath(r.URL.Path) {
+		key, dedicated := p.apiKey()
+		switch {
+		case key == "":
+			// 全仓「api_key 为空 = 不鉴权」的既有语义（运维有意关掉鉴权时保持可用）。
+			// 注意：此时面板也全开——部署在反代/隧道之后请务必配上 admin_api_key。
+		case !dedicated && panelSensitivePath(r.Method, r.URL.Path):
+			writeErr(w, http.StatusForbidden,
+				"admin_key_required：该接口会导出凭据或改写状态，必须用独立的 admin_api_key；"+
+					"当前面板仍在用下游 api_key 当门禁")
+			return
+		case !httpauth.VerifyBearer(r, key):
+			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+			return
+		}
 	}
 	p.mux.ServeHTTP(w, r)
 }
@@ -448,12 +470,50 @@ func panelPublicPath(p string) bool {
 	return false
 }
 
-// apiKey 当前生效密钥（Live 优先，回落静态字段）。
-func (p *Panel) apiKey() string {
+// apiKey 当前生效的**面板**密钥：优先 admin_api_key（Live 热值优先），没有则回落
+// 网关 api_key（兼容既有部署）。返回的第二个值表示「面板有独立管理员密钥」。
+func (p *Panel) apiKey() (key string, dedicated bool) {
 	if p.cfg.Live != nil {
-		return p.cfg.Live.Load().APIKey
+		if k := p.cfg.Live.Load().AdminAPIKey; k != "" {
+			return k, true
+		}
+		return p.cfg.Live.Load().APIKey, false
 	}
-	return p.cfg.APIKey
+	if p.cfg.AdminAPIKey != "" {
+		return p.cfg.AdminAPIKey, true
+	}
+	return p.cfg.APIKey, false
+}
+
+// panelSensitivePath 会**泄漏凭据或改写状态**的接口：没有独立的 admin_api_key 时一律拒绝。
+//
+// 为什么单独列而不是「全部 /panel/api 都要 admin」：既有部署只配了 api_key，把整个面板
+// 一刀切会让人连只读页都打不开；而这些接口正好是 P0 的攻击面（导出全池 RT、改写配置、
+// 增删账号、代登录）。
+func panelSensitivePath(method, path string) bool {
+	switch {
+	case strings.HasPrefix(path, "/panel/api/export/"):
+		return true
+	case path == "/panel/api/config": // GET 回显密钥、POST 改写整份配置
+		return true
+	case strings.HasPrefix(path, "/panel/api/import/"):
+		return true
+	case strings.HasPrefix(path, "/panel/api/login/"):
+		return true
+	case strings.HasPrefix(path, "/panel/api/accounts/"):
+		// 账号列表（GET /panel/api/accounts）是只读的；带 uid 的子路径与任何写方法都算敏感。
+		if method != http.MethodGet {
+			return true
+		}
+		return strings.Count(strings.TrimPrefix(path, "/panel/api/accounts/"), "/") >= 0 && strings.TrimPrefix(path, "/panel/api/accounts/") != ""
+	case strings.HasPrefix(path, "/panel/api/campaign/claim"):
+		return true
+	case strings.HasPrefix(path, "/panel/api/admin/"):
+		return true
+	case strings.HasPrefix(path, "/panel/api/tasks/") && method != http.MethodGet:
+		return true
+	}
+	return false
 }
 
 // expiringSoonWindow 返回调度器当前生效的快过期路由窗口；测试面板无调度器时返回 0。
@@ -479,12 +539,14 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	// 余额刷新是异步长任务：前端要知道「还在跑」才能正确轮询（报告 #21）。
 	balanceRefreshing := p.cfg.Scheduler != nil && p.cfg.Scheduler.TaskRunning(scheduler.TaskBalance)
+	authKey, panelDedicated := p.apiKey()
+	_ = panelDedicated
 	writeJSON(w, http.StatusOK, map[string]any{
 		"balance_refreshing": balanceRefreshing,
 		"model_fallback":     p.modelFallbackTable(), // 面板标注「已路由至」
 		"version":            p.cfg.Version,
 		"uptime_sec":         int(time.Since(p.started).Seconds()),
-		"auth_required":      p.apiKey() != "",
+		"auth_required":      authKey != "",
 		"redis_mode":         p.cfg.RedisMode,
 		"sticky_sessions":    sticky,
 		"total":              total,

@@ -16,7 +16,10 @@ import (
 
 // Snapshot 一次读取的不可变配置视图。
 type Snapshot struct {
-	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权
+	APIKey string // 网关/面板共同鉴权密钥；空 = 不鉴权
+	// AdminAPIKey 面板专用门禁（admin_api_key）：与发给下游的 APIKey 分开，
+	// 避免「客户端 key 即全池管理员」。面板敏感接口要求它非空（见 panel/panel.go）。
+	AdminAPIKey          string
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
