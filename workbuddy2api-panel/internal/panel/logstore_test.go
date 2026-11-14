@@ -222,7 +222,9 @@ func TestRingBackfillsFromLogStore(t *testing.T) {
 	}
 	// 新写入必须照常入环 + 落盘（回填不能把写路径挂掉）。
 	r.Write([]byte("2026-11-09 10:00:00 fresh line\n"))
-	store2.Flush()
+	// 落盘在后台 goroutine 里做（见 Ring 注释）：断言前要显式刷一次，
+	// store2.Flush 已经是空操作（每行一次 write，没有内存缓冲可刷）。
+	r.Flush()
 	if got := r.Snapshot(); len(got) != 2 {
 		t.Fatalf("新写入后环条数 = %d want 2", len(got))
 	}

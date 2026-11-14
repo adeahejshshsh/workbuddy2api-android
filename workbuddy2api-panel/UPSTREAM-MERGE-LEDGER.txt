@@ -752,3 +752,16 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 | `8622073e` 加密 auth 回写保持加密 | 本仓**没有** `wbencrypted` 那套加密 auth 支持（`wbSealed` 字段都不存在），这条是对那个功能的修补，缺载体 |
 | `67386ae5` 到期日推算标记 / 告警限频 | 本仓没有 `upstream.ExpiryBucket`（按自然日聚合的到期桶，更早的上游提交未合），`Estimated` 无处可挂 |
 | `6be18704` 导入覆盖前求证有界并发 | 本仓 `importCockpit` 没有「覆盖前逐号求证」这一步，先把功能本身补齐才有得改 |
+
+### 第八批（已合：`ee74f54c`）
+
+| 部分 | 说明 |
+|---|---|
+| 落盘挪出 log 输出路径 | `Ring.Write` 就是 `log.SetOutput` 的出口，调用时 logger 的锁还攥着；此前 Write 里直接 `store.Append`（一次文件写 + bufio 判定），慢盘/磁盘满会把整个进程的日志卡死。现在 Write 只入队 + 发一个容量 1 的信号，后台 goroutine 在锁外写；队列上限 10000 行，溢出的只留在环里并计入 `storeDropped`。停机与导出前调 `Ring.Flush` |
+| 一行一次 write | bufio 攒批在缓冲满时会把一行拆进两次 write，与同机另一个进程的追加交错成坏行；进程被杀时缓冲里最多 48KB 直接丢，而事故现场恰恰在最后几行。改成一行一次 write（O_APPEND 下不与别的进程交错）；`LogStore.Flush` 变成空操作，要刷的是 `Ring.Flush` |
+| 钩子 | `main` 里 `defer pn.Logs().Flush()` 排在 `panelLogs.Close()` 之前（defer 后进先出）；日志导出前先 Flush |
+
+用例：上游 `logstore_write_test.go` 原样搬入（把 store 的锁攥住模拟「磁盘卡住」，Write 必须照样返回；以及「Append 不攒批」的直接断言）。既有回填用例改成显式 `Ring.Flush`。
+
+**注意**：本仓 `Ring` 没有上游那套「任务频道快照落盘（taskArchive）」，那一块来自更早的上游提交、本仓未合；
+本批只搬了与 `LogStore` 相关的那半（也就是这次事故相关的半）。

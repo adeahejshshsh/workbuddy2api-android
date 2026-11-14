@@ -494,6 +494,9 @@ func main() {
 			if err := pn.Logs().SetLogStore(panelLogs); err != nil {
 				log.Printf("WARN: 面板日志回填失败（不影响新日志）: %v", err)
 			}
+			// 落盘在 Ring 的后台 goroutine 里做：退出前先把排队的行写完，再关文件
+			// （defer 后进先出：这条在 Close 之前执行）。
+			defer pn.Logs().Flush()
 			defer panelLogs.Close()
 			log.Printf("[panel] 运行日志落盘 %s（保留 %d 天，上限 %d MiB）",
 				panelLogs.Dir(), cfg.Logging.PanelLogRetentionDays, cfg.Logging.PanelLogMaxMB)
