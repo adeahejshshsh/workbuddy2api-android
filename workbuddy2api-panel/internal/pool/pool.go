@@ -15,6 +15,9 @@ import (
 type Pool struct {
 	mu    sync.RWMutex
 	byUID map[string]*entry
+	// parked 被账号目录热重载移出池的条目（uid → 原条目，见 ParkMany）。文件回来时原样复活，
+	// 禁用、暂停、分组、冷却都还在；随 state.json 的 parked_accounts 落盘，文件缺席期间重启也不丢。
+	parked  map[string]*entry
 	// rules 模型规则表（id → 规则）。面板「模型规则」页维护，随 state.json 落盘。
 	rules   map[string]ModelRule
 	stateFp string
@@ -583,7 +586,45 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 		e.needAuth = false // 拿到真实凭证：解除占位标记（bug P1-3）
 		return
 	}
+	if e, ok := p.parked[a.UID]; ok {
+		// 热重载移出过的号回来了：沿用原条目，人工设的禁用/暂停/分组不因文件挪开一阵就丢。
+		delete(p.parked, a.UID)
+		e.a = a
+		e.needAuth = false
+		p.byUID[a.UID] = e
+		p.dirty.Store(true)
+		return
+	}
 	p.byUID[a.UID] = &entry{a: a}
+}
+
+// maxParked 暂存条目上限：外部脚本反复轮换大批账号时不让内存无界增长；满了就不再暂存（照旧删）。
+const maxParked = 4096
+
+// ParkMany 把账号移出池并暂存其状态（热重载用），只落盘一次；返回实际移出的 uid。
+// 与 RemoveMany 的差别只在暂存：面板手动删除是「不要了」，热重载删除是「文件暂时不见了」。
+func (p *Pool) ParkMany(uids []string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var removed []string
+	for _, uid := range uids {
+		e, ok := p.byUID[uid]
+		if !ok {
+			continue
+		}
+		delete(p.byUID, uid)
+		if len(p.parked) < maxParked {
+			if p.parked == nil {
+				p.parked = map[string]*entry{}
+			}
+			p.parked[uid] = e
+		}
+		removed = append(removed, uid)
+	}
+	if len(removed) > 0 && p.saveLocked() != nil {
+		p.dirty.Store(true)
+	}
+	return removed
 }
 
 // ReconcileResult Reconcile 对单个账号做了什么。

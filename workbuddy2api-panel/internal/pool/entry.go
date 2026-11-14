@@ -629,6 +629,9 @@ func (e *entry) windowTokens(model string, window time.Duration, now time.Time) 
 // stateFile 持久化格式。
 type stateFile struct {
 	Accounts map[string]stateAccount `json:"accounts"`
+	// Parked 被账号目录热重载暂存的号（pool.parked）。与 accounts 分开：它们不在池里，
+	// 文件回来时才重新入池，禁用/暂停/分组随之复活。缺省省略，旧文件照常读。
+	Parked map[string]stateAccount `json:"parked_accounts,omitempty"`
 	// ModelRules 模型规则表。与账号的 model_rules 引用分开存：规则可被多账号共用，
 	// 改一次所有挂它的账号立刻生效（不想让改规则变成逐账号的批量写）。
 	ModelRules []ModelRule `json:"model_rules,omitempty"`
