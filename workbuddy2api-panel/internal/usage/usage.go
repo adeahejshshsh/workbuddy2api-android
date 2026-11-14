@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -202,7 +203,10 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 		model = "(unknown)"
 	}
 	scope := "h:" + now.Format(hourLayout)
-	key := scope + "|" + realm + "|" + uid + "|" + model + "|" + d.ModelRate
+	// 键用**长度前缀**编码，不用裸分隔符（审查 A8）：model 是客户端可控字符串
+	// （网关对未登记模型名是透传的），带 `|` 的名字能拼出与另一账号/另一模型相同的桶键，
+	// 用量与积分就记到别人头上。长度前缀让每段的边界无歧义。
+	key := keyPart(scope) + keyPart(realm) + keyPart(uid) + keyPart(model) + keyPart(d.ModelRate)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -944,4 +948,9 @@ func (r *Recorder) Describe() string {
 		}
 	}
 	return fmt.Sprintf("%d buckets, file %d bytes", n, sz)
+}
+
+// keyPart 给桶键的一段加长度前缀：`len:val` 拼接后不可能有歧义。
+func keyPart(s string) string {
+	return strconv.Itoa(len(s)) + ":" + s
 }
