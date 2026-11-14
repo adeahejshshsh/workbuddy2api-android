@@ -26,9 +26,11 @@ package upstream
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -137,15 +139,57 @@ type packagesReply struct {
 // globalUserResource 国际版额度查询：summary 给总额，paid/free 明细补到期批次。
 // 返回值口径与 CN 路径完全一致（remain/total/expiring/earliest/earliestRemaining），
 // 上游调用方无感知。
-func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
+// ExpiryBucket 单个自然日到期的积分合计（按真实失效时刻聚合）。
+//
+//   - Date 为该日（UTC+8，YYYY-MM-DD），前端按这个日期分组展示；
+//   - ExpireAt 是该日最早一批的精确时刻；
+//   - Remain 是该日所有正余额包的剩余量之和；
+//   - Estimated 该日额度里至少有一批的到期日是**按计量周期（CycleEndTime）推算**的，
+//     不是上游给出的真实扣费截止（缺 DeductionEndTime / ExpiredTime 时的回退）。面板据此
+//     标注「按计量周期推算」，避免运维把推算值当权威日期（issue #200）。
+type ExpiryBucket struct {
+	Date      string    `json:"date"`
+	ExpireAt  time.Time `json:"expires_at,omitempty"`
+	Remain    int64     `json:"remain"`
+	Estimated bool      `json:"estimated,omitempty"`
+}
+
+// estimatedExpiryWarnEvery 同一账号「到期日只能推算」WARN 的最小间隔。余额刷新每 5 分钟
+// 一轮，而这个状态由上游数据形态决定、短时间内不会变；不限频会让每个号每天刷 288 行
+// 同样的日志。变量供测试缩短。
+var estimatedExpiryWarnEvery = time.Hour
+
+var estimatedExpiryWarned sync.Map // uid -> time.Time（上次 WARN 的时刻）
+
+// estimatedExpiryWarnDue 返回该账号这次是否该写 WARN，并记下时刻。
+func estimatedExpiryWarnDue(uid string, now time.Time) bool {
+	// 多个刷新协程可能同时算同一账号：用 LoadOrStore + CompareAndSwap，
+	// 保证同一间隔内只有一个调用方拿到 true。
+	for {
+		v, loaded := estimatedExpiryWarned.LoadOrStore(uid, now)
+		if !loaded {
+			return true
+		}
+		if now.Sub(v.(time.Time)) < estimatedExpiryWarnEvery {
+			return false
+		}
+		if estimatedExpiryWarned.CompareAndSwap(uid, v, now) {
+			return true
+		}
+	}
+}
+
+// globalUserResourceBuckets 同 globalUserResource，另外给出「按自然日聚合的到期桶」
+// （面板首页与到期提醒用）。两个入口共用同一份实现，口径不会漂移。
+func (c *Client) globalUserResourceBuckets(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, buckets []ExpiryBucket, err error) {
 	// summary 是主口径，失败即整次失败（明细单独拿到也没总额可对）。
 	raw, err := c.billingJSON(a, "POST", billingSummaryPath, map[string]any{})
 	if err != nil {
-		return 0, 0, 0, time.Time{}, 0, err
+		return 0, 0, 0, time.Time{}, 0, nil, err
 	}
 	var sum summaryReply
 	if uerr := json.Unmarshal(billingInner(raw, "Packages"), &sum); uerr != nil {
-		return 0, 0, 0, time.Time{}, 0, fmt.Errorf("billing summary parse: %w", uerr)
+		return 0, 0, 0, time.Time{}, 0, nil, fmt.Errorf("billing summary parse: %w", uerr)
 	}
 	// 顺手记下这个号是不是付费号：选号对 exclusive 模型（免费号调不通）据此跳过它。
 	// 零额外请求——这个字段本来就在 summary 里，此前只解析不用。
@@ -179,8 +223,9 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 	// CycleEndTime 逐月递推）。按码归并——每个包只该贡献一次余额，且只认该码**最早
 	// 的未来到期**那条（真正会先扣完的那一期）。不归并会把同一笔余额重复计入 N 次。
 	type pick struct {
-		d   packageDetail
-		end time.Time
+		d         packageDetail
+		end       time.Time
+		estimated bool // 到期日是按计量周期推算的
 	}
 	// 归并的最小单位是 **（PackageCode, 计量周期）**，不是 PackageCode 本身。
 	//
@@ -199,7 +244,7 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 	}
 	merged := make(map[cycleKey]pick, len(details))
 	for _, d := range details {
-		end, ok := packageEndAt(d.DeductionEndTime, d.ExpiredTime, d.CycleEndTime)
+		end, ok, estimated := packageEndAt(d.DeductionEndTime, d.ExpiredTime, d.CycleEndTime)
 		if !ok || !end.After(now) {
 			continue
 		}
@@ -207,11 +252,11 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 		if cur, seen := merged[k]; seen {
 			// 同一批可能同时出现在 paid / free 两条端点：留剩余更大的一条。
 			if d.balanceRemain() > cur.d.balanceRemain() {
-				merged[k] = pick{d: d, end: end}
+				merged[k] = pick{d: d, end: end, estimated: estimated}
 			}
 			continue
 		}
-		merged[k] = pick{d: d, end: end}
+		merged[k] = pick{d: d, end: end, estimated: estimated}
 	}
 	// 每个码有多少个未来周期：只有一个时「借 summary 余额」不会跨周期串味（历史行为，
 	// 覆盖「明细自报 0 而 summary 有数」的套餐型包）；多个时一律不借。
@@ -219,7 +264,7 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 	for k := range merged {
 		futurePerCode[k.code]++
 	}
-	byDate := make(map[string]int64)
+	byDate := make(map[string]*ExpiryBucket)
 	for k, p := range merged {
 		// 每行用**自己的**剩余；只有单周期码才允许回落到 summary 的余额。
 		r := int64(p.d.balanceRemain())
@@ -237,21 +282,53 @@ func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, t
 			earliestAt = end
 		}
 		day := end.In(softRateResetLoc).Format("2006-01-02")
-		byDate[day] += r
+		b, seen := byDate[day]
+		if !seen {
+			b = &ExpiryBucket{Date: day, ExpireAt: end}
+			byDate[day] = b
+		} else if end.Before(b.ExpireAt) {
+			b.ExpireAt = end
+		}
+		if p.estimated {
+			// 同日多批里只要有一批是推算的，整行就标注——面板一行只展示「该日」，
+			// 混了两种口径时保守地显示为推算。
+			b.Estimated = true
+		}
+		b.Remain += r
 		if soon > 0 && !end.After(now.Add(soon)) {
 			expiring += r
 		}
 	}
+	var estimateCount int
 	if len(byDate) > 0 {
 		dates := make([]string, 0, len(byDate))
 		for d := range byDate {
 			dates = append(dates, d)
 		}
 		sort.Strings(dates)
-		earliestRemaining = byDate[dates[0]]
+		buckets = make([]ExpiryBucket, 0, len(dates))
+		for _, d := range dates {
+			buckets = append(buckets, *byDate[d])
+			if byDate[d].Estimated {
+				estimateCount++
+			}
+		}
+		earliestRemaining = buckets[0].Remain
+	}
+	if estimateCount > 0 && a != nil && estimatedExpiryWarnDue(a.UID, now) {
+		// 日期是按计量周期末日推算的（缺 DeductionEndTime / ExpiredTime）。仍然计入，
+		// 但留一行 WARN：这个口径不对等于真实扣费截止，排障时别被它带偏。
+		log.Printf("WARN: [billing] %d 个自然日的到期日只能按计量周期（CycleEndTime）推算，非真实扣费截止（acct=%s）",
+			estimateCount, a.UID)
 	}
 	c.notifyCredits(a, remain, nil)
-	return remain, total, expiring, earliestAt, earliestRemaining, nil
+	return remain, total, expiring, earliestAt, earliestRemaining, buckets, nil
+}
+
+// globalUserResource 兼容旧调用方：只关心余额与最早到期，不要桶。
+func (c *Client) globalUserResource(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
+	remain, total, expiring, earliestAt, earliestRemaining, _, err = c.globalUserResourceBuckets(a, soon)
+	return
 }
 
 // globalCreditPackages 国际版的逐包构成（面板「积分构成」用），口径与 CN 的
@@ -277,12 +354,13 @@ func (c *Client) globalCreditPackages(a *auth.Auth) ([]CreditPackage, int64, int
 	}
 	// 每个码取「最早未来到期」那条，用于补 EndTime / PackageName。
 	type pick struct {
-		d   packageDetail
-		end time.Time
+		d         packageDetail
+		end       time.Time
+		estimated bool // 到期日是按计量周期推算的
 	}
 	best := make(map[string]pick, len(codes))
 	for _, d := range c.globalPackageDetails(a, codes) {
-		end, ok := packageEndAt(d.DeductionEndTime, d.ExpiredTime, d.CycleEndTime)
+		end, ok, _ := packageEndAt(d.DeductionEndTime, d.ExpiredTime, d.CycleEndTime)
 		if !ok || !end.After(now) {
 			continue
 		}
@@ -402,12 +480,15 @@ func (d packageDetail) balanceRemain() float64 {
 // 而优先烧掉（实测 2026-10-03：「CodeBuddy 个人体验版」cycle=2026-10-31 而
 // deduction=2034-12-24，余额 500 分）。回退 ExpiredTime（仅在包失效后才回填）
 // → CycleEndTime。都缺 → 无到期（保守：不参与「先烧快到期的」排序）。
-func packageEndAt(deductionMS int64, expired, cycleEnd string) (time.Time, bool) {
+// packageEndAt 这一批的到期时刻。第三个返回值表示**是按计量周期推算**的（缺真实扣费截止
+// 时的回退）——面板据此标注，别把推算值当权威日期。
+func packageEndAt(deductionMS int64, expired, cycleEnd string) (time.Time, bool, bool) {
 	if deductionMS > 0 {
-		return time.UnixMilli(deductionMS).In(softRateResetLoc), true
+		return time.UnixMilli(deductionMS).In(softRateResetLoc), true, false
 	}
 	if t, ok := parsePackageEndTime(expired); ok {
-		return t, true
+		return t, true, false
 	}
-	return parsePackageEndTime(cycleEnd)
+	t, ok := parsePackageEndTime(cycleEnd)
+	return t, ok, ok
 }
