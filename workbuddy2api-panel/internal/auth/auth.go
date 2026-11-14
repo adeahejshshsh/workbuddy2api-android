@@ -914,7 +914,16 @@ func jwtTokenSource(token string) string {
 
 // writeFileSync 写文件并 fsync 落盘（rename 前必须先落盘，见 ReplaceAtomic 注释）。
 func writeFileSync(path string, raw []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	// O_NOFOLLOW（审查 A3）：临时文件名是 `path.tmp.<pid>.<seq>`，同机可预置同名符号链接
+	// 把这次写入重定向到任意路径（例如覆盖别人的 config.json）。O_EXCL 顺带保证「只创建
+	// 新文件」，不会跟随已存在的东西。
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL | syscall.O_NOFOLLOW
+	f, err := os.OpenFile(path, flags, mode)
+	if errors.Is(err, fs.ErrExist) {
+		// 极端情况下序号/profile 撞名：退一步用 O_TRUNC 但**仍不跟随符号链接**，
+		// 否则就等于把这条路径整个放弃（O_TRUNC 会跟随链接）。
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+	}
 	if err != nil {
 		return err
 	}

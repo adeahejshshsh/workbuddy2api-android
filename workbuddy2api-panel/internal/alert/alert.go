@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -355,7 +357,9 @@ func (m *Monitor) post(p Payload, tag string) {
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		log.Printf("WARN: [alert] webhook post failed rule=%s: %v", tag, err)
+		// 只记 host：*url.Error 的 Error() 带完整 URL，path/query 里的 token 会直接进日志
+		// （审查 A2）。webhook 常把凭据放在 query（?token=…）或 path 段里。
+		log.Printf("WARN: [alert] webhook post failed rule=%s host=%s: %v", tag, webhookHost(m.cfg.WebhookURL), unwrapURLErr(err))
 		return
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
@@ -363,4 +367,22 @@ func (m *Monitor) post(p Payload, tag string) {
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		log.Printf("WARN: [alert] webhook returned %d rule=%s", resp.StatusCode, tag)
 	}
+}
+
+// webhookHost 只取 scheme://host，用于日志（不带 path/query 里的凭据）。
+func webhookHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "(invalid)"
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// unwrapURLErr 把 *url.Error 拆成底层错误：默认 Error() 会拼出完整 URL。
+func unwrapURLErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }

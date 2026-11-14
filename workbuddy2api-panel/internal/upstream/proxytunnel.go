@@ -48,7 +48,13 @@ func proxyForAddr(addr string) (*url.URL, error) {
 // dialOutbound 建立到 addr 的裸 TCP 连接：有代理走隧道，无代理直连。
 func dialOutbound(ctx context.Context, d *net.Dialer, addr string) (net.Conn, error) {
 	pu, err := proxyForAddr(addr)
-	if err != nil || pu == nil {
+	if err != nil {
+		// 「查代理出错」与「没有代理」必须分开（审查 A1）：并进 nil 分支就是**静默直连**——
+		// 配了代理的部署在代理失效那一瞬间会用真实 IP 打上游（风控/关联封号面）。
+		// 这个文件其它地方都写着「绝不静默直连」，这里也一样：出错就 fail-fast。
+		return nil, fmt.Errorf("解析 %s 的代理配置失败（拒绝直连）：%w", addr, err)
+	}
+	if pu == nil {
 		return d.DialContext(ctx, "tcp", addr)
 	}
 	conn, err := dialTunnel(ctx, d, pu, addr)
