@@ -35,14 +35,14 @@ func looksLikeJSON(payload string) bool {
 	return t[0] == '{' || t[0] == '['
 }
 
-// splitConcatenatedJSON 把首尾相接的多个 JSON 值切成独立字符串。
+// SplitConcatenatedJSON 把首尾相接的多个 JSON 值切成独立字符串。
 //
 // 切法：按字节扫描，跟踪字符串状态（含 \ 转义）与 {}、[] 嵌套深度；深度从 0 回到 0
 // 且下一个非空白字节与当前值首尾相接，就切一刀。每个值单独再验证一次 json 合法性
 // ——宁可少切（返回单元素走原样透传），也不产出半截对象把客户端带偏。
 //
 // 返回值：len>1 表示确实拆开了；len==1 表示「本来就是一个值」或「切不动」。
-func splitConcatenatedJSON(payload string) []string {
+func SplitConcatenatedJSON(payload string) []string {
 	trimmed := strings.TrimSpace(payload)
 	if trimmed == "" {
 		return []string{payload}
