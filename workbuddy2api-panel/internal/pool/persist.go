@@ -166,6 +166,7 @@ func (p *Pool) load() {
 	}
 	p.applyAccountsLocked(sf.Accounts)
 	p.loadParkedLocked(sf.Parked)
+	p.loadWindowsLocked(sf.Windows, time.Now())
 	p.applyRulesLocked(sf.ModelRules)
 }
 
@@ -323,6 +324,7 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.parked = nil
 	p.applyAccountsLocked(s.Accounts)
 	p.loadParkedLocked(s.Parked)
+	p.loadWindowsLocked(s.Windows, time.Now())
 	p.applyRulesLocked(s.ModelRules)
 }
 
@@ -405,6 +407,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		}
 		sf.Parked[uid] = stateOf(e, now)
 	}
+	sf.Windows = p.windowsStateLocked(now)
 	// 规则表整体写出：规则本体 + 每个账号的引用都在一张 state.json 里，
 	// 单文件快照才不会出现「账号指向了不存在的规则」。
 	if len(p.rules) > 0 {

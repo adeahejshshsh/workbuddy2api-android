@@ -15,6 +15,10 @@ import (
 type Pool struct {
 	mu    sync.RWMutex
 	byUID map[string]*entry
+	// windows 额度窗口登记表（window.go）：429 带重置时刻时登记，排程到点发探针起窗。
+	// 排程语义（到点该发请求），与模型级冷却（路由语义）不同生命周期，故独立存。
+	windows map[string]*ModelWindow
+
 	// parked 被账号目录热重载移出池的条目（uid → 原条目，见 ParkMany）。文件回来时原样复活，
 	// 禁用、暂停、分组、冷却都还在；随 state.json 的 parked_accounts 落盘，文件缺席期间重启也不丢。
 	parked  map[string]*entry

@@ -632,6 +632,10 @@ type stateFile struct {
 	// Parked 被账号目录热重载暂存的号（pool.parked）。与 accounts 分开：它们不在池里，
 	// 文件回来时才重新入池，禁用/暂停/分组随之复活。缺省省略，旧文件照常读。
 	Parked map[string]stateAccount `json:"parked_accounts,omitempty"`
+	// Windows 额度窗口登记表（window.go）。放在顶层而不是每个 stateAccount 里：
+	// 它是排程语义（到点发探针），不是账号路由状态，跟着账号走会让「删号重加」顺手把窗口也删掉
+	// ——而额度窗口是上游侧的客观事实，与本地账号记录无关。
+	Windows map[string]stateModelWindow `json:"windows,omitempty"`
 	// ModelRules 模型规则表。与账号的 model_rules 引用分开存：规则可被多账号共用，
 	// 改一次所有挂它的账号立刻生效（不想让改规则变成逐账号的批量写）。
 	ModelRules []ModelRule `json:"model_rules,omitempty"`
