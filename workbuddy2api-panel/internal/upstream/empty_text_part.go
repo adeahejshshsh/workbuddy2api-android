@@ -18,7 +18,7 @@
 // 更需要兜住的是最后一行背后那条规律：**字符串 content 只要去空白后以 `[` 开头，
 // 上游就会把它当 parts 数组解析**。工具结果里常见的表单/按钮抓取恰好是这个形状
 // （`[{"type":"text","text":""},…]`），于是一段本该是「数据」的字符串被嗅探成一个
-// 空文本段。这里按同一口径嗅探、补值、重新序列化。
+// 空文本段。这里按同一口径嗅探，只在字节层面补值，其余原文不动。
 //
 // 修法是**只补值、不删段**：空 text 段填一个空格。删段会改段落数量与下标（客户端
 // 侧的多模态顺序、工具结果的段序都可能被别处引用），而补一个空格对模型上下文没有
@@ -81,57 +81,136 @@ func guardEmptyTextParts(messages []any) {
 		case string:
 			// 字符串信封被上游当 parts 嗅探：只有「解析出非空对象数组」才算，否则原样
 			// 保留（普通文本、数字、以 [ 开头但解析失败的串都不动）。
-			parts := sniffParts(v)
-			if parts == nil {
-				continue
-			}
-			if !fillEmptyTextParts(parts) {
-				continue
-			}
-			if nb, err := json.Marshal(parts); err == nil {
-				msg["content"] = string(nb)
+			if s, ok := fillSniffedEmptyText(v); ok {
+				msg["content"] = s
 			}
 		}
 	}
 }
 
-// sniffParts 复刻上游的嗅探口径：字符串去前导空白后以 `[` 开头、且能解析成
-// 「非空的对象数组」时返回该数组，否则 nil（表示上游不会把它当 parts）。
-func sniffParts(content string) []any {
+// textSpan 待替换的字节区间 [start,end) 与替换内容；start==end 表示插入。
+type textSpan struct {
+	start, end int
+	repl       string
+}
+
+// fillSniffedEmptyText 对「会被上游当 parts 嗅探」的字符串补位，返回新串与是否改动。
+//
+// 只在字节层面改空段的 text 值（缺失时插入 text 键），其余字节一律不动。这串多半是
+// 工具输出：整体 Unmarshal+Marshal 会把大整数转成 float64 丢精度、把 < > & 转义成
+// <、按字母序重排对象键，模型看到的工具结果就不再是客户端发来的那份。
+func fillSniffedEmptyText(content string) (string, bool) {
 	stripped := strings.TrimLeft(content, " \t\r\n")
-	if !strings.HasPrefix(stripped, "[") {
-		return nil
+	lead := len(content) - len(stripped)
+	if !strings.HasPrefix(stripped, "[") || !json.Valid([]byte(stripped)) {
+		return content, false
 	}
-	var parts []any
-	if err := json.Unmarshal([]byte(stripped), &parts); err != nil {
-		return nil
+	elems, ok := rawElements(stripped, '[')
+	// 空数组或含非对象元素：上游不把它当 parts。
+	if !ok || len(elems) == 0 {
+		return content, false
 	}
-	if len(parts) == 0 {
-		return nil
-	}
-	for _, p := range parts {
-		if _, ok := p.(map[string]any); !ok {
-			return nil
+	var spans []textSpan
+	for _, e := range elems {
+		raw := stripped[e.start:e.end]
+		if raw[0] != '{' {
+			return content, false
+		}
+		if sp, ok := emptyTextSpan(raw); ok {
+			sp.start += e.start
+			sp.end += e.start
+			spans = append(spans, sp)
 		}
 	}
-	return parts
+	if len(spans) == 0 {
+		return content, false
+	}
+	var b strings.Builder
+	b.Grow(len(content) + 16*len(spans))
+	b.WriteString(content[:lead])
+	prev := 0
+	for _, sp := range spans {
+		b.WriteString(stripped[prev:sp.start])
+		b.WriteString(sp.repl)
+		prev = sp.end
+	}
+	b.WriteString(stripped[prev:])
+	return b.String(), true
 }
 
-// fillEmptyTextParts 就地补位，返回是否有改动。
-func fillEmptyTextParts(parts []any) bool {
-	changed := false
-	for _, rawPart := range parts {
-		part, ok := rawPart.(map[string]any)
-		if !ok || partType(part) != "text" {
-			continue
-		}
-		if !isEmptyText(part) {
-			continue
-		}
-		part["text"] = emptyTextPartFill
-		changed = true
+// rawElements 列出一个 JSON 数组（open='['）的元素或对象（open='{'）的值在 src 中的
+// 字节区间（src 必须已是合法 JSON）。对象时同时给出每个值的键名。
+//
+// 区间由 Decoder.InputOffset 减去原始值长度推出；再逐一核对区间内容与解码出的原文
+// 一致，任何不一致都按「无法定位」放弃——宁可不补，也不写坏客户端的数据。
+func rawElements(src string, open byte) ([]rawElem, bool) {
+	dec := json.NewDecoder(strings.NewReader(src))
+	dec.UseNumber()
+	if tok, err := dec.Token(); err != nil || tok != json.Delim(open) {
+		return nil, false
 	}
-	return changed
+	var out []rawElem
+	for dec.More() {
+		var key string
+		if open == '{' {
+			tok, err := dec.Token()
+			if err != nil {
+				return nil, false
+			}
+			key, _ = tok.(string)
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, false
+		}
+		end := int(dec.InputOffset())
+		start := end - len(raw)
+		if start < 0 || src[start:end] != string(raw) {
+			return nil, false
+		}
+		out = append(out, rawElem{key: key, start: start, end: end})
+	}
+	return out, true
+}
+
+type rawElem struct {
+	key        string
+	start, end int
+}
+
+// emptyTextSpan 判断一个对象原文是否为「上游会判空的 text 段」，是则给出补位编辑。
+// 重复键按最后一次出现为准（与解析成 map 的口径一致）。
+func emptyTextSpan(obj string) (textSpan, bool) {
+	fields, ok := rawElements(obj, '{')
+	if !ok {
+		return textSpan{}, false
+	}
+	typ, text := -1, -1
+	for i, f := range fields {
+		switch f.key {
+		case "type":
+			typ = i
+		case "text":
+			text = i
+		}
+	}
+	if typ < 0 {
+		return textSpan{}, false
+	}
+	var t string
+	if json.Unmarshal([]byte(obj[fields[typ].start:fields[typ].end]), &t) != nil || t != "text" {
+		return textSpan{}, false
+	}
+	fill, _ := json.Marshal(emptyTextPartFill)
+	if text < 0 {
+		// 缺失：紧跟 `{` 插入。对象至少有 type 键，后面补逗号合法。
+		return textSpan{start: 1, end: 1, repl: `"text":` + string(fill) + `,`}, true
+	}
+	v := obj[fields[text].start:fields[text].end]
+	if v != "null" && v != `""` {
+		return textSpan{}, false
+	}
+	return textSpan{start: fields[text].start, end: fields[text].end, repl: string(fill)}, true
 }
 
 // partType 取段类型。上游只对精确的 "text" 做校验，"textarea" 这类未知 type 被忽略，

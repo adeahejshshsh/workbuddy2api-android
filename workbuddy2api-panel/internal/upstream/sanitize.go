@@ -13,12 +13,7 @@ import (
 // sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
 // 普通请求全不中 → 原样返回，零分配）。
 var sanitizeFeatures = []string{
-	"x-anthropic-billing-hdr", // header 键值段键名
-	// 上游服务端注入的身份指令（issue #187）。必须挂在**通用**门控上：泄漏出现在
-	// assistant 消息（模型复述注入原文），而 identity 门控只对 system/developer 生效，
-	// 挂错门控等于规则永远不执行。
-	"identify yourself as",
-	"model_identity",
+	"x-anthropic-billing-header",                      // header 键值段键名
 	"You are Claude Code",                             // 身份句（截断前缀即可命中）
 	"branch (you will usually use this for PRs)",      // 注入指令句（Main/Default 两种前缀都覆盖）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段
@@ -74,10 +69,27 @@ const sanitizeDshPathsReplacement = "Paths beginning with @ refer to files the u
 // 单独匹配 identify yourself as 会误伤正常指令（"Do not identify yourself as an AI."
 // 是合法要求），而整句前缀在真实语料里几乎不可能自然出现。
 var sanitizeInjectedIdentityRe = regexp.MustCompile(
-	`(?i)when asked about your[^.\n]{0,60}?identity[^.\n]{0,60}?,\s*identify yourself as\s+[^.\n]{1,80}\.`)
+	`(?i)when asked about your[^.\n]{0,60}?identity[^.\n]{0,60}?,\s*identify yourself as\s+[^\n]{1,80}?\.(\W|$)`)
 
 // 替换成中性表述：不声明任何身份，也不改变上下文里真实可用的信息。
-const sanitizeInjectedIdentityReplacement = "When asked about your capabilities, answer using only the information available in this conversation."
+const sanitizeInjectedIdentityReplacement = "When asked about your capabilities, answer using only the information available in this conversation.${1}"
+
+// 注入身份指令的两个探针（小写）。门控与正则都按 ASCII 忽略大小写：正则是 (?i)，
+// 门控若按原文大小写比对，"Identify yourself as" 这类复述就会在门口被放过。
+//
+// 作用域只有滚雪球的载体：assistant 的正文与任意消息的 reasoning_content / reasoning
+// （见 scrubInjectedIdentity 的调用处）。system / user 里的同形句是用户自己写的人设
+// （"When asked about your identity, identify yourself as Aria, the Acme assistant."），
+// 改写它等于篡改用户的提示词。
+const (
+	injectedIdentityProbe = "identify yourself as"
+	modelIdentityTagProbe = "model_identity"
+)
+
+// containsFoldASCII 大小写不敏感的子串查找（只折 ASCII：探针本身就是小写 ASCII）。
+func containsFoldASCII(s, sub string) bool {
+	return strings.Contains(strings.ToLower(s), sub)
+}
 
 // sanitizeModelIdentityTagRe 去掉 <model_identity> 包裹本身（保留内部文本）。
 //
@@ -96,7 +108,7 @@ var sanitizeHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-(?:hdr|header)[ 
 // 注意该正则不要求冒号，是 sanitizeHdrRe 的超集——hasFingerprint 与 sanitizeText
 // 中两者并用：先删键值形态（sanitizeHdrRe），再缩写残留裸键名（本正则），
 // 替换语义不同（整段删除 vs 最小缩写），不可合并为一个正则。
-var sanitizeBareHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-(?:hdr|header)`)
+var sanitizeBareHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header`)
 
 // sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
 var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
@@ -214,14 +226,6 @@ func sanitizeTextWith(text string, brand bool) string {
 	}
 	// 数字错误码单独走边界正则（见 sanitizeCodeRe 注释）
 	text = sanitizeCodeRe.ReplaceAllString(text, "${1}11\u2011-128${2}")
-	// 上游服务端注入的身份指令（issue #187）：不限角色，assistant 复述同样要洗——
-	// 那段复述正是历史回流的载体。
-	if strings.Contains(text, "identify yourself as") {
-		text = sanitizeInjectedIdentityRe.ReplaceAllString(text, sanitizeInjectedIdentityReplacement)
-	}
-	if strings.Contains(text, "model_identity") {
-		text = sanitizeModelIdentityTagRe.ReplaceAllString(text, "")
-	}
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
@@ -233,7 +237,7 @@ func sanitizeTextWith(text string, brand bool) string {
 		}
 	}
 	// 兜底：键值形态已在上面整段删除，这里只剩裸键名（引用/示例文本形态）。
-	text = sanitizeBareHdrRe.ReplaceAllString(text, "x-anthropic-hdr")
+	text = sanitizeBareHdrRe.ReplaceAllString(text, "x-anthropic-billing-hdr")
 	// @ 路径说明段：整段同义改写（段内无品牌词，前面所有规则都碰不到它）。
 	if strings.Contains(text, sanitizeDshPathsProbe) {
 		text = sanitizeDshPathsRe.ReplaceAllString(text, sanitizeDshPathsReplacement)
@@ -241,6 +245,19 @@ func sanitizeTextWith(text string, brand bool) string {
 	// 不能 TrimSpace（BUG-02）：只要某条消息命中任一指纹，整段正文的缩进、行首空格、
 	// 行尾空白都会被删掉，代码块/缩进结构被静默破坏，而且 sanitizeContent 因
 	// s != c 判成「已改写」，没有任何日志。剥离留下的空白留着即可。
+	return text
+}
+
+// scrubInjectedIdentity 改掉上游服务端注入、又被模型复述回历史的身份指令（issue #187），
+// 并去掉 <model_identity> 标签本身。只对滚雪球的载体调用（见 sanitizeMessages），不 TrimSpace，
+// 不命中时原样返回。
+func scrubInjectedIdentity(text string) string {
+	if containsFoldASCII(text, injectedIdentityProbe) {
+		text = sanitizeInjectedIdentityRe.ReplaceAllString(text, sanitizeInjectedIdentityReplacement)
+	}
+	if containsFoldASCII(text, modelIdentityTagProbe) {
+		text = sanitizeModelIdentityTagRe.ReplaceAllString(text, "")
+	}
 	return text
 }
 
@@ -271,9 +288,14 @@ func hasFingerprint(text string) bool {
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
 // 返回净化后的值及是否发生变化。
 func sanitizeContent(v any, brand bool) (any, bool) {
+	return mapContentText(v, func(s string) string { return sanitizeTextWith(s, brand) })
+}
+
+// mapContentText 对字符串 content 或多模态数组里每个 text part 应用 f。
+func mapContentText(v any, f func(string) string) (any, bool) {
 	switch c := v.(type) {
 	case string:
-		s := sanitizeTextWith(c, brand)
+		s := f(c)
 		return s, s != c
 	case []any:
 		changed := false
@@ -286,7 +308,7 @@ func sanitizeContent(v any, brand bool) (any, bool) {
 			if !ok {
 				continue
 			}
-			if s := sanitizeTextWith(text, brand); s != text {
+			if s := f(text); s != text {
 				m["text"] = s
 				changed = true
 			}
@@ -382,10 +404,18 @@ func sanitizeMessages(messages []any, brandGlobal bool) bool {
 		identity := strings.EqualFold(strings.TrimSpace(role), "system") ||
 			strings.EqualFold(strings.TrimSpace(role), "developer")
 		brand := brandGlobal || identity
+		clean := func(s string) string { return sanitizeTextWith(s, brand) }
+		// 思维链字段与 assistant 正文是注入身份指令的回流载体（scrubInjectedIdentity）；
+		// system / user 的正文不在此列，那里同形的句子是用户自己写的人设。
+		carrier := func(s string) string { return scrubInjectedIdentity(clean(s)) }
+		contentClean := clean
+		if strings.EqualFold(strings.TrimSpace(role), "assistant") {
+			contentClean = carrier
+		}
 		// content 与 tool_calls 各自独立判断：content 可以为 null（工具调用轮），
 		// 早期版本在此 continue，导致这类消息的 tool_calls 完全不被净化。
 		if c, ok := m["content"]; ok {
-			if nc, ch := sanitizeContent(c, brand); ch {
+			if nc, ch := mapContentText(c, contentClean); ch {
 				m["content"] = nc
 				changed = true
 			}
@@ -393,7 +423,7 @@ func sanitizeMessages(messages []any, brandGlobal bool) bool {
 		// reasoning_content（思维链回填字段，见 thinking.go/sse.go）实测同样
 		// 携带指纹，与 content 同等净化。string 形态直接走 sanitizeText。
 		if rc, ok := m["reasoning_content"].(string); ok {
-			if s := sanitizeTextWith(rc, brand); s != rc {
+			if s := carrier(rc); s != rc {
 				m["reasoning_content"] = s
 				changed = true
 			}
@@ -403,7 +433,7 @@ func sanitizeMessages(messages []any, brandGlobal bool) bool {
 		// reasoning_content / tool_calls —— 镜像进 reasoning 的指纹原样出站，
 		// 裸 "11128" 这种反探测串同样致命。
 		if r, ok := m["reasoning"].(string); ok {
-			if s := sanitizeTextWith(r, brand); s != r {
+			if s := carrier(r); s != r {
 				m["reasoning"] = s
 				changed = true
 			}

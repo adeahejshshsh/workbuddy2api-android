@@ -123,11 +123,9 @@ func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, 
 	//   - 空 text 段（11151）：客户端重试只会重放同一段历史，换号也救不回来；
 	//   - reasoning 镜像：Kimi/GLM/MiniMax 等按 `reasoning` 读历史，只看
 	//     reasoning_content 的话它们的多轮一致性校验会挂。
-	// 位置必须在 repack/cleanup 之后：那两步会把字符串 content 挪到别的消息上，
-	// 先补位再挪动等于漏掉被挪过去的那一段。
-	if msgs, ok := obj["messages"].([]any); ok {
-		guardEmptyTextParts(msgs)
-	}
+	// 位置必须在 repack/cleanup 之后（那两步会把字符串 content 挪到别的消息上，先补位
+	// 再挪动等于漏掉被挪过去的那一段），也必须在 sanitize 之后（只含指纹的 text 段会被
+	// 净化洗成空串，先补位的话出站仍带 ""，照样 11151）。
 	mirrorUpstreamReasoning(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
@@ -136,6 +134,9 @@ func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, 
 		// 工具描述同样要洗：客户端作者把身份句写进 description 时，只洗 messages
 		// 等于整段原样出站（见 sanitizeTools 注释）。
 		sanitizeTools(obj["tools"], brandAll)
+	}
+	if msgs, ok := obj["messages"].([]any); ok {
+		guardEmptyTextParts(msgs)
 	}
 	// 用 marshalNoEscape 而不是 json.Marshal：后者会把 < > & 转成 \u003c 等，
 	// 而 Agent 流量的常态就是 XML 工具标签（<tool_use>）、HTML、&amp;、shell 重定向

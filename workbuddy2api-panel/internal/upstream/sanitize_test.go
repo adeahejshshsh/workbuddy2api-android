@@ -98,16 +98,20 @@ func TestSanitizeRewritesAllFire(t *testing.T) {
 
 // header 指纹：键值形态整段剥离、裸键名缩写（两种拼写都要覆盖）。
 func TestSanitizeHeaderFingerprints(t *testing.T) {
-	kv := sanitizeText("x-anthropic-billing-hdr: abc; tail")
-	if strings.Contains(strings.ToLower(kv), "x-anthropic-billing") {
+	kv := sanitizeText("x-anthropic-billing-header: abc; tail")
+	if strings.Contains(strings.ToLower(kv), "x-anthropic-billing-header") {
 		t.Fatalf("键值段未剥离: %q", kv)
 	}
+	// 裸键名用真名（-header）；缩写形态 -hdr 是本层**自己的产物**，不能再被当成指纹
+	// 重洗一遍，否则每次过一遍净化都把用户文本两端的空白裁掉（见 sanitizeBareHdrRe 注释）。
 	for _, in := range []string{
-		"see x-anthropic-billing-hdr here",
-		"see x-anthropic-billing-hdr here",
+		"see x-anthropic-billing-header here",
+		"SEE X-ANTHROPIC-BILLING-HEADER HERE",
 	} {
 		out := sanitizeText(in)
-		if strings.Contains(strings.ToLower(out), "x-anthropic-billing") {
+		// 断言的是「真名不再出现」：缩写产物 x-anthropic-billing-hdr 是本层自己的输出，
+		// 保留它是上游的口径（且它不能反过来再被当成指纹，见 sanitizeBareHdrRe 注释）。
+		if strings.Contains(strings.ToLower(out), "x-anthropic-billing-header") {
 			t.Fatalf("裸键名未缩写: %q -> %q", in, out)
 		}
 	}

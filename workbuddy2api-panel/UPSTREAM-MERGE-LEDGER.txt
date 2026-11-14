@@ -664,3 +664,18 @@ uid → `00000000-0000-4000-8000-000000000001` / `…002`，真机 uin → 12 �
 未合（本批有意跳过）：`def074c5` 的 `continue_billing_test.go`（158 行）依赖上游的
 `fakeContinueUpstream` / `StoreModelMaxOutForTest` 夹具，本仓没有对应 helper；记账路径由
 `restrict_firstframe_test` 之外的全量用例间接覆盖，后续要补得先把夹具补齐。
+
+### 第三批（已合，2 条）
+
+| 上游提交 | 说明 |
+|---|---|
+| `767056cc` 身份改写只作用于回流载体 | 此前 `sanitizeTextWith` 对所有角色都跑「when asked about your … identity, identify yourself as …」整句替换与 `<model_identity>` 标签剥离。system/user 里同形的句子是**用户自己写的人设**（"…identify yourself as Aria, the Acme assistant."），改写它等于篡改提示词。现在只有 assistant 正文与任意消息的 `reasoning_content` / `reasoning` 走 `scrubInjectedIdentity`（`sanitizeMessages` 里按 role 选 `clean` / `carrier`）。门控改用 ASCII 不敏感探针（`containsFoldASCII`）——`Identify yourself as` 这类复述此前在门口就被放过。正则同时修掉「身份名带点」的截断（GPT-4.1 / Claude 3.5 会被切在第一个点），句号后的引号/换行用捕获组 `${1}` 原样接回。**连带收紧**：裸键名正则改成真名 `-header`、替换产物用 `x-anthropic-billing-hdr`（原来 `(?:hdr|header)` + 产物 `x-anthropic-hdr` 会让本层自己的产物被当成指纹再洗一遍，每次过净化都裁掉用户文本两端的空白） |
+| `a7983640` 空 text 段按字节补位 | 整体 Unmarshal+Marshal 会把 2^64 级整数变成浮点、把 `<` 转义成 `\u003c`、把对象键按字母序重排——模型看到的工具结果不再是客户端发来的那份。新实现用 `Decoder.InputOffset` 定位每个数组元素的字节区间（并逐字节核对），只在空段上补 `text` 值（缺失时插入 `text` 键），其余字节一律不动；定位对不上就整体放弃（宁可不补，也不写坏数据）。同时把补位挪到 **sanitize 之后**：只含指纹的 text 段被净化洗成空串后，先补位的话出站仍带 `""`，照样 11151 |
+
+### 本批看过但没接的
+
+| 上游提交 | 为什么不接 |
+|---|---|
+| `9ba108fb` 首帧心跳后置、`0befb2b0` 粘帧 error 触发首帧否决 | 两者都建立在 `upstream.HeadVetoError` + 把 `headKeepaliveWriter` 迁进 `upstream` 包的重构上；本仓没有 HeadVeto 这套结构（首帧否决是另一套实现），先要把那层移植过来才谈得上叠这两条 |
+| `1f67b377` 安全续写裁决前不漏字节、`b4012ceb` 续写闸门按限额区分 | 要整段重写 `toolonly.go` / `continue.go` 的段裁决，而本仓在这块有分叉（`features.tool_only_rescue` 缺省**关**、`atSegmentCap` 上限口径）。上游那份 `toolonly.go` 直接换进来会把救援默认打开——线上实测会用一次额外上游调用换一段被丢弃的正文，不能默默改默认值 |
+| `798458f8` 出图回合不判失败 | 本仓 `responses.go` 没有 `reasoningOnlyNoOutput` / `responsesReasoningOnly` 这套判据（那批代码来自更早的上游提交，本仓未合）；等把 responses 适配器补齐再接 |
