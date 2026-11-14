@@ -241,8 +241,14 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			// 打回 6h —— 一次 6004 就抹掉了「这个模型反复不可用」的历史。
 			// 与 CooldownModelBusy / RecordModelRateLimitAudit 同口径。
 			prev := e.modelCooldowns[model]
+			until := p.cappedSoftUntilLocked(now, resetAt, base)
+			// 只延长不缩短（审查 C4）：11102 的 6h→12h→24h 退避与 6004 的短窗共用同一张表，
+			// 整体覆盖会让一次 429 把更长的冷却**砍短**，账号被提前派回撞同一个模型。
+			if prev.Until.After(until) {
+				until = prev.Until
+			}
 			e.modelCooldowns[model] = modelCooldown{
-				Until:   p.cappedSoftUntilLocked(now, resetAt, base),
+				Until:   until,
 				ResetAt: resetAt,
 				Reason:  reason,
 				Hits:    prev.Hits,

@@ -76,6 +76,13 @@ type watermarkRequest struct {
 
 // watermarkStrip 裁掉图片底部的水印留白。
 func (h *Handler) watermarkStrip(w http.ResponseWriter, r *http.Request) {
+	// 整个请求体的硬上限（审查 B4）：`ParseMultipartForm(32MiB)` 只设「内存阈值」，
+	// 超出部分会落到临时文件，总量没有边界——一个请求就能把磁盘打满，之后
+	// state.json / 预算落盘全失败。这里先按「图片上限 + 一小截 multipart 开销」截断，
+	// 超出直接 413（不是静默截断后当成坏图）。
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, watermarkMaxBytes+(1<<20))
+	}
 	if !h.loadLive().WatermarkStripEnabled {
 		writeOpenAIErrorHint(w, http.StatusForbidden, "watermark_strip_disabled",
 			"水印裁切端点未开启：请在面板配置里打开 features.watermark_strip_enabled（默认关闭）",
@@ -85,6 +92,13 @@ func (h *Handler) watermarkStrip(w http.ResponseWriter, r *http.Request) {
 
 	req, err := parseWatermarkRequest(r)
 	if err != nil {
+		// 超限回 413（不是 400）：「请求体太大」与「图坏了/参数不对」是两类错误，
+		// 客户端据此决定「换小图重试」还是「不要重试」。
+		var tooBig *watermarkTooLargeError
+		if errors.As(err, &tooBig) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "invalid_request", err.Error())
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -186,6 +200,11 @@ func parseWatermarkRequest(r *http.Request) (watermarkRequest, error) {
 // 其余同名表单字段当参数。给「本机有文件、手上没有公网 URL」的场景用。
 func parseWatermarkMultipart(r *http.Request) (watermarkRequest, error) {
 	if err := r.ParseMultipartForm(watermarkMaxBytes); err != nil {
+		// 超过 MaxBytesReader 的硬上限时给出可识别的错误（调用方映射成 413）。
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return watermarkRequest{}, &watermarkTooLargeError{limit: watermarkMaxBytes}
+		}
 		return watermarkRequest{}, fmt.Errorf("parse multipart: %v", err)
 	}
 	req := watermarkRequest{
