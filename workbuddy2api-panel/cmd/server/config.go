@@ -193,11 +193,11 @@ type Config struct {
 		// WebActivityEnabled 国际版「网页通道」每日活跃腿（issue #111）。缺省 **false**：
 		// 上游实测每日 30 积分的判据是活跃上报本身，网页会话不是必要条件；而这条腿每天
 		// 为每个国际号建一条真实会话、占一条活跃名额（上限 10，漏收尾就永久少一条）。
-		WebActivityEnabled    bool `json:"web_activity_enabled"`
+		WebActivityEnabled bool `json:"web_activity_enabled"`
 		// WindowProbeEnabled 额度窗口探针：6004 限流的重置时刻到点后，为那个 (账号, 模型)
 		// 发一个最小请求把新一轮配额窗口顶开（见 scheduler/windowprobe.go）。
 		// 缺省 **false**：探针是真实计费的对话请求，自动发等于替部署花钱，必须显式开。
-		WindowProbeEnabled bool `json:"window_probe_enabled"`
+		WindowProbeEnabled    bool `json:"window_probe_enabled"`
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
 
@@ -382,6 +382,19 @@ type Config struct {
 
 		EmbeddingsEnabled     bool `json:"embeddings_enabled"`
 		WatermarkStripEnabled bool `json:"watermark_strip_enabled"`
+
+		// ThreeDEnabled 混元 3D 生成（POST /v1/3d/* 与 MCP 工具 generate_3d /
+		// get_3d_task）的总开关，默认 false。关闭时端点回 403 three_d_disabled，
+		// MCP 工具不出现在 tools/list 里。面板保存后经 livecfg 热生效。
+		ThreeDEnabled bool `json:"three_d_enabled"`
+
+		// ThreeDTempTokens 手工配置的 `ck_t_` 临时云凭证，键 = 账号 UID，特殊键 "*"
+		// 作为兜底。敏感字段：只进内存，不写日志、不回显面板、不进错误信息。
+		// 作为自动签发的**手工覆盖**：填了的账号直接用这份凭证，不再签发。
+		ThreeDTempTokens map[string]string `json:"three_d_temp_tokens"`
+
+		// ThreeDAutoToken 自动签发临时云凭证（默认 true）。改动需重启生效。
+		ThreeDAutoToken bool `json:"three_d_auto_token"`
 		// ToolOnlyRescue 「说一句就收尾」的安全续写（只采纳工具调用），默认**关**。
 		// 判据只能看「末条是工具结果 + 正文短（<2KB）」，而 agent 循环里的正常收尾
 		// 长得一模一样：线上实测把 1608B 的完整回答当成截断，白打一次上游。
@@ -654,6 +667,9 @@ func Default() *Config {
 	// 缺省等一轮（60s 上限），避免把上游明说「40 秒后再来」的排队秒变成客户端可见失败。
 	c.Features.BusyRetry = true
 	c.Features.BusyWaitSeconds = 60
+	// 3D 临时凭证自动签发缺省 true：打开 three_d_enabled 即开箱可用，无须手工收集
+	// ck_t_。显式 false 退回「只用手工凭证表」。
+	c.Features.ThreeDAutoToken = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	// 身份首句替换缺省关闭（老配置无该键 → false），但文本预置默认值，
 	// 面板勾选后无需再填。

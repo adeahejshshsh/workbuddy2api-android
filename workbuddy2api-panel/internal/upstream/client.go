@@ -1044,6 +1044,10 @@ type Client struct {
 	// chatBase/billingBase 返回 CN base，路径也走 CN（双保险，与 auth.Realm() 的开关闸呼应）。
 	GlobalEnabled bool
 
+	// ThreeDCredential 混元 3D 的临时云凭证来源（见 three_d_credential.go）。
+	// nil = 未挂载（3D 功能不可用，返回 ErrThreeDNoCredential）。装配期设定、运行期只读。
+	ThreeDCredential ThreeDCredential
+
 	// creditObserver 余额查询观察者（见 CreditObserver / SetCreditObserver）。
 	// atomic：启动期挂载、运行期并发读，不参与任何出站决策。（qcgzxw `826aaded`）
 	creditObserver atomic.Pointer[CreditObserver]
@@ -1425,6 +1429,15 @@ func (c *Client) RefreshToken(a *auth.Auth) (err error) {
 }
 
 // refreshTokenOnce 实际执行一次刷新（原 RefreshToken 的实现体）。
+// RefreshTokenIfNeeded 只在令牌临近过期（within 窗口内）时刷新一次。
+// 3D 的临时云凭证签发要用账号自己的 access token，签发前先确保它是新鲜的。
+func (c *Client) RefreshTokenIfNeeded(a *auth.Auth, within time.Duration) error {
+	if a == nil || !a.NeedsRefresh(within) {
+		return nil
+	}
+	return c.refreshTokenOnce(a)
+}
+
 func (c *Client) refreshTokenOnce(a *auth.Auth) error {
 	// 第 1 段（锁内）：读快照。
 	a.Lock()

@@ -1588,6 +1588,15 @@ body.veil-open { overflow: hidden; }
               <input type="checkbox" name="embeddings_enabled"></div>
             <div class="hint">实验特性，缺省关闭（关着回 403 embeddings_disabled）。上游嵌入只注册了
               bge-m3 一个模型（1024 维），可用性随账号/租户变化。改动即时生效。</div>
+            <div class="switch"><span class="lb">混元 3D 生成 /v1/3d/*</span>
+              <input type="checkbox" name="three_d_enabled"></div>
+            <div class="hint">实验特性，默认关闭。关闭时端点回 403 <code>three_d_disabled</code>，MCP 的
+              <code>generate_3d</code> / <code>get_3d_task</code> 也不会出现在工具面里。改动即时生效。
+              默认使用账号 access token 自动签发临时云凭证。也可手工配置
+              <code>features.three_d_temp_tokens</code>（键=账号 UID，<code>"*"</code> 兜底）覆盖自动签发；
+              该敏感字段不在本页面表单里，保存面板配置后热生效。只有自动签发不可用或已关闭、且没有手工凭证时，
+              才会回 503 <code>three_d_credential_missing</code>。自动签发开关需手工修改
+              <code>features.three_d_auto_token</code> 并重启。</div>
             <div class="switch"><span class="lb">会话粘性路由</span>
               <input type="checkbox" name="session_sticky_enabled"></div>
             <div class="hint" style="margin-top:10px">Upstash Redis 镜像、凭证目录与状态文件路径需手工编辑配置文件（判为重启项）。</div>

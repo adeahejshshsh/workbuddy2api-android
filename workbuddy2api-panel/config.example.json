@@ -76,7 +76,10 @@
     "sanitize_blacklist_fingerprints": true,
     "busy_retry": true,
     "busy_wait_seconds": 60,
-    "repair_deferred_tool_args": false
+    "repair_deferred_tool_args": false,
+    "three_d_enabled": false,
+    "three_d_temp_tokens": {},
+    "three_d_auto_token": true
   },
   "models": {
     "allowed": []

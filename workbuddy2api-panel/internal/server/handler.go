@@ -162,6 +162,10 @@ type Config struct {
 	// RestrictionHold 11140 风控连坐的全池暂停时长（upstream.restriction_hold_seconds，
 	// 默认 1800s；0 = 只保留「命中即停手」）。见 restrict.go。启动时读取。
 	RestrictionHold time.Duration
+
+	// ThreeDEnabled 混元 3D 生成开关的静态回退（features.three_d_enabled，默认关闭）。
+	// Live 非 nil 时以热快照为准。
+	ThreeDEnabled bool
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -178,6 +182,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
 		EmbeddingsEnabled:     h.cfg.EmbeddingsEnabled,
 		ToolOnlyRescue:        h.cfg.ToolOnlyRescue,
+		ThreeDEnabled:         h.cfg.ThreeDEnabled,
 	}
 }
 
@@ -227,7 +232,10 @@ type Handler struct {
 	// 台账未命中的 task_id 走有界探测自愈（见 videos_probe.go）。
 	videoLedger *videoTaskStore
 	// videoProbe 台账里没有的任务的探测状态（负缓存 / 全局限速 / 暂停），见 videos_probe.go。
-	videoProbe videoProber
+	videoProbe taskProber
+	// threeDLedger / threeDProbe 3D 任务台账与探测状态，语义同视频（见 three_d.go / probe.go）。
+	threeDLedger *threeDTaskStore
+	threeDProbe  taskProber
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
@@ -259,7 +267,11 @@ func NewHandler(cfg Config) *Handler {
 		log.Printf("WARN: [server] prompt.mode=custom 但 prompt.text 为空：本次不会改写客户端 system（疑似配置漏项）")
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), budget: newDailyBudget(cfg.DailyBudget, cfg.BudgetStateFile),
-		videoLedger: newVideoTaskStore()}
+		videoLedger: newVideoTaskStore(),
+		// 两个探测器各用一套参数，互不抢占额度（见 probe.go / videos_probe.go / three_d_probe.go）。
+		videoProbe:   newTaskProber(videoProbeConfig),
+		threeDLedger: newThreeDTaskStore(),
+		threeDProbe:  newTaskProber(threeDProbeConfig)}
 	// 突发积分闸 / 缓存率闸（review 移植 58262f31）：0 = 关闭。
 	h.budget.setGuards(cfg.BurstCreditLimit, cfg.CacheLowRate)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -283,6 +295,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/videos/tasks", h.withAuth(h.videoTasks))
 	h.mux.HandleFunc("GET /v1/videos/{task_id}/content", h.withAuth(h.videoContent))
 	h.mux.HandleFunc("GET /v1/videos/{task_id}", h.withAuth(h.videoTask))
+	h.mux.HandleFunc("POST /v1/3d/generations", h.withAuth(h.threeDGenerations))
+	h.mux.HandleFunc("POST /v1/3d/tasks", h.withAuth(h.threeDTasks))
+	h.mux.HandleFunc("GET /v1/3d/{job_id}", h.withAuth(h.threeDTasks))
 	// 去水印（裁白边）：默认关闭（features.watermark_strip_enabled）。
 	// 关着时回 403，MCP 的 strip_watermark 工具也不出现。
 	h.mux.HandleFunc("POST /v1/images/strip-watermark", h.withAuth(h.watermarkStrip))
@@ -358,7 +373,7 @@ func isChatEntry(path string) bool {
 		"/v1/images/generations", "/v1/images/edits",
 		// 出视频也是「会真扣积分」的入站写操作：不纳入归档的话面板里看不到谁在打、
 		// 扣了多少（videos.go 自己记账，但 requestTrace 要在这一层才有）。
-		"/v1/videos/generations", "/v1/videos/tasks":
+		"/v1/videos/generations", "/v1/videos/tasks", "/v1/3d/generations", "/v1/3d/tasks":
 		return true
 	}
 	return false
