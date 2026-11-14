@@ -1000,3 +1000,19 @@ hex 前 16 位，对不上就报错、不猜。
 堵住的三种坏结果：凭据以明文落盘、桌面端字段被丢、毫秒/秒互相改写。
 
 用例：上游 `wbencrypted_test.go` + `testdata/wbencrypted-auth.json` 原样搬入并通过。
+
+### 第二十批（`67386ae5` + 前置：按自然日聚合的到期桶）
+
+| 部分 | 说明 |
+|---|---|
+| `upstream.ExpiryBucket`（新） | `{Date, ExpireAt, Remain, Estimated}`：按真实失效时刻聚到自然日（UTC+8），`ExpireAt` 取该日最早一批，`Remain` 为该日所有正余额包之和 |
+| `packageEndAt` | 多回一个 `estimated`：`DeductionEndTime`/`ExpiredTime` 是真实扣费截止，只有 `CycleEndTime` 才是按计量周期**推算**。同日多批里只要一批是推算的，整行标注（面板一行只展示「该日」，混口径时保守显示为推算） |
+| `globalUserResourceBuckets` | 与既有 `globalUserResource` 共用同一份实现（后者只丢桶），口径不漂移 |
+| 推算 WARN 限频 | `estimatedExpiryWarnEvery = 1h`；并发用 LoadOrStore + CAS 保证同间隔内只有一个调用方拿到 true。否则余额刷新每 5 分钟一轮，每个号每天刷 288 行同样的日志 |
+
+**没搬**：面板首页「到期提醒」快照与折线（`pool.ExpiryBucket` 透传 + 前端展示）——本仓面板
+还没有到期桶的展示，先把数据层做对，展示那半等有需求再接，不提前铺死代码。
+
+用例：`packageEndAt` 四分支；推算 WARN 限频三态。
+
+**至此 62 条里「有前置量」的五条全部落地**：`b60f1c0b`、`6be18704`、`3bab4f8c`、`8622073e`、`67386ae5`。
