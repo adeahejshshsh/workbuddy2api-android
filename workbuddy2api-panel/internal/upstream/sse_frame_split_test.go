@@ -52,7 +52,7 @@ func TestSplitConcatenatedJSON(t *testing.T) {
 		{name: "空串", in: ``, parts: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := splitConcatenatedJSON(tc.in)
+			got := SplitConcatenatedJSON(tc.in)
 			if len(got) != tc.parts {
 				t.Fatalf("拆出 %d 份 want %d：%q", len(got), tc.parts, got)
 			}
@@ -69,7 +69,7 @@ func TestSplitConcatenatedJSON(t *testing.T) {
 
 // 端到端：上游把两个 chunk 粘在一行时，客户端必须收到两个**独立的** data 帧。
 //
-// 变异判据：去掉 writeFrame 里的 splitConcatenatedJSON 分支，本用例会退化成
+// 变异判据：去掉 writeFrame 里的 SplitConcatenatedJSON 分支，本用例会退化成
 // 一个 data 帧、且帧内是 `{a} {b}`——正是 issue #197 里客户端 JSON.parse 失败
 // 的那个形态。
 func TestStreamSplitsGluedFrames(t *testing.T) {

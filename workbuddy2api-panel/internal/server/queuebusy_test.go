@@ -79,9 +79,10 @@ func TestChatQueueBusyWithoutWaitReturns429(t *testing.T) {
 // 上游原文仍在 message 里，排队位置留在 gateway_hint。
 func TestWriteUpstreamBusyErrorCommittedFrameIsRetryable(t *testing.T) {
 	rec := httptest.NewRecorder()
-	hk := newHeadKeepaliveWriter(context.Background(), rec, time.Hour)
-	defer hk.stop()
-	hk.writeComment() // 提交 200 + SSE 头
+	// 已提交响应头的形态：注释帧现在由 upstream.StreamHint 写，这里只要一个「已写过字节」
+	// 的记录器即可（writeUpstreamBusyError 只据 Committed() 分支）。
+	hk := &sseCommitWriter{ResponseWriter: rec}
+	_, _ = hk.Write([]byte(": keepalive\n\n"))
 	writeUpstreamBusyError(hk, 40, queueBusyBody, "upstream_busy: position 3133", nil)
 	body := rec.Body.String()
 	for _, want := range []string{

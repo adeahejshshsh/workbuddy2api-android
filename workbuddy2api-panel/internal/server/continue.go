@@ -297,6 +297,15 @@ func (r *continueReader) frame(payload string) {
 	}
 	var obj map[string]any
 	if json.Unmarshal([]byte(payload), &obj) != nil {
+		// 粘帧（issue #197，见 upstream/sse_frame_split.go）：拆开逐份走本函数，每份都记状态、
+		// 各自成帧。原样透传的话，粘在里面的 error / finish_reason / usage 都记不到，续写层
+		// 会把这一段当成「无 finish 断流」去续写。
+		if parts := upstream.SplitConcatenatedJSON(payload); len(parts) > 1 {
+			for _, p := range parts {
+				r.frame(p)
+			}
+			return
+		}
 		// 非法 JSON：原样透传（不解析状态，防抖）
 		r.emit(payload)
 		return

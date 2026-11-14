@@ -330,8 +330,21 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 				sawDone = true
 				break
 			} else {
-				var chunk map[string]any
-				if json.Unmarshal([]byte(payload), &chunk) == nil {
+				// 粘帧（issue #197）：一个 data 行里首尾相接两个以上 JSON 对象时整行解析失败，
+				// 原先两份内容都被静默丢掉；拆开后逐份并入聚合。
+				var chunks []map[string]any
+				var whole map[string]any
+				if json.Unmarshal([]byte(payload), &whole) == nil {
+					chunks = []map[string]any{whole}
+				} else {
+					for _, part := range SplitConcatenatedJSON(payload) {
+						var c map[string]any
+						if json.Unmarshal([]byte(part), &c) == nil {
+							chunks = append(chunks, c)
+						}
+					}
+				}
+				for _, chunk := range chunks {
 					// 上游「200 + error 帧」是真实形态（6004 限流、内容审核、11158 等级
 					// 拒绝）。流式路径一直专门处理它（StreamHint 的 error-passthrough），
 					// 非流式此前把它当普通事件吃掉：error 帧没有 choices → 不并入内容，
@@ -757,6 +770,8 @@ type streamOptions struct {
 	// holdUntilContent 把「不含内容」的前导帧先扣住，直到出现正文/工具调用才刷出
 	// （见 WithHoldUntilContent）。默认 false = 逐帧透传。
 	holdUntilContent bool
+	// headKeepalive 首帧心跳间隔（见 headkeepalive.go）；0 = 关闭。
+	headKeepalive time.Duration
 }
 
 // WithMarkupRepair 注册「模型原生工具调用标记」修复器（见 dsml.go）。
@@ -1133,7 +1148,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			// 「第二个对象」上（Unexpected non-whitespace character after JSON），
 			// 整轮对话作废，而报错在读侧，看不出是上游粘帧。这里拆成多个对象逐个
 			// 走常规路径。
-			if parts := splitConcatenatedJSON(payload); len(parts) > 1 {
+			if parts := SplitConcatenatedJSON(payload); len(parts) > 1 {
 				log.Printf("WARN: [upstream] data 帧内含 %d 个 JSON 对象（上游粘帧）→ 拆成独立帧透传，首个 %.120q",
 					len(parts), truncate(parts[0], 120))
 				n := 0
@@ -1228,12 +1243,42 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	var readErr error
 	// upstreamDone 上游是否显式发过 data: [DONE]（正常收尾）。与 finishSeen 一起判截断。
 	var upstreamDone bool
+	// 首帧心跳（见 headkeepalive.go）：本账号上游已回 200、首帧还没到的空窗里由**本协程**
+	// 按节拍写注释帧；辅助协程只替它读下一行（一问一答），没有第二个协程碰 ResponseWriter。
+	// 首个 data 帧一到就停手，之后直接读。
+	var hb *headHeartbeat
+	hbDead := false
+	headOpen := true
+	if o.headKeepalive > 0 {
+		hb = newHeadHeartbeat(br, o.headKeepalive)
+		defer hb.stop()
+	}
+	heartbeat := func() {
+		if hbDead {
+			return
+		}
+		if _, werr := io.WriteString(w, ": keepalive\n\n"); werr != nil {
+			hbDead = true
+			return
+		}
+		// 只能直接 Flush：辅助协程此刻可能正在读 br，flushIfDrained 会去碰 br。
+		if fl != nil {
+			fl.Flush()
+		}
+	}
 readLoop:
 	for {
-		line, err := br.ReadString('\n')
+		var line string
+		var err error
+		if hb != nil && headOpen {
+			line, err = hb.readLine(heartbeat)
+		} else {
+			line, err = br.ReadString('\n')
+		}
 		trimmed := strings.TrimRight(line, "\r\n")
 		switch {
 		case strings.HasPrefix(trimmed, "data:"):
+			headOpen = false // 首帧已到：否决窗口关闭，之后直接读
 			// "data:" 后的空格可选（SSE 规范）。[DONE] 统一在循环结束后写出。
 			payload := strings.TrimPrefix(strings.TrimPrefix(trimmed, "data:"), " ")
 			if strings.TrimSpace(payload) == "[DONE]" {
