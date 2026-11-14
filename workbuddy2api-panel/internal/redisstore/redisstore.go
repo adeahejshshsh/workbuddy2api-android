@@ -149,8 +149,17 @@ func (u *Upstash) init() {
 			go func() {
 				defer u.workerWG.Done()
 				for fn := range u.q {
-					fn()
-					u.wg.Done()
+					// 单个任务 panic 不能带走 worker（审查 C8）：否则 workerWG 永不 Done、
+					// Close() 卡到超时，镜像写入静默停摆。wg.Done 放 defer 里，panic 也记账。
+					func() {
+						defer u.wg.Done()
+						defer func() {
+							if rec := recover(); rec != nil {
+								log.Printf("ERR: [redisstore] 写队列任务 panic: %v", rec)
+							}
+						}()
+						fn()
+					}()
 				}
 			}()
 		}

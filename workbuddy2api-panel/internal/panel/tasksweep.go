@@ -42,8 +42,12 @@ func (p *Panel) RunTaskSweepNow() (int, string) {
 			busy++
 			continue
 		}
-		acc, cl, err := p.sweepAccount(a)
-		p.unlockAccount(st.UID)
+		// unlock 必须 defer（审查 C2）：sweepAccount 解析上游响应 panic 时，同步路径没有
+		// recover，锁会永久留在 held 状态——该账号此后所有任务入口都拿不到锁，直到重启。
+		acc, cl, err := func() (int, int, error) {
+			defer p.unlockAccount(st.UID)
+			return p.sweepAccount(a)
+		}()
 		swept++
 		accepted += acc
 		claimed += cl
@@ -191,8 +195,11 @@ func (p *Panel) ClaimSweepOnce(ctx context.Context) (accounts, claimed, failed i
 			if !p.tryLockAccount(uid) {
 				return // 该号正在跑任务动作：本轮让位，等下一轮
 			}
-			_, cl, err := p.sweepAccount(a)
-			p.unlockAccount(uid)
+			// 同上：goroutine 路径虽有 recover，但 recover 之后照样跳过 unlock。
+			_, cl, err := func() (int, int, error) {
+				defer p.unlockAccount(uid)
+				return p.sweepAccount(a)
+			}()
 			mu.Lock()
 			accounts++
 			claimed += cl
