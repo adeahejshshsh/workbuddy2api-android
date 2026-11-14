@@ -72,6 +72,15 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 11148 工具配对断裂：请求内容的问题（会话历史里的 tool_calls 与 tool 结果对不上），
 		// 换号/重试都不会好，只能新建会话。
 		return "tool calls and tool results do not match in the conversation history; retrying will not help — start a new conversation/thread"
+	case ErrUpstreamBusy:
+		// 11134 供应商过载：同属容量信号，但不是排队——换个模型是有效出路，说「队列满」
+		// 会把人引去查排队。
+		if IsProviderOverloaded(msg) {
+			return "the upstream model provider is temporarily overloaded (not an account problem); retry after the Retry-After delay or switch to another model"
+		}
+		// 6020/6021 queue.full：渠道级容量满载。措辞明确「不是账号问题、换号无意义」，
+		// 指引客户端短等待后重试（SDK 指数退避天然适配）。
+		return "upstream admission queue is full (channel-level capacity, not an account problem); retry after a short wait"
 	case ErrContentBlocked:
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
@@ -116,6 +125,11 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 func FrameKind(payload string) ErrKind {
 	if IsModelRateLimit(payload) {
 		return ErrSoftRate
+	}
+	// 11140 账号风控限制文书要 code + 文案同时成立，而 code 在帧的 error.code 上、不在
+	// message 里：只拿 message 去 Classify 会把它判成普通 4xx，首帧否决后照样换号。
+	if IsRestricted(payload) {
+		return ErrAccountFault
 	}
 	var f struct {
 		Error struct {

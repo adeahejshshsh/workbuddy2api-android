@@ -18,7 +18,6 @@ import "strings"
 // restrictionMarkers 风控限制文书的实测措辞（社区封禁复盘 + hub #422 的 403 样例）。
 var restrictionMarkers = []string{
 	"账号存在异常行为",
-	"已被限制",
 	"unusual activity",
 }
 
@@ -45,4 +44,21 @@ func IsRestricted(body string) bool {
 		}
 	}
 	return false
+}
+
+// IsAccountRestriction 报告 ErrAccountFault 的 body 是否属于 11140 账号限制的任一形态
+// （"request illegal" 授权风控，或限制文书）。两者在上游都是设备/出口级判据：调用方禁用
+// 该号、停止换号，并把这次限制计入连坐判定。两种形态都要求 code 11140：同一句
+// "request illegal" 也出现在 11-128 渠道校验（请求级、可自愈）等别的 code 上，按文案判
+// 就会让一次请求级拦截停掉轮转、还可能凑成连坐暂停整个域。
+func IsAccountRestriction(body string) bool {
+	if IsRestricted(body) {
+		return true
+	}
+	return has11140(body) && strings.Contains(strings.ToLower(body), "request illegal")
+}
+
+// has11140 结构化 code 11140（含帧内 error.code 与字符串形态的 code）。
+func has11140(body string) bool {
+	return hasBusinessCode(body, "11140") || HasCodeMarker(body, "11140")
 }

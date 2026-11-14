@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -43,5 +44,49 @@ func TestClassifyChineseRestriction(t *testing.T) {
 	// 中文文书不触达通道校验分支（那是 11‑-128 的事）
 	if got := Classify(http.StatusForbidden, cn); got == ErrChannelRefused {
 		t.Fatal("中文 11140 被误判成通道校验失败")
+	}
+}
+
+// 泛化措辞「已被限制」不再算账号风控限制：它也出现在模型/功能级限制文案里
+// （例如「该模型已被限制使用」），按它判会把模型级限制误当成设备级扫荡、停掉整个域。
+func TestIsRestrictedIgnoresGenericWording(t *testing.T) {
+	if IsRestricted(`{"code":11140,"msg":"该模型已被限制使用"}`) {
+		t.Fatal("泛化「已被限制」不该判成账号风控限制（会误停整个域）")
+	}
+}
+
+// IsAccountRestriction 两种形态都要认；但 11-128 渠道校验的同一句 "request illegal"
+// 属请求级、可自愈，按文案判会停掉轮转、还可能凑成连坐暂停。
+func TestIsAccountRestriction(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       bool
+	}{
+		{"中文限制文书", `{"code":11140,"msg":"账号存在异常行为，已被限制使用"}`, true},
+		{"英文 unusual activity", `{"code":11140,"msg":"unusual activity detected"}`, true},
+		{"request illegal + 11140", `{"code":11140,"msg":"request illegal"}`, true},
+		{"request illegal + 11-128 渠道校验", `{"code":11128,"msg":"request illegal"}`, false},
+		{"泛化已被限制", `{"code":11140,"msg":"该模型已被限制使用"}`, false},
+	}
+	for _, c := range cases {
+		if got := IsAccountRestriction(c.body); got != c.want {
+			t.Fatalf("%s: IsAccountRestriction=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 11134 供应商过载：归 ErrUpstreamBusy，但要与 6020/6021 排队区分提示。
+func TestIsProviderOverloadedOnlyByCode(t *testing.T) {
+	if !IsProviderOverloaded(`{"code":11134,"msg":"model provider is temporarily unavailable"}`) {
+		t.Fatal("code 11134 应判成供应商过载")
+	}
+	if IsProviderOverloaded(`{"msg":"the model provider is temporarily unavailable"}`) {
+		t.Fatal("只有文案、没有结构化 code 时不该判成 11134")
+	}
+	if hint := GatewayHint(ErrUpstreamBusy, `{"code":11134,"msg":"x"}`, HintContext{}); !strings.Contains(hint, "overloaded") {
+		t.Fatalf("11134 的 hint 应说供应商过载而不是队列满: %q", hint)
+	}
+	if hint := GatewayHint(ErrUpstreamBusy, `{"code":6021,"msg":"queue.full"}`, HintContext{}); !strings.Contains(hint, "queue is full") {
+		t.Fatalf("6021 的 hint 应说队列满: %q", hint)
 	}
 }

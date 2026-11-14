@@ -524,6 +524,12 @@ func ParseRetryAfter(h http.Header) (time.Duration, bool) {
 	return 0, false
 }
 
+// IsProviderOverloaded 报告 body 是否为 11134「模型供应商暂时不可用」。它与 6020/6021
+// 同归 ErrUpstreamBusy，但成因是供应商过载而不是排队：给客户端的文案要区分（队列满的
+// 措辞会让人去查排队），而且供应商过载时「换个模型」是有效出路，排队时不是。
+// 只认结构化 code，文案单独出现仍是普通 5xx。
+func IsProviderOverloaded(body string) bool { return hasBusinessCode(body, "11134") }
+
 // parseQueueRetryAfter 从 6020/6021 排队响应的 body 抽上游明示的重试等待
 // （data.retry_after，整数秒）。上游把排队口径放在 **body** 而不是 Retry-After 头
 // （真机：429 + code 6020，data 含 queue_position/queue_size/retry_after/
@@ -740,7 +746,7 @@ func Classify(status int, body string) ErrKind {
 	if isQueueBody(body, lower) {
 		return ErrUpstreamBusy
 	}
-	if hasBusinessCode(body, "11134") {
+	if IsProviderOverloaded(body) {
 		return ErrUpstreamBusy
 	}
 	// 11134「the model provider is temporarily unavailable, please retry later or
