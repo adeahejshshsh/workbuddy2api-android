@@ -59,6 +59,15 @@ type Auth struct {
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
+
+	// wbSealed 来源是 $wbEncrypted 加密文件时，原本被信封包住的字段路径集合
+	// （形如 "auth.accessToken"）；wbDoc 是解密后的整份文档（UseNumber 保留数字原文），
+	// 回写以它为底——只覆盖本包管理的字段，桌面端自己的字段（phoneNumber、uin 等）原样保留。
+	// expiresAtMillis 记录来源文件里 expiresAt 的单位（毫秒），回写按同一单位写回。
+	// 三者都只在解析时设定一次，nil 表示明文来源（走既有回写路径）。
+	wbSealed        map[string]bool
+	wbDoc           map[string]any
+	expiresAtMillis bool
 }
 
 // NicknameValue 加锁读取 Nickname。
@@ -355,9 +364,23 @@ func Parse(raw []byte) (*Auth, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty auth storage")
 	}
+	// 新版桌面端把 auth 字段换成 $wbEncrypted 信封（见 wbencrypted.go）。
+	// 解密后再按原两形态解析；未加密文件原样返回，不吃这条路径。
+	dec, wbSealed, wbDoc, derr := decryptWBEncrypted(raw)
+	if derr != nil {
+		return nil, derr
+	}
+	raw = dec
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return nil, fmt.Errorf("storage_parse_error: %w", err)
+	}
+	// 来源文件的 expiresAt 是毫秒还是秒：按解密后（或原始）文档里的量级判断。
+	expiresMillis := false
+	if wbDoc != nil {
+		if millis, ok := wbExpiresAtMillis(wbDoc); ok {
+			expiresMillis = millis
+		}
 	}
 	var a Auth
 	if _, nested := probe["auth"]; nested {
@@ -436,6 +459,9 @@ func Parse(raw []byte) (*Auth, error) {
 	// 归一在两条解析分支**汇合之后**（嵌套形/扁平形都要覆盖）：只归一其中一条，
 	// 另一种形态的凭据照样会把到期时间推到公元 58800 年。
 	a.ExpiresAt = normalizeExpiresAt(a.ExpiresAt)
+	if len(wbSealed) > 0 {
+		a.wbSealed, a.wbDoc, a.expiresAtMillis = wbSealed, wbDoc, expiresMillis
+	}
 	return &a, nil
 }
 
@@ -482,18 +508,21 @@ func (a *Auth) SaveAtomic() error {
 		return fmt.Errorf("no FilePath set")
 	}
 	snap := authFileSnapshot{
-		path:         a.FilePath,
-		uid:          a.UID,
-		accessToken:  a.AccessToken,
-		refreshToken: a.RefreshToken,
-		expiresAt:    a.ExpiresAt,
-		domain:       a.Domain,
-		realm:        a.realm,
-		enterpriseID: NormalizeEnterpriseID(a.EnterpriseID),
-		accountType:  strings.TrimSpace(a.AccountType),
-		entOverride:  NormalizeEnterpriseOverride(a.EnterpriseOverride),
-		nickname:     a.Nickname,
-		deviceToken:  a.DeviceToken,
+		path:            a.FilePath,
+		uid:             a.UID,
+		accessToken:     a.AccessToken,
+		refreshToken:    a.RefreshToken,
+		expiresAt:       a.ExpiresAt,
+		domain:          a.Domain,
+		realm:           a.realm,
+		enterpriseID:    NormalizeEnterpriseID(a.EnterpriseID),
+		accountType:     strings.TrimSpace(a.AccountType),
+		entOverride:     NormalizeEnterpriseOverride(a.EnterpriseOverride),
+		nickname:        a.Nickname,
+		deviceToken:     a.DeviceToken,
+		wbSealed:        a.wbSealed,
+		wbDoc:           a.wbDoc,
+		expiresAtMillis: a.expiresAtMillis,
 	}
 	a.mu.Unlock()
 	return writeAuthSnapshot(snap)
@@ -507,10 +536,32 @@ type authFileSnapshot struct {
 	entOverride                                   string
 	deviceToken                                   string
 	expiresAt                                     int64
+	// wbSealed/wbDoc/expiresAtMillis 加密来源文件的回写底稿（见 wbOverlay）：
+	// wbSealed 非 nil 表示本来要封回信封。
+	wbSealed        map[string]bool
+	wbDoc           map[string]any
+	expiresAtMillis bool
 }
 
 // writeAuthSnapshot 把快照写成 auth 文件（全部 I/O 在此，不持 a.mu）。
 func writeAuthSnapshot(s authFileSnapshot) error {
+	// 加密来源（$wbEncrypted）：以解密后的原文档为底，只覆盖本包管理的字段，再按解密时
+	// 同样的规则整树封回信封。这条路径**不能**走下面的明文合并——那会把凭据以明文落盘，
+	// 也会丢掉桌面端自己的字段（phoneNumber、uin 等）。
+	if s.wbSealed != nil {
+		doc := wbOverlay(s)
+		if err := sealForSave(doc, s.wbSealed); err != nil {
+			return fmt.Errorf("密封 %s 失败: %w", s.path, err)
+		}
+		raw, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := ReplaceAtomic(s.path, raw, 0o600); err != nil {
+			return fmt.Errorf("写入 %s 失败: %w", s.path, err)
+		}
+		return nil
+	}
 	// 先读回原文件，保留用户/插件手写的未知键（review P2-14）：此前只重写已知
 	// 字段，第一次 token 刷新后用户在文件里加的键就静默消失了。读取失败（文件
 	// 不存在/损坏）时从空 map 起，行为与旧版一致。
@@ -937,4 +988,81 @@ func (a *Auth) SetEnterpriseOverride(v string) error {
 	a.EnterpriseOverride = norm
 	a.mu.Unlock()
 	return a.SaveAtomic()
+}
+
+// wbExpiresAtMillis 判断文档里的 expiresAt 是毫秒还是秒：>= 1e12 视为毫秒
+// （秒级到 1e12 要公元 33658 年，实际不可能是秒）。
+func wbExpiresAtMillis(doc map[string]any) (bool, bool) {
+	holder := doc
+	if nested, ok := doc["auth"].(map[string]any); ok {
+		holder = nested
+	}
+	v, ok := holder["expiresAt"]
+	if !ok {
+		return false, false
+	}
+	switch t := v.(type) {
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return n >= 1e12, true
+		}
+	case float64:
+		return t >= 1e12, true
+	}
+	return false, false
+}
+
+// wbOverlay 加密来源文件的回写底稿：解密后原文档的副本，把本包管理的字段写回它们
+// 原来的位置（嵌套形在 auth / account 下，扁平形在顶层）。原文没有、值又为空的字段不新增，
+// 其余桌面端字段原样保留；expiresAt 按来源的单位写回。
+func wbOverlay(s authFileSnapshot) map[string]any {
+	doc := cloneJSON(s.wbDoc).(map[string]any)
+	authObj, nested := doc["auth"].(map[string]any)
+	accObj := doc
+	if nested {
+		if accObj, _ = doc["account"].(map[string]any); accObj == nil {
+			accObj = map[string]any{}
+			doc["account"] = accObj
+		}
+	} else {
+		authObj = doc
+	}
+	set := func(m map[string]any, k string, v any, empty bool) {
+		if _, has := m[k]; has || !empty {
+			m[k] = v
+		}
+	}
+	exp := s.expiresAt
+	if s.expiresAtMillis {
+		exp *= 1000
+	}
+	set(authObj, "accessToken", s.accessToken, false)
+	set(authObj, "refreshToken", s.refreshToken, s.refreshToken == "")
+	set(authObj, "expiresAt", exp, s.expiresAt == 0)
+	set(authObj, "domain", s.domain, s.domain == "")
+	set(authObj, "realm", s.realm, s.realm == "")
+	set(accObj, "uid", s.uid, s.uid == "")
+	set(accObj, "enterpriseId", s.enterpriseID, s.enterpriseID == "")
+	set(accObj, "nickname", s.nickname, s.nickname == "")
+	set(doc, "device_token", s.deviceToken, s.deviceToken == "")
+	return doc
+}
+
+// cloneJSON 深拷贝 JSON 解码出的值（map / slice 递归，其余是不可变的标量）。
+func cloneJSON(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		m := make(map[string]any, len(t))
+		for k, x := range t {
+			m[k] = cloneJSON(x)
+		}
+		return m
+	case []any:
+		s := make([]any, len(t))
+		for i, x := range t {
+			s[i] = cloneJSON(x)
+		}
+		return s
+	}
+	return v
 }

@@ -980,3 +980,23 @@ main（带用例、CI 绿），要么有明确的不合理由。
 用例：上游 `windowprobe_test.go` 原样搬入（开窗/仍限流/时刻未变重试/其它错误放弃/闸门拦截/首个有效帧判定）。
 
 至此 `3bab4f8c` 闭环：登记（6004 带重置时刻）→ 到点探针（开关开时）→ 开窗清冷却。
+
+### 第十九批（`8622073e` + 前置：$wbEncrypted 加密 auth）
+
+这条一直标「缺载体」是对的：本仓**根本读不了**新版桌面端的加密 auth 文件，所以「回写要保持加密」
+的修补无处可挂。这一批把整条链补上。
+
+加密口径（`internal/auth/wbencrypted.go`）：`{"$wbEncrypted":1,"envelope":"<b64(JSON{suite,keyId,nonce,authTag,ciphertext})>"}`，
+key = sha256(桌面端 at-rest 静态密钥字符串本身)、AES-256-GCM、固定 AAD；`keyId` = sha256(key) 的
+hex 前 16 位，对不上就报错、不猜。
+
+| 部分 | 说明 |
+|---|---|
+| 解密 | `decryptWBEncrypted` 深度遍历，`UseNumber` 保留数字原文（昵称 "12345" 不会被二次解成数字）；无信封的文件原样返回 |
+| 解析 | `Parse` 开头解密再走原两形态；记录 `wbSealed` / `wbDoc` / `expiresAtMillis` |
+| 回写 | 加密来源**不走**明文合并：以 `wbDoc` 深拷贝为底，只覆盖本包管理的字段、按原单位写回 `expiresAt`，再整树封回信封。桌面端自己的字段（phoneNumber、uin…）原样保留 |
+| 明文来源 | 路径完全不变（读回原文件保留未知键那套），零回归 |
+
+堵住的三种坏结果：凭据以明文落盘、桌面端字段被丢、毫秒/秒互相改写。
+
+用例：上游 `wbencrypted_test.go` + `testdata/wbencrypted-auth.json` 原样搬入并通过。
