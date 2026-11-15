@@ -125,7 +125,17 @@ type respTracker struct {
 	chunkSt  int   // 0=等大小行 1=收数据 2=等 chunk 尾 CRLF 3=收 trailer
 	unknown  bool  // 无法判断边界 → 永不回到 awaitRequest
 	started  bool
+	// lineBuf chunked 大小行的**半行缓冲**（审查 D3）。
+	//
+	// 此前 `bytes.Index(b[i:], "\r\n")` 找不到 CRLF 就直接 `return false` 丢掉这半行
+	// （原注释自认「不缓存」）。下一次 Read 从新字节开始、chunkSt 仍是 0，于是把**后半行**
+	// 当成一条新的大小行去解析 → 解析失败 → `unknown = true` → 该连接的 tracker 永久失效，
+	// 之后头序重排静默失灵；早响应（WAF 403/413）时后续请求体还可能被当请求头缓冲。
+	lineBuf []byte
 }
+
+// maxChunkLine chunked 大小行的最大长度（正常只有几十字节，留足余量防脏数据撑爆）。
+const maxChunkLine = 4096
 
 // feed 喂入刚读到的字节，返回 true 表示「本响应已完整结束」。
 func (t *respTracker) feed(b []byte) bool {
@@ -209,9 +219,25 @@ func (t *respTracker) feedChunked(b []byte) bool {
 	for i < len(b) {
 		switch t.chunkSt {
 		case 0: // 等 chunk 大小行
+			if len(t.lineBuf) > 0 {
+				// 把上一批留下的半行拼到本批前面，然后整体重新扫（审查 D3）。
+				merged := make([]byte, 0, len(t.lineBuf)+len(b)-i)
+				merged = append(merged, t.lineBuf...)
+				merged = append(merged, b[i:]...)
+				t.lineBuf = nil
+				b = merged
+				i = 0
+			}
 			j := bytes.Index(b[i:], []byte("\r\n"))
 			if j < 0 {
-				return false // 半行，下次继续（不缓存，行很短且极少跨包）
+				// 半行：**缓存**等下一批（审查 D3）。此前直接丢弃 → 下次把后半行当新行解析。
+				// 超长则判定不可解析（脏数据 / 不是 chunked），避免缓冲无界增长。
+				if len(b)-i > maxChunkLine {
+					t.unknown = true
+					return false
+				}
+				t.lineBuf = append(t.lineBuf, b[i:]...)
+				return false
 			}
 			line := string(b[i : i+j])
 			if k := bytes.IndexByte([]byte(line), ';'); k >= 0 {
