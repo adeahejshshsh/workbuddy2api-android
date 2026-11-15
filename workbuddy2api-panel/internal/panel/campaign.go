@@ -9,6 +9,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math/rand/v2"
 	"net/http"
@@ -129,8 +130,25 @@ func (p *Panel) campaignStatus(w http.ResponseWriter, r *http.Request) {
 	defer p.campaignMu.Unlock()
 	accts := p.cfg.Pool.List()
 	out := make([]campaignAccount, len(accts))
-	sem := make(chan struct{}, 3)
+	// 固定 3 个 worker 消费账号下标（W2-CP-01）：此前是「每个账号一个 goroutine
+	// 抢信号量」，几千号时几千个 goroutine 同时阻塞在 sem 上，而 campaignMu 被
+	// 整轮持锁（期间的 claim 请求全部 409）。改成有界 worker 后并发数固定。
+	type campaignJob struct {
+		i int
+		a *auth.Auth
+	}
+	jobs := make(chan campaignJob)
 	var wg sync.WaitGroup
+	for w := 0; w < 3; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				i, a := job.i, job.a
+				p.campaignStatusOne(r, a, module, code, out, i)
+			}
+		}()
+	}
 	for i, st := range accts {
 		if st.Disabled {
 			continue
@@ -139,40 +157,9 @@ func (p *Panel) campaignStatus(w http.ResponseWriter, r *http.Request) {
 		if a == nil {
 			continue
 		}
-		wg.Add(1)
-		go func(i int, a *auth.Auth) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			it := campaignAccount{UID: a.UID, Nickname: a.Nickname, Realm: a.Realm()}
-			if !campaignEligible(a) {
-				it.Err = "该领域/账号类型不参与本期活动"
-				out[i] = it
-				return
-			}
-			if r.Context().Err() != nil {
-				return // 客户端已断开：剩下的号不再查
-			}
-			snap, err := p.cfg.Upstream.CampaignTasks(a, module, code)
-			if err != nil {
-				it.Err = err.Error()
-				out[i] = it
-				return
-			}
-			it.InPeriod = snap.InPeriod
-			it.Tasks = snap.Tasks
-			it.Vouchers = snap.Vouchers
-			inv := snap.Invite
-			it.Invite = &inv
-			for _, t := range snap.Tasks {
-				if upstream.CampaignTaskReady(t) {
-					it.Ready = append(it.Ready, t.Code)
-				}
-			}
-			sort.Strings(it.Ready)
-			out[i] = it
-		}(i, a)
+		jobs <- campaignJob{i: i, a: a}
 	}
+	close(jobs)
 	wg.Wait()
 	res := make([]campaignAccount, 0, len(out))
 	ready := 0
@@ -192,12 +179,59 @@ func (p *Panel) campaignStatus(w http.ResponseWriter, r *http.Request) {
 		"accounts":       res,
 		"accounts_ready": ready,
 	}
-	if r.Context().Err() == nil { // 客户端中途走了，结果不完整，不缓存
+	// 只缓存「完整且全部成功」的结果（W2-CP-03）：此前任一账号报错也缓存 1 分钟，
+	// 一次上游抖动后面板持续显示「查询失败」，用户会以为账号坏了。
+	cacheable := r.Context().Err() == nil
+	if cacheable {
+		for _, it := range res {
+			if it.Err != "" {
+				cacheable = false
+				break
+			}
+		}
+	}
+	if cacheable {
 		p.campaignCacheMu.Lock()
 		p.campaignCache = campaignCacheEntry{key: module + "|" + code, at: time.Now(), body: body}
 		p.campaignCacheMu.Unlock()
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// campaignMaxUIDs 单次领奖请求可列出的账号数上限（W2-CP-02）。
+const campaignMaxUIDs = 5000
+
+// campaignStatusOne 单账号活动查询（由固定 worker 池调用，W2-CP-01）。
+//
+// out 按下标写入：每个下标只会被一个 worker 写，无并发写同一元素。
+func (p *Panel) campaignStatusOne(r *http.Request, a *auth.Auth, module, code string, out []campaignAccount, i int) {
+	it := campaignAccount{UID: a.UID, Nickname: a.Nickname, Realm: a.Realm()}
+	if !campaignEligible(a) {
+		it.Err = "该领域/账号类型不参与本期活动"
+		out[i] = it
+		return
+	}
+	if r.Context().Err() != nil {
+		return // 客户端已断开：剩下的号不再查
+	}
+	snap, err := p.cfg.Upstream.CampaignTasks(a, module, code)
+	if err != nil {
+		it.Err = err.Error()
+		out[i] = it
+		return
+	}
+	it.InPeriod = snap.InPeriod
+	it.Tasks = snap.Tasks
+	it.Vouchers = snap.Vouchers
+	inv := snap.Invite
+	it.Invite = &inv
+	for _, t := range snap.Tasks {
+		if upstream.CampaignTaskReady(t) {
+			it.Ready = append(it.Ready, t.Code)
+		}
+	}
+	sort.Strings(it.Ready)
+	out[i] = it
 }
 
 // campaignClaim POST /panel/api/campaign/claim
@@ -213,8 +247,20 @@ func (p *Panel) campaignClaim(w http.ResponseWriter, r *http.Request) {
 		UIDs   []string `json:"uids"`
 		DryRun *bool    `json:"dry_run"`
 	}
+	// 请求体收紧 + uids 上限（W2-CP-02）：此前只有全局 32MB 兜底，32MB 的 uids
+	// 数组解码后能放大成数百万 map 项。
+	limitJSONBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	if len(req.UIDs) > campaignMaxUIDs {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("uids 最多 %d 条", campaignMaxUIDs))
+		return
+	}
+	// 上游缺失时直接回 503（W2-CP-04）：否则下面的 CampaignTasks 解引用 nil panic。
+	if p.cfg.Upstream == nil {
+		writeErr(w, http.StatusServiceUnavailable, "上游客户端未就绪（配置热重载窗口），请稍后重试")
 		return
 	}
 	module, code, ok := campaignIdent(req.Module, req.Code)
@@ -252,9 +298,9 @@ func (p *Panel) campaignClaim(w http.ResponseWriter, r *http.Request) {
 		// Pending 上游已接受领奖请求、但回读不到 claimed_at（未确认入账）——
 		// 不算 Claimed，下一轮会再试。
 		Pending []string `json:"pending,omitempty"`
-		Would    []string `json:"would_claim,omitempty"`
-		Skipped  []string `json:"skipped,omitempty"`
-		Errors   []string `json:"errors,omitempty"`
+		Would   []string `json:"would_claim,omitempty"`
+		Skipped []string `json:"skipped,omitempty"`
+		Errors  []string `json:"errors,omitempty"`
 	}
 
 	ctx := r.Context()
@@ -326,4 +372,3 @@ func (p *Panel) campaignClaim(w http.ResponseWriter, r *http.Request) {
 		"rows":    rows,
 	})
 }
-

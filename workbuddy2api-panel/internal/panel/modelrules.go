@@ -8,11 +8,17 @@ package panel
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
+
+// modelRuleMaxBatch 单次批量操作的 uid / 模型条数上限（W2-MD-04）。
+// 请求体已由 limitJSONBody 收到 1MB，这里再挡一层「数组长度」——1MB 的
+// 短字符串数组解码后能放大成几十万条，落盘时整份规则写进 config.json。
+const modelRuleMaxBatch = 512
 
 // modelRulesEntry 规则 + 引用计数（面板左栏列表用）。
 type modelRulesEntry struct {
@@ -50,8 +56,14 @@ func (p *Panel) modelRuleSave(w http.ResponseWriter, r *http.Request) {
 		Models []string `json:"models"`
 		Note   string   `json:"note"`
 	}
+	// 请求体收紧 + 数组上限（W2-MD-04）。
+	limitJSONBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	if len(req.Models) > modelRuleMaxBatch {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("models 最多 %d 条", modelRuleMaxBatch))
 		return
 	}
 	saved, err := p.cfg.Pool.UpsertRule(pool.ModelRule{
@@ -70,26 +82,91 @@ func (p *Panel) modelRuleSave(w http.ResponseWriter, r *http.Request) {
 // 把一条规则批量挂到一批账号上（assigned=true）或摘掉（assigned=false）。
 // 规则卡片上的「应用」用它：账号多的池子里不用逐个账号点「配置」。
 // 只动这条规则的引用，账号原有的其它规则不变。
+//
+// 增量形态（W4F1-077）：{"id":"r1","add":["u1"],"del":["u2"]} —— 一次请求同时
+// 挂上 add、摘掉 del。前端此前是「先发 assigned:true 再发 assigned:false」两条
+// 独立请求，第一条成功、第二条失败时挂载已部分生效而界面报「保存失败」并 return
+// （不关弹窗、不刷新），用户再点一次会把已生效的部分重发。改成单请求后，
+// 失败只会是「一条都没动」（规则不存在/参数非法在动之前就返回）。
 func (p *Panel) modelRuleApply(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID       string   `json:"id"`
 		UIDs     []string `json:"uids"`
 		Assigned bool     `json:"assigned"`
+		// 增量形态（W4F1-077）。
+		Add []string `json:"add"`
+		Del []string `json:"del"`
 	}
+	limitJSONBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
 		return
 	}
-	if strings.TrimSpace(req.ID) == "" {
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
 		writeErr(w, http.StatusBadRequest, "缺少规则 id")
 		return
 	}
-	n, err := p.cfg.Pool.ApplyRule(req.ID, req.UIDs, req.Assigned)
+	if len(req.Add)+len(req.Del) > 0 {
+		if len(req.Add) > modelRuleMaxBatch || len(req.Del) > modelRuleMaxBatch {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("add / del 各最多 %d 条", modelRuleMaxBatch))
+			return
+		}
+		added, removed, err := p.applyRuleDelta(id, req.Add, req.Del)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "id": id, "added": added, "removed": removed, "changed": added + removed,
+		})
+		return
+	}
+	if len(req.UIDs) > modelRuleMaxBatch {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("uids 最多 %d 条", modelRuleMaxBatch))
+		return
+	}
+	n, err := p.cfg.Pool.ApplyRule(id, req.UIDs, req.Assigned)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": n})
+}
+
+// applyRuleDelta 在一次请求内同时挂上 add、摘掉 del（W4F1-077）。
+//
+// 语义：重叠的 uid 以 del 为准（先 add 再 del，摘除是更保守的结果）。
+// 原子性：规则存在性在**任何写入之前**校验，因此失败时一条都没动；两次
+// ApplyRule 由 modelRuleMu 串起来，避免并发请求交错看到「只挂了一半」的中间态。
+func (p *Panel) applyRuleDelta(id string, add, del []string) (added, removed int, err error) {
+	p.modelRuleMu.Lock()
+	defer p.modelRuleMu.Unlock()
+	known := false
+	for _, rr := range p.cfg.Pool.Rules() {
+		if rr.ID == id {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return 0, 0, fmt.Errorf("规则不存在: %s", id)
+	}
+	if len(add) > 0 {
+		n, e := p.cfg.Pool.ApplyRule(id, add, true)
+		if e != nil {
+			return 0, 0, e
+		}
+		added = n
+	}
+	if len(del) > 0 {
+		n, e := p.cfg.Pool.ApplyRule(id, del, false)
+		if e != nil {
+			return added, 0, e
+		}
+		removed = n
+	}
+	return added, removed, nil
 }
 
 // modelRuleDelete POST /panel/api/model_rules/delete
@@ -99,6 +176,7 @@ func (p *Panel) modelRuleDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID string `json:"id"`
 	}
+	limitJSONBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
 		return
@@ -127,8 +205,13 @@ func (p *Panel) accountModelRules(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IDs []string `json:"ids"`
 	}
+	limitJSONBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	if len(req.IDs) > modelRuleMaxBatch {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("ids 最多 %d 条", modelRuleMaxBatch))
 		return
 	}
 	ids, err := p.cfg.Pool.AssignRules(uid, req.IDs)

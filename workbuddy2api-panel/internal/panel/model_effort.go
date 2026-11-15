@@ -57,6 +57,19 @@ func (p *Panel) setModelEffort(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "load config: "+err.Error())
 		return
 	}
+	// 「读 → 改 → 写」串行化（W2-MD-01）：两个标签页同时改两个模型，或前端连点
+	// 时后写者会覆盖前者，用户另一项设置静默丢失。锁只包住这一段，SaveConfig 的
+	// 深合并仍在锁内完成（它本身就是写盘路径）。
+	//
+	// 锁内重新 LoadConfig：上面那次读只用于快速失败，真正参与读改写的是锁内快照，
+	// 否则两个并发请求会基于同一份旧配置各自改一项、后写者覆盖前者。
+	p.configWriteMu.Lock()
+	defer p.configWriteMu.Unlock()
+	cfgAny, err = p.cfg.LoadConfig()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load config: "+err.Error())
+		return
+	}
 	raw, err := json.Marshal(cfgAny)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "marshal config: "+err.Error())
@@ -71,7 +84,16 @@ func (p *Panel) setModelEffort(w http.ResponseWriter, r *http.Request) {
 	// 保留既有条目（裸名两域共用、别的域的精确键、已删除模型的残留键都原样带上），
 	// 只覆盖当前模型的键；键统一小写，与 EffortPolicy.DefaultEffortFor 的查找口径一致。
 	entries := effortDefaults(root)
-	entries[realm+":"+strings.ToLower(bare)] = effort
+	key := realm + ":" + strings.ToLower(bare)
+	// 写入前先删掉 EqualFold 相同的旧键（W2-MD-02）：用户历史上可能写过
+	// cn:GLM-5.2，若只写小写键就会与它并存两条档位，实际生效取决于下游查找顺序，
+	// 面板显示与真正生效的档位可能不一致。与 setModelHidden 的幂等增删同口径。
+	for k := range entries {
+		if k != key && strings.EqualFold(k, key) {
+			delete(entries, k)
+		}
+	}
+	entries[key] = effort
 	body, err := json.Marshal(map[string]any{"thinking": map[string]any{"model_defaults": entries}})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "marshal config: "+err.Error())

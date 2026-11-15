@@ -42,6 +42,15 @@ var chatLogOut io.Writer = os.Stdout
 // SetChatLogOutput 替换聊天表格日志输出目标（仅 main 启动期调用一次）。
 func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 
+// chatLogMu 串行化流水行的整行写出（W1A3-09）。
+//
+// 为什么需要：logChatRowEx 直接 fmt.Fprintf(chatLogOut, …)，而 chatLogOut 是进程级
+// 共享 io.Writer。os.Stdout 的小写入通常是原子的，但 main 注入的是 MultiWriter
+// （stdout + 面板环形缓冲），环形的 Write 在锁内按行切分 —— 两个并发请求的
+// Fprintf 会在 MultiWriter 里拆成多次 Write 调用而交错，面板日志出现半行/拼接脏行。
+// 一次 Fprintf 在本锁内完成，整行要么完整落盘要么完整丢弃。
+var chatLogMu sync.Mutex
+
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
 	start time.Time
@@ -796,6 +805,9 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 		}
 		src = fmt.Sprintf(" src=%s ua=%s |", dashIfEmpty(clientIP), ua)
 	}
+	// 整行一次性写出（W1A3-09）：见 chatLogMu 的注释 —— 注入 MultiWriter 后
+	// 并发 Fprintf 会拆成多次 Write 并交错成半行。
+	chatLogMu.Lock()
 	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |%s%s\n",
 		seq,
 		time.Now().Format("15:04:05"),
@@ -810,6 +822,7 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 		extra,
 		src,
 	)
+	chatLogMu.Unlock()
 }
 
 // cacheMissSignal 低命中率告警信号（issue #92 P1 轻量化）：同一模型此前观测到过

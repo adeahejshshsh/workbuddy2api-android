@@ -140,7 +140,8 @@ type Panel struct {
 	idxETag string
 
 	// logins 进行中的 OAuth 设备授权会话（state → 会话信息）。
-	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
+	// poll 成功或超时（loginTTL）后剔除；另有 loginMaxSessions 硬上限（W2-LG-01），
+	// 反复 POST /login/start 不会再无界堆积。
 	loginMu sync.Mutex
 	// 注意必须是**指针** map：loginSession 带可变字段（consumed），值类型 map 里
 	// 取出来的是副本，改副本不会回写 —— 防重入标记会永远失效（review H1）。
@@ -169,6 +170,18 @@ type Panel struct {
 
 	// campaignMu 活动查询与领奖同一时刻只跑一轮（campaign.go）。
 	campaignMu sync.Mutex
+	// configWriteMu 串行化「读配置 → 改一项 → 写回」的读改写（W2-MD-01）。
+	// model_effort / model_hidden 都是这个形状：并发两次设置（两个标签页、连点、
+	// 后台也在写）时后写者覆盖前者，用户另一项设置静默丢失。SaveConfig 的深合并
+	// 只保护「未提交的兄弟键」，保护不了同一键的并发值。
+	configWriteMu sync.Mutex
+	// modelRuleMu 串行化规则批量挂载的「add + del」两步（W4F1-077）：并发请求
+	// 交错会看到「只挂了一半」的中间态。
+	modelRuleMu sync.Mutex
+	// creditRefreshSem 领奖后异步刷余额的在飞上限（W2-AT-02）：每项领奖都会触发
+	// 一次上游额度查询，批量领奖 + 上游变慢时 goroutine 线性堆积。满了就跳过本次
+	// 刷新（下一次余额刷新/手动点「余额」会补上），绝不阻塞任务链。
+	creditRefreshSem chan struct{}
 	// campaignCacheMu/campaignCache 活动进度查询的短时缓存（campaign.go）。
 	campaignCacheMu sync.Mutex
 	campaignCache   campaignCacheEntry
@@ -203,6 +216,11 @@ func (p *Panel) unlockAccount(uid string) {
 // 防止"开了添加账号弹窗就走开"的会话永久滞留。
 const loginTTL = 15 * time.Minute
 
+// loginMaxSessions 同时在飞的登录会话上限（W2-LG-01）：每条都要打一次上游
+// auth/state，且只在下次 start / poll 命中时才回收 —— 不设上限就是无界放大。
+// 面板是单管理员使用，几十个并发弹窗已远超真实用量。
+const loginMaxSessions = 64
+
 // loginSession 进行中的 OAuth 会话：创建时刻 + realm（cn/global，用于落盘与端点切换）。
 type loginSession struct {
 	created time.Time
@@ -232,6 +250,8 @@ func New(cfg Config) *Panel {
 		// 热重载的缺席计数表：nil map 上写会 panic（重载首轮就写）。
 		reloadMissing:       map[string]int{},
 		reloadDeleteConfirm: 2,
+		// 容量 8：与余额刷新的上游 QPS 同量级（见 refreshCreditsAsync）。
+		creditRefreshSem: make(chan struct{}, 8),
 	}
 	p.growthConc.Store(int64(cfg.GrowthConcurrency))
 	p.routes()
@@ -474,10 +494,17 @@ func panelPublicPath(p string) bool {
 // 网关 api_key（兼容既有部署）。返回的第二个值表示「面板有独立管理员密钥」。
 func (p *Panel) apiKey() (key string, dedicated bool) {
 	if p.cfg.Live != nil {
-		if k := p.cfg.Live.Load().AdminAPIKey; k != "" {
+		snap := p.cfg.Live.Load()
+		if k := snap.AdminAPIKey; k != "" {
 			return k, true
 		}
-		return p.cfg.Live.Load().APIKey, false
+		if k := snap.APIKey; k != "" {
+			return k, false
+		}
+		// 快照两个字段都空时回落到静态配置（W2-AU-02）：结构体的零值语义是
+		// fail-open（key=="" 即不鉴权），任何一处构建 livecfg.Snapshot 漏填
+		// APIKey 的改动都会让面板静默变成匿名可达。当前三处构建点都填了，
+		// 但这条回落是「漏填也不会开门」的唯一保证。
 	}
 	if p.cfg.AdminAPIKey != "" {
 		return p.cfg.AdminAPIKey, true
@@ -1117,6 +1144,12 @@ func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
+	// 删除必须与热重载的「扫描-对齐」轮次互斥（W2C4-01）：此前全程不持 reloadMu，
+	// 与 reload.go 的扫描可交错 —— 扫描轮已读到该文件、删完之后才 upsert，账号会
+	// 在内存里复活（页面出现幽灵号）；反向顺序还会把残留文件当新号再加一遍。
+	// 锁序与 reload 一致：reloadMu → pool.mu（AuthByUID 已在锁外取好，见上）。
+	p.reloadMu.Lock()
+	defer p.reloadMu.Unlock()
 	if a.FilePath != "" {
 		if err := os.Remove(a.FilePath); err != nil && !os.IsNotExist(err) {
 			log.Printf("panel: remove uid=%s 失败（auth 文件删不掉: %v）", uid, err)
@@ -1685,6 +1718,9 @@ func (p *Panel) modelToggle(w http.ResponseWriter, r *http.Request) {
 		Off   bool   `json:"off"`
 		Note  string `json:"note"`
 	}
+	// 请求体收紧（W2C4-02）：本 handler 此前漏了 limitJSONBody，只受 ServeHTTP 的
+	// 32MB 全局上限约束 —— 鉴权后即可反复触发 32MB 级 JSON 解码的内存放大。
+	limitJSONBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
 		return

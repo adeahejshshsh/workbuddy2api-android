@@ -160,24 +160,33 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	var toVerify []importAcct
 	var vmu sync.Mutex // 保护 imported/skipped/errs/warnings：求证回调并发进来
 
-	// 后置动作并发上限（bug 18）：与 packages / syncNicknames 同款 sem=3
-	importSem := make(chan struct{}, 3)
-	// postImport 后置动作（签到/注册激活/领 trial/查余额）丢到后台并限并发（bug #23 / bug 18）：
+	// postImport 后置动作（签到/注册激活/领 trial/查余额）丢到后台（bug #23 / bug 18）：
 	// 每号 2 次上游调用、几十个号串行就是几十秒到几分钟，全部跑完才返回 → 浏览器/反代先超时，
-	// 前端报失败但账号其实已导入一半，用户重试又重复导入。抢槽必须在 goroutine 内部，
-	// 否则后台化被同步信号量抵消。
-	postImport := func(ia importAcct) {
-		go func(a *auth.Auth, realm string) {
-			importSem <- struct{}{}
-			defer func() { <-importSem }()
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("ERR: [panel] postImportActivate panic uid=%s: %v", a.UID, r)
-				}
-			}()
-			p.postImportActivate(a, realm)
-		}(ia.a, ia.realm)
+	// 前端报失败但账号其实已导入一半，用户重试又重复导入。
+	//
+	// 并发模型（W2-IM-02）：固定 3 个 worker 消费一个有界队列，**不再是「每号一个
+	// goroutine 抢信号量」** —— 那样一次导入几千号就是几千个 goroutine 阻塞在 sem 上
+	// （各带一个 *auth.Auth 引用），与 32MB 的解析放大叠加就是 OOM。队列容量等于
+	// 条数上限，所以 handler 侧入队不会阻塞（仍然不等待后台完成）。
+	postQueue := make(chan importAcct, importMaxEntries)
+	var postWG sync.WaitGroup
+	for w := 0; w < importPostWorkers; w++ {
+		postWG.Add(1)
+		go func() {
+			defer postWG.Done()
+			for ia := range postQueue {
+				func(a *auth.Auth, realm string) {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("ERR: [panel] postImportActivate panic uid=%s: %v", a.UID, r)
+						}
+					}()
+					p.postImportActivate(a, realm)
+				}(ia.a, ia.realm)
+			}
+		}()
 	}
+	postImport := func(ia importAcct) { postQueue <- ia }
 
 	// commit 落盘并入池（调用方持 vmu）。落盘在前、入池在后：入池后选号就会用新凭据。
 	// verified 表示新凭据刚被 refresh 求证过：上游已把文件里的 refresh token 轮换，池里原有
@@ -243,9 +252,12 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		}
 		expiresAt := expRaw
 
-		nickname := acc.Nickname
-		if strings.TrimSpace(nickname) == "" {
-			nickname = acc.Email
+		// 昵称净化（W2-IM-03）：导入字段原样落盘并进日志/面板列表，控制字符与超长
+		// 昵称会污染日志行（换行可伪造整行日志）并放大面板渲染；上限 64 rune 与
+		// 面板展示口径一致。
+		nickname := sanitizeNickname(acc.Nickname)
+		if nickname == "" {
+			nickname = sanitizeNickname(acc.Email)
 		}
 
 		a := &auth.Auth{
@@ -322,6 +334,10 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 
+	// 关掉后置队列让 worker 退出（W2-IM-02）：此时所有入队点（主循环 + 求证回调）
+	// 都已结束，关队列不会 panic；worker 继续在后台跑完剩余项（与既有语义一致：
+	// handler 不等待后置动作）。
+	close(postQueue)
 	total = len(accounts)
 	log.Printf("panel: cockpit import finished total=%d imported=%d skipped=%d", total, imported, skipped)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -343,6 +359,20 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 //
 // 为什么加 2：换包名后旧包的私有目录搬不过来（/data/data 非 root 读不到），用户能拿到
 // 的就是 auths/*.json 这些文件本身；只认 cockpit 形状等于逼人手工改键名。
+const (
+	// importMaxDepth 导入 JSON 的嵌套深度上限（W2-IM-01）。深嵌套（[[[[…）会让
+	// encoding/json 递归到打穿 goroutine 栈 —— Go 的栈溢出是 fatal error，
+	// recover 无效，直接带走整个网关进程。32 层足够容纳任何真实导出形状。
+	importMaxDepth = 32
+	// importMaxEntries 单次导入的账号条数上限（W2-IM-01/02）：32MB 数组解码后在
+	// []json.RawMessage + probe map 上放大 2~3 倍，再给每号起一个 goroutine，
+	// 一次导入就能把进程打满。2000 条远超正常池规模（几十~几百号）。
+	importMaxEntries = 2000
+	// importPostWorkers 后置动作（签到/注册/领 trial/查余额）的固定 worker 数
+	// （W2-IM-02，与既有 sem=3 同量级）。
+	importPostWorkers = 3
+)
+
 // importEnvelopeKeys 导出工具可能使用的信封键（值可能是数组或单个对象）。
 var importEnvelopeKeys = []string{"accounts", "data", "list", "items", "results", "auths"}
 
@@ -361,6 +391,11 @@ func parseImportPayload(raw []byte) ([]cockpitAccount, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return nil, fmt.Errorf("empty file")
+	}
+	// 解码前先做字节级形状预检（W2-IM-01）：深嵌套会在 json.Unmarshal 里递归到
+	// 打穿 goroutine 栈（fatal error，recover 无效，整个网关进程直接没）。
+	if err := checkImportShape(trimmed); err != nil {
+		return nil, err
 	}
 	var items []json.RawMessage
 	switch trimmed[0] {
@@ -442,6 +477,11 @@ func parseImportPayload(raw []byte) ([]cockpitAccount, error) {
 	default:
 		return nil, fmt.Errorf("不是 JSON 对象或数组")
 	}
+	// 条数上限（W2-IM-01/02）：解码后的 []cockpitAccount 是内存放大的主要来源，
+	// 也是「每号一个后置动作」的上游。超限直接拒，不做部分导入（部分导入更难解释）。
+	if len(items) > importMaxEntries {
+		return nil, fmt.Errorf("账号条数 %d 超过单次导入上限 %d，请分批导入", len(items), importMaxEntries)
+	}
 	out := make([]cockpitAccount, 0, len(items))
 	for i, it := range items {
 		acc, err := decodeImportItem(it)
@@ -451,6 +491,89 @@ func parseImportPayload(raw []byte) ([]cockpitAccount, error) {
 		out = append(out, acc)
 	}
 	return out, nil
+}
+
+// importNicknameMaxRunes 导入昵称的 rune 上限（W2-IM-03）。
+const importNicknameMaxRunes = 64
+
+// sanitizeNickname 去掉控制字符/换行并截断到上限（W2-IM-03）。
+//
+// 为什么必须做：昵称会写进 auths/*.json、面板列表与 stdout 日志行。带 \n 的昵称
+// 可以伪造整行日志（日志是排障与审计的唯一依据），带控制字符的昵称会让面板渲染错乱。
+func sanitizeNickname(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	n := 0
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			continue // 控制字符（含 \n / \r / \t）
+		}
+		if n >= importNicknameMaxRunes {
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// checkImportShape 解码前的字节级形状预检（W2-IM-01）。
+//
+// 只做两件事，不解析 JSON 语义：
+//  1. 括号嵌套深度 ≤ importMaxDepth —— 深嵌套会让 encoding/json 递归爆栈，
+//     Go 的栈溢出是 fatal error（recover 无效），一个 32MB 的 `[[[[…` 就能带走
+//     整个网关进程；
+//  2. 粗数顶层数组元素（逗号计数，仅在根是数组时）≤ importMaxEntries ——
+//     在 Unmarshal 之前挡住「几万条账号」的内存放大。
+//
+// 字符串内的括号/逗号按状态机跳过（含转义），避免把正文里的 `[` 当结构。
+func checkImportShape(raw []byte) error {
+	depth := 0
+	inStr := false
+	esc := false
+	topElems := 1
+	rootArray := false
+	for i, b := range raw {
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case b == '\\':
+				esc = true
+			case b == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			inStr = true
+		case '[', '{':
+			depth++
+			if i == 0 && b == '[' {
+				rootArray = true
+			}
+			if depth > importMaxDepth {
+				return fmt.Errorf("JSON 嵌套过深（>%d 层），拒绝解析", importMaxDepth)
+			}
+		case ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if rootArray && depth == 1 {
+				topElems++
+			}
+		}
+	}
+	if rootArray && topElems > importMaxEntries {
+		return fmt.Errorf("账号条数超过单次导入上限 %d，请分批导入", importMaxEntries)
+	}
+	return nil
 }
 
 // decodeImportItem 单条：靠键名区分 cockpit（snake_case）与本仓 auths（camelCase）。

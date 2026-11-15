@@ -9,8 +9,13 @@ package panel
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 )
+
+// modelNameRe 模型名白名单（W2-MD-03）：字母/数字/点/下划线/冒号/连字符，≤128 字符。
+// 冒号保留是因为裸名允许带命名空间（qwen:7b）。
+var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9._:\-]{1,128}$`)
 
 // setModelHidden 切换单个模型的「下游可见」状态。
 //
@@ -35,8 +40,24 @@ func (p *Panel) setModelHidden(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "id 需为 cn:模型名 或 global:模型名")
 		return
 	}
+	// 模型名白名单（W2-MD-03）：此前只校验非空，含控制字符/超长的名字会原样写进
+	// config.json，再被 /v1/models 输出与前端渲染 —— 配置文件被污染且排障时看不出
+	// 是注入。128 是上游最长模型名的量级上限。
+	if !modelNameRe.MatchString(bare) {
+		writeErr(w, http.StatusBadRequest, "模型名只允许字母、数字、点、下划线、冒号、连字符（≤128 字符）")
+		return
+	}
 
 	cfgAny, err := p.cfg.LoadConfig()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load config: "+err.Error())
+		return
+	}
+	// 读改写串行化（W2-MD-01）：与 setModelEffort 同一把锁，避免两个接口互相
+	// 覆盖对方刚写的键（SaveConfig 深合并只保护未提交的兄弟键）。
+	p.configWriteMu.Lock()
+	defer p.configWriteMu.Unlock()
+	cfgAny, err = p.cfg.LoadConfig()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "load config: "+err.Error())
 		return

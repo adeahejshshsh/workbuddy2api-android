@@ -189,7 +189,15 @@ func (p *Panel) removeMissingLocked(seen map[string]bool, force bool, res *Reloa
 			continue
 		}
 		// 护栏 4：文件其实在盘上（可能是面板刚写入、或扫描竞态）→ 视为在场，不计缺席。
-		if a := p.cfg.Pool.AuthByUID(st.UID); a != nil && a.FilePath != "" {
+		//
+		// FilePath 为空的账号按「无法判定」处理（W2C4-19）：内存态/未落盘来源的号
+		// 没有文件可 stat，此前每轮都被记缺席，连续 N 轮后被 ParkMany 移出 —— 而移除
+		// 结果会持久化，重启也不复活（正是 issue #199 要防的踢号）。
+		if a := p.cfg.Pool.AuthByUID(st.UID); a != nil {
+			if a.FilePath == "" {
+				delete(p.reloadMissing, st.UID)
+				continue
+			}
 			if _, statErr := os.Stat(a.FilePath); statErr == nil {
 				delete(p.reloadMissing, st.UID)
 				continue
@@ -307,6 +315,12 @@ func (p *Panel) reloadIfChanged(reason string) (ReloadResult, error) {
 		return res, err
 	}
 	if !res.Skipped {
+		// 重载本身可能写盘（LoadDirReport 对空 realm 回填），扫描**前**取的 fp 已过期
+		// （W2C4-21）：写回过期值会让下一 tick 必然再全量重载一次（表现为「每 tick 都
+		// 全量扫」）。成功重载后重新取一次指纹。
+		if after := dirContentFingerprint(p.cfg.AuthDir); after != "" {
+			fp = after
+		}
 		p.reloadMu.Lock()
 		p.reloadFingerprint = fp
 		p.reloadMu.Unlock()
@@ -434,13 +448,13 @@ func (p *Panel) reloadStatus(w http.ResponseWriter, r *http.Request) {
 	missing := len(p.reloadMissing)
 	p.reloadMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                  true,
-		"at":                  at,
-		"result":              res,
-		"auth_dir":            p.cfg.AuthDir,
-		"interval":            interval.String(),
-		"delete_confirm":      confirm,
-		"pending_delete":      missing,
-		"pool":                len(p.cfg.Pool.List()),
+		"ok":             true,
+		"at":             at,
+		"result":         res,
+		"auth_dir":       p.cfg.AuthDir,
+		"interval":       interval.String(),
+		"delete_confirm": confirm,
+		"pending_delete": missing,
+		"pool":           len(p.cfg.Pool.List()),
 	})
 }

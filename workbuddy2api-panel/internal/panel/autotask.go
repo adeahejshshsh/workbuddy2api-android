@@ -438,7 +438,15 @@ func (p *Panel) refreshCreditsAsync(a *auth.Auth) {
 	if a == nil || p.cfg.Upstream == nil || p.cfg.Pool == nil {
 		return
 	}
+	// 在飞上限（W2-AT-02）：批量领奖时每项都会调到这里，上游变慢就线性堆 goroutine。
+	// 抢不到槽直接跳过本次刷新 —— 这是纯观测性刷新，下一次余额刷新会补上。
+	select {
+	case p.creditRefreshSem <- struct{}{}:
+	default:
+		return
+	}
 	go func() {
+		defer func() { <-p.creditRefreshSem }()
 		// panic 兜底（bug #1）：这是纯观测性刷新，绝不能因为它打死网关。
 		defer func() {
 			if r := recover(); r != nil {
@@ -956,6 +964,12 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	// 国际版账号无成长任务体系（bug-01）：与 accountTasks / 调度器 D4 门控同口径。
 	if a.IsGlobal() {
 		writeErr(w, http.StatusNotImplemented, "国际版账号无成长任务体系（上游 growth 仅对个人 CN 用户开放）")
+		return
+	}
+	// 上游缺失时直接回 503（W2-AT-05）：配置热重载窗口内 p.cfg.Upstream 可能为 nil，
+	// 此前 act.run 第一行解引用就 panic —— net/http 只断连接，前端拿到空响应。
+	if p.cfg.Upstream == nil {
+		writeErr(w, http.StatusServiceUnavailable, "上游客户端未就绪（配置热重载窗口），请稍后重试")
 		return
 	}
 	var body struct {
@@ -1683,30 +1697,44 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 		return "", fmt.Errorf("专家市场列表为空")
 	}
 	ok, fail := 0, 0
+	// 尝试数上限（W2-AT-01）：失败也计入。此前失败分支直接 continue、跳过项间节流，
+	// 上游异常时会把整张专家表（上百条）无间隔打一遍 —— 撞频控后 softRateGate 会把
+	// 该账号的其它任务一起堵死。
+	maxAttempts := count * 3
+	if maxAttempts < count {
+		maxAttempts = count
+	}
+	attempts := 0
 	for i, e := range experts {
+		if ok >= count || attempts >= maxAttempts {
+			break
+		}
+		attempts++
+		// 失败分支同样走节流（W2-AT-01）：下面的 gap 放在每个分支之后统一执行。
+		failed := func() bool {
+			// 召唤链（web_element_click + summon_click + summoned）。
+			summonEvents := upstream.DesktopExpertSummonSequence(e)
+			if err := p.cfg.Upstream.ReportDesktopEvent(a, summonEvents...); err != nil {
+				return true
+			}
+			// 真实 chat（带 X-Expert-Id）→ 服务端 requestId。
+			conv, req, cerr := p.cfg.Upstream.DesktopChatWithExpert(a, e.ExpertID)
+			if cerr != nil {
+				return true
+			}
+			// 使用事件（JOIN 服务端 requestId）+ chat 链。
+			events := append(upstream.DesktopChatSequence(conv, req, "msg-"+upstream.Tail8(req), "fast-model", "fast-model"),
+				upstream.DesktopExpertActualUseEvent(e, conv, req))
+			return p.cfg.Upstream.ReportDesktopEvent(a, events...) != nil
+		}()
+		if failed {
+			fail++
+		} else {
+			ok++
+		}
 		if ok >= count {
 			break
 		}
-		// 召唤链（web_element_click + summon_click + summoned）。
-		summonEvents := upstream.DesktopExpertSummonSequence(e)
-		if err := p.cfg.Upstream.ReportDesktopEvent(a, summonEvents...); err != nil {
-			fail++
-			continue
-		}
-		// 真实 chat（带 X-Expert-Id）→ 服务端 requestId。
-		conv, req, cerr := p.cfg.Upstream.DesktopChatWithExpert(a, e.ExpertID)
-		if cerr != nil {
-			fail++
-			continue
-		}
-		// 使用事件（JOIN 服务端 requestId）+ chat 链。
-		events := append(upstream.DesktopChatSequence(conv, req, "msg-"+upstream.Tail8(req), "fast-model", "fast-model"),
-			upstream.DesktopExpertActualUseEvent(e, conv, req))
-		if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
-			fail++
-			continue
-		}
-		ok++
 		if i < len(experts)-1 {
 			if !sleepAB(a.UID, expertSummonGap) {
 				return "", errTaskAborted
@@ -2088,8 +2116,10 @@ func (p *Panel) runAutoAllAsync(a *auth.Auth, uid, jobID string) {
 			p.jobEnd(uid, jobID, fmt.Sprintf("内部错误：%v", r))
 		}
 	}()
-	defer watchAbort(ctx.Done(), uid)()
+	// 先清中止标记再装看护（W2-AT-04）：顺序反了的话，ctx 在两者之间取消时
+	// watchAbort 写入的中止标记会被 clearAborted 覆盖 —— 中止失效，流水线跑满 15 分钟。
 	clearAborted(uid)
+	defer watchAbort(ctx.Done(), uid)()
 
 	results := p.runAutoAllWith(a, func(item map[string]any) {
 		code, _ := item["task_code"].(string)
