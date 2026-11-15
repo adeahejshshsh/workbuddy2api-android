@@ -107,7 +107,13 @@ func (c *Client) CompensationStatus(a *auth.Auth) (CompensationInfo, error) {
 		EndTime   string `json:"end_time"`
 		Validity  string `json:"validity_period"`
 	}
-	_ = json.Unmarshal(data, &resp)
+	// 解析失败必须报（审查 W4-U2-101 第三处）：本函数是「先查后领」的查询端，
+	// 解析失败时 resp 停在零值 → Active=false 被当成「当前没有补偿活动」，带截止日的
+	// 补偿会**静默过期**，而日志里一行都没有。前两处（ClaimGift/ClaimCompensation）
+	// 已按同一口径修过，这里补齐，三个入口不再各说各话。
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return info, fmt.Errorf("compensation status parse: %w (body: %s)", err, truncate(string(data), 120))
+	}
 	info.Active = resp.Active
 	info.Claimed = resp.Claimed
 	info.Credit = resp.CreditNum

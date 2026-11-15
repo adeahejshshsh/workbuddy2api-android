@@ -72,7 +72,9 @@ func (c *Client) AgenticSearch(ctx context.Context, a *auth.Auth, query string) 
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		// HTTPStatus 也填（审查 A1-11）：doJSONRaw 两处都填，这三处此前留 0，
+		// 排障时「真实 HTTP 状态」同一类错误两种口径，日志与面板无法统一归因。
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, HTTPStatus: resp.StatusCode, Msg: truncate(string(raw), 200)}
 	}
 	done, ok := agenticDone(raw)
 	if !ok {

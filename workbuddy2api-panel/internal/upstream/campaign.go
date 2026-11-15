@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -131,8 +130,10 @@ func (c *Client) campaignJSON(a *auth.Auth, method, path string, out any) error 
 		return err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := readAllLimitedStrict(resp.Body, 1<<20)
 	if err != nil {
+		// 截断也要报（审查 A1-15）：任务列表/领奖回执被砍半时，JSON 解析失败会
+		// 被误报成「上游给了坏 JSON」，而真因是网关 1MiB 封顶。
 		return fmt.Errorf("campaign read: %w", err)
 	}
 	var env struct {
@@ -338,11 +339,22 @@ func (c *Client) CampaignClaimVerified(a *auth.Auth, module, code, taskCode stri
 }
 
 // truncateBody 截断响应体用于错误信息（保留可读前缀）。
+//
+// 按 **rune** 而不是字节切（审查 A1-19）：错误信息里带中文/emoji 时按字节切会把
+// 多字节字符劈成两半，日志与面板上出现乱码（`\xe4\xbd` 之类），排障时反而看不出
+// 上游到底说了什么。口径与 errbrief.truncateRunes 一致。
 func truncateBody(s string, n int) string {
 	if len(s) <= n {
+		return s // 字节数都没超，必然不需要截断（快路径，不分配）
+	}
+	if n <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(runes[:n]) + "…"
 }
 
 // CampaignStockResetAt 券库存重置时刻（stock_reset_at 是秒级时间戳）。

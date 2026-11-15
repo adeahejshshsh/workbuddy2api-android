@@ -20,6 +20,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -28,6 +29,10 @@ const (
 	modelBusyPath = "/v2/chat/busy"
 	// modelBusyBatch 单批模型数上限。上游硬限制，超限整批被拒，故必须分批。
 	modelBusyBatch = 50
+	// modelBusyUnsupportedCooldown 探到 404 之后的冷却：期内不再探测，到期重探一次
+	// （审查 W4-U2-106）。1 小时是折中：繁忙度是纯观测数据，重探一次的成本远小于
+	// 「上游补了端点却永远看不见」的代价。
+	modelBusyUnsupportedCooldown = time.Hour
 )
 
 // ModelBusy 查一批模型的繁忙度，返回 model → busy_level（上游未返回的模型不在 map 里）。
@@ -41,9 +46,13 @@ func (c *Client) ModelBusy(a *auth.Auth, models []string) (map[string]string, er
 	// 探到 404 就记住，本进程后续直接返回空表：繁忙度是**纯观测**数据，拿到 404
 	// 既不值得每轮刷新重试、也不该让上层把「观测失败」记成错误（面板会把 busy 失败
 	// 并进目录错误列表，进而拒绝写目录缓存）。
-	// 自愈口子：上游若补上该端点，重启进程即重新探测（不做持久化）。
+	// 自愈口子改成「冷却后重探」（审查 W4-U2-106）：此前 404 是进程级粘滞，
+	// 上游补上该端点后本进程永远不再探测，繁忙度长期空白且面板看不出原因。
+	// 冷却期内仍然直接返回空表（不白打请求）；冷却到期后放行一次，成功则清位。
 	if c.globalOn(a) && c.modelBusyUnsupported.Load() {
-		return out, nil
+		if until := c.modelBusyRetryAt.Load(); until != 0 && time.Now().UnixNano() < until {
+			return out, nil
+		}
 	}
 	for i := 0; i < len(models); i += modelBusyBatch {
 		end := i + modelBusyBatch
@@ -64,8 +73,11 @@ func (c *Client) ModelBusy(a *auth.Auth, models []string) (map[string]string, er
 		if err != nil {
 			var ue *Error
 			if c.globalOn(a) && errors.As(err, &ue) && ue.Kind == ErrNotFound {
+				// 置位 + 记冷却截止（审查 W4-U2-106）：冷却期内不再探测，到期后重探一次。
 				c.modelBusyUnsupported.Store(true)
-				log.Printf("model busy: global realm 无 /v2/chat/busy（404），本进程后续跳过繁忙度探测")
+				c.modelBusyRetryAt.Store(time.Now().Add(modelBusyUnsupportedCooldown).UnixNano())
+				log.Printf("model busy: global realm 无 /v2/chat/busy（404），%s 内跳过繁忙度探测",
+					modelBusyUnsupportedCooldown)
 				return out, nil
 			}
 			return out, err
@@ -81,6 +93,13 @@ func (c *Client) ModelBusy(a *auth.Auth, models []string) (map[string]string, er
 			if r.Model != "" && r.Level != "" {
 				out[r.Model] = r.Level
 			}
+		}
+		// 端点可用 → 清掉「不支持」标记与冷却（审查 W4-U2-106 的自愈闭环）：
+		// 上游补上端点后，第一次成功的探测就应当让后续请求恢复正常探测节奏。
+		if c.modelBusyUnsupported.Load() {
+			c.modelBusyUnsupported.Store(false)
+			c.modelBusyRetryAt.Store(0)
+			log.Printf("model busy: /v2/chat/busy 已恢复可用，解除跳过")
 		}
 	}
 	return out, nil

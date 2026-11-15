@@ -18,9 +18,15 @@ func normalizeUsageCacheAliases(usage map[string]any) map[string]any {
 	out["cached_tokens"] = best
 	out["prompt_cache_hit_tokens"] = best
 
-	promptDetails := cloneUsageDetails(out, "prompt_tokens_details")
-	promptDetails["cached_tokens"] = best
-	out["prompt_tokens_details"] = promptDetails
+	// prompt_tokens_details 只在**上游已给**时改写（审查 W4-U2-087）：此前无条件
+	// clone + 写回，等于给上游根本没下发该字段的响应凭空造一个 `{cached_tokens:N}`
+	// —— 与同函数内 input_tokens_details「不凭空造」的口径自相矛盾，严格解析的
+	// 下游可能因为多出来的字段改变缓存判定（把「未观测」当成「观测到命中」）。
+	if _, exists := out["prompt_tokens_details"]; exists {
+		promptDetails := cloneUsageDetails(out, "prompt_tokens_details")
+		promptDetails["cached_tokens"] = best
+		out["prompt_tokens_details"] = promptDetails
+	}
 
 	// Responses API consumers use this nested form. Preserve it when the
 	// upstream already supplies it, but do not invent it for Chat-only clients.
@@ -84,6 +90,11 @@ func positiveUsageNumber(value any) (float64, bool) {
 		return float64(n), n > 0
 	case uint32:
 		return float64(n), n > 0
+	case json.Number:
+		// json.Number 只在解码侧用了 UseNumber 时出现（payload.go 主管线就是这么解
+		// 请求体的）。补上它，两个函数才真正同一套类型（审查 W4-U2-088）。
+		f, err := n.Float64()
+		return f, err == nil && f > 0
 	default:
 		return 0, false
 	}
@@ -146,6 +157,12 @@ func UsageCacheMissTokens(usage map[string]any) (float64, bool) {
 }
 
 // usageNumber 从 usage 顶层取数值字段（JSON 数字可能是 float64 / json.Number 形态）。
+//
+// 类型集合与 positiveUsageNumber 对齐（审查 W4-U2-088）：两个函数原先支持的
+// 类型不同（前者只有 float64/int/int64/json.Number，后者多了 float32/int32/uint*），
+// 于是**同一份 usage** 在「命中率统计」与「prompt_tokens 读取」两条路径上会一个
+// ok 一个不 ok —— 表现为「有命中数但 miss 推导失败」，命中率闸拿到半截输入。
+// 这里补齐成同一套。
 func usageNumber(usage map[string]any, key string) (float64, bool) {
 	v, ok := usage[key]
 	if !ok {
@@ -154,9 +171,19 @@ func usageNumber(usage map[string]any, key string) (float64, bool) {
 	switch n := v.(type) {
 	case float64:
 		return n, true
+	case float32:
+		return float64(n), true
 	case int:
 		return float64(n), true
 	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case uint32:
 		return float64(n), true
 	case json.Number:
 		f, err := n.Float64()

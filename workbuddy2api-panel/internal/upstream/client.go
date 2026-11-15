@@ -995,6 +995,11 @@ type Client struct {
 	// modelBusyUnsupported 上游 /v2/chat/busy 在该域不存在（国际版实测 404）。
 	// 探到一次即置位，本进程后续跳过探测。atomic：并发调用只读 + 一次性写。
 	modelBusyUnsupported atomic.Bool
+	// modelBusyRetryAt 上一次 404 的冷却截止（UnixNano，0 = 无冷却）。
+	// 审查 W4-U2-106：此前 404 是**进程级粘滞**——置位后永不重探，上游哪天补上
+	// 该端点，繁忙度也永远空白（面板看不出原因，日志只有启动期那一行）。
+	// 改成「1 小时冷却后重探一次」：404 仍然便宜（一次请求），但不会一直不打。
+	modelBusyRetryAt atomic.Int64
 
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
 	// 空 = 默认官方形态：chat/refresh/FetchModels 走
@@ -1293,9 +1298,15 @@ func (c *Client) doJSONRaw(req *http.Request) (env apiEnvelope, raw []byte, err 
 		return env, nil, err
 	}
 	defer resp.Body.Close()
-	raw, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return env, nil, fmt.Errorf("read body: %w", err)
+	// 截断要单独报（审查 A1-15）：LimitReader 读到 1MiB 就 EOF，与「上游刚好发 1MiB」
+	// 无法区分，截断后继续 json.Unmarshal 只会报 `unexpected end of JSON input`，
+	// 把「网关砍了」误报成「上游给了坏 JSON」。这里用 readAllLimited 显式判截断。
+	raw, truncated, rerr := readAllLimited(resp.Body, 1<<20)
+	if rerr != nil {
+		return env, nil, fmt.Errorf("read body: %w", rerr)
+	}
+	if truncated {
+		return env, raw, fmt.Errorf("%w (limit 1MiB)", ErrResponseTooLarge)
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
@@ -1686,7 +1697,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			if kind == ErrNone {
 				return nil, resp.StatusCode, raw, nil
 			}
-			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+			// HTTPStatus 也填（审查 A1-11）：同一类错误两种口径会让排障误判。
+			ue := &Error{Kind: kind, Status: resp.StatusCode, HTTPStatus: resp.StatusCode, Msg: truncate(string(raw), 200)}
 			if d, ok := ParseRetryAfter(resp.Header); ok {
 				ue.RetryAfter = d
 			} else if kind == ErrUpstreamBusy {
@@ -2020,9 +2032,10 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := readAllLimitedStrict(resp.Body, 1<<20)
 	if err != nil {
-		// 读失败 → 传输层错误（handler 侧该路径不 NoteError）。
+		// 读失败 → 传输层错误（handler 侧该路径不 NoteError）；截断同理：半截
+		// models 目录会静默少列模型，不如显式失败让上层降级（审查 A1-15）。
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -2100,7 +2113,14 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	// − paidId + 三个速度预设；data.models 是平台全量目录（CN 实测 58 条 vs 菜单 17 项），
 	// 照单全列会把客户端根本显示、点了还 11102 的内部 id 暴露给下游。
 	ids := pick.ordered(byID)
-	if ids == nil {
+	if len(ids) == 0 {
+		// 判**空切片**而不是判 nil（审查 A1-04）：pick.ordered 在「没有任何 id 命中」
+		// 时返回的是 `make([]string,0,...)` 这种**非 nil 空切片**，而这里原来只判
+		// `ids == nil` —— 于是 agents 名单与 data.models 完全对不上（上游改名 /
+		// 只下发 paidId 的部署）时，整个 v3 目录被当成「0 个模型」写进 5min 负缓存，
+		// /v1/models 直接丢光全部 v3 模型，日志只有一句 "v3/config returned empty models"。
+		// 空结果就回落全量：宁可多列（下游按 nonChatModel 再过滤），也不要整份消失。
+		//
 		// 上游没下发 agents（老版本/私有化）：回落全量并按 id 排序（bug #8：map 迭代序随机，
 		// 会让 /v1/models 每次缓存过期就重排一次）。
 		ids = make([]string, 0, len(byID))
@@ -2550,9 +2570,11 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	raw, err := readAllLimitedStrict(resp.Body, 2<<20)
 	if err != nil {
 		// 读失败 → 传输层错误：半截 body 不进解析（不罚号）。
+		// 截断同样走这里（审查 A1-15）：v3/config 的 agents 名单在报文尾部，被砍掉
+		// 会让 pick.ordered 得到空列表 → /v1/models 整份 v3 目录丢失。
 		return nil, nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -2939,6 +2961,13 @@ func (c *Client) enterpriseResourceCtx(ctx context.Context, a *auth.Auth, soon t
 	remain = limit - usedInt
 	if remain < 0 {
 		remain = 0
+	}
+	// 上界也要钳（审查 A1-27）：used 是浮点脏值时可能是负数（上游回 -5），
+	// `limit - (-5)` 就得到「剩余 > 总额」，路由权重（credits/maxCredits）与
+	// credit_floor 都会高估这个号的余额。口径与 packageRemainUsed 的
+	// 「remain 不超过 size」一致。
+	if remain > limit {
+		remain = limit
 	}
 	total = limit
 	// 周期到期批次：cycleEndTime 优先，缺失回落 cycleResetTime。

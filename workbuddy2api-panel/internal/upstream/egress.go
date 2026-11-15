@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -78,16 +79,58 @@ func randUUID() string {
 // 此前整族都缺 —— 对拍夹具里 4 条「漏发」就是它们。这些是链路追踪头，官方由
 // undici/OTel 自动注入，每条请求都带。
 func injectTraceHeaders(req *http.Request) {
-	if req.Header.Get("traceparent") != "" || req.Header.Get("Traceparent") != "" {
-		return // 调用方已显式设置（透传场景）不覆盖
-	}
+	// 逐个头判空（审查 A1-18）：此前只要调用方设置了 traceparent 就整体 return，
+	// b3 / X-B3-ParentSpanId / acp-connection-id 三条全部不再注入 —— 透传场景下
+	// 头族只剩一条 traceparent，比「整族都缺」更像被中间件改写过，而头族一致性
+	// 正是本项目反复强调的指纹面。
+	//
+	// 关键：调用方已给 traceparent 时，其余三条必须**沿用它的 trace id**，
+	// 否则 traceparent 与 b3 指向两个不同的 trace，链路追踪直接断成两截
+	// （比缺头更难查）。span id 仍是本跳自己的，符合 W3C/B3 语义。
 	trace := randHex32()
 	span := randHex16()
+	if tp := req.Header.Get("traceparent"); tp != "" || req.Header.Get("Traceparent") != "" {
+		if tp == "" {
+			tp = req.Header.Get("Traceparent")
+		}
+		if parsed, ok := traceIDFromTraceparent(tp); ok {
+			trace = parsed
+		}
+	}
 	parent := randHex16()
-	req.Header.Set("traceparent", "00-"+trace+"-"+span+"-01")
-	req.Header.Set("b3", trace+"-"+span+"-1-"+parent)
-	req.Header.Set("X-B3-ParentSpanId", parent)
-	req.Header.Set("acp-connection-id", randUUID())
+	if req.Header.Get("traceparent") == "" && req.Header.Get("Traceparent") == "" {
+		req.Header.Set("traceparent", "00-"+trace+"-"+span+"-01")
+	}
+	if req.Header.Get("b3") == "" {
+		req.Header.Set("b3", trace+"-"+span+"-1-"+parent)
+	}
+	if req.Header.Get("X-B3-ParentSpanId") == "" {
+		req.Header.Set("X-B3-ParentSpanId", parent)
+	}
+	if req.Header.Get("acp-connection-id") == "" {
+		req.Header.Set("acp-connection-id", randUUID())
+	}
+}
+
+// traceIDFromTraceparent 从 W3C traceparent 里取 32 hex 的 trace id。
+// 形态：<version>-<trace-id>-<parent-id>-<flags>。非标准形态返回 ok=false，
+// 调用方退回自己生成（宁可 id 不一致，也不要写一个非法 trace id 出去）。
+func traceIDFromTraceparent(tp string) (string, bool) {
+	parts := strings.Split(strings.TrimSpace(tp), "-")
+	if len(parts) < 4 {
+		return "", false
+	}
+	id := parts[1]
+	if len(id) != 32 {
+		return "", false
+	}
+	for _, r := range id {
+		isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+		if !isHex {
+			return "", false
+		}
+	}
+	return strings.ToLower(id), true
 }
 
 // officialConnectionValue 给出该 path 上官方客户端实际发送的 Connection 值。

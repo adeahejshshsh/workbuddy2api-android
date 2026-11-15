@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -241,8 +242,12 @@ func (c *Client) WebConversationStatus(ctx context.Context, a *auth.Auth, id str
 
 // webConversationAction 对会话执行收尾动作（stop / delete）。
 //
-// 收尾失败不上抛：一轮已经跑完的活跃不能因为清理失败被改判成失败。上游对同一
-// 会话重复 stop 是幂等的（状态已经是 completed 也回 code 0）。
+// **错误照常返回**（审查 W4-U2-070：原注释写「收尾失败不上抛」，与实现相反 ——
+// 注释说不上抛、函数却把 err 交回去，按注释理解而不检查 err 的调用方会静默漏掉
+// 未释放的活跃会话，上游 10 条上限被占满后才在别处报 429/code 10105）。
+// 「失败不改变本轮结论」这条语义由**调用方**决定：RunWebAgentTurn 的收尾路径就是
+// 记日志不上抛（见其 defer），而 StopWebConversation 的直接调用者应当看到错误。
+// 上游对同一会话重复 stop 是幂等的（状态已经是 completed 也回 code 0）。
 func (c *Client) webConversationAction(ctx context.Context, a *auth.Auth, id, action string) error {
 	if id == "" {
 		return nil
@@ -348,6 +353,13 @@ func (c *Client) RunWebAgentTurn(ctx context.Context, a *auth.Auth, id string, s
 				atomic.AddInt64(&events, 1)
 			}
 		}
+		// Scanner 的错误必须打出来（审查 W4-U2-073）：1 MiB/行的上限被撞到时
+		// Scan 返回 false 且**静默退出**，事件计数就此停住 —— 上游下发大 update
+		// （长代码块）时 Chunks 会偏小，甚至 0 被判「这一轮没说话」，活跃判定跟着错。
+		// 这里只记日志（不改计数口径）：打卡链路不解析正文，能看见原因就够了。
+		if serr := sc.Err(); serr != nil {
+			log.Printf("WARN: [upstream] webagent SSE 读中断（事件计数可能偏小）: %v", serr)
+		}
 	}()
 
 	rpc := func(rid int, method string, params any) error {
@@ -432,9 +444,48 @@ func (c *Client) acpPost(ctx context.Context, sess WebSession, connID string, ri
 		return err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// 读失败不再静默（审查 W4-U2-068 的同一处）：此前 `raw, _ := io.ReadAll(...)`，
+	// 读错时 raw 为空，错误信息变成 `HTTP 200: `（看着像上游什么都没说），
+	// 真因（连接被掐/超时）丢失。截断同理（A1-15）：1MiB 封顶后 JSON-RPC 应答
+	// 被砍半，解析必然失败，不能当「没有 error 字段」处理。
+	raw, truncated, rerr := readAllLimited(resp.Body, 1<<20)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(strings.TrimSpace(string(raw)), 120))
+	}
+	if rerr != nil {
+		return fmt.Errorf("acp %s 读取响应失败: %w", method, rerr)
+	}
+	if truncated {
+		return fmt.Errorf("acp %s 响应超过 1MiB 上限被截断（%w）", method, ErrResponseTooLarge)
+	}
+	// JSON-RPC 的 error 字段必须当失败（审查 W4-U2-068）：ACP 上游以
+	// **HTTP 200 + {"error":{code,message}}** 回拒绝是常态（initialize 的会话不存在、
+	// session/load 的沙箱未就绪、prompt 的模型不可用都走这条）。此前只判 HTTP 状态，
+	// 这些失败被吞成成功 → 四步全"过"、流程继续往下跑，最后只在轮询超时时报
+	// 「没跑完」，根因（模型不可用 / 会话不存在）完全丢失，排障只能靠猜。
+	// 注意：只认**结构化** error（键存在且非 nil），与 sse.go 里 "error":null 的
+	// 口径一致 —— OpenAI 兼容实现常带 null，不能判成失败。
+	var rpcEnv struct {
+		Error *struct {
+			Code    any    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	trimmed := bytes.TrimSpace(raw)
+	// 只在**看起来是 JSON 对象**时才判 error：Accept 里同时声明了 text/event-stream，
+	// 上游若改以 SSE 回包（W4-U2-069 待验证的那条），按 JSON 解析会把正常回包判成
+	// 失败 —— 宁可少判一次，也不能把 SSE 应答当坏 JSON。
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		if uerr := json.Unmarshal(trimmed, &rpcEnv); uerr != nil {
+			return fmt.Errorf("acp %s 响应不是合法 JSON（%v）: %s", method, uerr, truncate(string(trimmed), 120))
+		}
+		if rpcEnv.Error != nil {
+			detail := strings.TrimSpace(rpcEnv.Error.Message)
+			if detail == "" {
+				detail = truncate(string(trimmed), 120)
+			}
+			return fmt.Errorf("acp %s JSON-RPC error (code=%v): %s", method, rpcEnv.Error.Code, detail)
+		}
 	}
 	return nil
 }

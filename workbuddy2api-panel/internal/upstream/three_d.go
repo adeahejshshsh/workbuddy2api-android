@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -65,9 +64,15 @@ func (c *Client) threeDCall(ctx context.Context, a *auth.Auth, action string, bo
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	// 4 MiB 截断要单独报（审查 W4-U2-064 / A1-15）：截断后 JSON 必然解不出，
+	// 若混进「解析失败」分支就只能看到前 300 字符，分不清「上游返回超大 body」
+	// 还是「上游返回错误页」，排障信息不足。
+	data, truncated, err := readAllLimited(resp.Body, 4<<20)
 	if err != nil {
 		return nil, fmt.Errorf("read 3d response: %w", err)
+	}
+	if truncated {
+		return nil, fmt.Errorf("%w (limit 4MiB)", ErrResponseTooLarge)
 	}
 	var env struct {
 		Response json.RawMessage `json:"Response"`
@@ -75,7 +80,11 @@ func (c *Client) threeDCall(ctx context.Context, a *auth.Auth, action string, bo
 		Message  string          `json:"message"`
 	}
 	if json.Unmarshal(data, &env) != nil {
-		return nil, &Error{Kind: Classify(resp.StatusCode, string(data)), Status: resp.StatusCode, Msg: truncate(string(data), 300)}
+		// 解析失败也要走 threeDReject（审查 W4-U2-060）：上游以 HTML/网关错误页回
+		// 401/403 时，临时凭证已经失效，但此前这条分支直接构造 *Error 返回、跳过
+		// Invalidate —— 坏凭证会在缓存里留到 14 分钟 TTL 结束，期间该账号 3D 全失败
+		// 且不会重新签发。HTTPStatus 一并填上（审查 A1-11：同类错误两种口径）。
+		return nil, c.threeDReject(a, resp.StatusCode, "", truncate(string(data), 300))
 	}
 	if len(env.Response) > 0 {
 		var inner struct {
@@ -193,18 +202,22 @@ func threeDKeyExpiresAt(v any) time.Time {
 }
 
 func threeDError(status int, msg string) *Error {
+	httpStatus := status
 	if status < 400 {
-		status = http.StatusBadGateway
+		// 业务错误（HTTP 200 信封里带 Response.Error）按 400 口径分类（审查 F-06）：
+		// 此前先合成 502 再 Classify，Classify 的 `status >= 500 → ErrServer` 层命中，
+		// 于是「参数错/鉴权错」这类确定性拒绝被记成上游 5xx，进账号连败/熔断 ——
+		// 与紧随其后的注释「不能按 502 冷却健康账号」正好相反。
+		// 现在 Status 与 Kind 同源：业务拒绝 = 400/ErrClient，真正的 5xx 才 ErrServer。
+		status = http.StatusBadRequest
 	}
 	kind := Classify(status, msg)
 	if kind == ErrNone {
 		kind = ErrClient
 	}
-	// 腾讯业务错误通常在 HTTP 200 信封中返回，不能按 502 冷却健康账号。
-	if status == http.StatusBadGateway {
-		status = http.StatusBadRequest
-	}
-	return &Error{Kind: kind, Status: status, Msg: truncate(msg, 500)}
+	// HTTPStatus 填真实 HTTP 状态（审查 A1-11）：Status 是语义码（业务错误被归一到
+	// 400），排障时必须还能看到上游实际回的是 200 还是 401，否则两类错误无法区分。
+	return &Error{Kind: kind, Status: status, HTTPStatus: httpStatus, Msg: truncate(msg, 500)}
 }
 
 func threeDHeaders(host, action string, payload []byte, token string, now time.Time) map[string]string {

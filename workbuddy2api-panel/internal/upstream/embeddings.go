@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -60,7 +59,9 @@ func (c *Client) Embeddings(ctx context.Context, a *auth.Auth, model string, inp
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	// 截断必须报（审查 A1-15）：16 MiB 是「向量数组」的合理上限，超了说明响应形态
+	// 异常；半截向量数组解析失败会被误报成上游坏 JSON，且可能把残缺向量透传出去。
+	raw, err := readAllLimitedStrict(resp.Body, 16<<20)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
@@ -69,8 +70,12 @@ func (c *Client) Embeddings(ctx context.Context, a *auth.Auth, model string, inp
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	_ = json.Unmarshal(raw, &env)
-	if env.Code == 11351 {
+	// 解析失败不再静默（审查 W4-U2-101 同类 / 本文件原为 `_ = json.Unmarshal`）：
+	// 此前 env 停在零值 → Code=0 → 200 分支直接把 raw 当向量透传出去。上游换成
+	// HTML 错误页 / 网关插入的纯文本告警（HTTP 仍是 200）时，客户端拿到一段
+	// 根本不是 JSON 的「成功响应」，错误归因落在客户端解析器上。这里显式失败。
+	envErr := json.Unmarshal(raw, &env)
+	if envErr == nil && env.Code == 11351 {
 		return nil, fmt.Errorf("%w: %s", ErrEmbeddingModelNotFound, truncate(env.Msg, 160))
 	}
 	// 限流/排队的等待口径随信封带出：头优先，6020/6021 的 data.retry_after 兜底
@@ -80,7 +85,8 @@ func (c *Client) Embeddings(ctx context.Context, a *auth.Auth, model string, inp
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		// HTTPStatus 也填（审查 A1-11）：与 doJSONRaw 统一口径。
+		ue := &Error{Kind: kind, Status: resp.StatusCode, HTTPStatus: resp.StatusCode, Msg: truncate(string(raw), 200)}
 		if d, ok := ParseRetryAfter(resp.Header); ok {
 			ue.RetryAfter = d
 		} else if kind == ErrUpstreamBusy {
@@ -95,6 +101,11 @@ func (c *Client) Embeddings(ctx context.Context, a *auth.Auth, model string, inp
 	}
 	if env.Code != 0 {
 		return nil, upErr()
+	}
+	// 200 + 解不出的 body：不能当成功透传（见上方 envErr 注释）。
+	if envErr != nil {
+		return nil, &Error{Kind: ErrServer, Status: resp.StatusCode, HTTPStatus: resp.StatusCode,
+			Msg: fmt.Sprintf("embeddings 响应不是 JSON 信封（%v）: %s", envErr, truncate(string(raw), 160))}
 	}
 	return json.RawMessage(raw), nil
 }
