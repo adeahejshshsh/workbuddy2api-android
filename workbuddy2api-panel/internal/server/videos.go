@@ -193,7 +193,11 @@ func (s *videoTaskStore) claimCharge(id string) bool {
 	defer s.mu.Unlock()
 	o, ok := s.m[id]
 	if !ok {
-		return true // 台账里没有：无标记可用，交由调用方自行按 id 去重语义处理
+		// 台账里没有 = 条目已被 TTL/容量淘汰（或正被 gc 摘掉）：与 3D 口径统一为
+		// **不记账**（审查 B5）。此前这里返回 true「无标记可用」，于是同一任务在条目
+		// 淘汰后再查到 completed 会重新赢得记账权 → 同一笔用量被记两次。
+		// 宁可极少数情况下漏记一次，也不要重复扣费。
+		return false
 	}
 	if o.Charged {
 		return false
