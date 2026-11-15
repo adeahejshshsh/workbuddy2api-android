@@ -846,6 +846,15 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// wroteAny 客户端是否已收到任何字节。false 时响应头**还没发出**（WriteHeader 由
 	// 首次写触发），调用方仍可换号重试或回正经的 502 JSON（见 ErrStreamBrokeBeforeFlush）。
 	wroteAny := false
+	// committed 是否已经往 ResponseWriter 写过**任何**字节（含心跳/注释帧）。
+	//
+	// 与 wroteAny 分开（审查 D6）：Go 的 ResponseWriter 在第一次 Write 时才发响应头，
+	// 所以「头有没有发出去」只能靠这个标志判。此前只有内容帧会置 wroteAny，而首帧心跳
+	// （默认 server.head_keepalive=1500ms 就会触发）直接写字节 —— 头已发出，wroteAny 仍
+	// false，于是上游在首帧前断流时被判成「一个字节都没发」：要么走换号重发（不可能，
+	// 头已提交），要么在**已提交的 200 SSE** 里再写 502 JSON（撤头撤不掉），客户端拿到
+	// `: keepalive` 后跟一段 JSON —— 既不是合法 SSE 也没有 [DONE]。
+	committed := false
 	fl, _ := w.(http.Flusher)
 	// br 在下面才初始化，但写帧闭包要用它判断「上游缓冲是否已读空」→ 先声明。
 	var br *bufio.Reader
@@ -898,6 +907,37 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// writeOut 真正把一帧写到客户端并 flush（不做任何扣帧判定）。
 	// 写失败一律包成 errClientWrite：上游帧本身是好的，写不出去只可能是客户端
 	// 断连。handler 据此区分「人走了」与「上游坏了」——两者对账号的处置相反。
+	// sseMeta 累积 `event:` / `id:` / `retry:` 这类**帧内元数据行**（审查 D2）。
+	//
+	// SSE 规范里它们与随后的 data 行属于**同一个事件**。此前每条非 data 行都直接写出
+	// 「行 + 空行」，等于把它们各自封成一个无 data 的事件帧 —— 上游若按 event: 分型，
+	// 客户端收到的类型全部丢失（只看到默认 message），紧随其后的 data 帧也丢了类型。
+	// 现在只缓冲，等真正写 data 帧时一起输出。
+	//
+	// 注释行（`:` 开头）例外：它本身就是合法的事件帧（心跳），且「整条流只有心跳按空流
+	// 处理」是既有契约（TestStreamEmptyFramesCase 钉住），不能被这次改动带偏。
+	var sseMeta []string
+	// writeMeta 输出缓冲的元数据行。terminate=true 时补一个空行**结束当前事件**
+	// （只有流尾「有 event 但没有 data」时才需要；接 data 行的场合不能补，否则
+	// 元数据行与 data 行被空行拆成两个事件 —— 那正是 D2 要修的病）。
+	writeMeta := func(terminate bool) error {
+		if len(sseMeta) == 0 {
+			return nil
+		}
+		for _, l := range sseMeta {
+			if _, werr := io.WriteString(w, l+"\n"); werr != nil {
+				return clientWriteErr(werr)
+			}
+		}
+		if terminate {
+			if _, werr := io.WriteString(w, "\n"); werr != nil {
+				return clientWriteErr(werr)
+			}
+			committed = true
+		}
+		sseMeta = sseMeta[:0]
+		return nil
+	}
 	writeOut := func(payload string) error {
 		// 别名回显（review #25）：只替换精确的 "model":"<real>" 片段，
 		// 不做整帧重编码（帧体积小、字段多，重编码风险大于收益）。
@@ -905,10 +945,14 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			payload = strings.ReplaceAll(payload,
 				`"model":"`+o.modelReal+`"`, `"model":"`+o.modelEcho+`"`)
 		}
+		if werr := writeMeta(false); werr != nil { // 帧内元数据行与 data 同属一个事件
+			return werr
+		}
 		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
 			return clientWriteErr(werr)
 		}
 		wroteAny = true
+		committed = true
 		flushIfDrained()
 		return nil
 	}
@@ -1147,7 +1191,14 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	var writeFrame func(string) (int, error)
 	writeFrame = func(payload string) (int, error) {
 		var obj map[string]any
-		if json.Unmarshal([]byte(payload), &obj) != nil {
+		if json.Unmarshal([]byte(payload), &obj) == nil {
+			// 正常路径也要记终态（审查 D7）：此前 `finishSeen` 只在 repairFrame 循环里
+			// 被置位，而「上游给了 finish_reason 但不发 data: [DONE]」是**常见形态**
+			// （本文件另一处注释自述）。于是流尾的截断兜底条件 `!upstreamDone &&
+			// !finishSeen` 成立，在正常终态之后再补一帧 finish_reason=length ——
+			// 客户端按最后一个终态判成「被截断」。
+			setFinishSeen(obj)
+		} else {
 			// 粘帧（issue #197）：上游偶发把两个 chunk 塞进同一个 data 行，形如
 			// `data: {a} {b}`。按 SSE 规范客户端会把整行当一份文本解析，直接失败在
 			// 「第二个对象」上（Unexpected non-whitespace character after JSON），
@@ -1266,6 +1317,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			hbDead = true
 			return
 		}
+		committed = true // 头已随这次写发出（审查 D6）
 		// 只能直接 Flush：辅助协程此刻可能正在读 br，flushIfDrained 会去碰 br。
 		if fl != nil {
 			fl.Flush()
@@ -1337,13 +1389,20 @@ readLoop:
 			// 会与下一个 "data: " 帧粘成 ": heartbeat\ndata: ..." —— 下游按 "\n\n" 切帧后
 			// 整块没有 "data: " 前缀，直接丢弃。实测 GLM 的工具调用首帧（携带 id+name）
 			// 正是被这样吞掉的：调用整个消失、completed 的 output 变 null。
-			if _, werr := io.WriteString(w, line); werr != nil {
-				return clientWriteErr(werr)
+			if isSSEComment(trimmed) {
+				// 注释/心跳：独立成帧（合法 SSE，且「只有心跳 = 空流」是既有契约）。
+				if _, werr := io.WriteString(w, line); werr != nil {
+					return clientWriteErr(werr)
+				}
+				if _, werr := io.WriteString(w, "\n"); werr != nil {
+					return clientWriteErr(werr)
+				}
+				wroteAny = true
+				committed = true
+			} else {
+				// event: / id: / retry: —— 与随后的 data 行同属一个事件，先缓冲（审查 D2）。
+				sseMeta = append(sseMeta, trimmed)
 			}
-			if _, werr := io.WriteString(w, "\n"); werr != nil {
-				return clientWriteErr(werr)
-			}
-			wroteAny = true
 			// 注释/心跳行同样只在缓冲读空时 flush（与 data 帧同一条理由：
 			// 成批到达时逐行 flush 是纯系统调用开销）。
 			flushIfDrained()
@@ -1364,6 +1423,10 @@ readLoop:
 	// DeferredToolCall 参数修复的尾部收尾：上游只发 [DONE]/EOF、没给 finish_reason
 	// 时，把已缓存的参数补成一帧再写 [DONE]/截断终态。已经发过 finish 的流不再补
 	// ——补在终态之后会变成「回合结束后的工具参数」，客户端直接丢弃。
+	// 只有 event:/id: 没有 data: 的流：元数据行也要送出去并结束事件（否则整段被吞）。
+	if werr := writeMeta(true); werr != nil {
+		return werr
+	}
 	if !finishSeen {
 		for _, f := range toolRepair.Flush() {
 			if werr := emitChunk(f, ""); werr != nil {
@@ -1410,10 +1473,14 @@ readLoop:
 	// 上游读错误（流中途断）：补一帧 error 再补 [DONE]。客户端因此能区分
 	// 「说完了」与「说到一半上游断了」，不会把半截答案当完整答案。
 	if readErr != nil {
-		// 一帧未发就断：此时响应头还没发出（wroteAny=false），**不写** error 帧与
+		// 一个字节都没发就断：此时响应头还没发出（committed=false），**不写** error 帧与
 		// [DONE]——那会把 200 钉死，白白放弃换号重试的机会。交给调用方决定：换号
 		// 重试，或回一个正经的 502 JSON（见 ErrStreamBrokeBeforeFlush）。
-		if !wroteAny {
+		//
+		// 判据是 committed 而不是 wroteAny（审查 D6）：心跳已经发过头之后断流，再走
+		// 「换号重发」就是往已提交的 200 SSE 里塞 502 JSON。那种情况必须照常补 error 帧
+		// + [DONE]，让客户端至少能正常收尾。
+		if !committed {
 			return fmt.Errorf("%w (%v)", ErrStreamBrokeBeforeFlush, readErr)
 		}
 		// 走 writeSSE 而不是 writeRaw（报告 #7）：writeRaw 内部会调
@@ -1573,4 +1640,10 @@ func finishOnlyFrame(src map[string]any, finish string) map[string]any {
 		}
 	}
 	return frame
+}
+
+// isSSEComment 判断一行是否是 SSE 注释（以 ":" 开头）。注释是合法的事件帧（心跳），
+// 与 event:/id:/retry: 这类帧内元数据行不同：后者必须与 data 行同帧（审查 D2）。
+func isSSEComment(trimmed string) bool {
+	return strings.HasPrefix(trimmed, ":")
 }
