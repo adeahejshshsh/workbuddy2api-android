@@ -19,6 +19,9 @@ import (
 	"github.com/andybalholm/brotli"
 )
 
+// deflateMaxBytes 单次 deflate 解压允许读入的压缩字节上限（超限按「解不了」处理）。
+const deflateMaxBytes = 8 << 20
+
 // decodeBodyIfNeeded 按 Content-Encoding 包一层解码；不认识 / 未压缩时原样返回。
 //
 // 返回的 body 会**去掉** Content-Encoding / Content-Length 头：调用方看到的是解压后的
@@ -43,9 +46,12 @@ func decodeBodyIfNeeded(resp *http.Response) *http.Response {
 		// **必须先整段读进内存**：zlib.NewReader 构造时就会消费头部两字节，失败时那个
 		// reader 已经回不去了，再拿它喂 flate 就是半截流（实测报 unexpected EOF）。
 		// deflate 只会用在 JSON 接口上，整段读是可控的。
-		raw, rerr := io.ReadAll(resp.Body)
+		// 读取必须有上限（审查 P2）：此前是无界 ReadAll，一个畸形的 deflate 响应
+		// 就能把进程内存吃满。deflate 只用在 JSON 接口上，8 MiB 足够，超了按「解不了」
+		// 处理（原样交回调用方，让它按原文报错，而不是当成合法 JSON 去解析）。
+		raw, rerr := io.ReadAll(io.LimitReader(resp.Body, deflateMaxBytes+1))
 		_ = resp.Body.Close()
-		if rerr != nil {
+		if rerr != nil || int64(len(raw)) > deflateMaxBytes {
 			return resp
 		}
 		if zr, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {

@@ -707,11 +707,28 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	if e.fails < p.breakerThreshold {
 		return
 	}
+	// 配置兜底（审查 C5-24）：`breakerCooldown`/`Max` 若为 0（未注入 / 显式清零），
+	// 原实现的循环第一轮就把 d 归零 → `breakerUntil = now`，熔断**静默失效**；
+	// 若 Max 极大，d 连续翻倍还会溢出成负数。这里先把两者夹到安全区间。
 	d := p.breakerCooldown
+	if d <= 0 {
+		d = defaultBreakerCooldown
+	}
+	maxD := p.breakerCooldownMax
+	if maxD <= 0 {
+		maxD = defaultBreakerCooldownMax
+	}
+	if maxD < d {
+		maxD = d
+	}
 	for i := 0; i < e.retryCount; i++ {
+		if d > maxD/2 { // 再翻倍必超上限：直接夹住，顺便避免溢出
+			d = maxD
+			break
+		}
 		d *= 2
-		if d >= p.breakerCooldownMax {
-			d = p.breakerCooldownMax
+		if d >= maxD {
+			d = maxD
 			break
 		}
 	}

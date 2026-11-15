@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,13 @@ type Config struct {
 }
 
 // Router 会话粘性路由器。
+// maxSessionEntries 内存里会话绑定表的硬上限（审查 P2 无界增长）。
+//
+// 键是客户端可控的（conversation_id / prompt_cache_key / 内容派生），一个脚本就能用
+// 海量唯一键把这张表顶爆；TTL 到期才回收，期间内存与 /status 输出都跟着涨。超过上限时
+// 按 lastActive 淘汰最旧的一批（TTL 内但更久没用过的先走）。
+const maxSessionEntries = 20000
+
 type Router struct {
 	mu      sync.RWMutex
 	entries map[string]entry
@@ -126,6 +134,7 @@ func (r *Router) LoadFromStore() {
 			continue
 		}
 		r.entries[key] = entry{uid: uid, lastActive: now}
+		r.trimLocked()
 		loaded++
 	}
 	r.mu.Unlock()
@@ -202,6 +211,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
 		if avail[e2.uid] {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
+			r.trimLocked()
 			return e2.uid, true
 		}
 		delete(r.entries, key) // 失效：清掉再分配
@@ -237,6 +247,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 
 	prev, existed := r.entries[key]
 	r.entries[key] = entry{uid: uid, lastActive: now}
+	r.trimLocked()
 	if existed && prev.uid != uid {
 		r.cfg.Store.DelBind(key)
 	}
@@ -307,6 +318,29 @@ func (r *Router) Count() int {
 }
 
 // gcOnce 清理 TTL 过期的绑定，并镜像删除。
+// trimLocked 超过 maxSessionEntries 时按 lastActive 淘汰最旧的一批（调用方持写锁）。
+// 只删内存副本，不动 Store 里的持久绑定（那边有自己的 TTL，删了反而会让别的实例丢绑定）。
+func (r *Router) trimLocked() {
+	n := len(r.entries)
+	if n <= maxSessionEntries {
+		return
+	}
+	// 淘汰到 90% 水位：避免每插入一条都触发一次全表扫描。
+	target := maxSessionEntries / 10 * 9
+	type kv struct {
+		key string
+		at  time.Time
+	}
+	all := make([]kv, 0, n)
+	for k, e := range r.entries {
+		all = append(all, kv{k, e.lastActive})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+	for i := 0; i < n-target; i++ {
+		delete(r.entries, all[i].key)
+	}
+}
+
 func (r *Router) gcOnce(now time.Time) int {
 	r.mu.Lock()
 	var expiredKeys []string

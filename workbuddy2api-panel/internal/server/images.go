@@ -422,6 +422,9 @@ func multipartToImageJSON(raw []byte, ct string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("解析 multipart 失败: %w", err)
 	}
+	// ReadForm 超过内存阈值的部分会落临时文件，必须显式清理（审查 P2 资源泄漏）：
+	// 此前不 RemoveAll，每个大上传请求都在 /tmp 留一份残留。
+	defer form.RemoveAll()
 	out := map[string]any{}
 	for k, vs := range form.Value {
 		if len(vs) == 0 {
@@ -466,9 +469,15 @@ func fileToDataURL(fh *multipart.FileHeader) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, 8<<20)) // 8MB 上限：上游对超大 base64 会拒
+	// 超限要**报错**而不是静默截断（审查 P2）：截断后的字节既不是完整图（上游会拒），
+	// 也不是原图，用户只会看到一句"上游返回 400"却不知道为什么。
+	const maxUpload = 8 << 20
+	b, err := io.ReadAll(io.LimitReader(f, maxUpload+1))
 	if err != nil {
 		return "", err
+	}
+	if len(b) > maxUpload {
+		return "", fmt.Errorf("上传文件超过 %d MiB（上游对超大 base64 会拒）：请先压缩或缩小尺寸", maxUpload>>20)
 	}
 	ct := fh.Header.Get("Content-Type")
 	if ct == "" {

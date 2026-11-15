@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -467,6 +468,17 @@ func (r *Recorder) flush(force bool) {
 	}
 
 	raw, err := json.Marshal(snap)
+	if err != nil {
+		// NaN / ±Inf 会让 json.Marshal **永久失败**（审查 P2 数值毒化）：dirty 反复置位、
+		// 每轮 tick 都重试同一份坏数据，usage.json 从此再也写不进去。序列化失败时先
+		// 把快照里的非有限浮点清零再试一次；仍失败才走原来的失败路径。
+		if cleaned, ok := sanitizeNonFinite(snap); ok {
+			if raw2, err2 := json.Marshal(cleaned); err2 == nil {
+				log.Printf("[usage] 序列化命中非有限数值（NaN/Inf），已清零后重试成功")
+				raw, err = raw2, nil
+			}
+		}
+	}
 	if err != nil {
 		fail("序列化失败", err)
 		return
@@ -953,4 +965,53 @@ func (r *Recorder) Describe() string {
 // keyPart 给桶键的一段加长度前缀：`len:val` 拼接后不可能有歧义。
 func keyPart(s string) string {
 	return strconv.Itoa(len(s)) + ":" + s
+}
+
+// sanitizeNonFinite 把快照里所有 NaN/±Inf 的 float64 清零（通过 JSON 往返做，
+// 免得手写整棵结构）。返回的 ok 表示确实做了清理。
+func sanitizeNonFinite(snap file) (file, bool) {
+	raw, err := json.Marshal(nanSafe(snap))
+	if err != nil {
+		return snap, false
+	}
+	var out file
+	if json.Unmarshal(raw, &out) != nil {
+		return snap, false
+	}
+	return out, true
+}
+
+// nanSafe 深拷贝一份并把非有限 float64 归零。用 map[string]any 往返实现，
+// 结构变更不需要同步维护。
+func nanSafe(v any) any {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		// 原值本身含 NaN/Inf：先转成通用结构再逐项清理。
+	}
+	var generic any
+	if raw != nil {
+		_ = json.Unmarshal(raw, &generic)
+	}
+	return scrubNonFinite(generic)
+}
+
+func scrubNonFinite(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, vv := range t {
+			t[k] = scrubNonFinite(vv)
+		}
+		return t
+	case []any:
+		for i, vv := range t {
+			t[i] = scrubNonFinite(vv)
+		}
+		return t
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) {
+			return float64(0)
+		}
+		return t
+	}
+	return v
 }

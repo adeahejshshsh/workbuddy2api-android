@@ -51,7 +51,7 @@ func TestLoadWindowsDropsInconsistentKey(t *testing.T) {
 	p := New("")
 	now := time.Now()
 	p.loadWindowsLocked(map[string]stateModelWindow{
-		"bogus-key": {UID: "u1", Model: "m1", ResetAt: now.Add(time.Hour)},
+		"bogus-key":           {UID: "u1", Model: "m1", ResetAt: now.Add(time.Hour)},
 		windowKey("u2", "m2"): {UID: "u2", Model: "m2", ResetAt: now.Add(2 * time.Hour)},
 	}, now)
 	ws := p.ModelWindows()
