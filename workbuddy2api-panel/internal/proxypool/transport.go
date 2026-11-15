@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
 )
 
 type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)

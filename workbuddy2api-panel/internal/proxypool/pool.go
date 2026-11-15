@@ -47,10 +47,15 @@ type Settings struct {
 	TimeoutSeconds   int    `json:"timeout_seconds"`
 	FailureThreshold int    `json:"failure_threshold"`
 	SuccessThreshold int    `json:"success_threshold"`
+	// AllowInternal 允许探测 URL 指向回环/内网（默认 **false**）。
+	// 只给「探测器本身就在内网」的部署或测试用：默认拒绝是因为探测由服务端自己发起，
+	// 放开等于给网关加一个可配置的 SSRF 入口（审查 W2-C6-14）。
+	AllowInternal bool `json:"allow_internal,omitempty"`
 }
 
 func DefaultSettings() Settings {
-	return Settings{"https://www.workbuddy.cn/", 60, 10, 3, 2}
+	return Settings{URL: "https://www.workbuddy.cn/", IntervalSeconds: 60, TimeoutSeconds: 10,
+		FailureThreshold: 3, SuccessThreshold: 2}
 }
 
 func (s Settings) validate() error {
@@ -58,12 +63,60 @@ func (s Settings) validate() error {
 	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" {
 		return errors.New("health URL must be an HTTP(S) URL without credentials or fragment")
 	}
+	// 探测 URL 由服务端自己发起（审查 W2-C6-14）：此前只校验 scheme/host/无凭据，
+	// 于是有配置权限者（或被劫持的订阅导入）可以让网关去打 169.254.169.254、
+	// 127.0.0.1:6379、内网管理口，并把状态/延迟/错误回显到面板。
+	if !s.AllowInternal {
+		if err := rejectInternalHost(u.Hostname()); err != nil {
+			return fmt.Errorf("health URL %w（确需探测内网请显式设 allow_internal=true）", err)
+		}
+	}
 	if s.IntervalSeconds < 1 || s.IntervalSeconds > 86400 || s.TimeoutSeconds < 1 || s.TimeoutSeconds > 300 ||
 		s.FailureThreshold < 1 || s.FailureThreshold > 100 || s.SuccessThreshold < 1 || s.SuccessThreshold > 100 {
 		return errors.New("health interval must be 1-86400s, timeout 1-300s, thresholds 1-100")
 	}
 	return nil
 }
+
+// rejectInternalHost 拒绝指向本机/内网/链路本地/云元数据的探测目标。
+//
+// 只校验**字面量**地址：不做 DNS（解析发生在拨号时，先解析再拨号仍有 TOCTOU，且会把
+// 解析器变成新的失败点）。IP 字面量与已知元数据域名已经覆盖绝大多数误配与滥用。
+func rejectInternalHost(host string) error {
+	h := strings.ToLower(strings.Trim(host, "[]"))
+	if h == "" {
+		return errors.New("主机为空")
+	}
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") ||
+		h == "metadata.google.internal" || h == "metadata" ||
+		strings.HasSuffix(h, ".internal") {
+		return fmt.Errorf("不能指向内部主机 %q", host)
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+			return fmt.Errorf("不能指向内网/回环地址 %q", host)
+		}
+		// 云元数据常见别名段（169.254 已被 LinkLocal 覆盖，这里补 CGNAT 与保留段）。
+		if ip4 := ip.To4(); ip4 != nil {
+			if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 { // 100.64.0.0/10 CGNAT
+				return fmt.Errorf("不能指向运营商级 NAT 地址 %q", host)
+			}
+			if ip4[0] == 0 {
+				return fmt.Errorf("不能指向保留地址 %q", host)
+			}
+		}
+	}
+	return nil
+}
+
+// maxImportNodes / maxImportBytes 单次订阅导入的硬上限（审查 W2-C6-13）：
+// 此前解析与整表写盘全程持锁，一次几十 MB / 10 万行的粘贴就能让 selectLocked
+// （每请求热路径）排队到超时。
+const (
+	maxImportNodes = 5000
+	maxImportBytes = 4 << 20
+)
 
 type Binding struct {
 	Mode    string `json:"mode"`
@@ -317,7 +370,19 @@ func (m *Manager) Snapshot() Snapshot {
 		if !n.Enabled {
 			status = "disabled"
 		}
-		u, _ := parseURL(n.URL)
+		// parseURL 出错返回 nil（审查 W2-C6-12）：此前丢弃 error 后立刻解引用 u.User，
+		// 配置文件被外部编辑、或将来新增未校验写入路径时，面板任意接口直接 panic
+		// （HTTP handler 崩，且 recover 后会丢掉整个响应）。
+		u, uerr := parseURL(n.URL)
+		if uerr != nil || u == nil {
+			s.Proxies = append(s.Proxies, View{
+				ID: n.ID, Name: n.Name, URL: n.URL, Protocol: "", PasswordSet: false,
+				Enabled: n.Enabled, Status: status, Checking: m.checking[n.ID], LatencyMS: h.latencyMS,
+				CheckedAt: h.checkedAt, LastError: "URL 无法解析: " + errText(uerr), Failures: h.failures,
+				Successes: h.successes, BoundCount: counts[n.ID], Exit: m.exit[n.ID],
+			})
+			continue
+		}
 		passwordSet := false
 		if u.User != nil {
 			_, passwordSet = u.User.Password()
@@ -334,6 +399,24 @@ func (m *Manager) Snapshot() Snapshot {
 }
 
 func (m *Manager) Import(text string) ([]ImportResult, error) {
+	// 解析放到锁外（审查 W2-C6-13）：此前 ParseSubscription 与整表写盘全程持 m.mu，
+	// 而 selectLocked 是每请求热路径 —— 一次几十 MB / 10 万行的粘贴就能让全网关请求
+	// 排队到超时。这里先按字节数硬拒，再在锁外解析，锁内只做「查重 + 追加」。
+	if len(text) > maxImportBytes {
+		return nil, fmt.Errorf("订阅内容 %d 字节超过上限 %d（请分批导入）", len(text), maxImportBytes)
+	}
+	// 订阅归一化（subscription.go）：明文 URI / 整段 base64 / Clash YAML 三种形态
+	// 都在这里变成「一行一个受支持的 URL」。认不出的条目带 Reason 回来，按
+	// unsupported / invalid 逐条报账——**不静默丢弃**，否则用户粘了 200 个节点
+	// 只进来 3 个却不知道为什么。
+	entries, err := ParseSubscription(text)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) > maxImportNodes {
+		return nil, fmt.Errorf("订阅含 %d 条，超过单次上限 %d（请分批导入）", len(entries), maxImportNodes)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	d := m.copyLocked()
@@ -343,14 +426,6 @@ func (m *Manager) Import(text string) ([]ImportResult, error) {
 	}
 	results := []ImportResult{}
 	var added []string
-	// 订阅归一化（subscription.go）：明文 URI / 整段 base64 / Clash YAML 三种形态
-	// 都在这里变成「一行一个受支持的 URL」。认不出的条目带 Reason 回来，按
-	// unsupported / invalid 逐条报账——**不静默丢弃**，否则用户粘了 200 个节点
-	// 只进来 3 个却不知道为什么。
-	entries, err := ParseSubscription(text)
-	if err != nil {
-		return nil, err
-	}
 	for _, entry := range entries {
 		r := ImportResult{Line: entry.Line, Name: entry.Name}
 		if entry.URL == "" {
@@ -497,6 +572,11 @@ func (m *Manager) Delete(id string) error {
 				return err
 			}
 			m.resetLocked(id)
+			// 删节点时把两张只增不删的表一起清掉（审查 W2-C6-16）：订阅刷新场景下反复
+			// 导入/删除，generation 与 requested 会单调增长，长期运行就是内存泄漏。
+			delete(m.generation, id)
+			delete(m.requested, id)
+			delete(m.checking, id)
 			return nil
 		}
 	}
@@ -658,4 +738,12 @@ func (m *Manager) Close() {
 	for _, tr := range m.transports {
 		tr.CloseIdleConnections()
 	}
+}
+
+// errText 把 error 压成一段可放进 View.LastError 的短文本（nil 安全）。
+func errText(err error) string {
+	if err == nil {
+		return "未知错误"
+	}
+	return err.Error()
 }

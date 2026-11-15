@@ -98,6 +98,7 @@ func TestProxiedHTTPSUsesTunnelAndInjectedHandshake(t *testing.T) {
 				return tc, nil
 			})
 			settings := DefaultSettings()
+			settings.AllowInternal = true // 测试目标是 127.0.0.1 的 httptest 服务（SSRF 校验默认拒绝内网）
 			settings.URL = target.URL + "/"
 			if err := m.Configure(settings); err != nil {
 				t.Fatal(err)
@@ -149,6 +150,7 @@ func TestConnectProxyAuthFailureReason(t *testing.T) {
 	}
 	defer m.Close()
 	settings := DefaultSettings()
+	settings.AllowInternal = true // 测试目标是 127.0.0.1 的 httptest 服务（SSRF 校验默认拒绝内网）
 	settings.URL = target.URL + "/"
 	if err := m.Configure(settings); err != nil {
 		t.Fatal(err)
