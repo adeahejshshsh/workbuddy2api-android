@@ -687,7 +687,12 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) []taskKind {
 			case taskActivity:
 				s.runActivity(ctx, true)
 			case taskKeepalive:
-				s.RunKeepaliveNowCtx(ctx, true)
+				// 排程路径必须走 selective（审查 E5）：此前调的是公开入口
+				// `RunKeepaliveNowCtx(ctx, true)`，而它固定 selective=false —— 于是
+				// `keepalive_refresh_window`（main 注入、面板可热改）在生产路径**完全没生效**，
+				// 每天 22:00 仍给全池每个号换一次 RT（46 号 = 46 次），正是 PR #244 想避免的
+				// 风控面。公开入口保持「手动 = 全量」的语义不动，排程走这个内部方法。
+				s.runKeepalive(ctx, true, true)
 			case taskGrowth:
 				// 成长任务队列：回调在 panel 侧异步启动（返回不等执行完），nil 未挂载则跳过。
 				s.schedMu.Lock()
@@ -751,7 +756,7 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 	}
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
-	var pending []string   // 瞬时失败、待 10/40 分钟补签的账号
+	var pending []string // 瞬时失败、待 10/40 分钟补签的账号
 	plan := s.spreadPlan(taskCheckin, spread, cst.Now())
 	for _, st := range plan.order(s.cfg.Pool.List()) {
 		if st.Disabled && !includeDisabled {
@@ -955,7 +960,11 @@ func (s *Scheduler) accountPace(ctx context.Context, plan *accountSpread, uid st
 func (s *Scheduler) RunKeepaliveNow() { s.RunKeepaliveNowCtx(context.Background(), false) }
 
 // RunKeepaliveNowCtx 带 ctx：停机时可打断，账号之间做节流。
-// RunKeepaliveNowCtx 带 ctx 的全量保活（面板/外部入口）：selective=false 恒刷新。
+// RunKeepaliveNowCtx 带 ctx 的**全量**保活（面板/外部手动入口）：selective=false 恒刷新
+// 全池，不受 keepalive_refresh_window 限制。
+//
+// 注意别拿它当排程路径用（审查 E5）：排程要的是「只刷快过期的号」，那条路走
+// runKeepalive(ctx, spread, true)。此前 runBatch 误用了本方法，导致临期窗口配置零效果。
 func (s *Scheduler) RunKeepaliveNowCtx(ctx context.Context, spread bool) {
 	s.runKeepalive(ctx, spread, false)
 }

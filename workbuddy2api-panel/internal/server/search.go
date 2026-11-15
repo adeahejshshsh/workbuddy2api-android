@@ -173,14 +173,42 @@ func ensureJSONString(item map[string]json.RawMessage, key string) {
 	}
 }
 
+// readBodyCapped 按**硬上限**读请求体：超限回 413（`request_too_large`），不静默截断。
+//
+// 为什么不用 io.LimitReader：截断后的字节既不是完整 JSON 也不是空，解析失败会被报成
+// 400 "invalid json"，把「太大」谎报成「格式错」（审查 W1A4-20）。MaxBytesReader 还会
+// 让 net/http 负责把剩余字节读掉/关连接，不会留一截没人读的 body 污染 keep-alive。
+//
+// 返回 (raw, true) 表示读到了完整 body；(nil, false) 表示已经把错误响应写出去了。
+func readBodyCapped(w http.ResponseWriter, r *http.Request, limit int64, hint string) ([]byte, bool) {
+	if r.Body == nil {
+		return nil, true
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		if bodyTooLarge(err) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("request body exceeds %d KiB%s", limit>>10, hint))
+			return nil, false
+		}
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+		return nil, false
+	}
+	return raw, true
+}
+
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	// 积分闸（审查 B1）：联网搜索按次计费，此前不在闸门覆盖范围里。
 	if !h.admitBudget(w, r) {
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+	// 超限回 413，不静默截断（审查 W1A4-20 / W3C8-32）：此前是 io.LimitReader(r.Body, 1<<20)，
+	// 超过 1MB 的 body 被切成半截，json.Unmarshal 报 "invalid json: unexpected end of JSON input"
+	// → 400。调用方只看到「JSON 坏了」，完全看不出是「太大」，于是把同一个大 body 反复重发。
+	// 与 images/videos/3D/embeddings 统一成 413 + 明确文案。
+	raw, ok := readBodyCapped(w, r, 1<<20, "（/v1/search 只收 query / count / realm 这类短字段）")
+	if !ok {
 		return
 	}
 	var req searchRequest

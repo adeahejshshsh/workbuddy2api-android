@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -51,12 +52,23 @@ func (h *Handler) probeVideoTask(taskID, caller string) (upstream.VideoTaskState
 		if state.ID == "" {
 			state.ID = taskID
 		}
+		// 200 + 空 body / 无 status（审查 W3C8-55）：这不是「命中」，是上游异常或网关误判。
+		// 收养进去会写一条 Status="" 的条目，而 noteState 对空 status 直接早退 → 该任务
+		// 永远停在 queued、还占着台账容量与「已收养」语义。当作「不是这个账号的任务」跳过，
+		// 与 404 同等处置（探测本来就不该把空回执当成自己的任务）。
+		if state.Status == "" {
+			return errProbeNotMine
+		}
 		return nil
 	})
 	if err != nil {
 		return upstream.VideoTaskState{}, "", "", err
 	}
 	// 已终态的多半在重启前被查过、记过账：收养时标已记账，免得重复计入；还在跑的出片时照常记。
+	//
+	// model 传空串（审查 W1A4-07 / W3C8-53）：探测能拿到的只有状态，没有请求上下文，
+	// 无法回溯是哪个模型出的片。空串由 adoptFor 折成 videoModelAdopted 占位，保证
+	// recordVideoUsage → NoteModelCost 不会因为 `model == ""` 被 pool 侧静默丢掉。
 	h.videoLedger.adoptFor(taskID, a.UID, a.Realm(), "", state.Done(), caller)
 	probeAdoptLog(videoProbeConfig.label, taskID, a)
 	return state, a.UID, a.Nickname, nil
@@ -64,8 +76,10 @@ func (h *Handler) probeVideoTask(taskID, caller string) (upstream.VideoTaskState
 
 // pollUnknownVideoTask 台账里没有的 task_id：有界探测（并发同一 id 只探一次），找到就按已知任务回，
 // 找不到回 404。st 由调用方 defer st.done()。
-func (h *Handler) pollUnknownVideoTask(w http.ResponseWriter, st *chatStat, taskID, caller string) {
-	state, uid, nick, err := h.videoLedger.pollShared(taskID, func() (upstream.VideoTaskState, string, string, error) {
+//
+// ctx 传给 pollShared 的等待方（审查 W1A4-05）：客户端断开时不必再等别人那一次探测跑完。
+func (h *Handler) pollUnknownVideoTask(ctx context.Context, w http.ResponseWriter, st *chatStat, taskID, caller string) {
+	state, uid, nick, err := h.videoLedger.pollShared(ctx, taskID, func() (upstream.VideoTaskState, string, string, error) {
 		return h.probeVideoTask(taskID, caller)
 	})
 	if err != nil {
@@ -90,5 +104,5 @@ func (h *Handler) pollUnknownVideoTask(w http.ResponseWriter, st *chatStat, task
 	st.uid, st.nick, st.model = uid, nick, owner.Model
 	st.status, st.outcome = http.StatusOK, "success"
 	h.videoLedger.noteState(taskID, state)
-	writeJSON(w, http.StatusOK, videoTaskPayload(taskID, state, requestedModel(owner.Model, owner.Realm), h.videoLedger))
+	writeJSON(w, http.StatusOK, videoTaskPayload(taskID, state, displayModel(owner.Model, owner.Realm), h.videoLedger))
 }
