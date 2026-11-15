@@ -1053,3 +1053,25 @@ hex 前 16 位，对不上就报错、不猜。
 全部原样搬入并通过（`saveConfig` 调用改成本仓 6 参签名）。
 
 **62 条至此全部结案**：已合 41、已等价 4、不适用 3、merge commit 14。
+
+### 复核（2026-11-15）：上游 main 无新提交，62 条按标识符级重验
+
+高水位仍是 `7dcae8ed`（2026-11-14 16:59）。三个独立来源核对：`git ls-remote`、GitHub
+commits API、`git fetch upstream` —— 全部返回同一 sha，`cf16478..7dcae8e` 之外没有新提交。
+基座仓 `linguo2625469/workbuddy2api-panel` 最后推送 2026-10-21，同样没有新提交。
+
+不信台账、直接对内容重验一遍：`cf16478..7dcae8e` 的 59 条非 merge 提交，逐条抽出「新增的
+函数/类型/常量名」，再看这些名字在本仓是否存在。18 条初筛告警逐条落到三类：
+
+| 判定 | 条数 | 例子 |
+|---|---|---|
+| 已落地（命名不同，或只差测试） | 9 | `d3edea9` 的 `IsAccountRestriction`/`has11140` 在 `upstream/restrict.go` 且 `FrameKind` 已接；`def074c` 的 `billed`/`sumUsage` 在 `continue.go`+`handler.go`；`8a39572` 的节流复用 `checkinAccountDelay`；`67386ae` 的 `estimatedExpiryWarnDue` 已在 |
+| 本仓没有该子系统（不适用） | 8 | `persistTasks`（无任务频道归档）、`filterMCPTools`（3D 工具按开关构造，不靠事后过滤）、`exitNote`（proxypool 未接进 server）、`webCodeError`（`IsWebConversationLimit` 上游自己也删了，没人消费 Code） |
+| 需执行体前置（不适用） | 1 | `69b3a1e` 的 `saveLoginAuth`/`StartNewAccountTasks` —— 本仓 `taskjobs.go` 只保留作业记录层，没有上游那套 per-account 执行体 |
+
+结论：这一批不需要再动代码，「62 条全部结案」在内容层面站得住。
+
+上游还挂着 3 个 PR：`#211`、`#214`（通用部分）、`#215`–`#218` 已在 #123 合入；只剩 `#242`
+（global 账号任务自动化，draft）：它要删 `autotask/tasks/taskcenter/taskjobs` 里 7 处
+`IsGlobal()` 并新增 `runGlobalChat/Skill/Template/Expert`，而本仓没有它挂靠的执行体，且这是
+消耗额度的功能（本仓口径：这类一律默认关）。等它合进上游 main 再评估。
