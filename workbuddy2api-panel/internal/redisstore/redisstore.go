@@ -46,9 +46,16 @@ type Store interface {
 }
 
 const (
-	bindPrefix  = "wb2api:bind:"
-	stateKey    = "wb2api:state"
+	bindPrefix = "wb2api:bind:"
+	stateKey   = "wb2api:state"
+	// readTimeout 单次读（GET / 单批 MGET）的预算，同时也是 client 的 Read/WriteTimeout。
 	readTimeout = 3 * time.Second
+	// writeTimeout 单次写的 ctx 预算。
+	//
+	// 必须 ≥ client 的 WriteTimeout（审查 C7-032）：此前写 ctx 固定 5s 而 client 的
+	// WriteTimeout 是 readTimeout(3s) —— ctx 预算永远用不满，5s 语义是假的，重连场景下
+	// 实际单写上限被悄悄压到 3s。这里统一成「读超时 + 2s 余量」，让 ctx 真正是上限。
+	writeTimeout = readTimeout + 2*time.Second
 )
 
 // New 根据 url+token 构建 Store。
@@ -112,6 +119,10 @@ type Upstash struct {
 	// sem 只限「同时在跑」、不限「在排队」，Redis 慢一拍就是
 	// 请求数 × 等待时间 个 goroutine（review H5）。
 	q chan func()
+	// failed 异步写失败计数（审查 C7-031）：此前失败只打 debug 日志、无计数，
+	// Redis 长期不可用时镜像静默全丢 —— 面板只有 dropped（队列满）一个数字，
+	// 分不清「丢弃」与「写失败」。WARN 也限频（首败 + 每 100 次一条），不刷屏。
+	failed atomic.Int64
 	// initOnce 懒初始化（零值 Upstash 也能用，测试直接构造）。
 	initOnce sync.Once
 	// closeOnce 保证 Close 幂等（多次调用只关一次 done）。
@@ -189,6 +200,33 @@ func (u *Upstash) goWrite(fn func()) {
 	}
 }
 
+// goWriteCritical 与 goWrite 相同，但**队列满时不丢弃**，改为在调用方 goroutine 里
+// 同步执行（审查 C7-033）。
+//
+// 为什么需要：队列满时丢弃的是**任意**写，其中可能正好是停机前的最后一次 SaveState ——
+// 池状态快照被丢，重启就回到旧状态（本地 state.json 兜底，故只是 P2，但没必要留这个洞）。
+// 调用方（pool 的 mirrorToStore）已经在写锁外，同步等几毫秒到几秒可接受；
+// 真等到 writeTimeout 说明 Redis 已经不可用，那时丢与不丢都一样。
+func (u *Upstash) goWriteCritical(fn func()) {
+	u.init()
+	u.submitMu.Lock()
+	select {
+	case <-u.done:
+		u.submitMu.Unlock()
+		return
+	default:
+	}
+	u.wg.Add(1)
+	select {
+	case u.q <- fn:
+		u.submitMu.Unlock()
+	default:
+		u.submitMu.Unlock()
+		fn() // 队列满：同步跑（绝不丢状态快照）
+		u.wg.Done()
+	}
+}
+
 // Dropped 返回因队列满被丢弃的异步写数量（观测/测试用）。
 func (u *Upstash) Dropped() int64 {
 	if u == nil {
@@ -253,16 +291,36 @@ func (u *Upstash) closeClient() error {
 
 func bindKey(key string) string { return bindPrefix + key }
 
+// noteWriteFail 记一次异步写失败并限频打日志（审查 C7-031）。
+// 首败立刻 WARN（这是「镜像开始丢」的信号），之后每 100 次一条。
+func (u *Upstash) noteWriteFail(op, key string, err error) {
+	n := u.failed.Add(1)
+	if n == 1 || n%100 == 0 {
+		log.Printf("WARN: [redisstore] %s 写失败（累计 %d 次）key=%s: %v", op, n, key, err)
+	}
+}
+
+// Failed 异步写失败累计次数（供面板/健康检查区分「丢弃」与「写失败」）。
+func (u *Upstash) Failed() int64 {
+	if u == nil {
+		return 0
+	}
+	return u.failed.Load()
+}
+
 // SetBind 异步镜像粘性会话绑定。
 func (u *Upstash) SetBind(key, uid string, ttl time.Duration) {
 	if ttl <= 0 {
 		ttl = keyTTL
 	}
 	u.goWrite(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if u.client == nil {
+			return // 零值 Upstash（测试直接构造）没有 client：静默跳过（审查 C7-029）
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 		defer cancel()
 		if err := u.client.Set(ctx, bindKey(key), uid, ttl).Err(); err != nil {
-			log.Printf("[redisstore] debug: SetBind %s: %v", key, err)
+			u.noteWriteFail("SetBind", key, err)
 		}
 	})
 }
@@ -270,27 +328,36 @@ func (u *Upstash) SetBind(key, uid string, ttl time.Duration) {
 // DelBind 异步删除粘性会话绑定。
 func (u *Upstash) DelBind(key string) {
 	u.goWrite(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if u.client == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 		defer cancel()
 		if err := u.client.Del(ctx, bindKey(key)).Err(); err != nil {
-			log.Printf("[redisstore] debug: DelBind %s: %v", key, err)
+			u.noteWriteFail("DelBind", key, err)
 		}
 	})
 }
 
 // SaveState 异步写池状态 JSON 快照。
 func (u *Upstash) SaveState(data []byte) {
-	u.goWrite(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	u.goWriteCritical(func() {
+		if u.client == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 		defer cancel()
 		if err := u.client.Set(ctx, stateKey, data, keyTTL).Err(); err != nil {
-			log.Printf("[redisstore] debug: SaveState: %v", err)
+			u.noteWriteFail("SaveState", "", err)
 		}
 	})
 }
 
 // LoadState 同步读池状态快照。
 func (u *Upstash) LoadState() ([]byte, bool) {
+	if u.client == nil {
+		return nil, false // 零值 Upstash（测试直接构造）：没有 client，不是错误（审查 C7-029）
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
 	defer cancel()
 	v, err := u.client.Get(ctx, stateKey).Bytes()
@@ -303,6 +370,9 @@ func (u *Upstash) LoadState() ([]byte, bool) {
 // LoadBinds 全量读取粘性会话绑定（SCAN bind:* 前缀）。
 func (u *Upstash) LoadBinds() map[string]string {
 	out := map[string]string{}
+	if u.client == nil {
+		return out // 同上（审查 C7-029）
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
 	defer cancel()
 	// 先收键、再按批 MGET（上游 2026-10-27 `7f44d06`）：逐键 GET 是 N+1 次公网
@@ -324,7 +394,11 @@ func (u *Upstash) LoadBinds() map[string]string {
 			end = len(keys)
 		}
 		chunk := keys[start:end]
-		vals, err := u.client.MGet(ctx, chunk...).Result()
+		// 每批独立 ctx（审查 C7-030）：此前 SCAN 与全部 MGET 批次共用**一个** 3s ctx，
+		// 绑定数 >300 时后续批次必然超时 → 粘性恢复大面积缺失（只有一行 WARN）。
+		bctx, bcancel := context.WithTimeout(context.Background(), readTimeout)
+		vals, err := u.client.MGet(bctx, chunk...).Result()
+		bcancel()
 		if err != nil {
 			log.Printf("WARN: [redisstore] 粘性绑定 MGET 失败（第 %d-%d 条），本次恢复不完整: %v", start, end, err)
 			continue
