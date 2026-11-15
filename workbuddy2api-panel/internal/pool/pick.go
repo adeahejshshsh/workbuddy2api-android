@@ -177,19 +177,14 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 				break
 			}
 		}
+		// 低频清理放在分支外（审查 C5-17）：此前清理写在「本次真的触发探索」里面，
+		// 探索条件长期不成立（无 tier0 或 interval=0）时该 map 永不清理，且会被 /status
+		// 整体序列化；客户端传任意模型名就能把它顶到 512+ 并常驻内存。
+		p.pruneExploreLastLocked(now)
 		key := realm + "\x1f" + reqModel
 		if hasTier1 && now.Sub(p.exploreLast[key]) >= p.costExploreInterval {
 			p.exploreLast[key] = now
-			// 顺手清理过旧条目（bug 17）：客户端可以传任意模型名（上游 400 也算一次
-			// pick 尝试），这个 map 会随「历史出现过的 (域,模型)」单调增长，
-			// /status 还会把它整体序列化输出。低频 O(n) 清理，代价可忽略。
-			if len(p.exploreLast) > 512 {
-				for k, ts := range p.exploreLast {
-					if now.Sub(ts) > 24*time.Hour {
-						delete(p.exploreLast, k)
-					}
-				}
-			}
+			// 清理已上移到分支外（审查 C5-17）：放在这里时，探索条件长期不成立就永不清理。
 			p.costExploreEvents++
 			bestTier = 1
 			explored = true
@@ -588,7 +583,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s（同一账号后续不再重复打印）",
 			logfmt.Label(best.a.UID, best.a.NicknameValue()), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
 	}
-	best.lastUsed = time.Now()
+	best.lastUsed = now // 用锁内快照的 now（审查 C5-16）：与 minPickGap 判定同一基准
 	// 兜底同样是「选中」，必须与 pick() 正常路径、粘性命中路径（PickByUIDForModel）
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的
 	// LRU 兜底（按 usedSeq 取最旧）眼里永远是「最旧」，刚被用过就被立刻再选——
@@ -787,3 +782,16 @@ func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float6
 }
 
 // SetCredits 更新账号余额。
+
+// pruneExploreLastLocked 低频清理探索计时表（每次 pick 最多做一次 O(n) 扫描，
+// 超过容量才扫）。调用方必须已持有 p.mu 写锁。
+func (p *Pool) pruneExploreLastLocked(now time.Time) {
+	if len(p.exploreLast) <= 512 {
+		return
+	}
+	for k, ts := range p.exploreLast {
+		if now.Sub(ts) > 24*time.Hour {
+			delete(p.exploreLast, k)
+		}
+	}
+}

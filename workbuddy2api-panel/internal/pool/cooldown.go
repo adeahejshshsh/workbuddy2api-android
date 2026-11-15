@@ -45,6 +45,7 @@ func (p *Pool) SetNickname(uid, nickname string) bool {
 	a.Lock()
 	// 已持写锁：这里必须直读字段。RWMutex 不可重入，调 NicknameValue() 会自死锁
 	// （RLock 等自己持有的 Lock —— 上一版批量替换时真踩到过，pool 测试直接挂住）。
+	prev := a.Nickname
 	changed := a.Nickname != nickname
 	if changed {
 		a.Nickname = nickname
@@ -54,6 +55,11 @@ func (p *Pool) SetNickname(uid, nickname string) bool {
 		return false
 	}
 	if err := a.SaveAtomic(); err != nil {
+		// 落盘失败要**回滚内存**（审查 P-19）：否则面板提示「保存失败」，界面刷新却是新昵称，
+		// 重启后又回旧值——内存与磁盘长期不一致，用户不知道该信哪一个。
+		a.Lock()
+		a.Nickname = prev
+		a.Unlock()
 		log.Printf("WARN: [pool] nickname save %s: %v", uid, err)
 		return false
 	}
@@ -707,11 +713,28 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	if e.fails < p.breakerThreshold {
 		return
 	}
+	// 配置兜底（审查 C5-24）：`breakerCooldown`/`Max` 若为 0（未注入 / 显式清零），
+	// 原实现的循环第一轮就把 d 归零 → `breakerUntil = now`，熔断**静默失效**；
+	// 若 Max 极大，d 连续翻倍还会溢出成负数。这里先把两者夹到安全区间。
 	d := p.breakerCooldown
+	if d <= 0 {
+		d = defaultBreakerCooldown
+	}
+	maxD := p.breakerCooldownMax
+	if maxD <= 0 {
+		maxD = defaultBreakerCooldownMax
+	}
+	if maxD < d {
+		maxD = d
+	}
 	for i := 0; i < e.retryCount; i++ {
+		if d > maxD/2 { // 再翻倍必超上限：直接夹住，顺便避免溢出
+			d = maxD
+			break
+		}
 		d *= 2
-		if d >= p.breakerCooldownMax {
-			d = p.breakerCooldownMax
+		if d >= maxD {
+			d = maxD
 			break
 		}
 	}

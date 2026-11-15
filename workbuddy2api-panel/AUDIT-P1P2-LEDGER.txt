@@ -1,0 +1,59 @@
+审查报告 P1/P2 落地台账（CODE-AUDIT-FULL.md）
+=============================================
+
+已在前 9 个 PR 修完（P0 全部 + P1 11 条）
+-----------------------------------------
+#148 P0-1 面板门禁改用独立 admin_api_key
+#149 C1 proxypool Realms 共享 map（fatal） / C2 清扫锁 panic 泄漏 / C3 暂存期 Release 失效
+     C7 工具参数修复器 nil map panic / C8 redis worker 无 recover
+#150 A1 代理静默直连 / A2 webhook 日志泄凭据 / A3 临时文件符号链接 / A8 桶键串账
+#151 C4 冷却被砍短 / C5 换凭证不重算规则 / C6 僵尸窗口 / B4 multipart 无上限
+#152 B2 无 token 扣费丢失 / B3 三个贵端点不占在途
+#153 B1 积分闸覆盖 embeddings/search/fetch/3D
+#154 A6 视频/3D 任务按调用方归属
+#155 B5 视频扣费幂等与 3D 统一
+#156 A5 显式会话键按调用方隔离
+
+本 PR（audit/p1-p2-full）已修
+-----------------------------
+pool
+  C5-04 SetRemark 无长度上限 → rune 截断 200
+  C5-05 modelCost 写侧永不清理 → 表长 >32 时 TTL 清理
+  C5-07 disabled 账号仍累计 12153 计数 → 入口短路
+  C5-16 兜底选号 lastUsed 用 time.Now() → 用锁内 now
+  C5-17 exploreLast 清理在探索分支内 → 移到分支外
+  C5-24 熔断时长配置为 0 时静默失效 / 溢出 → default 兜底 + 溢出前置判断
+  P-19 SetNickname 落盘失败不回滚内存 → 回滚
+usage
+  数值毒化：一个 NaN/±Inf 让 json.Marshal 永久失败 → 清零重试
+session
+  绑定表无上限 → maxSessionEntries=20000 + 按 lastActive 淘汰到 90% 水位
+server/images
+  fileToDataURL 8MiB 静默截断 → 报错
+  multipart ReadForm 后无 RemoveAll → defer 清理
+server/videos
+  numberToInt 对 NaN/±Inf/超界无校验 → 判非法
+upstream/decode_body
+  deflate 无界 ReadAll → 8MiB 上限
+upstream/client
+  F-08 doJSON 空体成功被判成解析失败 → 填 null（env.Data 同步）
+upstream/streak_extras
+  W4-U2-101 三处 `_ = json.Unmarshal` → 解析失败返回 error
+upstream/school
+  W4-U2-084 `raw, _ = json.Marshal(body)` → 检查 err
+upstream/report
+  W4-U2-028 失败分支返回半截信封 → 返回零值信封
+scheduler/windowprobe
+  P-25 clip 按字节截断 UTF-8 → 按 rune
+
+本 PR 未覆盖（下一批，按模块推进）
+---------------------------------
+- APK Java 层：A7 端口冒充链、A9 默认绑全网卡+明文、A10 WebView 注入 key 不校验来源
+  （需 Linux 环境跑 Gradle 构建验证，且改动在壳侧）
+- A4 realm 迁移陈旧快照覆盖新 RT（启动路径，需加文件锁/版本比较）
+- pool 锁内 IO 与选号口径：C5-01/02/03/11/12/13/14/15/18/19/20、C5-25 等
+- 面板导出接口条数/速率限制 + 审计行；getConfig 白名单脱敏 + no-store
+- reqlog 文件数无界、media_fetch 名额无超时回收、metrics 其余口径项
+- 前端 app.js 状态与竞态（12 条）、Java UI 层资源泄漏
+- 剩余 P2 约 300 条：按「无界增长 / 锁内 IO / 静默截断 / 计费口径 / 资源泄漏 / 前端竞态」
+  六组继续。

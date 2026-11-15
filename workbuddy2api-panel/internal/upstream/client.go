@@ -1312,7 +1312,13 @@ func (c *Client) doJSONRaw(req *http.Request) (env apiEnvelope, raw []byte, err 
 	// claim-gift、claim-compensation 这些 RPC 成功时可能回空体，
 	// 此前被 json.Unmarshal 判成 parse failed，成功记成失败。
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return env, raw, nil
+		// 调用方普遍是 `data, err := c.doJSON(...); json.Unmarshal(data, &out)`：
+		// 返回空 raw 会让 Unmarshal 报 `unexpected end of JSON input`，把**成功**记成失败
+		// （审查 F-08：travel/streak/school 等就是这么误判的）。这里补一个合法的
+		// `null`——Unmarshal 到结构体上是 no-op 且不报错，语义与「空体成功」一致。
+		// env.Data 也要填：doJSON 直接把它当返回值交给调用方（本函数的 raw 是整包）。
+		env.Data = json.RawMessage("null")
+		return env, json.RawMessage("null"), nil
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return env, raw, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))

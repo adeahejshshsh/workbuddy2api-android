@@ -48,6 +48,11 @@ func (p *Pool) NoteSessionDeadWith(uid, reason string) bool {
 	if !ok {
 		return false
 	}
+	// 已禁用的号不再累计（审查 C5-07）：注释承认过这点但没短路，disabled 号仍被其它
+	// 路径喂计数并置脏，落盘放大且没有意义。
+	if e.disabled {
+		return false
+	}
 	e.sessionDeadFails++
 	if e.sessionDeadFails < sessionDeadThreshold {
 		p.dirty.Store(true) // 中间计数也落盘：重启丢进度会让「离禁用还差几次」重新从零学
@@ -344,6 +349,10 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	}
 	if e.modelCost == nil {
 		e.modelCost = make(map[string]modelCostEntry)
+	} else if len(e.modelCost) > modelCostPruneAt {
+		// 写入口顺带惰性清理（审查 C5-05）：此前只在读侧按 TTL 过滤，写侧永不删，
+		// 模型名带版本/日期后缀时每号台账无界增长并随 state.json 落盘。
+		e.pruneExpiredModelCosts(time.Now())
 	}
 	const alpha = 0.3
 	prev, seen := e.modelCost[model]
@@ -876,6 +885,13 @@ func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedMod
 // 这里是服务端兜底：脚本直接灌超长值会让每次落盘时整份 state.json 变大。
 const groupMaxRunes = 24
 
+// remarkMaxRunes 备注上限（与 group 同口径按 rune 截断，见 SetRemark）。
+const remarkMaxRunes = 200
+
+// modelCostPruneAt 单价账本达到这个长度时在写入口做一次 TTL 清理
+// （低于它时清理成本大于收益，惰性阈值即可）。
+const modelCostPruneAt = 32
+
 type RealmHealth struct {
 	Total   int
 	Healthy int
@@ -968,7 +984,13 @@ func (p *Pool) SetRemark(uid, text string) bool {
 	if !ok {
 		return false
 	}
-	e.remark = strings.TrimSpace(text)
+	// 与 SetGroup 同口径按 rune 截断（审查 C5-04）：此前无上限，脚本灌超长备注会让
+	// state.json 每次落盘体积膨胀、面板渲染卡顿。
+	text = strings.TrimSpace(text)
+	if r := []rune(text); len(r) > remarkMaxRunes {
+		text = string(r[:remarkMaxRunes])
+	}
+	e.remark = text
 	p.dirty.Store(true)
 	return true
 }
