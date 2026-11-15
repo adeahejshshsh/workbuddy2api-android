@@ -22,11 +22,11 @@ func TestSaveKeepsValidBakWhenMainFileCorrupt(t *testing.T) {
 	p := New(stateFp)
 	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
 	p.SetCredits("u1", 1234, 0)
-	if err := p.saveLocked(); err != nil {
+	if err := p.flushNowErr(); err != nil {
 		t.Fatalf("首次落盘: %v", err)
 	}
 	// 再落一次，让 .bak 里也是一份合法内容。
-	if err := p.saveLocked(); err != nil {
+	if err := p.flushNowErr(); err != nil {
 		t.Fatalf("第二次落盘: %v", err)
 	}
 	goodBak, err := os.ReadFile(stateFp + ".bak")
@@ -45,7 +45,7 @@ func TestSaveKeepsValidBakWhenMainFileCorrupt(t *testing.T) {
 	p2.Add(&auth.Auth{UID: "u2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
 
 	// 恢复后的第一次落盘：**不许**把残骸覆盖进 .bak。
-	if err := p2.saveLocked(); err != nil {
+	if err := p2.flushNowErr(); err != nil {
 		t.Fatalf("恢复后落盘: %v", err)
 	}
 	after, err := os.ReadFile(stateFp + ".bak")
