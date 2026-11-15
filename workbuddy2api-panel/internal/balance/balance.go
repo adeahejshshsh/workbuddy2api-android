@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,6 +48,16 @@ const (
 
 	// dayLayout 日粒度键的格式（本地时区，与用户直觉一致）。
 	dayLayout = "2006-01-02"
+
+	// maxHistoryBytes 载入时允许读取的历史文件上限（审查 W2-C2-40）。
+	// maxPoints 只在 Add 里生效，一个手改/损坏的 10M 点文件能绕过它把启动直接打死。
+	maxHistoryBytes = 64 << 20
+
+	// 采样值合理区间（审查 W2-C2-40/45）：Credits 参与相邻差累加，接近 int64
+	// 极值的值会让 gained/consumed 溢出成负数（前端显示负消耗）。±1e12 远大于
+	// 任何真实积分水位，只用来挡住畸形数据。
+	minCredits = -1_000_000_000_000
+	maxCredits = 1_000_000_000_000
 
 	// expectedPerDay 判定"某日采样完整"所需的最少点数。
 	// 理论值 = 24h/30min = 48；留容差取 40（服务重启/短暂停机会让点数略少，
@@ -81,7 +92,9 @@ type file struct {
 
 // Recorder 并发安全的余额采样记录器。
 type Recorder struct {
-	mu     sync.Mutex
+	// mu 用 RWMutex（审查 W2-C2-41）：Snapshot/Describe 是只读路径，面板刷新
+	// 不该把采样（Add）挡在门外；写侧仍是排他锁，锁内不再做日志 I/O 与全量聚合。
+	mu     sync.RWMutex
 	path   string
 	points []Point // 按 TS 升序维护（Add 时追加，采样本身即时间递增）
 	dirty  bool
@@ -126,10 +139,30 @@ func New(path string) *Recorder {
 	}
 	if path != "" {
 		if err := r.load(); err != nil {
-			log.Printf("[balance] 载入失败（按空历史启动）: %v", err)
+			// 审查 W2-C2-43：此前载入失败只打一条日志就按空历史启动，随后任意一次
+			// flush 都会用空/新数据原子替换**原地覆盖**损坏文件，历史不可恢复。
+			// 先把它改名备份（*.corrupt.<unix>），再按空历史启动。
+			if backup := r.backupCorrupt(); backup != "" {
+				log.Printf("[balance] 载入失败（按空历史启动）: %v；原文件已备份为 %s", err, filepath.Base(backup))
+			} else {
+				log.Printf("[balance] 载入失败（按空历史启动）: %v", err)
+			}
 		}
 	}
 	return r
+}
+
+// backupCorrupt 把损坏的 history 文件改名备份，返回备份路径（失败返回空串）。
+// 审查 W2-C2-43：备份而不是删除 —— 手工修复或事后取证都还要用。
+func (r *Recorder) backupCorrupt() string {
+	if r.path == "" {
+		return ""
+	}
+	backup := fmt.Sprintf("%s.corrupt.%d", r.path, time.Now().Unix())
+	if err := os.Rename(r.path, backup); err != nil {
+		return ""
+	}
+	return backup
 }
 
 // Interval 返回采样间隔，供调度器使用（避免两处各写一个魔法数字）。
@@ -165,10 +198,20 @@ func (r *Recorder) Add(uid string, credits int64) bool {
 		return false
 	}
 	now := r.clock()
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	var truncateMsg string
+	var folded, folds, dropped int
 
+	r.mu.Lock()
 	if last, ok := r.lastSample[uid]; ok && now.Sub(last) < sampleInterval {
+		// 审查 W2-C2-39：注释承诺「同一采样窗口内重复调用只保留最后一个值」，
+		// 实现却是直接丢弃 —— 签到/领奖/大额消耗发生在窗口内时，曲线记的是
+		// **跳变前**的旧值，最长滞后 30 分钟，面板「当前余额」与上游不符。
+		// 现在把窗口内该账号的最后一个点就地更新成本次水位。
+		//
+		// 返回值仍是 false（语义 = 本次没有**新增**采样点），调用方的计数口径
+		// 因此不变；就地写安全的前提是 flush/Snapshot 都复制切片（见 W2-C2-42）。
+		r.mergeIntoWindowLocked(uid, now, credits)
+		r.mu.Unlock()
 		return false
 	}
 	r.lastSample[uid] = now
@@ -177,7 +220,7 @@ func (r *Recorder) Add(uid string, credits int64) bool {
 
 	// 点数超硬上限：立即折叠一次（异常保护）。
 	if len(r.points) > maxPoints {
-		r.rollupLocked(now)
+		folded, folds, dropped = r.rollupLocked(now)
 		// 折叠只处理**超出 detailedKeep 的旧点**：若全部点都在保留窗内（异常刷点、
 		// 时钟错乱、或 detailedKeep 配得很大），上面那次折叠一个点都不会减少，
 		// 上限就形同虚设 —— 文件会一直涨到磁盘满。这里补一道硬截断：真的还超，
@@ -185,11 +228,40 @@ func (r *Recorder) Add(uid string, credits int64) bool {
 		if len(r.points) > maxPoints {
 			drop := len(r.points) - maxPoints
 			r.points = append([]Point(nil), r.points[drop:]...)
-			log.Printf("WARN: [balance] 原始点数超上限（%d > %d）且折叠无效，已丢弃最旧 %d 个点",
+			truncateMsg = fmt.Sprintf("WARN: [balance] 原始点数超上限（%d > %d）且折叠无效，已丢弃最旧 %d 个点",
 				len(r.points)+drop, maxPoints, drop)
 		}
 	}
+	r.mu.Unlock()
+
+	// 日志一律在解锁之后打（审查 W2-C2-41：此前 stderr I/O 发生在持锁期间，
+	// 磁盘慢时把采样与面板查询一起拖住）。
+	logRollup(folded, folds, dropped)
+	if truncateMsg != "" {
+		log.Print(truncateMsg)
+	}
 	return true
+}
+
+// mergeIntoWindowLocked 把本窗口内该账号最后一个采样点的水位更新为最新值
+// （审查 W2-C2-39）。只回扫窗口内的点：窗口外的不可能是「本窗口的点」，
+// 回扫量因此与「窗口内活跃账号数」同阶，不会退化成全表扫描。
+func (r *Recorder) mergeIntoWindowLocked(uid string, now time.Time, credits int64) {
+	winStart := now.Add(-sampleInterval).Unix()
+	for i := len(r.points) - 1; i >= 0; i-- {
+		p := &r.points[i]
+		if p.TS < winStart {
+			return
+		}
+		if p.Day != "" || p.UID != uid {
+			continue
+		}
+		if p.Credits != credits {
+			p.Credits = credits
+			r.dirty = true
+		}
+		return
+	}
 }
 
 // Rollup 把超出 detailedKeep 的原始点折叠为日粒度（每账号每天留最后一个值）。
@@ -199,11 +271,24 @@ func (r *Recorder) Rollup(now time.Time) {
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.rollupLocked(now)
+	folded, folds, dropped := r.rollupLocked(now)
+	r.mu.Unlock()
+	logRollup(folded, folds, dropped)
 }
 
-func (r *Recorder) rollupLocked(now time.Time) {
+// logRollup 在**解锁之后**打折叠/裁剪日志（审查 W2-C2-41）。
+func logRollup(folded, folds, dropped int) {
+	if folded > 0 {
+		log.Printf("[balance] 折叠 %d 个原始采样点为 %d 个日粒度点（保留 %v 细粒度）", folded, folds, detailedKeep)
+	}
+	if dropped > 0 {
+		log.Printf("[balance] 丢弃 %d 个超期或畸形的日粒度点（保留 %v）", dropped, dayKeep)
+	}
+}
+
+// rollupLocked 折叠并裁剪；返回 (折叠的原始点数, 生成的日粒度点数, 丢弃的日粒度点数)
+// 供调用方在解锁后打日志（审查 W2-C2-41：锁内不做 stderr I/O）。
+func (r *Recorder) rollupLocked(now time.Time) (foldedOut, foldsOut, droppedOut int) {
 	cutoff := now.Add(-detailedKeep).Unix()
 
 	// 待折叠：超出 detailedKeep 的原始点，按 (uid, 日) 分组取当日最后一个水位，
@@ -242,10 +327,13 @@ func (r *Recorder) rollupLocked(now time.Time) {
 			order = append(order, k)
 		}
 		if f.hasPrev {
+			// 审查 W2-C2-45：差值与累加都夹住 int64 溢出（Credits 已在载入时
+			// 限幅，但 Add 是公开 API，畸形值仍可能进来）——溢出后 gained/
+			// consumed 会变负，前端显示负消耗。
 			if d := p.Credits - f.prev; d > 0 {
-				f.gained += d
+				addClamp(&f.gained, d)
 			} else if d < 0 {
-				f.consumed += -d
+				addClamp(&f.consumed, absClamp(d))
 			}
 		}
 		f.prev, f.hasPrev = p.Credits, true
@@ -255,8 +343,7 @@ func (r *Recorder) rollupLocked(now time.Time) {
 		folded++
 	}
 	if folded == 0 {
-		r.pruneDaysLocked(now)
-		return
+		return 0, 0, r.pruneDaysLocked(now)
 	}
 	for _, k := range order {
 		f := folds[k]
@@ -268,13 +355,16 @@ func (r *Recorder) rollupLocked(now time.Time) {
 	sort.Slice(kept, func(i, j int) bool { return kept[i].TS < kept[j].TS })
 	r.points = kept
 	r.dirty = true
-	log.Printf("[balance] 折叠 %d 个原始采样点为 %d 个日粒度点（保留 %v 细粒度）", folded, len(order), detailedKeep)
-
-	r.pruneDaysLocked(now)
+	// 日志由调用方在解锁后打（审查 W2-C2-41）。
+	return folded, len(order), r.pruneDaysLocked(now)
 }
 
-// pruneDaysLocked 丢弃超出 dayKeep 的日粒度点。
-func (r *Recorder) pruneDaysLocked(now time.Time) {
+// pruneDaysLocked 丢弃超出 dayKeep 的日粒度点，返回丢弃数量。
+//
+// 审查 W2-C2-44：此前 Day 解析失败的畸形点被**永远保留**（err != nil 时走
+// keep 分支），裁剪对它们彻底失效，只能靠 maxPoints 硬截断兜底。畸形数据
+// 没有保留价值，一并丢弃并计数（调用方解锁后 WARN）。
+func (r *Recorder) pruneDaysLocked(now time.Time) int {
 	cutoff := now.Add(-dayKeep)
 	var kept []Point
 	dropped := 0
@@ -284,7 +374,11 @@ func (r *Recorder) pruneDaysLocked(now time.Time) {
 			continue
 		}
 		t, err := time.ParseInLocation(dayLayout, p.Day, time.Local)
-		if err == nil && t.Before(cutoff) {
+		if err != nil {
+			dropped++
+			continue
+		}
+		if t.Before(cutoff) {
 			dropped++
 			continue
 		}
@@ -293,18 +387,54 @@ func (r *Recorder) pruneDaysLocked(now time.Time) {
 	if dropped > 0 {
 		r.points = kept
 		r.dirty = true
-		log.Printf("[balance] 丢弃 %d 个超期日粒度点（保留 %v）", dropped, dayKeep)
 	}
+	return dropped
+}
+
+// addClamp 累加正值并夹住 int64 上溢（审查 W2-C2-45）。
+func addClamp(dst *int64, d int64) {
+	if d <= 0 {
+		return
+	}
+	if d > math.MaxInt64-*dst {
+		*dst = math.MaxInt64
+		return
+	}
+	*dst += d
+}
+
+// absClamp 返回 |d|，MinInt64 夹到 MaxInt64（避免取负溢出）。
+func absClamp(d int64) int64 {
+	if d == math.MinInt64 {
+		return math.MaxInt64
+	}
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 // ---------------------------------------------------------------- 持久化 ----
 
 func (r *Recorder) load() error {
-	raw, err := os.ReadFile(r.path)
+	// 审查 W2-C2-40：先看大小再读 —— 一个 10M 点/几百 MB 的 history 文件
+	// 此前会被整体读入并反序列化，启动即 OOM 或长时间卡死（maxPoints 只在
+	// Add 里生效，绕过它只需要一个手改或损坏的文件）。
+	st, err := os.Stat(r.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // 首次启动：空历史
 		}
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("history 不是普通文件: %s", st.Mode().Type())
+	}
+	if st.Size() > maxHistoryBytes {
+		return fmt.Errorf("history 文件过大: %d > %d 字节", st.Size(), maxHistoryBytes)
+	}
+	raw, err := os.ReadFile(r.path)
+	if err != nil {
 		return err
 	}
 	var f file
@@ -314,15 +444,38 @@ func (r *Recorder) load() error {
 	if f.Version != 1 {
 		return fmt.Errorf("不支持的版本 %d", f.Version)
 	}
-	// 过滤非法值（手改/损坏文件不该让服务起不来）。
+	// 过滤非法值（手改/损坏文件不该让服务起不来）：
+	//   - UID 空 / TS<=0：既有口径；
+	//   - Credits 超出 ±1e12：参与差值累加会溢出（审查 W2-C2-40/45）；
+	//   - Day 非空但解析不出来：裁剪对它失效，永久占位（审查 W2-C2-44）。
 	pts := make([]Point, 0, len(f.Points))
+	skipped := 0
 	for _, p := range f.Points {
 		if p.UID == "" || p.TS <= 0 {
+			skipped++
 			continue
+		}
+		if p.Credits < minCredits || p.Credits > maxCredits {
+			skipped++
+			continue
+		}
+		if p.Day != "" {
+			if _, err := time.ParseInLocation(dayLayout, p.Day, time.Local); err != nil {
+				skipped++
+				continue
+			}
 		}
 		pts = append(pts, p)
 	}
 	sort.Slice(pts, func(i, j int) bool { return pts[i].TS < pts[j].TS })
+	// 点数上限与内存口径对齐（审查 W2-C2-40）：只保留最近的 maxPoints 个点。
+	if len(pts) > maxPoints {
+		skipped += len(pts) - maxPoints
+		pts = pts[len(pts)-maxPoints:]
+	}
+	if skipped > 0 {
+		log.Printf("WARN: [balance] 载入时丢弃 %d 个非法/超限采样点（保留 %d 个）", skipped, len(pts))
+	}
 	r.points = pts
 	// 按账号恢复「上次采样时刻」（各取最后一个原始点），避免重启后立刻补点导致
 	// 曲线密集；只认原始点——日粒度点是折叠产物，不代表上次采样时刻。
@@ -347,7 +500,10 @@ func (r *Recorder) flush(force bool) {
 		r.mu.Unlock()
 		return
 	}
-	snap := file{Version: 1, Saved: time.Now().Format(time.RFC3339), Points: r.points}
+	// 审查 W2-C2-42：只复制切片头是不够的 —— 解锁后 json.Marshal 读的是同一份
+	// 底层数组，而 Add 的「窗口内合并」（W2-C2-39）会就地改 Credits。这里显式
+	// 拷贝一份，让落盘内容与内存彻底解耦（20 万点约 8 MB，30 秒一次可接受）。
+	snap := file{Version: 1, Saved: r.clock().Format(time.RFC3339), Points: append([]Point(nil), r.points...)}
 	r.dirty = false
 	r.mu.Unlock()
 
@@ -364,7 +520,9 @@ func (r *Recorder) flush(force bool) {
 		fail("序列化", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
+	// 审查 W2-C2-46：数据目录统一 0700（history 文件本身 0600 没问题，但目录
+	// 全局可遍历时，同目录的其它凭据文件（如与 auths 混放）文件名可被枚举）。
+	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
 		fail("建目录", err)
 		return
 	}
@@ -473,15 +631,28 @@ func (r *Recorder) Snapshot(since time.Time) ([]Series, time.Time) {
 	if r == nil {
 		return nil, time.Time{}
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	// 审查 W2-C2-41：此前全程持**写锁**做全量分桶 + 每账号排序 + 日聚合，
+	// 面板刷新与采样互相拖慢（20 万点规模下锁内数十 ms）。现在锁内只做
+	// 「复制切片头 + 元数据」，聚合在锁外对副本进行 —— 读路径不再阻塞 Add。
+	// 复制 20 万点约 8 MB，与 flush 同一取舍（W2-C2-42）。
+	r.mu.RLock()
+	points := append([]Point(nil), r.points...)
+	names := make(map[string]string, len(r.names))
+	for k, v := range r.names {
+		names[k] = v
+	}
+	realms := make(map[string]string, len(r.realms))
+	for k, v := range r.realms {
+		realms[k] = v
+	}
+	r.mu.RUnlock()
 
 	var cutoff int64
 	if !since.IsZero() {
 		cutoff = since.Unix()
 	}
 	byUID := map[string][]Point{}
-	for _, p := range r.points {
+	for _, p := range points {
 		if cutoff > 0 && p.TS < cutoff {
 			continue
 		}
@@ -490,7 +661,7 @@ func (r *Recorder) Snapshot(since time.Time) ([]Series, time.Time) {
 	out := make([]Series, 0, len(byUID))
 	for uid, pts := range byUID {
 		sort.Slice(pts, func(i, j int) bool { return pts[i].TS < pts[j].TS })
-		s := Series{UID: uid, Name: r.names[uid], Points: pts, Realm: r.realms[uid]}
+		s := Series{UID: uid, Name: names[uid], Points: pts, Realm: realms[uid]}
 		if n := len(pts); n > 0 {
 			s.Current = pts[n-1].Credits
 			// 水位极值与窗口净变化都要把**折叠点的当日首值**算进去：折叠点只剩末值，
@@ -530,7 +701,9 @@ func (r *Recorder) Snapshot(since time.Time) ([]Series, time.Time) {
 		}
 		return out[i].UID < out[j].UID
 	})
-	return out, time.Now()
+	// 审查 W2-C2-47：与 Add/dailyOf 统一用注入时钟，否则测试注入固定时钟时
+	// 「数据截至」仍走真实时钟，语义不一致。
+	return out, r.clock()
 }
 
 // dailyOf 把某账号的采样点按本地日历日聚合为每日变化。
@@ -573,10 +746,11 @@ func dailyOf(pts []Point, now time.Time) []Daily {
 		// 相邻采样差值分正负累加：涨 = 到账，跌 = 消耗。跨日时 a 是新建的，
 		// hasPrev=false 不会把昨日末值误算进今日。
 		if a.hasPrev {
+			// 审查 W2-C2-45：同 rollupLocked，夹住 int64 溢出。
 			if d := p.Credits - a.prev; d > 0 {
-				a.gained += d
+				addClamp(&a.gained, d)
 			} else if d < 0 {
-				a.consumed += -d
+				addClamp(&a.consumed, absClamp(d))
 			}
 		}
 		// 日粒度折叠点自带的消耗/到账是**折叠时算好的当日合计**，必须加进来。
@@ -634,8 +808,8 @@ func (r *Recorder) Describe() string {
 	if r == nil {
 		return "off"
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	uids := map[string]struct{}{}
 	raw, day := 0, 0
 	for _, p := range r.points {

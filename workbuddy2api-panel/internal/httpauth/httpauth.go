@@ -10,21 +10,50 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
+	"sync/atomic"
 )
 
 // bearerPrefix 认证方案前缀（大小写敏感，与 HTTP 规范及既有实现一致）。
 const bearerPrefix = "Bearer "
 
+// allowEmptyKey 「空 key = 未启用鉴权」这个缺省语义的显式开关（审查 W2-AU-01）。
+//
+// 背景：key 为空时 VerifyBearer/VerifyDual 恒返回 true —— 这是 fail-open。默认保持
+// 这个语义是刻意的：server 的 /v1/* 与 panel 都靠它表达「本部署没配 api_key」，
+// 把默认改成 fail-closed 会让所有「回环 + 无密钥」的本地部署（含测试）直接 401。
+//
+// 但 fail-open 不该是**不可关闭**的：配置漏填密钥（把 api_key 写成空串、env 覆盖
+// 成空）时，网关会安静地对全世界开放。这里给部署方一个显式闸口：
+//
+//	httpauth.SetAllowEmptyKey(false)  // 之后空 key 一律拒绝（失败关闭）
+//
+// 语义只影响「key 为空」这一条分支，非空 key 的比较路径完全不变（仍是
+// SHA-256 + ConstantTimeCompare），因此不存在「关了开关反而更弱」的组合。
+//
+// 注：面板侧对敏感接口另有独立加固（internal/panel/panel.go 在 api_key 为空时对
+// 导出/配置/导入/登录/账号增删直接 403）；本开关是给 server 侧与未来调用方的
+// 统一闸口，不替代面板那一层。
+var allowEmptyKey atomic.Bool
+
+func init() { allowEmptyKey.Store(true) }
+
+// SetAllowEmptyKey 设置「空 key 是否放行」。false = 失败关闭（空 key 一律拒绝）。
+// 进程级设置，应在装配阶段（启动时）调用，不要按请求切换。
+func SetAllowEmptyKey(allow bool) { allowEmptyKey.Store(allow) }
+
+// AllowEmptyKey 报告当前语义（默认 true）。
+func AllowEmptyKey() bool { return allowEmptyKey.Load() }
+
 // VerifyBearer 校验请求头是否携带正确的 Bearer 密钥。
 //
-// key 为空表示"未启用鉴权"，恒返回 true（调用方据此放行）。
+// key 为空表示"未启用鉴权"，按 AllowEmptyKey() 决定是否放行（默认放行，见上）。
 // 比较用 SHA-256 摘要 + subtle.ConstantTimeCompare：
 //   - 常量时间，不因前缀匹配长度而泄露信息；
 //   - 先摘要再比较，长度差异被吸收进摘要（不会因长度不同提前返回）；
 //   - 摘要本身不可逆，即便有侧信道也拿不到密钥原文。
 func VerifyBearer(r *http.Request, key string) bool {
 	if key == "" {
-		return true
+		return AllowEmptyKey()
 	}
 	authz := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authz, bearerPrefix) {
@@ -47,7 +76,7 @@ func VerifyBearer(r *http.Request, key string) bool {
 // 比较路径，也就没有引入新的侧信道。
 func VerifyDual(r *http.Request, key string) bool {
 	if key == "" {
-		return true
+		return AllowEmptyKey()
 	}
 	if strings.HasPrefix(r.Header.Get("Authorization"), bearerPrefix) {
 		return VerifyBearer(r, key)

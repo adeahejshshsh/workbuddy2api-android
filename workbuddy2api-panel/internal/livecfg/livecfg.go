@@ -91,18 +91,33 @@ func NormalizeHiddenModels(hidden []string) map[string]struct{} {
 	if len(hidden) == 0 {
 		return nil
 	}
-	out := make(map[string]struct{}, len(hidden)*2)
+	out := make(map[string]struct{}, len(hidden)*4)
+	// add 同时登记「配置里的原样拼写」与「小写拼写」。
+	//
+	// 为什么要双写（审查：热快照口径不一致）：本表的消费方有两套口径 ——
+	// 面板用上游返回的**精确 id**（"cn:"+model.ID）查表，而服务端 modelHidden
+	// 用 strings.EqualFold 判定（大小写不敏感）。只登记一种拼写时，配
+	// `models.hidden: ["GLM-5.2"]` 会出现「上游确实被拦了、面板却显示未隐藏」。
+	add := func(realm, bare string) {
+		if bare == "" {
+			return
+		}
+		out[realm+":"+bare] = struct{}{}
+		if lower := strings.ToLower(bare); lower != bare {
+			out[realm+":"+lower] = struct{}{}
+		}
+	}
 	for _, m := range hidden {
 		m = strings.TrimSpace(m)
 		if m == "" {
 			continue
 		}
-		if prefix, bare, ok := strings.Cut(m, ":"); ok && (prefix == "cn" || prefix == "global") {
-			out[prefix+":"+bare] = struct{}{}
-		} else {
-			out["cn:"+m] = struct{}{}
-			out["global:"+m] = struct{}{}
+		if realm, bare, ok := splitHiddenRealm(m); ok {
+			add(realm, strings.TrimSpace(bare))
+			continue
 		}
+		add("cn", m)
+		add("global", m)
 	}
 	if len(out) == 0 {
 		return nil
@@ -110,8 +125,55 @@ func NormalizeHiddenModels(hidden []string) map[string]struct{} {
 	return out
 }
 
+// splitHiddenRealm 识别 "cn:" / "global:" 前缀（**大小写不敏感**）。
+//
+// 审查（热快照口径）：此前用 `prefix == "cn" || prefix == "global"` 精确比较，
+// 写 `CN:glm-5.2` 会被当成**裸模型名** → 登记成 "cn:CN:glm-5.2" 与
+// "global:CN:glm-5.2"，既藏错域又永远匹配不上任何模型 id；服务端侧
+// splitRealmPrefixFold 早就忽略大小写，两处口径必须一致。
+//
+// 只认这两个合法前缀：模型名本身可能含冒号（如 `qwen:7b`），不能拿
+// strings.Contains 当判据（服务端 modelHidden 的注释记录过这个坑）。
+func splitHiddenRealm(m string) (realm, bare string, ok bool) {
+	for _, r := range []string{"cn:", "global:"} {
+		if len(m) >= len(r) && strings.EqualFold(m[:len(r)], r) {
+			return r[:len(r)-1], m[len(r):], true
+		}
+	}
+	return "", m, false
+}
+
 // Store 整体替换快照。
-func (h *Holder) Store(s Snapshot) { h.p.Store(&s) }
+//
+// 审查（热快照口径）：快照承诺「不可变」，但 map 字段此前与调用方**共享引用** ——
+// 装配/保存路径后续改写同一个 map 时，读方会看到半更新的视图（比如别名表只换
+// 了一半的键）。这里在写入时克隆一份，让快照真正自洽。克隆只在保存配置时发生，
+// 不在请求热路径上。
+func (h *Holder) Store(s Snapshot) {
+	s.ModelFallback = cloneStringMap(s.ModelFallback)
+	s.ModelAliases = cloneStringMap(s.ModelAliases)
+	s.ThinkingModelDefaults = cloneStringMap(s.ThinkingModelDefaults)
+	if s.HiddenModels != nil {
+		m := make(map[string]struct{}, len(s.HiddenModels))
+		for k := range s.HiddenModels {
+			m[k] = struct{}{}
+		}
+		s.HiddenModels = m
+	}
+	h.p.Store(&s)
+}
+
+// cloneStringMap 复制 map；nil 保持 nil（调用方用 nil 判定「没配」）。
+func cloneStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
 
 // NormalizeModelAliases 把 "客户端名=真实名" 条目归一化成查找表。
 //
