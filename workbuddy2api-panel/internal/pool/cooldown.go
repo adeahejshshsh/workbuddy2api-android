@@ -45,6 +45,7 @@ func (p *Pool) SetNickname(uid, nickname string) bool {
 	a.Lock()
 	// 已持写锁：这里必须直读字段。RWMutex 不可重入，调 NicknameValue() 会自死锁
 	// （RLock 等自己持有的 Lock —— 上一版批量替换时真踩到过，pool 测试直接挂住）。
+	prev := a.Nickname
 	changed := a.Nickname != nickname
 	if changed {
 		a.Nickname = nickname
@@ -54,6 +55,11 @@ func (p *Pool) SetNickname(uid, nickname string) bool {
 		return false
 	}
 	if err := a.SaveAtomic(); err != nil {
+		// 落盘失败要**回滚内存**（审查 P-19）：否则面板提示「保存失败」，界面刷新却是新昵称，
+		// 重启后又回旧值——内存与磁盘长期不一致，用户不知道该信哪一个。
+		a.Lock()
+		a.Nickname = prev
+		a.Unlock()
 		log.Printf("WARN: [pool] nickname save %s: %v", uid, err)
 		return false
 	}

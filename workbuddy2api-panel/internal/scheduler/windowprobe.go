@@ -308,8 +308,11 @@ func orNone(s string) string {
 }
 
 func clip(s string) string {
-	if len(s) > 200 {
-		return s[:200]
+	// 按 rune 截断（审查 P-25）：按字节切会把中文报文切成乱码（`s[:200]` 可能落在
+	// 多字节字符中间）。同仓 logfmt.Truncate 有同款实现，这里保持一致。
+	const maxRunes = 200
+	if r := []rune(s); len(r) > maxRunes {
+		return string(r[:maxRunes])
 	}
 	return s
 }
