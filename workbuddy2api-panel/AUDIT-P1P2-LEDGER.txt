@@ -4,8 +4,8 @@
 总进度（截至本分支）
 --------------------
 P0   1 / 1     ✅ 全部
-P1   37 / 37（精编）✅ **全部完成**；完整 80 条里已修 51 条，其余为误报或需跨包改造
-P2   约 360 条里已修 168 条（按主题分组推进）
+P1   37 / 37（精编）✅ **全部完成**；完整 80 条里已修 63 条，其余为误报或需跨包改造
+P2   约 360 条里已修 338 条（94%）
 
 按提交划分
 ----------
@@ -34,6 +34,17 @@ P2   约 360 条里已修 168 条（按主题分组推进）
   #161     pool 落盘 IO 移出写锁（C5-37/46/47）
   #162     SSE 四条 D2/D3/D6/D7（元数据行拆帧 / chunked 半行 / 心跳不变量 / 补 length）
 
+第二轮（六代理并行，#163 一次合并）
+  a874498  session ids I1/I3/I4/I6 + usage U3 分层保留
+  9d8471e  redisstore C7-029~033（零值 panic / 批 ctx / 失败计数 / 快照不丢）
+  c5c9c3c  session S9（StopGC 后不再写表）
+  a5a60d7  prompt 改写模型 + balance W2-C2-39~47 + media/credithist/loginsite/livecfg/cmd-trial/index.html
+  f539147  pool 剩余 42 条 + auth 2 条 + proxypool 6 条
+  df8d0da  scheduler 六条 P1（C7-039/040/054/065/070/089）+ 22 条 P2 + safefile 五条
+  16c3bc4  upstream 三条 P1（A1-02 / W4-U1-02 / W4-U2-002）+ 18 条 P2
+  22040cd  server 核心链路 5 条 + panel 35 条（含 W1A3-02、W2-LS-01）
+  ecccfe2  T 系列补测 37 条（6 个新文件，21 次变异验证）
+
 关键修复（按危害排序）
 ----------------------
 1. A4 双实例共享 auths/ 时用陈旧快照覆盖新 RT → 账号掉线
@@ -58,7 +69,7 @@ W3C8-25       embeddings 不记账：需要接 chatStat + usage.Add + 新 mode �
 W2-C2-21      EnterpriseOverride 字段改未导出：需同步改 6 个包 20+ 处直读。
 W2-C2-32      wbFieldAAD 不掺 uid：是桌面端互操作契约，改了桌面端读不回文件。
 W2-C2-01~06   cmd/trial 系列；W2-C2-39~47 internal/balance 系列。
-剩余 P2 约 190 条：多为「信息」级或已在上面分组里判定为「需结构性重构」。
+剩余 P2 约 22 条：均为「信息」级，或已判定为「需跨包契约变更 / 需真实上游样本」。
 
 测试与验证
 ----------
