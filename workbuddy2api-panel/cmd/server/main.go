@@ -780,6 +780,29 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 
 // panelListenPath 从 listen 地址提取 ":port" 形式，用于启动日志拼面板 URL
 // （":7863" 或 "0.0.0.0:7863" → ":7863"；异常输入原样返回）。
+// panelRedactedValue 与 panel 包的掩码常量保持一致（跨包引用会把 panel 的展示细节
+// 拖进启动路径，这里只重复一个字面量，并用用例锁住两处一致）。
+const panelRedactedValue = "\u2022\u2022\u2022redacted\u2022\u2022\u2022"
+
+// dropRedactedSecrets 递归删除值等于掩码的键（= 用户没改这一栏）。
+// map 里删键 = 该字段保持磁盘上的原值（后面的 merge 只覆盖提交上来的键）。
+func dropRedactedSecrets(v any, mask string) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, vv := range t {
+			if sv, ok := vv.(string); ok && sv == mask {
+				delete(t, k)
+				continue
+			}
+			dropRedactedSecrets(vv, mask)
+		}
+	case []any:
+		for _, vv := range t {
+			dropRedactedSecrets(vv, mask)
+		}
+	}
+}
+
 // configureThreeDCredentials 装配一次 3D 凭证来源；自动开关的变化需要重启。
 func configureThreeDCredentials(up *upstream.Client, cfg *Config) *upstream.StaticThreeDCredentials {
 	static := upstream.NewStaticThreeDCredentials(cfg.Features.ThreeDTempTokens)
@@ -837,6 +860,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
+	// 面板 GET 会把密钥打码成占位符；用户没动那一栏就原样提交回来。这里把「值等于掩码」
+	// 的叶子**从 incoming 里摘掉**，等于「本字段未修改」——否则保存一次就把真密钥覆盖成
+	// 掩码串，下一次鉴权直接失效（审查 P0-1 次生项）。
+	dropRedactedSecrets(incoming, panelRedactedValue)
 	// mergeConfigMaps 是**原地**合并（返回的就是 cur），所以先留一份原始快照，
 	// 否则后面拿 cur 做「改了什么」的差异比对时两边永远是同一个对象。
 	var prev map[string]any
