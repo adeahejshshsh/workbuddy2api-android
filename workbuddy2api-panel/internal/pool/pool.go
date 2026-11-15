@@ -131,6 +131,10 @@ type Pool struct {
 	// 为 LRU 兜底/防惊群提供与 time.Now() 精度无关的严格全序（Windows ~0.5ms 精度下
 	// lastUsed 墙钟会全等）。仅 pick 写锁路径读写，无需 atomic。
 	pickSeq uint64
+	// shuffleSeq 洗牌播种用的进程级自增序号（审查 C5-14）：与 now.UnixNano() 一起
+	// 参与 PCG 播种，保证「同一时钟刻度内的多次洗牌」不会得到同一置换。
+	// 仅 pick 写锁路径读写（shuffleRNG 内自增），无需 atomic。
+	shuffleSeq uint64
 	// stopCh 关闭信号：Close 关闭它使 startFlusher 的后台 goroutine 退出。
 	// nil = 未启动 flusher（stateFp 为空时 New 不起 flusher）。
 	stopCh chan struct{}

@@ -193,7 +193,20 @@ type modelCooldown struct {
 	// AuditOnly 为 true 时仅用于状态展示（例如无重置时间的 6004），
 	// healthyForModel 与 modelExempt 必须忽略它，避免改变选号行为。
 	AuditOnly bool
+	// PrunedAt 该条目**过期被清成墓碑**的时刻（审查 C5-30）。运行态、不持久化。
+	//
+	// 墓碑（Until 已过期但 Hits > 0，只留退避计数）必须有保质期：原先 prune 把过期
+	// 条目改写成 `modelCooldown{Hits: mc.Hits}` 且**不留任何时间戳**，下一次 prune
+	// 又命中同一分支写回同一结构 —— 每个用过的 (号, 模型) 永久占一条内存，
+	// 与「防止 map 无限膨胀」的注释正好相反。有了 PrunedAt，超过
+	// modelBlockTombstoneTTL 的墓碑连 Hits 一起删（退避历史过期，重新学是可接受的）。
+	PrunedAt time.Time
 }
+
+// modelBlockTombstoneTTL 过期模型冷却「墓碑」的保留时长（审查 C5-30）。
+// 取 24h：11102 的 6h→12h→24h 退避跨度就是一天，一天内再撞同一模型必须记得
+// 之前的命中次数；超过一天没有任何新命中，说明该组合已经不用了，历史可以丢。
+const modelBlockTombstoneTTL = 24 * time.Hour
 
 // modelCostTTL 成本观测的有效期。取 6 小时：既覆盖"夜间免费"这类时段性优惠的
 // 单次会话，又不至于让昨天的价格决定今天的选择——过期的免费观测若永久有效，
@@ -317,6 +330,22 @@ type entry struct {
 	modelCost map[string]modelCostEntry
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
+	// lastPrune 上次惰性清理 modelCooldowns / modelCost 的时刻（审查 C5-19）。
+	// 运行态、不持久化：重启后零值 → 首次 pick 立即清一次，行为与旧版一致。
+	// 为什么需要它：清理原先在 pick 的候选循环里**每候选每次都跑**，是写锁内
+	// O(候选数 × 每号模型数)；而清理只是回收内存，读侧本来就会按 Until/LastSeen
+	// 自判过期 —— 30s 一次足够，不必占用选号热路径。
+	lastPrune time.Time
+}
+
+// pruneInterval 惰性清理的最小间隔（审查 C5-19）。30s 是「内存回收及时性」与
+// 「写锁内扫描成本」的折中：单号模型数通常 < 20，30s 一次摊到每次 pick 上
+// 可忽略，而 tombstone/过期观测最多多留半分钟。
+const pruneInterval = 30 * time.Second
+
+// pruneDue 报告该号是否到了惰性清理的时间（审查 C5-19）。调用方须持 p.mu 写锁。
+func (e *entry) pruneDue(now time.Time) bool {
+	return e.lastPrune.IsZero() || now.Sub(e.lastPrune) >= pruneInterval
 }
 
 // modelCostOf 返回该账号在指定 model 上的有效成本观测；无观测或观测过期返回 ok=false。
@@ -331,7 +360,38 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 	if mc.LastSeen.IsZero() || now.Sub(mc.LastSeen) > modelCostTTL {
 		return modelCostEntry{}, false // 过期：时段性优惠（夜间免费）不得跨时段生效
 	}
+	// 时间戳在**未来**也视为过期（审查 C5-32）：时钟回拨或并发写入会让
+	// LastSeen 落在 now 之后，now.Sub(LastSeen) 为负 → 上面那条永不过期，
+	// 陈旧单价长期生效、把选号的成本分层带偏。给 5 分钟容差（正常并发写只差微秒级），
+	// 超出即当脏数据丢弃，让下一次实测重新学习。
+	if mc.LastSeen.After(now.Add(5 * time.Minute)) {
+		return modelCostEntry{}, false
+	}
 	return mc, true
+}
+
+// observedChargedModel 报告该号在有效期内是否**实测过收费模型**（cost > 0）。
+//
+// 用途（审查 C5-01 / C5-02）：无模型上下文的路径（PickByUID 粘性直取、AvailableUIDs）
+// 不知道这一单要调哪个模型，没法用「该模型是否收费」判保底。判据换成
+// 「这个号有没有在收费模型上真花过钱」：
+//   - 有过 → 它是**消耗型**账号，触底后继续派单就是继续打穿上游余额（402 后硬冷却，
+//     代价远大于一次换号）；
+//   - 从未观测到收费（纯免费号 / 新号 / 观测已过期）→ 不拦：保底的目的正是
+//     「把余额留给免费模型」，对免费号拦单等于把可用号变成不可用号。
+//
+// 与 modelCostOf 同 TTL 口径（modelCostTTL），过期观测不参与判定。
+// 调用方须持 p.mu。
+func (e *entry) observedChargedModel(now time.Time) bool {
+	for _, mc := range e.modelCost {
+		if mc.LastSeen.IsZero() || now.Sub(mc.LastSeen) > modelCostTTL {
+			continue // 过期观测：不得让昨天的高价模型决定今天的保底判定
+		}
+		if mc.CostPer1k > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/连败降权期）。
@@ -474,16 +534,29 @@ func (e *entry) pruneExpiredModelCooldowns(now time.Time) {
 		return
 	}
 	for m, mc := range e.modelCooldowns {
-		if mc.Until.IsZero() || !now.Before(mc.Until) {
-			// 只清冷却、**保留命中计数**（bug 9）：Hits 是 11102 负缓存的指数退避依据，
-			// 连它一起删会让 TTL 永远停在 base（6h）—— 注释承诺的 6h→12h→24h 升级
-			// 在真实调用链上不可达（pick 每次都 prune，条目一过期计数就归零）。
-			if mc.Hits > 0 {
-				e.modelCooldowns[m] = modelCooldown{Hits: mc.Hits}
-				continue
-			}
-			delete(e.modelCooldowns, m)
+		if !mc.Until.IsZero() && now.Before(mc.Until) {
+			continue // 仍在冷却中：一个字都不动
 		}
+		if mc.Hits <= 0 {
+			delete(e.modelCooldowns, m) // 无退避历史：过期即删
+			continue
+		}
+		// 只清冷却、**保留命中计数**（bug 9）：Hits 是 11102 负缓存的指数退避依据，
+		// 连它一起删会让 TTL 永远停在 base（6h）—— 注释承诺的 6h→12h→24h 升级
+		// 在真实调用链上不可达（pick 每次都 prune，条目一过期计数就归零）。
+		//
+		// 但墓碑要有保质期（审查 C5-30）：此前写回的结构**不含任何时间戳**，下次
+		// prune 又命中同一分支写回同一结构 → 墓碑永不消失，每个用过的 (号, 模型)
+		// 永久占一条内存（Hits 恒 >0 所以永不 delete），与函数注释「防止 map 无限
+		// 膨胀」相反；同时 Reason 被抹成空串，ModelBlockedForRealm 的 Reasons 里
+		// 会出现无因条目。现在记 PrunedAt，超过 modelBlockTombstoneTTL 连 Hits 一起删。
+		if mc.PrunedAt.IsZero() {
+			mc.PrunedAt = now
+		} else if now.Sub(mc.PrunedAt) > modelBlockTombstoneTTL {
+			delete(e.modelCooldowns, m)
+			continue
+		}
+		e.modelCooldowns[m] = modelCooldown{Hits: mc.Hits, PrunedAt: mc.PrunedAt}
 	}
 }
 

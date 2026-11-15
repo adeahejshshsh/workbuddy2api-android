@@ -105,6 +105,13 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 	out := make([]ModelLockRow, 0, len(rows))
 	for key, a := range rows {
 		sep := strings.IndexByte(key, '\x1f')
+		if sep < 0 {
+			// 键必须由 realm+"\x1f"+model 构造（审查 C5-82）：当前所有写入点都满足，
+			// 但 sep==-1 时下一行的 key[:-1] 会直接 panic —— 面板接口是可从 HTTP
+			// 触达的，一旦有人改了键构造方式（或未来恢复路径塞进脏键），就是进程级
+			// 崩溃而不是少一行展示。丢弃并跳过是唯一安全的降级。
+			continue
+		}
 		realm, model := key[:sep], key[sep+1:]
 		row := ModelLockRow{
 			Model:         model,

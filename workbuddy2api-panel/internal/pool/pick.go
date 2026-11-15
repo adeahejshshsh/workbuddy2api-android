@@ -82,8 +82,18 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 		}
 		// 惰性清理过期的模型级冷却与成本台账（两者的 map 都不无限膨胀；
 		// status 只读遍历天然跳过过期项，但内存条目必须在此真正删除）。
-		e.pruneExpiredModelCooldowns(now)
-		e.pruneExpiredModelCosts(now)
+		//
+		// 节流（审查 C5-19）：此前是**每个候选、每次 pick** 都扫两张表，即
+		// 「写锁内 O(候选数 × 每号模型数)」——高 QPS + 客户端传不同模型名时，
+		// 选号本身成了锁热点，pick 的排队时间随账号数×模型数线性上涨。
+		// 过期条目对路由**没有**影响：modelCooled / modelCostOf 读侧都按
+		// Until / LastSeen 自判过期，清理只是回收内存，30s 一次完全够用。
+		// 首次见到该号（lastPrune 零值）立即清一次，保证「刚恢复的池子」状态干净。
+		if e.pruneDue(now) {
+			e.pruneExpiredModelCooldowns(now)
+			e.pruneExpiredModelCosts(now)
+			e.lastPrune = now
+		}
 		if !healthyOf(e) {
 			continue
 		}
@@ -117,23 +127,29 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 		// 兜底路径不看 in-flight（它选的是「还能救回来的号」），但占位时要看：
 		// 已经满额的号不能再接一单，否则单号并发突破上限。
 		e, ok := p.byUID[a.UID]
-		if !ok || p.inFlightFull(e) {
+		if !ok || !p.reserveSlotLocked(e) {
+			// 名额在「选完到占位」之间被别的 goroutine 抢走（Acquire 走的是无锁 CAS，
+			// 与本函数不共享 p.mu 的临界区）→ 当作无容量返回 nil，让调用方换路。
 			return nil
 		}
-		e.inFlight.Add(1)
 		return a
 	}
+	// 权重分母（maxCredits）必须在**优先级收窄之前**用原始 healthy 候选算（审查 C5-13）。
+	// 原先顺序是「先 prioritizeLocked 收窄 → 再 secondCredits(cands)」：配了优先级的池子里
+	// 分母取自最小优先级那一层，层内余额本来就小 → credits 项被相对放大（1 + credits/分母×10
+	// 里的分母变小 = 权重项变大），权重语义随优先级配置漂移，与注释承诺的「全集口径」相反。
+	// 分层是「谁能接单」的硬过滤，不该改变「接单者之间怎么加权」的基准。
+	maxCredits := secondCredits(cands)
 	// 账号优先级（issue #62）：配了优先级的号构成「先烧层」，层内有号可用时其余号一律
 	// 不接单——「优先消耗某个账号的余额」是一条硬语义，加权排序做不到（排序只改抽签
 	// 次序，高优先级号仍会被抽到）。放在成本分层之前：人的显式配置压过自动启发式。
 	// 零配置时 prioritizeLocked 原样返回，本行无副作用。冷却/停牌/在途满/保留积分停牌
 	// 的号已在上面的候选循环里被逐出，所以层内号烧空/冻结后本层自动让位给下一层。
 	cands = p.prioritizeLocked(cands)
-	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
-	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
+	// 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
+	// 短名单决策，低 credits 但久置的账号会永远排不进短名单。
 	// maxCredits 统一用**全集口径**（tier 过滤前的全部 healthy 候选）：截断排序与
 	// 抽签权重共享同一基准，两个阶段权重可比。
-	maxCredits := secondCredits(cands)
 	// 成本分层（reqModel 非空时）：按该模型的实测扣费把候选分层，只保留最优层。
 	//   0 = 已实测免费（限免期/夜间免费的号，最强偏好）
 	//   1 = 无观测（含观测过期）
@@ -207,7 +223,13 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 		}
 	}
 	// 窗口用量降权（issue #112）：短名单排序与下面抽签用的是同一份权重，两处都套，
-	// 否则 penalty 只影响谁进 top5、不影响抽签概率。
+	// 否则 penalty 只影响谁进短名单、不影响抽签概率。
+	//
+	// 分母口径（审查 C5-11）：uctx 在**本层全集 ws** 上算一次，然后作为参数传进
+	// pickWeighted —— 此前 pickWeighted 在传入的 eligible（≤短名单的 5 个子集）上
+	// 重新 usageCtxForEntries：子集的均值 ≠ 全集的均值，窗口降权被系统性放大
+	// （子集用量集中时 mean 变小、div 变大，权重被压得更狠）或缩小，issue #112
+	// 「两处都套同一份权重」的承诺只在排序阶段成立。
 	var uctx usageCtx
 	if p.balanceWindow > 0 && reqModel != "" {
 		uctx = usageCtx{model: reqModel, n: len(ws)}
@@ -220,16 +242,22 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 			ws[i].w /= p.usageDiv(ws[i].e, uctx, now)
 		}
 	}
-	// 等权重洗牌：仅当存在权重相等且候选数超过 top5 时，才对 ws 做 Fisher-Yates
+	// 等权重洗牌：仅当存在权重相等且候选数超过短名单时，才对 ws 做 Fisher-Yates
 	// 洗牌（且**不消耗 p.randInt64N 注入源**，避免改变 pickWeighted 的确定性语义，
 	// 见 TestPickDeterministicViaSetRandomSource）。权重全等或存在并列时，按字典序
-	// 截断会让 uid 靠后的账号永远进不了 top5（等权重账号被字典序饿死、LRU 兜底
-	// 又只在 top5 内转——惊群集中单号的根因）。洗牌用独立的 time-seeded 源，
+	// 截断会让 uid 靠后的账号永远进不了短名单（等权重账号被字典序饿死、LRU 兜底
+	// 又只在短名单内转——惊群集中单号的根因）。洗牌用独立的 time-seeded 源，
 	// 只在截断边界制造等权重随机次序，不影响加权抽签本身的确定性。
-	if len(ws) > 5 {
+	//
+	// 播种（审查 C5-14）：种子必须含**进程级自增序号**（p.shuffleSeq），不能只有
+	// now.UnixNano()。粗时钟平台（Windows time.Now 精度 ~0.5ms）同一 tick 内进来的
+	// 多次 pick 会得到完全相同的 UnixNano → 同一置换 → 并发突发时短名单顺序固定，
+	// 正是注释上一段声称修掉的「饿死/惊群」回归。两次洗牌（排序前 + 并列段内）
+	// 也各自取不同 salt，避免「排序前洗一次、排序后再洗出同一置换」。
+	if len(ws) > baseShortlistSize {
 		// 「存在并列」必须对**全体**权重判重，不能只跟 ws[0] 比：权重形如
 		// [5,3,3,1,1,1] 时 ws[0] 最高且唯一，只比首元素会判定「无并列」→ 不洗牌
-		// → 稳定排序按 uid 字典序截断 top5 → 等权重的 3/3 与 1/1/1 里靠后的号
+		// → 稳定排序按 uid 字典序截断 → 等权重的 3/3 与 1/1/1 里靠后的号
 		// 被永久饿死（review P1-6，正是这段注释声称修掉的病）。
 		seenW := make(map[float64]bool, len(ws))
 		eq := false
@@ -241,7 +269,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 			seenW[x.w] = true
 		}
 		if eq {
-			shuf := rand.New(rand.NewPCG(uint64(now.UnixNano()), uint64(len(ws))))
+			shuf := p.shuffleRNG(now, 1)
 			shuf.Shuffle(len(ws), func(i, j int) { ws[i], ws[j] = ws[j], ws[i] })
 		}
 	}
@@ -261,7 +289,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 	// 「等权重按 uid 字典序饿死」依然存在。这里在**排序之后**对每个 (cost1k, w)
 	// 并列段洗牌，截断才是随机取样；不同权重的相对次序仍由 cost/权重决定。
 	if len(ws) > 1 {
-		r := rand.New(rand.NewPCG(uint64(now.UnixNano()), uint64(len(ws))))
+		r := p.shuffleRNG(now, 2)
 		for start := 0; start < len(ws); {
 			end := start + 1
 			for end < len(ws) && ws[end].cost1k == ws[start].cost1k && ws[end].w == ws[start].w {
@@ -281,25 +309,60 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 	}
 	// candsAll 是「**成本层过滤后**的全候选」（不是整个池）：它是 cands 的同一底层数组
 	// 的别名，长度与 cands 相同 —— 被 costTier 挡掉的候选不在其中（报告 #11）。
-	// 供 LRU 兜底在这批候选里选最旧者，避免 top5 字典序截断把等权重靠后账号饿死。
+	// 供 LRU 兜底在这批候选里选最旧者，避免短名单字典序截断把等权重靠后账号饿死。
 	// 注意：两者共享数组，**后续不要对 cands 做 append**（会同时改写 candsAll）；
 	// 需要追加时先 copy。
 	candsAll := cands
-	if len(cands) > 5 {
-		cands = cands[:5]
+	// 短名单截断 + 长尾补偿（审查 C5-18）。
+	//
+	// 纯权重截断的固有病：长尾号（余额低）权重恒低于头部，永远进不了短名单，
+	// 只有「短名单全员刚被用过」时才靠 LRU 兜底接单 —— 闲置补偿被截断吃掉，
+	// 表现为「有几个号常年零流量」。两个方向都试过，这里取折中：
+	//
+	//  1. 基础短名单仍是权重前 5（既有语义不变：权重抽签的候选集不该被无谓放大，
+	//     TestPickWeightedTopFiveOnly 明确钉住了这一点）；
+	//  2. 额外给**长尾补偿位**：排在 5 名之后、且「曾被用过、闲置 ≥ tailPromoteIdle」
+	//     的号，按 lastUsed 从旧到新补最多 tailPromoteSlots 个进短名单。
+	//
+	// 为什么要求「曾被用过」：从未使用的号已经拿到满分闲置补偿（weightOf 的
+	// idleWeightMax），它进不了短名单是权重本身的结果；而「用过又久置」的号才是
+	// 真正被截断饿死的长尾 —— 它的闲置补偿被头部余额权重压住了。
+	// 为什么按 lastUsed 而不是按权重：补偿位要优先救「最久没接单」的号，
+	// 按权重选会又把补偿位给到长尾里最靠前的那几个，尾部依旧饿着。
+	if len(cands) > baseShortlistSize {
+		tail := make([]*entry, 0, tailPromoteSlots)
+		for _, c := range cands[baseShortlistSize:] {
+			if c.lastUsed.IsZero() || now.Sub(c.lastUsed) < tailPromoteIdle {
+				continue // 从未用过（已享满分闲置）或还不够久 → 不占补偿位
+			}
+			tail = append(tail, c)
+		}
+		if len(tail) > tailPromoteSlots {
+			sort.SliceStable(tail, func(i, j int) bool { return tail[i].lastUsed.Before(tail[j].lastUsed) })
+			tail = tail[:tailPromoteSlots]
+		}
+		if len(tail) > 0 {
+			// 三索引切片：保证 append 分配新数组，不改写 candsAll 的底层数组
+			// （candsAll 是 LRU 兜底/占比/策略用的全候选别名）。
+			short := make([]*entry, 0, baseShortlistSize+len(tail))
+			short = append(short, cands[:baseShortlistSize]...)
+			cands = append(short, tail...)
+		} else {
+			cands = cands[:baseShortlistSize]
+		}
 	}
 	var e *entry
 	// 账号占比（issue #62）：本层内配了占比的号独占抽签，按 share 归一化分流量
 	// （70/30 与 7/3 同义）。两条次序要求：
 	//   1. 先于「加权抽签」——后者是自动启发式，显式占比压在它之前；
-	//   2. 不走 top5 截断——截断按权重取前 5，低占比号会永远进不了短名单，占比无从生效。
+	//   2. 不走短名单截断——截断按权重取前 N，低占比号会永远进不了短名单，占比无从生效。
 	// 配了占比的号全不可用（冷却/在途满/停牌已被逐出）时本分支自动让位，回到既有
 	// 加权路由：占比是分配偏好，不是排他锁，不会把请求饿死。
 	if sp := p.sharePoolLocked(candsAll); len(sp) > 0 {
-		e = p.pickByShare(sp)
+		e = p.pickByShare(sp, now)
 	}
 	// 选号策略（strategy.go）：weighted 返回 nil 继续走下面的既有加权随机路径；
-	// 轮询/顺序耗尽在 **candsAll**（不受 top5 截断）上选，否则环只有 5 个号，
+	// 轮询/顺序耗尽在 **candsAll**（不受短名单截断）上选，否则环只有 5 个号，
 	// 「用完一个再用下一个」对第 6 个号永远不成立。
 	//
 	// 次序：显式占比（上面那个分支）优先于策略——占比是「这几个号怎么分」的更窄
@@ -323,7 +386,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 	if e != nil {
 		// 占比抽签已选中：跳过加权/LRU 路径（它自己的语义就是按比例分流量）。
 	} else if len(eligible) == 0 {
-		// top5 全部刚被用过：LRU 兜底，在**全候选 candsAll**（非仅 top5）里选最旧者。
+		// 短名单全部刚被用过：LRU 兜底，在**全候选 candsAll**（非仅短名单）里选最旧者。
 		// 用 usedSeq 单调序号而非 lastUsed 墙钟比较：Windows 等平台 time.Now() 精度
 		// ~0.5ms，快速连续选号时所有 lastUsed 完全相等，Before 全 false 会恒选
 		// candsAll[0] 导致集中。usedSeq 严格全序，与时间精度无关。
@@ -334,9 +397,10 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 			}
 		}
 	} else {
-		// 分母用全集口径的 maxCredits（与上面的 top5 截断排序同一基准），
+		// 分母用全集口径的 maxCredits（与上面的短名单截断排序同一基准），
 		// 不能在子集上重算 —— 见 pickWeighted 注释。
-		e = p.pickWeighted(eligible, reqModel, maxCredits) // eligible 保序 = top5 降序子集
+		// uctx 同样是截断阶段的**同一份**（审查 C5-11），见上方 usageCtx 计算处。
+		e = p.pickWeighted(eligible, reqModel, maxCredits, uctx) // eligible 保序 = 短名单降序子集
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -349,9 +413,14 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 	p.pickSeq++
 	e.usedSeq = p.pickSeq // 单调序号：保证 usedSeq 严格全序（防惊群/LRU 的权威依据）
 	if reserve {
-		// 锁内占位：与上面的 inFlightFull 过滤在同一把锁里，中间没有别的 goroutine
-		// 能插进来把名额抢走。
-		e.inFlight.Add(1)
+		// 锁内占位（审查 C5-36）：必须走与 Acquire 同一个 CAS 判据，不能用裸 Add。
+		// 上面的 inFlightFull 只是 Load 快照，而 Acquire 是**无锁 CAS**、不参与 p.mu
+		// 的临界区 —— inFlight=limit-1 时：Acquire 的 CAS 成功（→limit），本函数
+		// 的 Add(1) 照样执行（→limit+1），单号并发突破 max_in_flight。
+		// 而这个上限恰恰是上游 6004 / WAF 403 的触发条件，突破一次就够挨一轮限流。
+		if !p.reserveSlotLocked(e) {
+			return nil // 名额刚被抢走：按无容量处理，由调用方换路/重试
+		}
 	}
 	return e.a
 }
@@ -415,6 +484,47 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 // weightScale 权重定点放大：int64 累加后抽签，保持随机源注入（randInt64N）语义不变。
 const weightScale = 1_000_000
 
+// 短名单参数（审查 C5-18）。
+//
+// baseShortlistSize 是权重前 N 名的既有截断语义（既有用例钉住：第 6 名不该被
+// 权重抽签轮到）；tailPromoteSlots 是给长尾的补偿位，最多把短名单扩到
+// baseShortlistSize+tailPromoteSlots = 8 个；tailPromoteIdle 是「算长尾」的闲置门槛。
+//
+// 30 分钟：短于它时「刚被用过」与「久置」还没拉开差距，补偿会退化成随机扩样；
+// 长于它则长尾号的等待时间已经明显超过一次会话的典型时长（正是要救的场景）。
+const (
+	baseShortlistSize = 5
+	tailPromoteSlots  = 3
+)
+
+// tailPromoteIdle 长尾补偿的闲置门槛（审查 C5-18）。
+const tailPromoteIdle = 30 * time.Minute
+
+// shuffleSeqSalt 洗牌播种用的两个大奇数（splitmix64 常数），让 (时间, 序号, salt)
+// 三者任意一项不同就得到不同的 PCG 种子。
+const (
+	shuffleSeqSalt1 = 0x9E3779B97F4A7C15
+	shuffleSeqSalt2 = 0xBF58476D1CE4E5B9
+	shuffleSeqSalt3 = 0xD1B54A32D192ED03
+)
+
+// shuffleRNG 返回本次洗牌专用的 PRNG（审查 C5-14）。调用方须持 p.mu（写 shuffleSeq）。
+//
+// 为什么不能只播 now.UnixNano()：粗时钟平台（Windows time.Now 精度 ~0.5ms）同一
+// tick 内进来的多次 pick 拿到完全相同的 UnixNano → 同一置换 → 并发突发时短名单
+// 顺序固定，等权重账号又被字典序/固定置换集中到同一个号上（惊群回归）。
+// p.shuffleSeq 是进程级自增序号，保证「同一时刻的多次洗牌」种子必不相同；
+// salt 让同一次 pick 里的两次洗牌（排序前 / 并列段内）也不会撞成同一置换。
+// 注意本函数**不消耗** p.randInt64N（测试注入的确定性随机源），洗牌仍只影响
+// 截断边界的次序，不改变 pickWeighted 的确定性语义。
+func (p *Pool) shuffleRNG(now time.Time, salt int) *rand.Rand {
+	p.shuffleSeq++
+	seq := p.shuffleSeq
+	lo := uint64(now.UnixNano()) + seq*shuffleSeqSalt1 + uint64(salt)*shuffleSeqSalt3
+	hi := seq*shuffleSeqSalt2 + uint64(len(p.byUID))
+	return rand.New(rand.NewPCG(lo, hi))
+}
+
 // prioritizeLocked 账号优先级过滤（issue #62）：只保留「最小正整数」那一层。调用方须持锁。
 // 零配置（没有任何号配了正优先级）→ 原样返回，对既有选号零副作用。
 func (p *Pool) prioritizeLocked(cands []*entry) []*entry {
@@ -448,20 +558,48 @@ func (p *Pool) sharePoolLocked(cands []*entry) []*entry {
 }
 
 // pickByShare 在配了占比的账号里按 share 抽签（issue #62）：权重 = share，归一化后即比例。
-// 不套 minPickGap：占比的语义就是「流量按这个比例分给这几号」，硬压间隔会让比例失真；
-// 而在途上限/冷却/停牌已逐出不可用号，占满的号自动退出本次抽签，请求不会堆在单号上。
 // share 极小（< 1/weightScale）时钳到最小权重，避免整轮权重归零退化成均匀随机 ——
 // 那会让「1% 的号」和「99% 的号」一样多。
-func (p *Pool) pickByShare(cands []*entry) *entry {
-	weights := make([]int64, len(cands))
-	for i, e := range cands {
+//
+// 函数内复检（审查 C5-20）：原先本函数**只**信任调用方已过滤 inFlightFull，且完全
+// 不套 minPickGap。占比号（share 常配到 0.9）一旦是唯一候选，单号并发就能打满，
+// 突破 max_in_flight —— 而上游 6004/WAF 恰恰是「单号并发超限」触发的。两条复检：
+//
+//  1. inFlightFull 是**硬容量不变量**，必须逐候选复检：占比是流量分配偏好，
+//     不是「可以突破在途上限」的许可。满额的号从本次抽签退出。
+//  2. minPickGap 只做**软**偏好：占比的语义是「流量按这个比例分给这几号」，
+//     硬套间隔会把 70/30 压成 1/1、显式配置静默失真。所以先按间隔过滤，
+//     过滤后为空就退回全体占比号 —— 宁可按比例在最小间隔内再选一次，
+//     也不要让请求掉到下面的加权路径、把占比配置整个作废。
+func (p *Pool) pickByShare(cands []*entry, now time.Time) *entry {
+	usable := make([]*entry, 0, len(cands))
+	for _, e := range cands {
+		if p.inFlightFull(e) {
+			continue // 硬容量：满额号不参与占比抽签（复检，不依赖调用方）
+		}
+		usable = append(usable, e)
+	}
+	if len(usable) == 0 {
+		return nil // 占比号全满额：让位给下面的加权/策略路径（它们会判 nil → 换路）
+	}
+	gapped := make([]*entry, 0, len(usable))
+	for _, e := range usable {
+		if e.lastUsed.IsZero() || now.Sub(e.lastUsed) >= minPickGap {
+			gapped = append(gapped, e)
+		}
+	}
+	if len(gapped) > 0 {
+		usable = gapped // 软偏好：有「间隔已过」的号就只在它们里面按比例抽
+	}
+	weights := make([]int64, len(usable))
+	for i, e := range usable {
 		w := int64(p.shareOf(e.a.UID) * weightScale)
 		if w <= 0 {
 			w = 1
 		}
 		weights[i] = w
 	}
-	return p.drawWeighted(cands, weights)
+	return p.drawWeighted(usable, weights)
 }
 
 // drawWeighted 定点权重抽签（weights 与 cands 等长、同序）。权重和 <= 0 时退化为均匀随机。
@@ -603,6 +741,31 @@ func (p *Pool) inFlightFull(e *entry) bool {
 	return e.inFlight.Load() >= int64(limit)
 }
 
+// reserveSlotLocked 在锁内为选中账号占一个在途名额（审查 C5-36）。名额已满返回 false。
+//
+// 为什么不能直接 e.inFlight.Add(1)：Acquire 走的是**无锁 CAS 循环**，两者不共享临界区，
+// 「先 inFlightFull（Load）再 Add」是典型的 check-then-act —— inFlight=limit-1 时
+// Acquire 的 CAS 成功把计数推到 limit，本函数的 Add 再推到 limit+1，单号并发**突破**
+// max_in_flight（正是该字段要防的上游 WAF/6004 触发条件）。
+// 这里复用与 Acquire 完全一致的 CAS 判据；limit<=0（不限）时只累加计数，同 Acquire。
+// 调用方须持 p.mu（读 inFlightLimit），但 CAS 本身与锁无关。
+func (p *Pool) reserveSlotLocked(e *entry) bool {
+	limit := p.inFlightLimit(e)
+	if limit <= 0 {
+		e.inFlight.Add(1) // 不限：计数仍累加（供状态观测），但永不拒绝
+		return true
+	}
+	for {
+		cur := e.inFlight.Load()
+		if cur >= int64(limit) {
+			return false
+		}
+		if e.inFlight.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
+}
+
 // minPickGap 防并发撞号窗口：同一账号在该窗口内不重复被选中（除非 top5 全部刚被用过）。
 // 生产默认 100ms；纯加权分布测试可临时置 0 关闭防撞号。
 var minPickGap = 100 * time.Millisecond
@@ -628,12 +791,14 @@ var minPickGap = 100 * time.Millisecond
 // 权重是 `1 + credits/maxCredits*10 + 闲置 + …`，常数项不随分母缩放 —— 所以拿
 // top5 子集重算分母并不等价于整体缩放：子集里若没有余额最大的那个号，分母变小、
 // credits 项被放大，权重比例就变了，与「截断排序与抽签共享同一基准」的承诺相反。
-func (p *Pool) pickWeighted(cands []*entry, model string, maxCredits int64) *entry {
+func (p *Pool) pickWeighted(cands []*entry, model string, maxCredits int64, uctx usageCtx) *entry {
 	now := time.Now()
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
 	var total int64
-	uctx := p.usageCtxForEntries(cands, model, now)
+	// uctx 由调用方传入（审查 C5-11）：与短名单排序阶段共用同一份「本层全集」均值。
+	// 此前在这里调 usageCtxForEntries(cands, …) 会按**传入子集**重算均值 ——
+	// 子集均值 ≠ 全集均值，窗口降权的分母随子集组成漂移（见函数头注释）。
 	for i, e := range cands {
 		w := p.routingWeightOf(e, maxCredits, now) / p.usageDiv(e, uctx, now)
 		weights[i] = int64(w * scale)
@@ -759,7 +924,11 @@ func (p *Pool) usageDiv(e *entry, u usageCtx, now time.Time) float64 {
 	return 1 + float64(used)/mean
 }
 
-// usageCtxForEntries 同上，入参是候选切片（pickWeighted 用）。
+// usageCtxForEntries 按候选切片算窗口用量上下文。
+//
+// 注意（审查 C5-11）：pick 路径**不再**在抽签阶段调用它 —— 分母必须由截断阶段
+// 在「本层全集」上算一次再传下来，抽签子集上重算会让两阶段基准不一致。
+// 保留本函数供其它「全量候选」口径的调用方使用。
 func (p *Pool) usageCtxForEntries(cands []*entry, model string, now time.Time) usageCtx {
 	u := usageCtx{model: model, n: len(cands)}
 	if p.balanceWindow <= 0 || model == "" {

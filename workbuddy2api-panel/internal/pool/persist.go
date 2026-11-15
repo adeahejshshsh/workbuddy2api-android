@@ -249,6 +249,14 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			sessionDeadFails:         s.SessionDeadFails,
 			consecutiveFails:         s.ConsecutiveFails,
 		}
+		// 负余额钳 0（审查 C5-52）：SetCredits / SetCreditsDetailed 两个写入口都钳 0，
+		// 唯独恢复路径直接 `credits: s.Credits` —— 脏文件/手改/旧版本写下的负数会
+		// 带进权重与保底判定：weightOf 的 credits 项变负（权重可能 <= 0）、
+		// floorBlocked 恒真（credits < floor 永远成立）→ 该号永久不出池，
+		// 而且面板显示负余额，运维完全看不出是数据脏而不是真的欠费。
+		if e.credits < 0 {
+			e.credits = 0
+		}
 		// 到期快照按当前时刻惰性清洗：已过期、零剩余或超出总余额的脏数据不恢复。
 		if e.creditsExpiring < 0 {
 			e.creditsExpiring = 0

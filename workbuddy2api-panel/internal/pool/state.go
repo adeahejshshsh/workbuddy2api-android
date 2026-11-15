@@ -462,6 +462,28 @@ func (p *Pool) AuthByUID(uid string) *auth.Auth {
 	return nil
 }
 
+// floorBlockedNoModelLocked 无模型上下文的积分保底判定（审查 C5-01 / C5-02）。
+//
+// 为什么不能直接复用 floorBlockedForRealmModel(e, "", realm, now)：那个函数对
+// model=="" **立即返回 false**（「无模型上下文不拦」是它刻意的语义，见其注释）——
+// 照审查建议的字面写法调用等于什么都没加。无模型路径必须自带判据：
+//
+//	floor <= 0 或余额仍高于保底线        → 不拦（保底未开启/未触底）
+//	触底 + 该号实测过收费模型            → 拦（消耗型账号，继续派单＝继续打穿余额）
+//	触底但从未观测到收费（纯免费/新号）  → 放行（保底是「把余额留给免费模型」，
+//	                                       对免费号拦单等于把可用号变成不可用号）
+//
+// 口径边界：这是**证据式**判定，不猜模型。有模型上下文的路径（pick、
+// PickByUIDForModel）走 floorBlockedForRealmModel 的精确判定，两者不冲突。
+// 调用方须持 p.mu。
+func (p *Pool) floorBlockedNoModelLocked(e *entry, realm string, now time.Time) bool {
+	floor := p.creditFloorFor(realm)
+	if floor <= 0 || e.credits >= floor {
+		return false
+	}
+	return e.observedChargedModel(now)
+}
+
 // AvailableUIDs 返回当前 healthy 且未占满在途名额的账号 UID 列表（按 UID 排序，稳定输出）。
 // 供会话粘性路由（internal/session）做快路径命中校验 + 双段分配；无可用返回空切片。
 func (p *Pool) AvailableUIDs() []string {
@@ -471,6 +493,17 @@ func (p *Pool) AvailableUIDs() []string {
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
 		if !e.healthy(now) {
+			continue
+		}
+		// 积分保底 / 保留积分（审查 C5-02）：本列表是**会话层绑定候选**的来源，
+		// 只判 healthy+inFlightFull 时会把触底号绑进来 —— 之后每个请求都要先命中
+		// 它、再被 handler 侧的保底判定打回（unbind 抖动 + 每请求一条 WARN，
+		// 日志量与选号来回都白费）。分配侧与选号侧必须同口径。
+		// 无模型上下文 → 走证据式保底 + 严格保留积分（与 pick(reqModel=="") 一致）。
+		if p.floorBlockedNoModelLocked(e, e.a.Realm(), now) {
+			continue
+		}
+		if p.reserveBlocked(e, p.modelFreeOf(e, "")) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -492,6 +525,15 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
 		if !e.healthyForModel(now, model) {
+			continue
+		}
+		// 与 pick 同口径（审查 C5-02）：可用集合必须叠加积分保底与保留积分，
+		// 否则「可用集合」里出现选号侧永远不会选的号，调用方据此绑定/预热就会
+		// 反复落空。model 非空 → 用精确的 floorBlockedForRealmModel（含目录倍率兜底）。
+		if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
+			continue
+		}
+		if p.reserveBlocked(e, p.modelFreeOf(e, model)) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -570,6 +612,22 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	}
 	now := time.Now()
 	if !e.healthy(now) {
+		return nil
+	}
+	// 积分保底（审查 C5-01）：无模型粘性直取此前**完全没有**保底判定 ——
+	// PickByUIDForModel 有 floorBlockedForRealmModel，这条只有 healthy + inFlightFull，
+	// 于是走无模型粘性路由的请求可以持续选中已触底账号，一路把上游余额打穿撞 402
+	// （402 → 硬冷却到次日签到 → 该号整段不可用，代价远大于一次换号）。
+	// 返回 nil 的契约与 ForModel 版一致：调用方解绑粘性、回落普通轮换换号。
+	// 日志频次天然每请求至多一条（首次返回 nil 即解绑），无需额外节流。
+	if p.floorBlockedNoModelLocked(e, e.a.Realm(), now) {
+		log.Printf("WARN: [pool] credit floor: sticky(no-model) acct=%s credits=%d < floor=%d, unbind (paid models held out)",
+			logfmt.Label(e.a.UID, e.a.NicknameValue()), e.credits, p.creditFloorFor(e.a.Realm()))
+		return nil
+	}
+	// 保留积分同判据：无模型上下文判不出「免费模型豁免」，按严格口径处理 ——
+	// 这正是 pick(reqModel=="") 的口径（p.reserveBlocked(e, p.modelFreeOf(e, ""))）。
+	if p.reserveBlocked(e, p.modelFreeOf(e, "")) {
 		return nil
 	}
 	if p.inFlightFull(e) {
