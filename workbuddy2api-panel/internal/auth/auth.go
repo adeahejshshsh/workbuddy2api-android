@@ -3,12 +3,15 @@
 package auth
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +22,22 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
+
+// ErrStaleSnapshot 本次落盘被拒绝：磁盘上的凭证比手里的快照更新（审查 A4）。
+//
+// 为什么需要这个哨兵：双实例共享 ./auths 时（容器 + 本机同时跑、滚动发布的两副本），
+// A 实例刚把 refresh token 轮换并落盘，B 实例手里还是轮换前的快照；B 一旦整份写回，
+// A 的新 RT 就被覆盖成**已被上游消费**的旧 RT → 账号掉线，且面板上只显示「需要重新登录」，
+// 没有任何线索指向并发写。这里宁可让调用方拿到一个可识别的错误（重读后再决定写什么），
+// 也不允许静默覆盖：落盘失败是可重试的，令牌丢失是不可逆的。
+var ErrStaleSnapshot = errors.New("auth: stale snapshot refused (磁盘上的凭证更新，放弃覆盖)")
+
+// ErrEncryptedDowngrade 拒绝把明文快照写进 $wbEncrypted 加密文件（审查 W2-C2-17）。
+//
+// 为什么单独一个哨兵：加密文件被明文覆盖是**静默的安全属性降级**——功能上 token 还在、
+// 面板一切正常，只有桌面端那条登录链被写坏、凭据从此躺在磁盘上明文可读。给它一个可
+// 识别的错误，才能让上层（面板导入、热重载）说清「为什么这次没写进去」。
+var ErrEncryptedDowngrade = errors.New("auth: refuse to overwrite $wbEncrypted file with plaintext")
 
 // Auth 是归一化后的账号凭证（来源可以是插件 OAuth 嵌套形或手写扁平形）。
 type Auth struct {
@@ -60,14 +79,34 @@ type Auth struct {
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
 
-	// wbSealed 来源是 $wbEncrypted 加密文件时，原本被信封包住的字段路径集合
-	// （形如 "auth.accessToken"）；wbDoc 是解密后的整份文档（UseNumber 保留数字原文），
+	// wbSealed 来源是 $wbEncrypted 加密文件时，原本被信封包住的字段路径 → 信封 suite
+	// （形如 "auth.accessToken" → 1）；wbDoc 是解密后的整份文档（UseNumber 保留数字原文），
 	// 回写以它为底——只覆盖本包管理的字段，桌面端自己的字段（phoneNumber、uin 等）原样保留。
 	// expiresAtMillis 记录来源文件里 expiresAt 的单位（毫秒），回写按同一单位写回。
 	// 三者都只在解析时设定一次，nil 表示明文来源（走既有回写路径）。
-	wbSealed        map[string]bool
+	//
+	// 值从 bool 改成 uint32（审查 W2-C2-33）：解封时用的是信封自己的 suite，封装时却硬编码
+	// suite=1；某个字段若原本是 suite=2，回写后桌面端按自己的 suite 算 AAD 就解不开了
+	// （表现为「插件把桌面端的登录态写坏了」）。记下原 suite，封装按原值还原。
+	wbSealed        map[string]uint32
 	wbDoc           map[string]any
 	expiresAtMillis bool
+
+	// diskRT / diskRawSHA / diskRawOK 记录本对象**最后一次确认过的磁盘版本**（审查 A4）。
+	//
+	// 为什么需要：LoadDirReport 解析完文件后要写回 realm 标识，而「解析 → 写回」之间有
+	// 整段窗口。容器与本机双实例共享 ./auths 时（滚动发布、panel+gateway 同时跑），
+	// 另一实例可能正好在这段窗口里把 refresh token 轮换掉；拿解析时的快照整份
+	// SaveAtomic 就把新 RT 覆盖回旧值 —— 旧 RT 已被上游消费，账号当场「需要重新登录」，
+	// 日志里却没有任何痕迹。三个字段的作用：
+	//   - diskRT：解析时文件里的 refresh token（写前重读用它判断「令牌版本被换过没」）；
+	//   - diskRawSHA/diskRawOK：解析时原始字节的 sha256，realm 迁移用它做 CAS
+	//     （磁盘内容逐字节一致才允许写），比令牌比较更严。
+	// 每次成功落盘后由 SaveAtomic 更新为刚写入的 RT，避免把「自己刚写的版本」
+	// 误判成别人的写入。
+	diskRT     string
+	diskRawSHA [32]byte
+	diskRawOK  bool
 }
 
 // NicknameValue 加锁读取 Nickname。
@@ -79,6 +118,21 @@ func (a *Auth) NicknameValue() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.Nickname
+}
+
+// EnterpriseOverrideValue 加锁读取人工覆盖值（"" = 自动判定）。
+//
+// 为什么需要（审查 W2-C2-20）：EnterpriseOverride 是导出字段，写侧 SetEnterpriseOverride
+// 在 a.mu 内改写、读侧 IsEnterprise / IsEnterpriseSession 原来裸读，构成真实数据竞争
+// （-race 可复现）。面板改定性瞬间，并发请求可能按旧值或撕裂值判定企业版，成长任务
+// 门控随之抖动。读侧统一走这个访问器，写侧保持加锁。
+func (a *Auth) EnterpriseOverrideValue() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.EnterpriseOverride
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -268,7 +322,9 @@ func (a *Auth) IsEnterprise() bool {
 		return false
 	}
 	// 人工覆盖优先：上游字段不可信时（个人号带默认租户 enterpriseId），只能由人定性。
-	switch NormalizeEnterpriseOverride(a.EnterpriseOverride) {
+	// 经访问器加锁读（审查 W2-C2-20）：SetEnterpriseOverride 在 a.mu 内改写该字段，
+	// 这里原来裸读 —— 面板改定性的一瞬间，并发请求可能按旧值/撕裂值判定企业版。
+	switch NormalizeEnterpriseOverride(a.EnterpriseOverrideValue()) {
 	case "enterprise":
 		return true
 	case "personal":
@@ -523,9 +579,35 @@ func (a *Auth) SaveAtomic() error {
 		wbSealed:        a.wbSealed,
 		wbDoc:           a.wbDoc,
 		expiresAtMillis: a.expiresAtMillis,
+		baselineRT:      a.diskRT,
 	}
 	a.mu.Unlock()
-	return writeAuthSnapshot(snap)
+	if err := writeAuthSnapshot(snap); err != nil {
+		return err
+	}
+	// 落盘成功 → 磁盘上「我们确认过的版本」就是本次快照（审查 A4）。不更新的话，
+	// 下一次写盘会把「自己刚写的新 RT」当成别人的写入，误报 ErrStaleSnapshot。
+	a.mu.Lock()
+	a.diskRT = snap.refreshToken
+	a.diskRawSHA = [32]byte{}
+	a.diskRawOK = false // 内容已变（至少 realm 可能被改写），旧的字节摘要作废
+	a.mu.Unlock()
+	return nil
+}
+
+// noteDiskState 记录「这份快照来自磁盘上的这些字节」（审查 A4）。
+// LoadDirReport 解析完一个文件后立刻调用：之后的 realm 迁移与 SaveAtomic 都以它为
+// 「我读到的版本」，写前重读磁盘一比对就知道中间有没有别的实例插进来写。
+func (a *Auth) noteDiskState(raw []byte) {
+	if a == nil {
+		return
+	}
+	sum := sha256.Sum256(raw)
+	a.mu.Lock()
+	a.diskRT = a.RefreshToken
+	a.diskRawSHA = sum
+	a.diskRawOK = true
+	a.mu.Unlock()
 }
 
 // authFileSnapshot SaveAtomic 锁内取出的落盘快照（锁外 I/O 只读它）。
@@ -537,14 +619,22 @@ type authFileSnapshot struct {
 	deviceToken                                   string
 	expiresAt                                     int64
 	// wbSealed/wbDoc/expiresAtMillis 加密来源文件的回写底稿（见 wbOverlay）：
-	// wbSealed 非 nil 表示本来要封回信封。
-	wbSealed        map[string]bool
+	// wbSealed 非 nil 表示本来要封回信封；值是该字段原信封的 suite（审查 W2-C2-33）。
+	wbSealed        map[string]uint32
 	wbDoc           map[string]any
 	expiresAtMillis bool
+	// baselineRT 本对象上一次确认过的磁盘 refresh token（审查 A4）。空 = 没读过磁盘
+	// （手工构造的 Auth、面板新建的号），此时只按「磁盘过期时刻是否更晚」判断陈旧。
+	baselineRT string
 }
 
 // writeAuthSnapshot 把快照写成 auth 文件（全部 I/O 在此，不持 a.mu）。
 func writeAuthSnapshot(s authFileSnapshot) error {
+	// 写前重读磁盘，判快照是否已过期（审查 A4 / W2-C2-18）。这一步必须在**两条分支
+	// 之前**：加密分支同样会整份改写文件，一样能把别人刚轮换的 RT 盖回去。
+	if err := refuseStaleSnapshot(s); err != nil {
+		return err
+	}
 	// 加密来源（$wbEncrypted）：以解密后的原文档为底，只覆盖本包管理的字段，再按解密时
 	// 同样的规则整树封回信封。这条路径**不能**走下面的明文合并——那会把凭据以明文落盘，
 	// 也会丢掉桌面端自己的字段（phoneNumber、uin 等）。
@@ -654,6 +744,49 @@ func writeAuthSnapshot(s authFileSnapshot) error {
 	return nil
 }
 
+// refuseStaleSnapshot 写前重读磁盘，判断手里的快照是不是已经被别人甩在后面（审查 A4）。
+//
+// 判据（保守，只拦「确定是别人更新」的情形，避免误伤正常刷新）：
+//  1. 磁盘上根本没有 refresh token，或令牌与快照/上次确认的版本一致 → 放行；
+//  2. 令牌不同且磁盘的 expiresAt **更晚** → 另一个实例刚轮换过（轮换必然带来更晚的
+//     到期时刻）→ 拒绝，返回 ErrStaleSnapshot。
+//
+// 刻意**不**把「令牌不同且到期时刻相同」当陈旧：正常刷新链里快照的 RT 一定比磁盘新，
+// 而到期时刻相同只可能是同一秒内的两次刷新，无法区分谁更新；误判会打断刷新落盘。
+//
+// 也刻意**不**拦「快照没有 RT 而磁盘有」：那是「整体替换」的语义（面板用静态 API Key
+// 覆盖同 uid 的 OAuth 号、重新导入一份导出），是用户的显式动作，不是陈旧快照；
+// 拦住它只会让面板报一个看不懂的错。
+func refuseStaleSnapshot(s authFileSnapshot) error {
+	if s.path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		// 文件不存在（首次落盘）或读不动（权限问题留给 ReplaceAtomic 报）：没有可覆盖的内容。
+		return nil
+	}
+	if s.wbSealed == nil && bytes.Contains(raw, []byte(`"$wbEncrypted"`)) {
+		// 磁盘是加密文件、手里却是明文快照：写下去就把桌面端的信封抹成明文
+		// （审查 W2-C2-17 的最终后果）。宁可报错，也不做静默降级。
+		return fmt.Errorf("%w: %s", ErrEncryptedDowngrade, s.path)
+	}
+	disk, derr := Parse(raw)
+	if derr != nil || disk == nil {
+		// 磁盘此刻解析不了（另一实例写到一半 / 用户手改坏了）：我们的完整快照反而是修复。
+		return nil
+	}
+	diskRT, diskExp := disk.RefreshTokenValue(), disk.ExpiresAtValue()
+	if diskRT == "" || diskRT == s.refreshToken || diskRT == s.baselineRT {
+		return nil
+	}
+	if diskExp > s.expiresAt {
+		return fmt.Errorf("%w: %s 磁盘上的 refresh token 更新（disk.expiresAt=%d > snap.expiresAt=%d）",
+			ErrStaleSnapshot, s.path, diskExp, s.expiresAt)
+	}
+	return nil
+}
+
 // atomicSeq 原子替换的临时文件名序号（bug-01：唯一临时名，避免并发写交错）。
 var atomicSeq atomic.Uint64
 
@@ -680,30 +813,65 @@ func ReplaceAtomic(path string, raw []byte, mode os.FileMode) error {
 		return err
 	}
 	if err := os.Rename(tmp, path); err == nil {
+		// rename 之后补一次父目录 fsync（审查 W2-C2-24）：文件内容已 fsync，但目录项
+		// 可能还在页缓存里，掉电后 rename 会丢失、回退到旧文件（旧 token）。注释里
+		// 「已落盘」的承诺要靠这一步才成立。目录 fsync 失败不影响返回值（有些文件系统
+		// 不支持，属于尽力而为）。
+		syncDir(filepath.Dir(path))
 		return nil
 	} else if !errors.Is(err, syscall.EBUSY) {
 		_ = os.Remove(tmp)
 		return err
 	}
-	// bind mount：原地覆写（tmp 里是完整新内容，写失败时保留供人工恢复）
-	f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, mode)
-	if openErr != nil {
-		return openErr
-	}
-	_, werr := f.Write(raw)
-	serr := f.Sync()
-	cerr := f.Close()
-	if werr != nil {
-		return werr
-	}
-	if serr != nil {
-		return serr
-	}
-	if cerr != nil {
-		return cerr
+	// bind mount：原地覆写（tmp 里是完整新内容）
+	if err := overwriteInPlace(path, raw, mode); err != nil {
+		// 失败也要删 tmp（审查 W2-C2-23）：tmp 里是**完整明文凭据**，而它不匹配
+		// workbuddy*.json，没有任何扫描口径会碰到它 —— 留在磁盘上就是一份永不清理的
+		// 凭据副本，随备份/镜像扩散。
+		_ = os.Remove(tmp)
+		return err
 	}
 	_ = os.Remove(tmp)
 	return nil
+}
+
+// overwriteInPlace 对已存在的文件原地覆写（单文件 bind mount 的 EBUSY 兜底路径）。
+//
+// 单独抽出来是为了让「权限位修正」这条逻辑可测（审查 W2-C2-22）：EBUSY 现场无法在
+// 测试里构造，但这段代码本身可以直调。
+func overwriteInPlace(path string, raw []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	// 已存在的文件 mode 参数无效（审查 W2-C2-22）：O_TRUNC 原地覆写不改权限位。
+	// 旧版本/外部工具建的 0644 auth 文件会因此长期全局可读，而正常 rename 路径是
+	// 0600 —— 两条路径权限不一致。显式 chmod 收敛到同一口径。
+	if cerr := f.Chmod(mode); cerr != nil {
+		_ = f.Close()
+		return cerr
+	}
+	if _, werr := f.Write(raw); werr != nil {
+		_ = f.Close()
+		return werr
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		return serr
+	}
+	return f.Close()
+}
+
+// syncDir 尽力 fsync 目录（rename 的目录项落盘，审查 W2-C2-24）。
+// 失败不报错：部分文件系统/Android 分区对目录 fsync 返回 EINVAL，此时退回
+// 「内容已 fsync」的既有保证，不影响主流程。
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 // SaveAtomicRetry 在 SaveAtomic 基础上做有界重试（0/100ms/300ms）。
@@ -754,6 +922,15 @@ func (a *Auth) AdoptNewer(src *Auth) bool {
 		AccessToken: src.AccessToken, RefreshToken: src.RefreshToken, ExpiresAt: src.ExpiresAt,
 		Domain: src.Domain, realm: src.realm, EnterpriseID: src.EnterpriseID,
 		Nickname: src.Nickname, DeviceToken: src.DeviceToken,
+		// wbSealed/wbDoc/expiresAtMillis 必须一起搬（审查 W2-C2-17）。
+		// 不搬的后果：池里这份对象来自明文文件（wbSealed=nil），而磁盘已经被换成
+		// $wbEncrypted 文件；采纳后下一次 SaveAtomic 走明文分支，把加密文件**原地
+		// 改写成明文** —— 凭据加密保护静默降级，桌面端那条登录链同时被写坏。
+		// 这三个字段解析后只读（wbOverlay 会 clone），共享引用安全。
+		wbSealed: src.wbSealed, wbDoc: src.wbDoc, expiresAtMillis: src.expiresAtMillis,
+		// 磁盘版本基线跟着被采纳的快照走：src 就是「刚从磁盘读出来的那份」，
+		// 采纳之后本对象认的版本就是它（审查 A4）。
+		diskRT: src.RefreshToken, diskRawSHA: src.diskRawSHA, diskRawOK: src.diskRawOK,
 	}
 	src.mu.Unlock()
 	a.mu.Lock()
@@ -767,6 +944,8 @@ func (a *Auth) AdoptNewer(src *Auth) bool {
 	a.AccessToken, a.RefreshToken, a.ExpiresAt = in.AccessToken, in.RefreshToken, in.ExpiresAt
 	a.Domain, a.realm, a.EnterpriseID = in.Domain, in.realm, in.EnterpriseID
 	a.Nickname, a.DeviceToken = in.Nickname, in.DeviceToken
+	a.wbSealed, a.wbDoc, a.expiresAtMillis = in.wbSealed, in.wbDoc, in.expiresAtMillis
+	a.diskRT, a.diskRawSHA, a.diskRawOK = in.diskRT, in.diskRawSHA, in.diskRawOK
 	return true
 }
 
@@ -789,6 +968,9 @@ func LoadDirReport(dir string) (LoadReport, error) {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return LoadReport{}, err
 	}
+	// 顺手清扫崩溃/失败路径留下的临时文件（审查 W2-C2-23）：里面有完整明文 token，
+	// 且不在 workbuddy*.json 的扫描口径内，否则会永久躺在磁盘上随备份扩散。
+	sweepStaleTemps(dir)
 	var files []string
 	for _, e := range entries {
 		if ok, _ := filepath.Match("workbuddy*.json", e.Name()); ok && !e.IsDir() {
@@ -823,6 +1005,9 @@ func LoadDirReport(dir string) (LoadReport, error) {
 			continue
 		}
 		a.FilePath = f
+		// 记下「这份快照来自磁盘上的哪一份字节」（审查 A4）：后面的 realm 迁移要按这个
+		// 摘要做 CAS，SaveAtomic 也靠它认出「磁盘已经被别的实例换过版本」。
+		a.noteDiskState(raw)
 		if prev, ok := seenUID[a.UID]; ok {
 			// 真的去重（bug-4）：此前只打日志、两条都 append，而 pool.upsertLocked 是
 			// "后写覆盖" → 实际保留的是**后出现的**文件，与日志说的"保留 prev"相反。
@@ -848,7 +1033,17 @@ func LoadDirReport(dir string) (LoadReport, error) {
 			continue
 		}
 		if changed, r := a.BackfillRealm(); changed {
-			if err := a.SaveAtomic(); err != nil {
+			// 迁移落盘改用 saveRealmMigration（审查 A4 / W2-C2-18）：这里原来调
+			// a.SaveAtomic()，即「拿解析时的整份快照」重写文件。双实例共享 auths/ 时，
+			// 另一实例可能刚好在解析与写回之间把 refresh token 轮换掉，整份快照就把它
+			// 覆盖成**已被上游消费**的旧 RT —— 账号掉线，日志里只有一行「补 realm」。
+			// 现在：先按解析时的字节摘要做 CAS（磁盘被改过就放弃），再只写 realm 单键。
+			if err := a.saveRealmMigration(); err != nil {
+				if errors.Is(err, ErrStaleSnapshot) {
+					log.Printf("WARN: auth %s realm 迁移跳过（磁盘已被其他实例更新，不覆盖）: %v",
+						logfmt.Label(a.UID, a.NicknameValue()), err)
+					continue
+				}
 				log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 			} else if r == "global" {
 				log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.NicknameValue()), a.Domain)
@@ -857,6 +1052,120 @@ func LoadDirReport(dir string) (LoadReport, error) {
 	}
 	report.Auths = out
 	return report, nil
+}
+
+// saveRealmMigration 只把 realm 标识写回磁盘，绝不整份覆盖凭证（审查 A4 / W2-C2-18）。
+//
+// 两条防线，缺一不可：
+//  1. **CAS**：重读磁盘，与解析时的字节摘要逐字节比对。不一致就说明这份快照已经过期
+//     （另一实例轮换了 RT、用户手改了文件），直接返回 ErrStaleSnapshot，什么都不写。
+//     这比「比较令牌版本」更严：连 realm 之外的任何改动都算冲突。
+//  2. **单键写**：过了 CAS 也只改 auth.realm / 顶层 realm 一个键，其余字段按**磁盘上的
+//     当前内容**原样保留。这样即使 CAS 与 rename 之间还有极小的竞争窗口，最坏结果也只是
+//     realm 键被覆盖，不可能把别人的新 refresh token 写回旧值。
+//
+// 没有字节摘要时（手工构造的 Auth，例如面板新建后调 BackfillRealmFor）退回
+// refuseStaleSnapshot 的版本比较口径，行为与 SaveAtomic 一致。
+func (a *Auth) saveRealmMigration() error {
+	a.mu.Lock()
+	if a.FilePath == "" {
+		a.mu.Unlock()
+		return fmt.Errorf("no FilePath set")
+	}
+	path, realm := a.FilePath, a.realm
+	sealed := a.wbSealed
+	sum, haveSum := a.diskRawSHA, a.diskRawOK
+	fallback := authFileSnapshot{
+		path: path, refreshToken: a.RefreshToken, expiresAt: a.ExpiresAt,
+		baselineRT: a.diskRT, wbSealed: a.wbSealed,
+	}
+	a.mu.Unlock()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if haveSum {
+		if got := sha256.Sum256(raw); got != sum {
+			return fmt.Errorf("%w: %s 解析之后被修改过，放弃 realm 迁移", ErrStaleSnapshot, path)
+		}
+	} else if err := refuseStaleSnapshot(fallback); err != nil {
+		return err
+	}
+	out, err := rewriteRealmOnly(raw, realm, sealed)
+	if err != nil {
+		return err
+	}
+	if err := ReplaceAtomic(path, out, 0o600); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.diskRT = a.RefreshToken
+	a.diskRawSHA = sha256.Sum256(out)
+	a.diskRawOK = true
+	a.mu.Unlock()
+	return nil
+}
+
+// rewriteRealmOnly 在磁盘原文上只改 realm 一个键，其余字节语义（字段、信封、桌面端
+// 自有键、数字原文）全部保留。
+//
+// 为什么不用 writeAuthSnapshot：那条路径以「内存快照」为底整份重写，正是 A4 的成因。
+// 这里以**磁盘原文**为底，改动面收窄到单个键。sealed 里若有 "auth.realm"/"realm"，
+// 说明桌面端把 realm 也封在信封里，写回必须重新封装（审查 W2-C2-33 的同一口径）。
+func rewriteRealmOnly(raw []byte, realm string, sealed map[string]uint32) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber() // 保留 uin/expiresAt 这类大整数的原文，别经 float64 丢精度
+	var doc map[string]any
+	if err := dec.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("realm 迁移: %s 不是合法 JSON: %w", "auth", err)
+	}
+	if doc == nil {
+		return nil, fmt.Errorf("realm 迁移: 文档为 null")
+	}
+	holder, keyPath := doc, "realm"
+	if nested, ok := doc["auth"].(map[string]any); ok {
+		holder, keyPath = nested, "auth.realm"
+	}
+	if suite, ok := sealed[keyPath]; ok {
+		env, err := sealWBValueSuite(realm, suite)
+		if err != nil {
+			return nil, err
+		}
+		holder["realm"] = env
+	} else {
+		holder["realm"] = realm
+	}
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("realm 迁移: %w", err)
+	}
+	return out, nil
+}
+
+// sweepStaleTemps 清扫目录里超过 1 小时的 `*.tmp.<pid>.<seq>` 残留（审查 W2-C2-23）。
+//
+// 为什么需要：ReplaceAtomic 的临时文件里是**完整明文凭据**，进程在 write 与 rename
+// 之间崩溃、或 bind-mount 兜底失败时都会留下它；而它不匹配 workbuddy*.json，没有任何
+// 扫描口径会碰到它。1 小时的阈值保证不会误删另一个实例正在写的临时文件。
+func sweepStaleTemps(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-time.Hour)
+	for _, e := range entries {
+		if e.IsDir() || !strings.Contains(e.Name(), ".tmp.") {
+			continue
+		}
+		info, ierr := e.Info()
+		if ierr != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if rmErr := os.Remove(filepath.Join(dir, e.Name())); rmErr == nil {
+			log.Printf("auth: 清理残留临时文件 %s（含明文凭据，崩溃/失败路径遗留）", e.Name())
+		}
+	}
 }
 
 // IsEnterpriseSession 报告当前凭证是否处于「企业上下文」（上游 PR #162）：
@@ -876,7 +1185,7 @@ func (a *Auth) IsEnterpriseSession() bool {
 	// 人工定性为个人版时，连「企业切换会话」这一层也一并覆盖：否则面板上把账号
 	// 改成个人版后，任务面板仍然回「企业上下文账号不参与成长任务」——用户看到的是
 	// 「我改了但没用」。定性是人对上游字段的否决，不该被 token_source 再否决一次。
-	if NormalizeEnterpriseOverride(a.EnterpriseOverride) == "personal" {
+	if NormalizeEnterpriseOverride(a.EnterpriseOverrideValue()) == "personal" { // 审查 W2-C2-20：加锁读
 		return false
 	}
 	if a.IsEnterprise() {
@@ -1001,6 +1310,10 @@ func (a *Auth) SetEnterpriseOverride(v string) error {
 
 // wbExpiresAtMillis 判断文档里的 expiresAt 是毫秒还是秒：>= 1e12 视为毫秒
 // （秒级到 1e12 要公元 33658 年，实际不可能是秒）。
+//
+// 阈值与 normalizeExpiresAt **共用**同一个常量（审查 W2-C2-26）：两处原来分别是 1e12
+// 与 1e11，落在 [1e11, 1e12) 的值会被前者当毫秒（÷1000）却又被这里当秒（回写不 ×1000），
+// 结果凭证被写回成 1/1000 → 立刻过期 → 每次请求都刷新，放大上游调用与风控计数。
 func wbExpiresAtMillis(doc map[string]any) (bool, bool) {
 	holder := doc
 	if nested, ok := doc["auth"].(map[string]any); ok {
@@ -1013,10 +1326,10 @@ func wbExpiresAtMillis(doc map[string]any) (bool, bool) {
 	switch t := v.(type) {
 	case json.Number:
 		if n, err := t.Int64(); err == nil {
-			return n >= 1e12, true
+			return n > expiresAtMillisThreshold, true
 		}
 	case float64:
-		return t >= 1e12, true
+		return t > expiresAtMillisThreshold, true
 	}
 	return false, false
 }
@@ -1041,13 +1354,22 @@ func wbOverlay(s authFileSnapshot) map[string]any {
 			m[k] = v
 		}
 	}
-	exp := s.expiresAt
+	exp, expOK := s.expiresAt, true
 	if s.expiresAtMillis {
-		exp *= 1000
+		// 溢出保护（审查 W2-C2-27）：上游/手改文件把 expiresAt 写成接近 int64 上限时，
+		// ×1000 溢出成负数 → 落盘一个「已过期」时间 → 每次请求都刷新。此时宁可不写
+		// 这个字段（保留磁盘原值），也不写坏。
+		if s.expiresAt > math.MaxInt64/1000 {
+			expOK = false
+		} else {
+			exp = s.expiresAt * 1000
+		}
 	}
 	set(authObj, "accessToken", s.accessToken, false)
 	set(authObj, "refreshToken", s.refreshToken, s.refreshToken == "")
-	set(authObj, "expiresAt", exp, s.expiresAt == 0)
+	if expOK {
+		set(authObj, "expiresAt", exp, s.expiresAt == 0)
+	}
 	set(authObj, "domain", s.domain, s.domain == "")
 	set(authObj, "realm", s.realm, s.realm == "")
 	set(accObj, "uid", s.uid, s.uid == "")
