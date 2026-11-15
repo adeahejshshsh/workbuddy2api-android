@@ -33,6 +33,15 @@ import (
 // 这里再兜一层，避免沙箱卡死时拖住整轮巡检（activity 是遍历型任务）。
 const webActivityBudget = 180 * time.Second
 
+// webActivityBatchBudget 一轮 activity 遍历里网页腿的**整批**预算（审查 C7-070）。
+//
+// 单号 180s + 收尾 30s，且这条腿在 activity 的遍历循环里串行执行：46 个国际号
+// 最坏 46×210s ≈ 2.7 小时，期间 TaskActivity 族锁一直被占着 → 下一个 activity
+// 时点整轮被「上一轮仍在执行」静默跳过（叠加 C7-004 的丢轮）。10 分钟 ≈ 3 个号
+// 跑满预算，剩下的账号留给下一个时点/次日——每日活跃是「今天跑过就算数」的
+// 语义，少跑几个号不影响已经跑完的那些。
+var webActivityBatchBudget = 10 * time.Minute
+
 // webLegDay 记录「本进程内该账号今天已在网页通道成功过」的日期（CST）。
 // 键 = uid，值 = 2026-10-29 形态的自然日。
 type webLegDay struct {
@@ -55,7 +64,40 @@ func (s *Scheduler) markWebActivityDone(uid string) {
 	if s.webLeg.done == nil {
 		s.webLeg.done = make(map[string]string, 8)
 	}
-	s.webLeg.done[uid] = cst.Now().Format("2006-01-02")
+	day := cst.Now().Format("2006-01-02")
+	// 写入时顺手清掉非今日条目（审查 C7-071）：这张表只用来判「今天跑没跑」，
+	// 旧日期的记录没有任何用处，而它此前只写不删 —— 长期运行 + 账号轮换会让
+	// map 随「历史出现过的 uid 数」单调增长。
+	for k, v := range s.webLeg.done {
+		if v != day {
+			delete(s.webLeg.done, k)
+		}
+	}
+	s.webLeg.done[uid] = day
+}
+
+// webActivityBatchDeadline 本批网页腿的截止时刻；腿被关掉时返回零值（= 不跑）。
+func (s *Scheduler) webActivityBatchDeadline(now time.Time) time.Time {
+	if s.webActivityDisabled() {
+		return time.Time{}
+	}
+	return now.Add(webActivityBatchBudget)
+}
+
+// runWebActivityLegWithin 在**整批预算**内跑一条腿（审查 C7-070）。
+//
+// deadline 是批级截止时刻：单号自己的 180s 预算照旧，但不会越过整批截止 ——
+// 否则「预算用完」要等当前这个号跑满 3 分钟才生效。
+func (s *Scheduler) runWebActivityLegWithin(ctx context.Context, a *auth.Auth, deadline time.Time) {
+	if !deadline.IsZero() {
+		if !time.Now().Before(deadline) {
+			return
+		}
+		lctx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
+		ctx = lctx
+	}
+	s.runWebActivityLeg(ctx, a)
 }
 
 // runWebActivityLeg 网页通道每日活跃：建会话 → 接沙箱跑完一轮 → 收尾。

@@ -48,7 +48,10 @@ func (s *Scheduler) noteBalanceAuthFailure(a *auth.Auth, uid string, probeErr er
 	defer s.EndAccountTask(uid, TaskKeepalive)
 	rerr := s.cfg.Upstream.RefreshToken(a)
 	if rerr == nil {
-		if serr := a.SaveAtomic(); serr != nil {
+		// 落盘用带重试的版本（审查 C7-080）：RT 已在服务端轮换，磁盘上还是作废的
+		// 旧 RT —— 一次 SaveAtomic 失败就意味着重启后这个号要重新登录。保活路径
+		// 早就是 SaveAtomicRetry，这里此前是单次写入，两处口径不一。
+		if serr := a.SaveAtomicRetry(); serr != nil {
 			log.Printf("balance %s: 401 后刷新成功但落盘失败: %v", label, serr)
 		}
 		s.noteAuthHeal(uid)
@@ -63,7 +66,13 @@ func (s *Scheduler) noteBalanceAuthFailure(a *auth.Auth, uid string, probeErr er
 		// refresh token 失效 ≠ 账号不可用：AT 未过期时 chat 仍正常（issue #83，
 		// 与 keepalive 同一判据）。计死会在连续 3 轮后禁用掉一个健康账号。
 		if upstream.SessionDeadButUsable(a) {
-			log.Printf("balance %s: refresh token 已失效但 access token 仍有效，不计 session dead", label)
+			// 也写退避（审查 C7-081）：这类号 AT 还能用，但 RT 已经死了，refresh
+			// 注定失败。不写退避 = 每 30 分钟一轮的余额刷新都会再打一次 refresh，
+			// 一天 ~48 次注定失败的上游请求（还是轮换 RT 的写接口）。
+			// 死号不受影响：真死号走不到这个分支（SessionDeadButUsable 为 false），
+			// 仍然每轮都试，连续计数才能在阈值内判死。
+			s.noteAuthHeal(uid)
+			log.Printf("balance %s: refresh token 已失效但 access token 仍有效，不计 session dead（%s 内不再求证）", label, authHealBackoff)
 			return
 		}
 		if s.cfg.Pool.NoteSessionDead(uid) {
@@ -92,12 +101,21 @@ func (s *Scheduler) allowAuthHeal(uid string) bool {
 	return true
 }
 
-// noteAuthHeal 记录一次「refresh 成功」的求证时刻。
+// noteAuthHeal 记录一次「refresh 求证」的时刻（成功，或判定为「RT 死但 AT 可用」）。
 func (s *Scheduler) noteAuthHeal(uid string) {
 	s.authHealMu.Lock()
 	defer s.authHealMu.Unlock()
 	if s.authHealAt == nil {
 		s.authHealAt = make(map[string]time.Time)
 	}
-	s.authHealAt[uid] = time.Now()
+	now := time.Now()
+	// 写入时清掉已过退避窗口的条目（审查 C7-082）：这张表只用来判「这个号最近是否
+	// 求证过」，过期条目没有任何信息量，而它此前只写不删 —— 长期运行 + 账号轮换
+	// 会让 map 随历史 uid 数单调增长。
+	for k, t := range s.authHealAt {
+		if now.Sub(t) >= authHealBackoff {
+			delete(s.authHealAt, k)
+		}
+	}
+	s.authHealAt[uid] = now
 }

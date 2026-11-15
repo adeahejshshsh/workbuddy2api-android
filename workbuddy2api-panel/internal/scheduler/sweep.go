@@ -53,6 +53,13 @@ func (s *Scheduler) StartTaskSweep(ctx context.Context, interval time.Duration) 
 	if interval < 0 {
 		interval = 0
 	}
+	// 启动幂等（审查 C7-075）：重复装配会起多个清扫循环，同一周期把每个账号的
+	// 列表请求扇出多遍（任务族锁只挡并发，挡不住排队重复）。
+	if !s.sweepStarted.CompareAndSwap(false, true) {
+		log.Printf("scheduler: 补领清扫循环已启动，仅更新间隔")
+		return
+	}
+	s.sweepLoops.Add(1)
 	s.sweepInterval.Store(int64(interval))
 	go func() {
 		// 哨兵初值 -1：启动即暂停（interval=0）时也要打出「暂停中显示 0s」那条日志。
@@ -103,9 +110,17 @@ func (s *Scheduler) SetTaskSweepInterval(d time.Duration) {
 }
 
 // SetTaskSweepJitter 热改补领清扫的抖动幅度（千分比，负数按 0）。
+//
+// 上界必须夹到 500‰（审查 C7-074）：此前只夹下界，传 2000 会让 jitterFrac=2，
+// 下一轮 delay = cur - 2×cur = 负数 → 被 `if delay < 0 { delay = 0 }` 压成 0
+// → 清扫循环退化成**零间隔忙循环**，对全池连发列表请求（正是要防的频控形态）。
+// 与 SetBalanceJitter 同口径。
 func (s *Scheduler) SetTaskSweepJitter(permill int) {
 	if permill < 0 {
 		permill = 0
+	}
+	if permill > 500 {
+		permill = 500
 	}
 	s.sweepJitter.Store(int64(permill))
 	poke(s.rearmSweep)

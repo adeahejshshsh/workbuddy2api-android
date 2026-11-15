@@ -14,7 +14,11 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
+
+// maxLotteryDrawPerRound 单账号单轮抽奖次数的硬上限（审查 C7-054）。
+const maxLotteryDrawPerRound = 50
 
 // RunStreakBonusNow 对所有可用账号执行连登兑换 + 抽奖（幂等：locked/无次数自动跳过）。
 // 由签到排程（RunCheckinNow）末尾调用；也可面板手动触发。
@@ -30,8 +34,11 @@ func (s *Scheduler) RunStreakBonusNowCtx(ctx context.Context) {
 		ctx = context.Background()
 	}
 	first := true
+	// 禁用号是否参与：与签到/活跃/保活/余额同口径（审查 C7-056）。此前恒跳过，
+	// 打开 schedule.include_disabled_in_tasks 后连登兑换/抽奖对禁用号仍不执行。
+	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
+		if st.Disabled && !includeDisabled {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
@@ -65,8 +72,19 @@ func (s *Scheduler) RunStreakBonusNowCtx(ctx context.Context) {
 
 // streakBonusAccount 单账号：补签保连登 → 礼包/补偿 → 兑换所有已解锁档位 → 抽完所有 chances。
 func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
+	// 连登总览先取一次，后面补签与档位共用（审查 C7-057）：此前 makeupYesterday
+	// 内部又调一次 GrowthStreakFull，46 个号每天白多 46 次公网往返 —— 正是本文件
+	// 自述要防的「数百请求连发」形态。
+	//
+	// 副作用：这次查询失败时补签也一并跳过（此前补签有自己的一次查询）。两者走
+	// 同一个上游端点，端点挂了补签本来也成功不了，少打一次反而更对。
+	full, err := s.cfg.Upstream.GrowthStreakFull(a)
+	if err != nil {
+		log.Printf("streak-bonus %s: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
+		return
+	}
 	// 0. 补签保连登：昨日漏签且有补签卡则补上（连续天数一断就要重攒 7 天）。
-	s.makeupYesterday(a)
+	s.makeupYesterday(a, full)
 	// 0.5 礼包（先查后领）：ClaimGift 对「已领过」也返回 (0, nil)——上游 200 且 body
 	// 无 credit 字段，所以盲领写法会给每个已领号**每天**打一行假的「🎊 新手礼包 +0c」
 	// （日志有、余额流水里 delta 一次都没有），还白打一次上游。改成先查状态：
@@ -96,11 +114,6 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 		}
 	}
 
-	full, err := s.cfg.Upstream.GrowthStreakFull(a)
-	if err != nil {
-		log.Printf("streak-bonus %s: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
-		return
-	}
 	statuses := map[string]string{
 		"7d":  full.RedemptionStatus.Tier7dStatus,
 		"14d": full.RedemptionStatus.Tier14dStatus,
@@ -127,6 +140,18 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 		log.Printf("streak-bonus %s: lottery summary: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return
 	}
+	// 抽奖次数夹上限（审查 C7-054）：此前直接拿上游返回的 chances 当循环上界，
+	// 字段异常/解析错位（例如回 10000）会让网关对同一个号连发上万次抽奖 —— 一次
+	// 就把号打进上游风控。50 次/轮远超正常值（档位合计最多十几次），超出记 WARN
+	// 并只抽前 50 次，剩下的留给下一轮（次数在服务端，不会丢）。
+	if chances > maxLotteryDrawPerRound {
+		log.Printf("WARN: streak-bonus %s: 上游返回抽奖次数 %d 超过单轮上限，只抽 %d 次",
+			logfmt.Label(a.UID, a.NicknameValue()), chances, maxLotteryDrawPerRound)
+		chances = maxLotteryDrawPerRound
+	}
+	if chances < 0 {
+		chances = 0
+	}
 	for i := 0; i < chances; i++ {
 		raw, err := s.cfg.Upstream.LotteryDraw(a)
 		if err != nil {
@@ -152,13 +177,12 @@ func compactJSON(raw json.RawMessage) string {
 
 // makeupYesterday 昨日漏签且有补签卡时自动补签（保住连登连续天数）。
 // 无卡 / 无漏签 / 查询失败均静默（不影响主流程）。
-func (s *Scheduler) makeupYesterday(a *auth.Auth) {
+func (s *Scheduler) makeupYesterday(a *auth.Auth, full *upstream.StreakFull) {
 	missed, err := s.cfg.Upstream.HeatmapYesterdayMissed(a)
 	if err != nil || !missed {
 		return
 	}
-	full, err := s.cfg.Upstream.GrowthStreakFull(a)
-	if err != nil || full.MakeupCards.Balance <= 0 {
+	if full == nil || full.MakeupCards.Balance <= 0 {
 		return
 	}
 	// 「昨天」按北京时间算（报告 #8）：heatmap 的日期单元是 CST 自然日，

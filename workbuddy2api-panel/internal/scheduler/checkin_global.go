@@ -20,6 +20,7 @@
 package scheduler
 
 import (
+	"context"
 	"log"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -33,40 +34,45 @@ import (
 // 服务端是否配了活动；网络/鉴权出错时盲发只会把一个可诊断的读失败变成两个错误。
 // 这也与 CN 的 fail-open 形成对比——CN 的 fail-open 是因为「活动确实常开、盲签
 // 幂等无害」，前提不同，故策略不同。
-func (s *Scheduler) checkinGlobal(a *auth.Auth) {
+func (s *Scheduler) checkinGlobal(ctx context.Context, a *auth.Auth) (done bool, err error) {
 	// 企业版无签到体系：上游对 daily-checkin 直接 400 10001「企业账号不支持该操作」。
 	// 与 CN 分支同一个门控（SupportsPersonalEndpoints）。
 	if !a.SupportsPersonalEndpoints() {
-		return
+		return false, nil
 	}
 	label := logfmt.Label(a.UID, a.Nickname)
+	// 状态查询仍是**无 ctx** 的上游方法（upstream 侧只有 GetCheckinActivityStatus，
+	// 没有 Ctx 变体，审查 C7-086 的这一半要等上游包补齐）；它只是一次只读请求，
+	// 真正的写请求（daily-checkin）已经换成 Ctx 版本，停机时不再被它拖住。
 	act, err := s.cfg.Upstream.GetCheckinActivityStatus(a)
 	if err != nil {
 		log.Printf("WARN: checkin %s: 国际版活动状态查询失败（不发签到请求）: %v", label, err)
-		return
+		return false, err
 	}
 	if !act.Active {
 		// 常态：国际版活动未配置。一行 INFO 级别的显形（只在到点时打一次），
 		// 让人能确认「没签是因为活动没开」而不是「网关忘了签」。
 		log.Printf("checkin %s: 国际版签到活动未开启（每日 %d 积分），跳过", label, act.DailyCredit)
-		return
+		return true, nil // 活动没开 = 今天没有可做的事，不该进补签队列
 	}
 	if act.TodayCheckedIn {
 		// 上游 today_checked_in 是权威事实（本机 checkin_done 只记我们自己签的）。
 		s.cfg.Pool.NoteCheckinDone(a.UID)
 		log.Printf("checkin %s: 国际版今天已签到（连登 %d 天，每日 %d 积分）", label, act.StreakDays, act.DailyCredit)
-		return
+		return true, nil
 	}
-	if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+	// 写请求走 Ctx 变体（审查 C7-086）：停机/取消时能打断，不再阻塞签到族锁。
+	if err := s.cfg.Upstream.DailyCheckinCtx(ctx, a); err != nil {
 		if upstream.IsAlreadyCheckin(err) {
 			// 幂等：并发/重复触发时上游回「今天已签到」，语义是成功。
 			s.cfg.Pool.NoteCheckinDone(a.UID)
 			log.Printf("checkin %s: 国际版今天已签到（幂等）", label)
-			return
+			return true, nil
 		}
 		log.Printf("WARN: checkin %s: 国际版签到失败: %v", label, err)
-		return
+		return false, err
 	}
 	s.cfg.Pool.NoteCheckinDone(a.UID)
 	log.Printf("checkin %s: 国际版签到成功（每日 %d 积分）", label, act.DailyCredit)
+	return true, nil
 }

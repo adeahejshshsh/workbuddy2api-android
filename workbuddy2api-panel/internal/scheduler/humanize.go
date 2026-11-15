@@ -13,6 +13,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"hash/fnv"
 	"sync/atomic"
 	"time"
@@ -69,6 +70,15 @@ func spreadIntervalStagger(interval time.Duration, frac float64) time.Duration {
 		return 0
 	}
 	return time.Duration(float64(interval) * frac)
+}
+
+// balanceStaggerKey 余额刷新摊开的抖动 key：账号 + 本轮锚点（审查 C7-083）。
+//
+// 此前 key 只有 "bal|"+uid —— 每轮同一账号的偏移完全相同，注释自称的「每个周期
+// 重算」并未发生，上游看到的仍是「同 IP 上 N 个号以完全相同的顺序与间隔刷新」。
+// 把本轮锚点（秒）并进 key：同一轮内稳定（重排不会跳），跨轮必变。
+func balanceStaggerKey(uid string, roundStart time.Time) string {
+	return fmt.Sprintf("%s|%d", uid, roundStart.Unix())
 }
 
 // spreadStaggerDelay 单账号在余额刷新摊开窗口内的偏移。与账号摊开（spread.go）的
