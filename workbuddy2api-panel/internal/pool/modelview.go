@@ -103,6 +103,44 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 	}
 
 	out := make([]ModelLockRow, 0, len(rows))
+	// 单次遍历统计 Servable（审查 C5-81）：此前**每一行**都全量重扫 p.byUID，
+	// 即 O(行数 × 账号数)；行数上限是「账号数 × 各自模型冷却数」，最坏 O(n²)，
+	// 而且全程持 RLock —— 面板每刷新一次 / 每次 /status 都是可见的 CPU 尖峰，
+	// 期间选号的写锁排队。
+	//
+	// 改法：账号级谓词（disabled/paused/needAuth/healthy/inFlightFull）每个账号只算
+	// 一次，模型级谓词（手动关/规则/模型冷却）只对本域**有行**的那几个模型算。
+	realmModels := make(map[string][]string, len(rows))
+	for key := range rows {
+		sep := strings.IndexByte(key, '\x1f')
+		if sep < 0 {
+			continue
+		}
+		realmModels[key[:sep]] = append(realmModels[key[:sep]], key[sep+1:])
+	}
+	servable := make(map[string]int, len(rows))
+	for _, e := range p.byUID {
+		realm := e.a.Realm()
+		models := realmModels[realm]
+		if len(models) == 0 {
+			continue
+		}
+		// 与 Total 同一组谓词（审查 C5-83）：disabled/paused/needAuth 在这里显式判掉，
+		// 不再依赖 healthyForModel 内部排除 —— 两处口径分叉时（比如以后改
+		// healthyForModel）状态判定会自相矛盾（locked / starved 互相错位）。
+		if e.disabled || e.paused || e.needAuth {
+			continue
+		}
+		if !e.healthy(now) || p.inFlightFull(e) {
+			continue
+		}
+		for _, model := range models {
+			if e.modelOffed(model) || e.blockedByRules(model) || e.modelCooled(now, model) {
+				continue
+			}
+			servable[realm+"\x1f"+model]++
+		}
+	}
 	for key, a := range rows {
 		sep := strings.IndexByte(key, '\x1f')
 		if sep < 0 {
@@ -117,18 +155,11 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 			Model:         model,
 			Realm:         realm,
 			Total:         routable[realm],
+			Servable:      servable[key],
 			Locked:        a.locked,
 			UnlockAt:      a.unlockAt,
 			FullyUnlockAt: a.fullyAt,
 			Reason:        a.reason,
-		}
-		for _, e := range p.byUID {
-			if e.a.Realm() != realm || e.needAuth {
-				continue // 占位号不可服务（bug #5，与 healthyForModel 同口径）
-			}
-			if e.healthyForModel(now, model) && !p.inFlightFull(e) {
-				row.Servable++
-			}
 		}
 		switch {
 		case row.Servable > 0:

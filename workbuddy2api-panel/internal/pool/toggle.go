@@ -27,25 +27,44 @@ type modelOff struct {
 	Note string `json:"note,omitempty"`
 }
 
+// modelOffKey 手动关闭表的**唯一键口径**（审查 C5-90）：小写、去空白、剥 realm 前缀。
+//
+// 此前写入与读取都用调用方给的裸字符串精确匹配，于是面板传 "GPT-4o"、客户端传
+// "gpt-4o"、或请求里带 "global:gpt-4o" 时，运维明确关掉的组合**静默失效** ——
+// 请求照旧派到被关的模型上（"我关了它却还在用"）。
+// 与 blockedByRules 的口径对齐（那边走 normalizeRuleModel + splitRealmModel）。
+func modelOffKey(model string) string {
+	_, bare := splitRealmModel(normalizeRuleModel(model))
+	return bare
+}
+
 // SetModelOff 手动关闭某 (账号, 模型) 组合。
 //
 // model 用**裸名**（不含 cn:/global: 前缀）—— 前缀是网关侧路由协议，
 // 且同一账号的域固定，带前缀存会让「模型改名/换域」时对不上。
-// 调用方负责剥前缀（面板接口从请求体取的是裸名）。
+// 调用方负责剥前缀（面板接口从请求体取的是裸名）；即便没剥，这里也会再归一化一次
+// （审查 C5-90），保证写入键与读取键永远同一口径。
+//
+// 暂存号（parked）也可操作（审查 C5-91）：热重载窗口期的手动开关此前返回 false，
+// 被面板当成「账号不存在」，文件回来后开关丢失。
 func (p *Pool) SetModelOff(uid, model, note string) bool {
 	if uid == "" || model == "" {
 		return false
 	}
+	key := modelOffKey(model)
+	if key == "" {
+		return false
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	e, ok := p.byUID[uid]
+	e, ok := p.entryByUIDLocked(uid)
 	if !ok {
 		return false
 	}
 	if e.modelOff == nil {
 		e.modelOff = map[string]modelOff{}
 	}
-	e.modelOff[model] = modelOff{Since: time.Now(), Note: note}
+	e.modelOff[key] = modelOff{Since: time.Now(), Note: note}
 	p.dirty.Store(true)
 	return true
 }
@@ -55,16 +74,17 @@ func (p *Pool) SetModelOn(uid, model string) bool {
 	if uid == "" || model == "" {
 		return false
 	}
+	key := modelOffKey(model)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	e, ok := p.byUID[uid]
+	e, ok := p.entryByUIDLocked(uid)
 	if !ok || e.modelOff == nil {
 		return false
 	}
-	if _, exists := e.modelOff[model]; !exists {
+	if _, exists := e.modelOff[key]; !exists {
 		return false // 本来就没关，无需变更（幂等）
 	}
-	delete(e.modelOff, model)
+	delete(e.modelOff, key)
 	if len(e.modelOff) == 0 {
 		e.modelOff = nil
 	}
@@ -73,12 +93,12 @@ func (p *Pool) SetModelOn(uid, model string) bool {
 }
 
 // modelOffed 报告该 (账号, 模型) 是否被**手动**关闭。
-// 空 model / 未记录 → false。
+// 空 model / 未记录 → false。查询前按 modelOffKey 归一化（审查 C5-90）。
 func (e *entry) modelOffed(model string) bool {
 	if model == "" || len(e.modelOff) == 0 {
 		return false
 	}
-	_, ok := e.modelOff[model]
+	_, ok := e.modelOff[modelOffKey(model)]
 	return ok
 }
 
@@ -90,10 +110,13 @@ type ModelOffEntry struct {
 }
 
 // ModelOffOf 返回某账号手动关闭的模型清单（按模型名升序，输出稳定）。
+//
+// 纯读用 RLock（审查 C5-92）：此前拿写锁，面板每刷新一次就抢一次选号写锁。
+// 查暂存号（审查 C5-91）与 SetModelOff 的可操作面保持一致。
 func (p *Pool) ModelOffOf(uid string) []ModelOffEntry {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	e, ok := p.byUID[uid]
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.entryByUIDLocked(uid)
 	if !ok || len(e.modelOff) == 0 {
 		return nil
 	}

@@ -4,12 +4,14 @@ package pool
 
 import (
 	"log"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
 type Pool struct {
@@ -52,7 +54,12 @@ type Pool struct {
 	costExploreEvents int64
 	// egress 出口级瞬时失败计数（egress.go，键 = 出口身份）。运行态，不持久化：
 	// 链路状态易失，重启后从零开始是正确的。
-	egress map[string]egressStat
+	//
+	// 由 egressMu **独立**保护（审查 C5-94），不参与 p.mu 的锁序：网络抖动时每个
+	// 传输层失败都会记一次，若抢 p.mu 写锁就会与选号串行化 —— 正是本模块要治的
+	// 场景反而被自己的锁放大。两把锁从不嵌套。
+	egressMu sync.Mutex
+	egress   map[string]egressStat
 
 	// strategy 选号策略（weighted / round_robin / sequential，见 strategy.go）。
 	// 空 = weighted（既有行为）。它只决定「同样合格的候选里选哪个」——健康、冷却、
@@ -137,7 +144,16 @@ type Pool struct {
 	shuffleSeq uint64
 	// stopCh 关闭信号：Close 关闭它使 startFlusher 的后台 goroutine 退出。
 	// nil = 未启动 flusher（stateFp 为空时 New 不起 flusher）。
+	// 读写一律在 p.mu 内（审查 C5-41）：Close 原先无锁读 p.stopCh，与 startFlusher
+	// 的写入构成数据竞争；closeOnce 只保护 close，不保护读。
 	stopCh chan struct{}
+	// flushEvery 后台落盘周期（审查 C5-54）：构造期从包级 flushInterval 复制一份，
+	// flusher goroutine 只读本字段，不再每轮读包级 var（测试并发改它即数据竞争）。
+	flushEvery time.Duration
+	// lastWindowPrune 上次窗口表 prune 的时刻（审查 C5-64）：ScheduleModelWindow
+	// 原先每次登记都全表遍历，限流风暴时把 O(窗口数) 扫描塞进选号写锁。按
+	// windowPruneInterval 节流。仅持 p.mu 时读写。
+	lastWindowPrune time.Time
 	// closeOnce 保证 Close 幂等（多次调用不重复 close channel）。
 	// lastFallbackLog 上一次打过兜底选号日志的账号（bug-10：每请求路径要节流）。
 	lastFallbackLog string
@@ -166,6 +182,9 @@ func New(stateFp string) *Pool {
 		exploreLast:         map[string]time.Time{},
 		strategy:            StrategyWeighted,
 		scheduling:          map[string]scheduleCursor{},
+		// 构造期固化落盘周期（审查 C5-54）：测试在 New 之前改包级 flushInterval
+		// 仍然生效，但 flusher goroutine 之后只读本字段。
+		flushEvery: flushInterval,
 	}
 	if stateFp != "" {
 		p.load()
@@ -188,11 +207,16 @@ func New(stateFp string) *Pool {
 // 进程退出前调用，消除 startFlusher 的 goroutine 泄漏；不调用也不影响正确性
 // （进程退出即回收），仅是生命周期卫生。
 func (p *Pool) Close() {
-	if p.stopCh == nil {
+	// 持锁读 stopCh（审查 C5-41）：与 startFlusher 的写入同锁，消除数据竞争；
+	// 读到 nil 说明没起 flusher（纯内存池），无需落盘。
+	p.mu.RLock()
+	stopCh := p.stopCh
+	p.mu.RUnlock()
+	if stopCh == nil {
 		return
 	}
 	p.closeOnce.Do(func() {
-		close(p.stopCh)
+		close(stopCh)
 	})
 	p.Flush()
 }
@@ -305,10 +329,15 @@ func (p *Pool) CreditFloor() int64 {
 
 // SetCreditFloorByRealm 注入按域覆盖表（issue #147；键 "cn"/"global"）。
 // nil/空表 = 全部回落全局阈值。config 校验已剔非法键与负值，这里不再防御。
+//
+// 拷贝一份（审查 C5-43）：此前直接保存调用方传入的 map 引用，config 侧热重载
+// 复用/改写同一个 map 时，选号读侧（持 p.mu.RLock）与写侧就是并发 map 读写 ——
+// Go 运行时直接 fatal（concurrent map read and map write），不是普通数据竞争。
 func (p *Pool) SetCreditFloorByRealm(m map[string]int64) {
+	cp := maps.Clone(m)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.creditFloorByRealm = m
+	p.creditFloorByRealm = cp
 }
 
 // SetCreditFloorMaxRate 注入积分保底的目录倍率上限（0 = 严格模式）。
@@ -332,19 +361,27 @@ func (p *Pool) SetReserveCredits(v int64) {
 }
 
 // SetReserveCreditsByRealm 注入按域覆盖表（键 "cn"/"global"）。
+// 拷贝一份（审查 C5-43）：理由同 SetCreditFloorByRealm —— 保存调用方 map 引用会与
+// config 热重载构成并发 map 读写。
 func (p *Pool) SetReserveCreditsByRealm(m map[string]int64) {
+	cp := maps.Clone(m)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.reserveByRealm = m
+	p.reserveByRealm = cp
 }
 
 // SetAccountRouting 注入账号级路由偏好（issue #62）：优先级（小 = 先烧）与占比。
 // 空/nil = 未配置，选号行为与旧版完全一致。
+//
+// 两张表都拷贝（审查 C5-43）：priorityOf/shareOf 在选号写锁内高频读，调用方复用
+// 同一 map 改写时会 fatal。值类型（int/float64）无嵌套，浅拷贝足够。
 func (p *Pool) SetAccountRouting(priority map[string]int, share map[string]float64) {
+	pc := maps.Clone(priority)
+	sc := maps.Clone(share)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.accountPriority = priority
-	p.accountShare = share
+	p.accountPriority = pc
+	p.accountShare = sc
 }
 
 // reserveThreshold 该域的保留积分阈值：按域覆盖优先，未写回落全局值。
@@ -429,6 +466,12 @@ func (p *Pool) SetMaxInFlightGlobal(n int) {
 
 // inFlightLimit 报告账号的生效在途上限（global 分档优先，回落 maxInFlight）；
 // 0 = 不限。调用方需已持 p.mu（或快照过 limit，见 Acquire）。
+//
+// 已知且可接受的边界（审查 C5-45）：判据里的 e.a.Realm() 会随凭证更新而变化
+// （global.enabled 开关翻转、占位号换成真凭证）。切换瞬间已经在途的名额不会被回收，
+// 于是短时间内可能出现 inFlight > 新 limit —— 表现为「这个号暂时不再被选」，
+// 等请求结束 Release 后自愈。反过来强行回收在途名额会让并发上限失真（Release
+// 会扣到别人的名额上），代价更大，故不改；Acquire 读 limit 与 CAS 之间同样有这个窗口。
 func (p *Pool) inFlightLimit(e *entry) int {
 	if p.maxInFlightGlobal > 0 && e.a.Realm() == "global" {
 		return p.maxInFlightGlobal
@@ -532,16 +575,43 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 		seen[a.UID] = true
 		p.upsertLocked(a)
 	}
-	changed := false
+	total := len(p.byUID)
+	var missing []string
 	for uid := range p.byUID {
 		if !seen[uid] {
-			delete(p.byUID, uid)
-			changed = true
+			missing = append(missing, uid)
 		}
 	}
-	if !changed {
+	if len(missing) == 0 {
 		p.mu.Unlock()
 		return
+	}
+	// 大面积缺席走 parked 语义（审查 C5-39）：局部扫描失败（目录权限、临时 unlink、
+	// glob 竞态、bind mount 抖动）此前会把缺席账号从 byUID **删除并落盘** ——
+	// credits/冷却/熔断计数/成本账本永久丢失，且不走 parked，重启也捞不回来。
+	// 判据：缺席超过池子一半。正常运维删号走的是面板 Remove/热重载 ParkMany
+	// （panel/reload.go 有 N 轮确认），这里只兜「一次扫描就少一半」的异常形态。
+	// parked 与 delete 一样不在 byUID 里（不会复活进池），但状态保留在
+	// state.json 的 parked_accounts，文件回来时 upsertLocked 原样接回。
+	parkInstead := len(missing)*2 > total
+	for _, uid := range missing {
+		e := p.byUID[uid]
+		delete(p.byUID, uid)
+		if !parkInstead {
+			continue
+		}
+		if len(p.parked) >= maxParked {
+			log.Printf("WARN: [pool] 暂存区已满（%d 条），无法暂存缺席账号 uid=%s（状态丢弃）", maxParked, logfmt.UID8(uid))
+			continue
+		}
+		if p.parked == nil {
+			p.parked = map[string]*entry{}
+		}
+		p.parked[uid] = e
+	}
+	if parkInstead {
+		log.Printf("WARN: [pool] 本轮扫描缺席 %d/%d 个账号（>50%%），按暂存处理以免丢失状态（疑似 auth_dir 扫描不完整）",
+			len(missing), total)
 	}
 	p.dirty.Store(true)
 	p.mu.Unlock()
@@ -561,6 +631,9 @@ func (p *Pool) Remove(uid string) *auth.Auth {
 	delete(p.byUID, uid)
 	p.dirty.Store(true)
 	p.mu.Unlock()
+	// 摘掉等级事实里的残留（审查 C5-70）：账号都删了，UIDType[uid] 没有意义，
+	// 留着只会让 model_tier.json 单调变大（轮换导入场景）。
+	p.dropTierUID(uid)
 	p.flushNow() // 面板「删除即落盘」的语义保留，但 IO 在锁外（审查 C5-37）
 	return e.a
 }
@@ -572,7 +645,6 @@ func (p *Pool) RemoveMany(uids []string) []string {
 		return nil
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	removed := make([]string, 0, len(uids))
 	for _, uid := range uids {
 		if _, ok := p.byUID[uid]; !ok {
@@ -584,6 +656,10 @@ func (p *Pool) RemoveMany(uids []string) []string {
 	if len(removed) > 0 {
 		p.dirty.Store(true)
 	}
+	p.mu.Unlock()
+	// 等级事实同步摘除（审查 C5-70）：批量删除（热重载/轮换）时最需要，否则
+	// model_tier.json 会永久保留这批已消失的 uid。
+	p.dropTierUID(removed...)
 	return removed
 }
 
@@ -668,17 +744,32 @@ const (
 //
 // 原地更新在 p.mu 之外做：auth 的锁不嵌在池锁里，不引入新的锁序。
 func (p *Pool) Reconcile(a *auth.Auth) ReconcileResult {
-	p.mu.Lock()
-	e, ok := p.byUID[a.UID]
-	if !ok {
-		p.upsertLocked(a)
+	// 锁外 AdoptNewer + 回锁校验指针（审查 C5-40）：upsertLocked（SyncToDir / Add）
+	// 可能在这段锁外时间里把 e.a 换成新指针，于是 AdoptNewer 的更新写到了孤儿对象上
+	// 丢失 —— 磁盘上更新的令牌下一次请求又变回旧的。重试上限 3 次（每次都要真的
+	// 发生一次换指针才会重试，实际最多 1-2 次）。
+	for i := 0; i < 3; i++ {
+		p.mu.Lock()
+		e, ok := p.byUID[a.UID]
+		if !ok {
+			p.upsertLocked(a)
+			p.mu.Unlock()
+			return ReconcileAdded
+		}
+		cur := e.a
 		p.mu.Unlock()
-		return ReconcileAdded
-	}
-	cur := e.a
-	p.mu.Unlock()
-	if cur.AdoptNewer(a) {
-		return ReconcileUpdated
+		updated := cur.AdoptNewer(a)
+		p.mu.RLock()
+		still := p.byUID[a.UID]
+		same := still != nil && still.a == cur
+		p.mu.RUnlock()
+		if same {
+			if updated {
+				return ReconcileUpdated
+			}
+			return ReconcileUnchanged
+		}
+		// 指针被换掉了：这份更新可能落在孤儿上，重来一轮（对新指针重放 AdoptNewer）。
 	}
 	return ReconcileUnchanged
 }

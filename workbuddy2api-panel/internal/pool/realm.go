@@ -34,9 +34,14 @@ func (p *Pool) IsAvailableForModel(uid, model string) bool {
 // 查询，两次之间账号可能被面板移除 / SyncToDir 剔除。各处若只取 uids[0]，取不到就
 // 静默放弃该域 —— 表现为 /v1/models 偶发返回空、启动预热静默跳过、日志里零线索。
 func (p *Pool) PickExistingAuth(uids []string) *auth.Auth {
+	// 一次加锁查完（审查 C5-85）：此前对每个 uid 单独调 AuthByUID，即 O(n) 次
+	// RLock/RUnlock —— 契约上这里要的是「这批 uid 里第一个还在的号」，
+	// 一次读锁内完成既更短也更一致（不会在两次加锁之间看到不同的池状态）。
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	for _, uid := range uids {
-		if a := p.AuthByUID(uid); a != nil {
-			return a
+		if e, ok := p.byUID[uid]; ok && e != nil {
+			return e.a
 		}
 	}
 	return nil

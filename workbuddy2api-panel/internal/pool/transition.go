@@ -10,7 +10,8 @@
 //
 //	disabled           ← disableLocked（Disable / NoteSessionDead 达阈）
 //	until/coolKind     ← Cooldown(CoolSoft/Hard) / CooldownSoftForModel 无解析分支
-//	modelCooldowns     ← CooldownSoftForModel 有解析分支；被 disableLocked/Cooldown/clearCoolingLocked 清
+//	modelCooldowns     ← CooldownSoftForModel 有解析分支；被 disableLocked/Cooldown/clearCoolingLocked
+//	                     清**路由部分**（6004 类；11102/11158 负缓存与 AuditOnly 台账保留，审查 C5-88）
 //	                     （reviveCoolingLocked 不清——余额恢复不构成限流解除证据）
 //	breakerUntil       ← recordBreakerFailureLocked（Cooldown/NoteError 喂入）；NoteSuccess 清
 //	softStreak         ← Cooldown(CoolSoft)/CooldownSoftForModel；NoteSuccess 清（revive 保留：与余额无关）
@@ -24,6 +25,15 @@
 //     （禁用是终态，冷却随之作废）。reviveCoolingLocked（签到/余额刷新解冻）**不再**
 //     走全清：余额恢复只解冻 CoolHard，软限流与模型级台账各有自身恢复时刻
 //     （详见 reviveCoolingLocked 注释）。
+//
+// 锁序契约（审查 C5-87）：本文件（以及 pool 包全部日志点）在**持 p.mu 写锁**时调用
+// e.a.NicknameValue()，即固定锁序 **pool.mu → auth.mu**（单向）。因此：
+//   - auth 侧**禁止**在持 a.mu 时回调任何 pool 方法（否则 ABBA 死锁，而禁用/熔断
+//     是错误路径，正是最需要可用性的时刻）；
+//   - 新增日志点时优先只用 e.a.UID（无锁字段），需要昵称时确认调用方仍在同一锁序内。
+//
+// 现状已核实安全：upstream 的令牌刷新是「快照 → 解锁 → 网络 IO → 再锁写回」，
+// auth 不会在持锁时进入 pool。
 package pool
 
 import (
@@ -33,15 +43,26 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
-// clearCoolingLocked 清冷却域：until/coolKind/softStreak/modelCooldowns 全归零，
-// reason 一并清空。熔断器（fails/retryCount/breakerUntil）不属冷却域，不动。
+// clearCoolingLocked 清冷却域：until/coolKind/softStreak 归零，模型级冷却只清
+// **参与路由**的那部分（6004 类），reason 一并清空。熔断器（fails/retryCount/
+// breakerUntil）不属冷却域，不动。
+//
+// 为什么不再整体置 nil（审查 C5-88）：modelCooldowns 里混着两类语义完全不同的条目 ——
+//   - 6004 模型级限流：随账号冷却一起失效是合理的；
+//   - 11102/11158 负缓存（"这个号就是用不了这个模型"）：这是**上游事实**，与本地
+//     冷却无关，还带 Hits 退避历史。
+//
+// 原实现 `e.modelCooldowns = nil` 把两类一起抹掉：禁用 → ReviveDisabled 复活后，
+// 该号立刻被派回「官方确定用不了」的模型，重新吃 11102 并从 6h→12h→24h 从头退避，
+// 与 clearRoutingModelCooldownsLocked 刻意保留 11102 的口径正好相反。
+// 现在复用同一函数，两个入口口径统一。
 // 调用方必须已持有 p.mu。
 func (e *entry) clearCoolingLocked() {
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""
 	e.softStreak = 0
-	e.modelCooldowns = nil // 冷却域清零时一并清模型级独立冷却（模型豁免随之消失）
+	clearRoutingModelCooldownsLocked(e) // 只清 6004，保留 11102/11158 与 AuditOnly 台账
 }
 
 // disableLocked 禁用迁移：置 disabled 并清冷却域（禁用是比冷却更强的不可用终态）。

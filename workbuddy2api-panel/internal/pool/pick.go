@@ -72,6 +72,13 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, reserve
 	}
 	// floorBlocked 积分保底拦截判定（实现在 floorBlockedForRealmModel，与粘性路径共用）：
 	// 触底 + 收费（本地实测台账 或 上游目录倍率）即拦；免费/未知倍率不受限。
+	//
+	// 锁内回调（审查 C5-12，本轮不改，仅固化契约）：floorBlocked 会经 modelRateOf /
+	// exclusiveModelOf / exclusivePaidOf 调到上游目录缓存，而这些调用发生在**持 p.mu
+	// 写锁**期间。交叉验证结论：三者实现只读各自的 map（effortsMu/paidMu 的 RLock），
+	// 无 IO、不反向调用 Pool —— 当前不构成死锁，但锁序 pool.mu → upstream.* 必须固化：
+	// **注入回调禁止反向调用 Pool、禁止做 IO**。若将来要把倍率快照成本地 map 传入，
+	// 那是把 upstream 目录缓存拷进 pool（跨包改动），不在本轮范围。
 	floorBlocked := func(e *entry) bool { return p.floorBlockedForRealmModel(e, reqModel, realm, now) }
 	var cands []*entry
 	// exclusiveHeld 只因为「模型免费号调不通」被挡下的号（见下方 relaxation）。

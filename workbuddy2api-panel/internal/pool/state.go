@@ -175,6 +175,9 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 			e.credits = remain
 			e.creditsTotal = total
 		}
+		// 权威余额到达 = 「余额已知」，与 total 的数值解耦（审查 C5-10）：
+		// 免费号 total == 0 也必须让 reserveBlocked 生效。
+		e.creditsKnown = true
 		// 权威余额到达：内插扣费的不足 1 分余数归零（bug-11）。不清的话后续
 		// NoteModelCost 会从旧余数继续累加，credits 与真实余额长期差不到 1 分，
 		// credit_floor 的触底判定会略早/略晚。
@@ -203,14 +206,17 @@ func (p *Pool) NoteError(uid string) {
 
 // reserveBlocked 报告账号是否因「保留积分」停牌（不再接单）。调用方须持锁。
 //
-// 「余额已知」用 creditsTotal > 0 判定（UserResource 聚合值）：从未查到余额的账号
-// 不受影响 —— 否则新导入、还没刷过余额的号会被 0 值直接停掉。
+// 「余额已知」判据（审查 C5-10）：creditsKnown 优先（权威接口确认过，哪怕 total 为 0），
+// 未确认时回落旧的 creditsTotal > 0 口径。两个作用：
+//   - 从未查到余额的账号不受影响 —— 否则新导入、还没刷过余额的号会被 0 值直接停掉；
+//   - 免费号（creditsTotal 恒 0）与「余额接口长期失败」的号不再被永久豁免保底：
+//     原先 total == 0 让整条规则短路，credits 已是 0 也照常接单，保留积分形同虚设。
 func (p *Pool) reserveBlocked(e *entry, modelFree bool) bool {
 	if modelFree {
 		return false
 	}
 	t := p.reserveThreshold(e.a.Realm())
-	return t > 0 && e.creditsTotal > 0 && e.credits <= t
+	return t > 0 && (e.creditsKnown || e.creditsTotal > 0) && e.credits <= t
 }
 
 // modelFreeOf 报告 (账号域, 模型) 是否免费档：上游目录倍率数值为 0。
@@ -287,6 +293,15 @@ func (p *Pool) NoteSuccess(uid string) {
 // 审查 B2）：此时**仍要下账**（余额插值、credit_floor 保底、选号成本分都靠它），
 // 只是不更新「每千 token 单价」那份账本——没有分母，per1k 无从计算，硬算出来的
 // 天文数字会污染成本分。
+//
+// 已知边界（审查 C5-06，本轮不改）：内插扣减与权威覆盖（ReenableIfCredits /
+// SetCreditsDetailed）之间没有版本号。一次请求在 t0 发出、t1 记账，若权威余额在
+// (t0,t1) 之间到达，那份余额**已经包含**本次消耗，t1 再扣一次就是重复计费（表现为
+// 偶发多扣）；反过来先记账后覆盖则会「回弹」。正确修法需要调用方在请求开始时取一份
+// 余额快照/版本号并随记账传回来 —— 那要改 handler 的记账调用签名（跨包，不在本次
+// 改动范围）。当前的缓解是：creditFrac 在权威写入时归零、扣减量按「本次 credit」
+// 而非「余额差」，所以单次误差被限制在一次请求的消费额内，且下一次签到/余额刷新
+// 会把它拉回权威值。
 func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	if uid == "" || model == "" {
 		return
@@ -824,31 +839,51 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。
 		// 常规冷却（until）与熔断期（breakerUntil）可能只有其一在生效，
 		// 取仍在未来且更晚截止的那个，避免仅熔断期时误报 0 / unknown。
-		remaining := int64(0)
-		if now.Before(e.until) {
-			if r := int64(time.Until(e.until).Seconds() + 0.999); r > remaining {
-				remaining = r
-			}
-		}
-		if now.Before(e.breakerUntil) {
-			if r := int64(time.Until(e.breakerUntil).Seconds() + 0.999); r > remaining {
-				remaining = r
-				st.CoolKind = "breaker"
-			}
-		}
-		// 降权期也参与"取更晚截止"的比较（bug #8）：只有它生效时给出 degraded。
-		if now.Before(e.degradeUntil) {
-			if r := int64(time.Until(e.degradeUntil).Seconds() + 0.999); r > remaining {
-				remaining = r
-				st.CoolKind = "degraded"
-			}
-		}
+		//
+		// 统一以入口的 now 为唯一时间基准（审查 C5-09）：此前 Cooling 用 now 判定、
+		// 剩余秒数却用 time.Until(...) 重新取一次 time.Now() —— 两个采样点相差
+		// 微秒到毫秒，截止边界上会出现「冷却中 0 秒」的自相矛盾行。
+		// 抽成 coolRemainingOf 是为了能被用例用固定 now 钉住。
+		remaining, kind := coolRemainingOf(e, now)
 		st.CoolRemaining = remaining
+		if kind != "" {
+			st.CoolKind = kind
+		}
 		if st.CoolKind == "" {
 			st.CoolKind = e.coolKind.String()
 		}
 	}
 	return st
+}
+
+// coolRemainingOf 计算冷却剩余秒数（向上取整）与「更晚截止」对应的 kind。
+// 单一时间基准（now 由调用方传入，审查 C5-09）：三处截止都用同一个 now 比较，
+// 不再各自 time.Until。
+//
+// 返回 kind 为空表示「常规冷却 until 更晚或三者都没有更晚者」——由调用方回落
+// 到 e.coolKind 的展示文案。breaker/degraded 优先于 until 是既有语义。
+func coolRemainingOf(e *entry, now time.Time) (int64, string) {
+	remaining := int64(0)
+	kind := ""
+	if now.Before(e.until) {
+		if r := int64(e.until.Sub(now).Seconds() + 0.999); r > remaining {
+			remaining = r
+		}
+	}
+	if now.Before(e.breakerUntil) {
+		if r := int64(e.breakerUntil.Sub(now).Seconds() + 0.999); r > remaining {
+			remaining = r
+			kind = "breaker"
+		}
+	}
+	// 降权期也参与"取更晚截止"的比较（bug #8）：只有它生效时给出 degraded。
+	if now.Before(e.degradeUntil) {
+		if r := int64(e.degradeUntil.Sub(now).Seconds() + 0.999); r > remaining {
+			remaining = r
+			kind = "degraded"
+		}
+	}
+	return remaining, kind
 }
 
 // disabledAtRFC3339 把 entry.disabledAt 转成对外字符串（零值返回空，JSON 里省略）。
@@ -1072,6 +1107,12 @@ func (p *Pool) SlotWaitForRealm(model, realm string) bool {
 		if !e.healthyForModel(now, model) {
 			continue
 		}
+		// 「只差一个在途名额」的判据（审查 C5-08）：healthyForModel 不含 inFlight
+		//（账号级健康是状态机权威判定），所以这里必须显式叠加 inFlightFull，否则
+		// 有空闲名额的号也会被报成「等名额」，调用方会白等一轮。
+		// paused/disabled 号不单独区分：它们已被 healthyForModel 判假挡在上面，
+		// 语义是「等一个会放出来的名额」，把暂停号算进来会让调用方无限等。
+		// 改 healthyForModel 的口径时，这条叠加必须同步复核。
 		if p.inFlightFull(e) && !p.floorBlockedForRealmModel(e, model, realm, now) {
 			return true
 		}
