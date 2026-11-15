@@ -39,6 +39,13 @@ func (s *Scheduler) noteBalanceAuthFailure(a *auth.Auth, uid string, probeErr er
 		log.Printf("balance %s: 401（%s 内已求证过登录态，本轮跳过 refresh）", label, authHealBackoff)
 		return
 	}
+	// 账号级族锁（审查 E4）：保活族也会对这个号 refresh。两条路径并发轮换同一个 RT 时，
+	// 后到的那个拿着已作废的 RT 去换 → 上游回 12153 → 一个健康号被判成 session dead。
+	if !s.TryBeginAccountTask(uid, TaskKeepalive) {
+		log.Printf("balance %s: 该号正在保活刷新，本轮跳过", label)
+		return
+	}
+	defer s.EndAccountTask(uid, TaskKeepalive)
 	rerr := s.cfg.Upstream.RefreshToken(a)
 	if rerr == nil {
 		if serr := a.SaveAtomic(); serr != nil {

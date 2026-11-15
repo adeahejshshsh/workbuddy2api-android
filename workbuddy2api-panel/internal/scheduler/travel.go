@@ -90,6 +90,12 @@ func (s *Scheduler) RunTravelNowCtx(ctx context.Context, spread bool) {
 // shortcut: 不加账号间限速，调用方自己控节奏——按号端点存在的意义就是让外部
 // 调度器做到每号独立随机时点，再叠加固定节拍等于把指纹加回去。
 func (s *Scheduler) RunTravelNowFor(uid string) bool {
+	// 账号级族锁（审查 E4）：此前这条按号入口**完全绕过** TaskTravel —— 手动触发与排程
+	// 撞在同一秒时会同时对这个号发起旅行写请求（重复推进/重复领奖）。
+	if !s.TryBeginAccountTask(uid, TaskTravel) {
+		return false
+	}
+	defer s.EndAccountTask(uid, TaskTravel)
 	st, ok := s.cfg.Pool.Status(uid)
 	if !ok || st.Disabled {
 		return false
