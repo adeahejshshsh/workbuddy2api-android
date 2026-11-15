@@ -66,3 +66,30 @@ func TestValidConversationIDWhitelist(t *testing.T) {
 		}
 	}
 }
+
+// StopGC 之后不能再往表里写（审查 S9）：关停顺序若错（先 StopGC 后仍有在途请求），
+// 表会继续被写但再没人回收 —— 无界增长且无人管。
+func TestResolveAfterStopGCDoesNotGrow(t *testing.T) {
+	r := New(Config{})
+	r.cfg.Available = func() []string { return []string{"u1", "u2"} }
+	r.StartGC()
+	r.StopGC()
+
+	before := 0
+	r.mu.RLock()
+	before = len(r.entries)
+	r.mu.RUnlock()
+
+	for i := 0; i < 100; i++ {
+		uid, ok := r.Resolve("key-" + string(rune('a'+i%26)))
+		if !ok || uid == "" {
+			t.Fatalf("关停后仍应能返回一个可用 uid（无状态轮换），got %q ok=%v", uid, ok)
+		}
+	}
+	r.mu.RLock()
+	after := len(r.entries)
+	r.mu.RUnlock()
+	if after != before {
+		t.Fatalf("StopGC 之后表仍在增长：%d → %d", before, after)
+	}
+}

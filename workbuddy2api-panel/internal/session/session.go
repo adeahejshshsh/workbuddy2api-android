@@ -60,6 +60,10 @@ type Router struct {
 	entries map[string]entry
 	cfg     Config
 	stop    chan struct{}
+	// stopped StopGC 之后置位（审查 S9）：关停顺序若错（先 StopGC 后仍有在途请求），
+	// 表会继续被写但再没人回收 —— 无界增长且无人管。置位后 Resolve 退化为
+	// 「不写表、只按可用池轮换」，Bind 变 no-op，语义与「没有粘性」一致。
+	stopped bool
 }
 
 // New 构建路由器。若 cfg.Store 为 nil 则用 Noop（纯内存）；cfg.Available 为 nil 视为空池。
@@ -113,6 +117,7 @@ func (r *Router) StartGC() {
 func (r *Router) StopGC() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.stopped = true
 	if r.stop != nil {
 		close(r.stop)
 		r.stop = nil
@@ -211,6 +216,10 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.stopped {
+		// 已关停：不写表（否则无界增长且无人回收），按可用池做无状态轮换（审查 S9）。
+		return uids[hashIndex(key, len(uids))], true
+	}
 
 	// re-check：并发同 key 可能已被其他 goroutine 分配好。
 	// 锁内只读本地 avail，不再回头调 pool（bug-07）。
