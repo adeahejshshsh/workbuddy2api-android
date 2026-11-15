@@ -37,7 +37,7 @@ var (
 
 // probeVideoTask 有界探测：成功则收养并返回状态；否则返回 errVideoProbeSkipped / errVideoNotFound
 // 或终止探测的那个上游错误。
-func (h *Handler) probeVideoTask(taskID string) (upstream.VideoTaskState, string, string, error) {
+func (h *Handler) probeVideoTask(taskID, caller string) (upstream.VideoTaskState, string, string, error) {
 	var state upstream.VideoTaskState
 	a, err := h.probeAccounts(&h.videoProbe, taskID, func(a *auth.Auth) error {
 		data, err := h.cfg.Upstream.VideoTask(a, taskID)
@@ -57,16 +57,16 @@ func (h *Handler) probeVideoTask(taskID string) (upstream.VideoTaskState, string
 		return upstream.VideoTaskState{}, "", "", err
 	}
 	// 已终态的多半在重启前被查过、记过账：收养时标已记账，免得重复计入；还在跑的出片时照常记。
-	h.videoLedger.adopt(taskID, a.UID, a.Realm(), "", state.Done())
+	h.videoLedger.adoptFor(taskID, a.UID, a.Realm(), "", state.Done(), caller)
 	probeAdoptLog(videoProbeConfig.label, taskID, a)
 	return state, a.UID, a.Nickname, nil
 }
 
 // pollUnknownVideoTask 台账里没有的 task_id：有界探测（并发同一 id 只探一次），找到就按已知任务回，
 // 找不到回 404。st 由调用方 defer st.done()。
-func (h *Handler) pollUnknownVideoTask(w http.ResponseWriter, st *chatStat, taskID string) {
+func (h *Handler) pollUnknownVideoTask(w http.ResponseWriter, st *chatStat, taskID, caller string) {
 	state, uid, nick, err := h.videoLedger.pollShared(taskID, func() (upstream.VideoTaskState, string, string, error) {
-		return h.probeVideoTask(taskID)
+		return h.probeVideoTask(taskID, caller)
 	})
 	if err != nil {
 		var ue *upstream.Error

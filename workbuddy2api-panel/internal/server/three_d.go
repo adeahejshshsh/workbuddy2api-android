@@ -41,12 +41,15 @@ var threeDProbeConfig = probeConfig{
 
 // threeDTaskOwner 任务台账条目：上游任务只对提交它的账号可见，查询必须回到同一账号。
 //
-// 租户模型：网关只有一个共享 API key，Auth 里也没有调用方 id，所以台账只记「提交账号」
-// 而不记「调用方」——持有 key 即可查任意 job_id，与视频功能同一信任模型（README 已写明）。
+// 租户模型：台账同时记「提交账号」与「提交方指纹」（Caller，见 taskowner.go）。此前只记
+// 账号，于是任一持 key 者拿到别人的 job_id 就能查到成品直链（COS 直链带 q-signature，
+// 24 小时有效）——审查 A6。现在非本调用方的查询一律按「不存在」处理。
 type threeDTaskOwner struct {
 	UID, Realm string
 	Model      string
 	Created    time.Time
+	// Caller 提交方指纹；空 = 不校验（网关未配 key 时无租户边界）。
+	Caller string
 	// Charged 已记账标记：查到终态时按 ResultCreditConsumed 记一次，重复查询不再记。
 	Charged bool
 	// 用量快照：上游 credit 只在第一次查到终态时回，之后重复查询不带，不记住就会丢账。
@@ -81,12 +84,17 @@ func newThreeDTaskStore() *threeDTaskStore {
 }
 
 func (s *threeDTaskStore) put(id, uid, realm, model string, state upstream.ThreeDState) {
+	s.putFor(id, uid, realm, model, "", state)
+}
+
+// putFor 记录归属调用方（caller 为空 = 不校验，供上游用例与旧调用方使用）。
+func (s *threeDTaskStore) putFor(id, uid, realm, model, caller string, state upstream.ThreeDState) {
 	if s == nil || id == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.m[id] = &threeDTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), State: state, HasState: true}
+	s.m[id] = &threeDTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), State: state, HasState: true, Caller: caller}
 	s.gcLocked()
 }
 
@@ -95,6 +103,11 @@ func (s *threeDTaskStore) put(id, uid, realm, model string, state upstream.Three
 // charged 传「收养时任务是否已到终态」：已完成的任务多半在重启前被查过、记过账，再记一次就是
 // 重复计入；还在跑的任务不可能在任何地方记过账，留到终态时照常记一次。
 func (s *threeDTaskStore) adopt(id, uid, realm, model string, charged bool) {
+	s.adoptFor(id, uid, realm, model, charged, "")
+}
+
+// adoptFor 收养并记录归属调用方（探测命中走这条）。
+func (s *threeDTaskStore) adoptFor(id, uid, realm, model string, charged bool, caller string) {
 	if s == nil || id == "" || uid == "" {
 		return
 	}
@@ -103,7 +116,21 @@ func (s *threeDTaskStore) adopt(id, uid, realm, model string, charged bool) {
 	if _, ok := s.m[id]; ok {
 		return
 	}
-	s.m[id] = &threeDTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Charged: charged}
+	s.m[id] = &threeDTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Charged: charged, Caller: caller}
+}
+
+// ownedBy 该任务是否属于这个调用方（空 Caller = 公共，兼容旧条目）。
+func (s *threeDTaskStore) ownedBy(id, caller string) bool {
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o := s.m[id]
+	if o == nil || o.Caller == "" || caller == "" {
+		return true
+	}
+	return o.Caller == caller
 }
 
 func (s *threeDTaskStore) get(id string) (threeDTaskOwner, bool) {
@@ -323,7 +350,7 @@ func (h *Handler) threeDGenerations(w http.ResponseWriter, r *http.Request) {
 		if state.Status == "" {
 			state.Status = "SUBMITTED"
 		}
-		h.threeDLedger.put(state.JobID, a.UID, "cn", model, state)
+		h.threeDLedger.putFor(state.JobID, a.UID, "cn", model, h.callerPrint(r), state)
 		log.Printf("3d %s: 任务已提交 job=%s", logfmt.Label(a.UID, a.Nickname), state.JobID)
 		if !wait {
 			writeJSON(w, http.StatusOK, h.threeDPayload(state.JobID, state, model))
@@ -570,7 +597,14 @@ func (h *Handler) threeDTasks(w http.ResponseWriter, r *http.Request) {
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
 	}
 	defer st.done()
+	// 归属校验（审查 A6）：不是本调用方提交的任务 → 当作不存在（同一条 404/探测路径），
+	// 不区分「没有这个 job」与「不是你的 job」，不泄漏存在性。
+	caller := h.callerPrint(r)
 	owner, ok := h.threeDLedger.get(id)
+	if ok && !h.threeDLedger.ownedBy(id, caller) {
+		ok = false
+		owner = threeDTaskOwner{}
+	}
 	if !ok {
 		// 台账里没有（进程重启 / 超容量 / 别处提交）：有界探测自愈，与视频同一套机制。
 		h.pollUnknownThreeDTask(r.Context(), w, st, id)
@@ -710,8 +744,8 @@ func (h *Handler) recordThreeDUsage(st *chatStat, uid string, state upstream.Thr
 	}
 	st.credit, st.hasCredit = state.Credit, true
 	// tokens 传 0：3D 上游只回 credit、不回 token 数。pool 侧对 tokens=0 仍会下账
-		// （余额插值/保底/成本分），只是不更新每千 token 单价（审查 B2）。
-		h.cfg.Pool.NoteModelCost(uid, "hy-3d", state.Credit, 0)
+	// （余额插值/保底/成本分），只是不更新每千 token 单价（审查 B2）。
+	h.cfg.Pool.NoteModelCost(uid, "hy-3d", state.Credit, 0)
 	if h.cfg.Usage != nil {
 		h.cfg.Usage.Add(time.Now(), "cn", uid, "hy-3d", usage.Delta{
 			Credit: state.Credit, HasCredit: true,
