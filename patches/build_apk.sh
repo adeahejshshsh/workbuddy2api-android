@@ -283,7 +283,21 @@ python3 "$SCRIPT_DIR/zip_align.py" wb2api-unsigned.apk wb2api-aligned.apk
 mv -f wb2api-aligned.apk wb2api-unsigned.apk
 
 echo "== 6/6 签名 =="
+# 密钥优先级（审查 E1）：App 私有目录 > 工作区。
+# 工作区在 /sdcard（FUSE）上，`chmod 600` **不生效**，同机任何持存储权限的应用都能读；
+# 而 keystore + 口令凑齐就能签出「同签名」的恶意 APK 覆盖线上包 —— 用户侧看不出区别。
+# 私有目录（$PREFIX 在 app 沙箱内）才是 0600 真正生效的地方，与口令文件的既有约定一致。
 KS="$KS_TARGET"
+if [ -f "$PREFIX/etc/wb2api.keystore" ]; then
+  KS="$PREFIX/etc/wb2api.keystore"
+elif [ -f "$KS_TARGET" ]; then
+  echo "⚠ 签名密钥仍在共享存储：$KS_TARGET"
+  echo "   /sdcard 是 FUSE，chmod 不生效，同机应用可读；拿到它与口令即可签出同签名包覆盖线上版本。"
+  echo "   建议迁移（一次性）："
+  echo "     mkdir -p \"$PREFIX/etc\" && cp \"$KS_TARGET\" \"$PREFIX/etc/wb2api.keystore\""
+  echo "     chmod 600 \"$PREFIX/etc/wb2api.keystore\" && rm \"$KS_TARGET\""
+  echo "   迁移后本脚本自动优先用私有目录那份，口令同理（\$PREFIX/etc/wb2api.kspass）。"
+fi
 # 签名密钥**绝不自动生成**：keystore 被 .gitignore 与 push_github.sh 双重排除，换机 /
 # 误删 / 清工作区后它就是不存在的。自动生成的新密钥与线上包不同，装到已装旧版的手机
 # 上直接 INSTALL_FAILED_UPDATE_INCOMPATIBLE —— 只能卸载重装，面板配置、api_key、

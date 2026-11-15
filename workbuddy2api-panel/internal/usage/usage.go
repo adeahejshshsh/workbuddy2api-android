@@ -98,6 +98,9 @@ type Recorder struct {
 	// 「一直在重试但一直失败」这件事显形——否则它只活在日志里。
 	lastErr       string
 	failedFlushes int
+	// droppedNewBuckets 因桶数上限被拒的新键计数（审查 U6）：细分级被丢弃这件事要
+	// 显形，否则面板上只是"某个模型突然没了统计"，无从判断是被限流还是真没流量。
+	droppedNewBuckets int64
 
 	stopOnce    sync.Once
 	startedFlag atomic.Bool // Start 是否跑过（Stop 据此判断要不要等 done，bug B8）
@@ -203,6 +206,10 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	if model == "" {
 		model = "(unknown)"
 	}
+	// 写侧必须归一到本地时区（审查 U5）：读/折叠侧用 `time.ParseInLocation(..., time.Local)`
+	// 解释桶串，若调用方传的是 `time.Now().UTC()`，桶字符串就是 UTC 小时却被当本地小时
+	// 解析 —— 折叠到错误的日、窗口筛选整体偏移（差几小时就少算/多算几小时）。
+	now = now.In(time.Local)
 	scope := "h:" + now.Format(hourLayout)
 	// 键用**长度前缀**编码，不用裸分隔符（审查 A8）：model 是客户端可控字符串
 	// （网关对未登记模型名是透传的），带 `|` 的名字能拼出与另一账号/另一模型相同的桶键，
@@ -214,6 +221,14 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 
 	b := r.buckets[key]
 	if b == nil {
+		// 新键要有闸（审查 U6）：maxBuckets 此前只在 Rollup（30s ticker）里检查，
+		// 那 30 秒窗口内可以被灌进任意多新键（model 是客户端可控字符串，基数无上限），
+		// 单次爆发就能把内存推到 GB 级。这里满了就直接拒新键 —— 已有键照常累加，
+		// 丢的是「还没被观测过的新组合」的细分，聚合总数不受影响。
+		if len(r.buckets) >= maxBuckets {
+			r.droppedNewBuckets++
+			return // defer 负责解锁
+		}
 		b = &bucket{Scope: scope, Realm: realm, UID: uid, Model: model, Rate: d.ModelRate}
 		r.buckets[key] = b
 	}
@@ -227,7 +242,9 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	if d.HasCompletion {
 		b.CT += d.CompletionTokens
 	}
-	if d.HasTotal {
+	// total=0 但 pt/ct 非 0 时按 pt+ct 兜底（审查 U7）：上游偶尔给 `total_tokens: 0`，
+	// 此前 `HasTotal` 为真就直接加 0，总量列系统性少算，面板「总量」与 pt+ct 对不上。
+	if d.HasTotal && d.TotalTokens > 0 {
 		b.TT += d.TotalTokens
 	} else if d.HasPromptTokens || d.HasCompletion {
 		// 上游没给 total：用 pt+ct 兜底，保证总量口径连续。
@@ -369,13 +386,26 @@ func (r *Recorder) load() error {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return err
 	}
+	// 版本校验（审查 U8）：文件比本进程新时不要「按旧结构硬读」——那会静默产出错值，
+	// 而且第一次 flush 还会把它按旧格式写回、彻底毁掉新版数据。备份后从空表开始。
+	if f.Version > fileVersion {
+		bak := r.path + ".v" + strconv.Itoa(f.Version) + ".bak"
+		log.Printf("[usage] WARN: %s 是 v%d 格式（本进程只认 v%d），已备份到 %s 并从空表开始",
+			r.path, f.Version, fileVersion, bak)
+		if err := os.Rename(r.path, bak); err != nil {
+			log.Printf("[usage] WARN: 备份失败 %s: %v（继续按空表启动，原文件未改动）", bak, err)
+		}
+		return nil
+	}
 	// 加载上限（bug #12）：以前把文件里的桶全量恢复，不校验条数 —— 文件被写坏、
 	// 或被合入超大历史后，进程启动即吃满内存，而且第一次 flush 还会把它原样写回。
-	if len(f.Buckets) > 2*maxBuckets {
+	// 上限与运行时对齐（审查 U8）：此前是 2*maxBuckets，启动瞬间内存可达运行上限的
+	// 两倍，紧接着 Rollup 又要在锁内淘汰一半。
+	if len(f.Buckets) > maxBuckets {
 		log.Printf("[usage] WARN: %s 含 %d 个桶，超上限，按时间保留最新 %d 个",
-			r.path, len(f.Buckets), 2*maxBuckets)
+			r.path, len(f.Buckets), maxBuckets)
 		sort.Slice(f.Buckets, func(i, j int) bool { return bucketTimeKey(f.Buckets[i]) > bucketTimeKey(f.Buckets[j]) })
-		f.Buckets = f.Buckets[:2*maxBuckets]
+		f.Buckets = f.Buckets[:maxBuckets]
 	}
 	for i := range f.Buckets {
 		b := f.Buckets[i]

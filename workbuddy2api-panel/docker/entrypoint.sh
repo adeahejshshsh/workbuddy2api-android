@@ -46,18 +46,25 @@ PY
       fi
     fi
     # 写回失败（只读挂载等）时退回 env：至少能起来，但 key 会随重启变 —— 明确告警。
+    # 只打印前缀（审查 E3）：完整 key 打进 stdout 就会进 docker logs / CI 记录 /
+    # 日志采集系统，等于把凭据散播到所有能读日志的地方。运维要看完整值就去看
+    # config.json（或 docker exec cat），那里本来就有。
+    KEY_HINT="${KEY%"${KEY#??????}"}…（完整值见 /app/config.json）"
     if grep -q "\"api_key\"[[:space:]]*:[[:space:]]*\"$KEY\"" /app/config.json 2>/dev/null; then
-      echo "[entrypoint] config.json 里没有 api_key，已生成并写入：$KEY"
-      echo "[entrypoint] 记下来：客户端与面板都要用它（之后重启不会再变）"
+      echo "[entrypoint] config.json 里没有 api_key，已生成并写入：$KEY_HINT"
+      echo "[entrypoint] 客户端与面板都用它（之后重启不会再变）"
     else
       export WB2A_API_KEY="$KEY"
-      echo "[entrypoint] ⚠ config.json 不可写（只读挂载？），改用环境变量注入 api_key：$KEY"
+      echo "[entrypoint] ⚠ config.json 不可写（只读挂载？），改用环境变量注入 api_key：$KEY_HINT"
       echo "[entrypoint] ⚠ 这样每次重启都会换 key，请把 config.json 挂成可写或显式设 WB2A_API_KEY"
     fi
   fi
 fi
 
 if [ -z "${WB2A_LISTEN:-}" ]; then
+  # 容器内必须监听 0.0.0.0，否则 docker 的端口映射收不到流量（映射打进的是容器
+  # 网络命名空间，不是它的回环）。**对外暴露**由 docker-compose 的 ports 绑定决定
+  # —— 那里默认只绑宿主机 127.0.0.1（审查 E3），要开给局域网得显式改。
   WB2A_LISTEN="0.0.0.0:7863"
 fi
 # 用户显式提供了 WB2A_API_KEY 才 export（env 优先于文件，这是 applyEnv 的既有语义）

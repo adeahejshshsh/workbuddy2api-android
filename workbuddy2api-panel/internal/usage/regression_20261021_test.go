@@ -62,7 +62,9 @@ func TestLoadCapsBucketCountAndSkipsBadScope(t *testing.T) {
 	}
 
 	r := New(path)
-	if got, want := len(r.buckets), 2*maxBuckets; got != want {
+	// 加载上限已与运行时对齐为 maxBuckets（审查 U8）：此前是 2*maxBuckets，
+	// 启动瞬间内存可达运行上限的两倍，紧接着 Rollup 又要在锁内淘汰一半。
+	if got, want := len(r.buckets), maxBuckets; got != want {
 		t.Fatalf("加载后桶数 = %d，期望封顶在 %d（含脏数据被丢弃）", got, want)
 	}
 }

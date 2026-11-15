@@ -203,6 +203,12 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		avail[u] = true
 	}
 
+	// bound 快照在**读锁**下构建（审查 S1）：此前这段遍历写在写锁里，表越大单次持锁
+	// 越久，所有快路径的 RLock 都被排队 —— 新会话风暴时全站吞吐崩塌（注释当时只把
+	// pool 的锁移出，漏了自身这层 O(N) 扫描）。读锁可与快路径并发；快照只是启发式
+	// （用来挑「还没被占用的号」），略旧几微秒无妨。
+	bound := r.snapshotBound(now)
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -222,17 +228,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	}
 
 	// 双段策略：优先"空闲账号"（未被任何会话绑定的可用号），其次全池。
-	bound := map[string]bool{}
-	for _, v := range r.entries {
-		// 过期绑定不算占用（bug 9）：过期条目要等 gcOnce（默认 5 分钟）或再次访问
-		// 同一 key 才清，期间它把 uid 一直钉成「非空闲」，idle 集合被低估，
-		// 第二段「全池哈希」被迫提前生效 —— TTL 配大、号少时，新会话总是撞在
-		// 同一批"看起来都被占着"的号上。读路径只判断不删除，清理仍交给 gcOnce。
-		if expired(v, now, r.cfg.TTL) {
-			continue
-		}
-		bound[v.uid] = true
-	}
+	// bound 已在上面的读锁里构建好（审查 S1）；过期绑定不计入占用（bug 9）。
 	var idle []string
 	for _, u := range uids {
 		if !bound[u] {
@@ -253,6 +249,24 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	}
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
 	return uid, true
+}
+
+// snapshotBound 在读锁下复制一份「当前被占用」的 uid 集合（审查 S1）。
+// 过期绑定不算占用（bug 9）：过期条目要等 gcOnce（默认 5 分钟）或再次访问同一 key
+// 才清，期间它把 uid 一直钉成「非空闲」，idle 集合被低估，第二段「全池哈希」被迫
+// 提前生效 —— TTL 配大、号少时，新会话总是撞在同一批"看起来都被占着"的号上。
+// 读路径只判断不删除，清理仍交给 gcOnce。
+func (r *Router) snapshotBound(now time.Time) map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	bound := make(map[string]bool, len(r.entries))
+	for _, v := range r.entries {
+		if expired(v, now, r.cfg.TTL) {
+			continue
+		}
+		bound[v.uid] = true
+	}
+	return bound
 }
 
 // minTouchInterval 快路径滚动 lastActive 的最小间隔（滑动续期节流）。

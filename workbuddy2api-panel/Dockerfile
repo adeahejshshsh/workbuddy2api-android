@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.23-alpine AS build
+# 基础镜像必须满足 go.mod 的 `go 1.24`（审查 E2）：Go 1.21+ 会强制最低版本，
+# 用 1.23 构建直接报 "go.mod requires go >= 1.24"。此前是 1.23，镜像链实际不可用。
+FROM golang:1.24-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -16,7 +18,8 @@ RUN VER="${APP_VERSION:-$(cat VERSION 2>/dev/null || git describe --tags --abbre
  && LDF="-s -w -X main.appVersion=$VER" \
  && echo "构建版本: $VER" \
  && CGO_ENABLED=0 go build -trimpath -ldflags="$LDF" -o /out/wb2api ./cmd/server \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
+ # 注：本仓没有 cmd/signin（上游有，这里没搬），此前这行让 `docker build` 必然失败
+ # （审查 E2）。签到改由 /panel/api 与调度器驱动，不需要独立二进制。
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/trial ./cmd/trial
@@ -31,7 +34,8 @@ WORKDIR /app
 # 脚本置入 + 去 CRLF（Windows 检出可能性）在切到 app 之前以 root 完成——
 # app 对 root 所有文件无写权限，sed -i 需要写权限。
 COPY --from=build /out/wb2api /app/wb2api
-COPY --from=build /out/signin_bin /app/signin_bin
+# 本仓没有 signin_bin（审查 E2）：上游那个二进制依赖 cmd/signin，这里没搬。
+# 少这一行不会报错，但留着会让 build 在 COPY 阶段直接失败（找不到 /out/signin_bin）。
 COPY --from=build /out/login /app/login
 COPY --from=build /out/credit /app/credit
 COPY --from=build /out/trial /app/trial
