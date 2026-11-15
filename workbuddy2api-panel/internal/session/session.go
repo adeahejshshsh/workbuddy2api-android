@@ -392,6 +392,25 @@ func hashIndex(key string, n int) int {
 // 此闸，只发 user_id 的请求会借内容哈希重新获得粘性，使该契约在 fallback 路径失效
 // （上游 #169 同款回归修正）。这类客户端回落加权轮换。
 func ExtractKey(body []byte) string {
+	return ExtractKeyScoped(body, "")
+}
+
+// ExtractKeyScoped 与 ExtractKey 相同，但把**显式会话键**也按调用方命名空间隔离
+// （审查 A5）：`conversation_id` / `conversationId` / `prompt_cache_key` 此前原值直接当
+// 全局键，多租户/转售部署下任一客户端复用他人的 id 就能把受害者的会话钉到自己选的账号，
+// 或者抢占键让受害者被钉到攻击者账号上；prompt cache 槽也会互相覆盖。
+//
+// caller 为空 = 不隔离（单租户/未配网关 key 的部署保持既有行为）。
+func ExtractKeyScoped(body []byte, caller string) string {
+	k := extractRawKey(body)
+	if k == "" || caller == "" {
+		return k
+	}
+	return caller + "\x00" + k
+}
+
+// extractRawKey 原有的取值逻辑（不动优先级）。
+func extractRawKey(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}

@@ -1415,7 +1415,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
-	sessKey := session.ExtractKey(body)
+	// 会话键按调用方隔离（审查 A5）：显式 conversation_id / prompt_cache_key 也带命名空间，
+	// 否则任一客户端复用他人的 id 即可把受害者会话钉到自己选的账号。未配 key 的部署
+	// （无租户边界）保持原值。
+	sessKey := session.ExtractKeyScoped(body, h.callerPrint(r))
 	// 降级门的隔离键（bug 4）：优先会话键；客户端不带会话头时退化成
 	// 「UA + 模型」的客户端指纹 —— 一个客户端的 system 指纹误报不该让全站降智。
 	degradeKey := sessKey
