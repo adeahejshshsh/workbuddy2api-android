@@ -69,6 +69,9 @@ type videoTaskOwner struct {
 	Realm   string
 	Model   string
 	Created time.Time
+	// Caller 提交方的调用方指纹（见 taskowner.go）：非空时只允许同一调用方查询，
+	// 否则 task_id 泄漏就等于产物直链泄漏（审查 A6）。
+	Caller string
 	// Charged 已记账标记：轮询到 completed 时按 usage.credit 记一次，重复查询不再记。
 	// 收养来的条目也用它：收养时任务已到终态就视为已记账（见 adopt）。
 	Charged bool
@@ -111,6 +114,7 @@ func newVideoTaskStore() *videoTaskStore {
 }
 
 func (s *videoTaskStore) put(id, uid, realm, model string) {
+	s.putFor(id, uid, realm, model, "")
 	if s == nil || id == "" {
 		return
 	}
@@ -138,6 +142,11 @@ func (s *videoTaskStore) get(id string) (videoTaskOwner, bool) {
 // charged 传「收养时任务是否已到终态」：已完成的任务多半在重启前被查过、记过账，再记一次就是
 // 重复计入；还在跑的任务不可能在任何地方记过账，留到出片时照常记一次。
 func (s *videoTaskStore) adopt(id, uid, realm, model string, charged bool) {
+	s.adoptFor(id, uid, realm, model, charged, "")
+}
+
+// adoptFor 收养并记录归属调用方（探测命中走这条）。
+func (s *videoTaskStore) adoptFor(id, uid, realm, model string, charged bool, caller string) {
 	if s == nil || id == "" || uid == "" {
 		return
 	}
@@ -146,7 +155,32 @@ func (s *videoTaskStore) adopt(id, uid, realm, model string, charged bool) {
 	if _, ok := s.m[id]; ok {
 		return
 	}
-	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Charged: charged}
+	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Charged: charged, Caller: caller}
+}
+
+// putFor 记录归属调用方（caller 为空 = 不校验）。
+func (s *videoTaskStore) putFor(id, uid, realm, model, caller string) {
+	if s == nil || id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Caller: caller}
+	s.gcLocked()
+}
+
+// ownedBy 该任务是否属于这个调用方（条目没有记录调用方时视为「公共」，兼容旧台账）。
+func (s *videoTaskStore) ownedBy(id, caller string) bool {
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o := s.m[id]
+	if o == nil || o.Caller == "" || caller == "" {
+		return true
+	}
+	return o.Caller == caller
 }
 
 // claimCharge 尝试把任务标成「已记账」。返回 true 表示本次调用赢得了记账权
@@ -526,7 +560,7 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		st.status, st.outcome = http.StatusOK, "success"
-		h.videoLedger.put(taskID, a.UID, realm, bare)
+		h.videoLedger.putFor(taskID, a.UID, realm, bare, h.callerPrint(r))
 		seed := videoTaskStateFromSubmit(taskStatus)
 		if seed.Status == "" {
 			seed.Status = "queued"
@@ -939,14 +973,21 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 	}
 	defer st.done()
 
+	// 归属校验（审查 A6）：台账命中但提交方不是当前调用方 → 当作**不存在**处理，
+	// 走同一条 404/探测路径（不区分「没这个任务」与「不是你的任务」，不泄漏存在性）。
+	caller := h.callerPrint(r)
 	owner, known := h.videoLedger.get(taskID)
+	if known && !h.videoLedger.ownedBy(taskID, caller) {
+		known = false
+		owner = videoTaskOwner{}
+	}
 	if !known {
 		if opt.noProbe {
 			st.status, st.outcome = http.StatusNotFound, "http_error"
 			writeVideoNotFound(w, taskID, videoNotFoundHint)
 			return
 		}
-		h.pollUnknownVideoTask(w, st, taskID)
+		h.pollUnknownVideoTask(w, st, taskID, caller)
 		return
 	}
 	realm := owner.Realm
