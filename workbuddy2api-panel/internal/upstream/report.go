@@ -12,9 +12,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -102,7 +102,9 @@ func (c *Client) billingMeterRawCtx(ctx context.Context, a *auth.Auth, paths []s
 		// 仅 404 换路径（路径不存在才值得 fallback）；其他错误直接返回。
 		var ue *Error
 		if !errors.As(err, &ue) || ue.Kind != ErrNotFound || i == len(paths)-1 {
-			return env, raw, err
+			// 失败时返回**零值信封**（审查 W4-U2-028）：把半截 env 交给上层，调用方若先看
+			// env.Data 就会把错误体当结果用，静默产出错值。raw 保留给错误分类/日志。
+			return apiEnvelope{}, raw, err
 		}
 	}
 	return apiEnvelope{}, lastRaw, lastErr

@@ -8,6 +8,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"net/http"
 
@@ -23,7 +24,11 @@ func (c *Client) ClaimGift(a *auth.Auth) (int64, error) {
 	var resp struct {
 		Credit int64 `json:"credit"`
 	}
-	_ = json.Unmarshal(data, &resp)
+	// 解析失败要**报错**（审查 W4-U2-101）：此前忽略解析结果、返回「0 积分 + nil」，
+	// 与「活动不存在、没领到」完全无法区分，签到链会把上游改字段/回 HTML 当成正常无事发生。
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("claim parse: %w (body: %s)", err, truncate(string(data), 120))
+	}
 	return resp.Credit, nil
 }
 
@@ -36,7 +41,11 @@ func (c *Client) ClaimCompensation(a *auth.Auth) (int64, error) {
 	var resp struct {
 		Credit int64 `json:"credit"`
 	}
-	_ = json.Unmarshal(data, &resp)
+	// 解析失败要**报错**（审查 W4-U2-101）：此前忽略解析结果、返回「0 积分 + nil」，
+	// 与「活动不存在、没领到」完全无法区分，签到链会把上游改字段/回 HTML 当成正常无事发生。
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("claim parse: %w (body: %s)", err, truncate(string(data), 120))
+	}
 	return resp.Credit, nil
 }
 

@@ -27,7 +27,13 @@ const schoolBase = "/portal/activity/school"
 func (c *Client) schoolJSON(a *auth.Auth, method, path string, body map[string]any, out any) error {
 	var raw []byte
 	if body != nil {
-		raw, _ = json.Marshal(body)
+		// 序列化失败必须返回（审查 W4-U2-084）：此前忽略 err 会发出空 body，
+		// 上游回一句语义模糊的 400，排查方向被彻底误导。
+		b, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("school request marshal: %w", err)
+		}
+		raw = b
 	}
 	req, err := http.NewRequest(method, c.billingBase(a)+schoolBase+path, bytes.NewReader(raw))
 	if err != nil {

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1231,6 +1232,15 @@ func clipText(s string, n int) string {
 func numberToInt(v any) (int, bool) {
 	switch n := v.(type) {
 	case float64:
+		// NaN ±Inf 转 int 在 Go 里是未定义行为（实现相关的大负数），会把「非法参数」
+		// 变成「合法但荒谬的数值」透传给上游（审查 P2 numberToInt 无校验）。
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return 0, false
+		}
+		// 超出 int 范围也拒（不同平台 int 宽度不同，超界即无意义）。
+		if n > math.MaxInt32 || n < math.MinInt32 {
+			return 0, false
+		}
 		return int(n), true
 	case int:
 		return n, true
