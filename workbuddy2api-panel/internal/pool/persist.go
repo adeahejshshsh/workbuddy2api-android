@@ -96,17 +96,9 @@ func (p *Pool) startFlusher() {
 		for {
 			select {
 			case <-t.C:
-				p.mu.Lock()
-				// 失败必须回置 dirty（bug #1）：此前先清脏标记再落盘，一次瞬时失败
-				// （磁盘满/rename 跨设备/权限）之后要等到**下一次状态变更**才会重试，
-				// 而 APK 场景进程随时会被系统杀掉 —— 冷却截止、熔断计数、成本账本
-				// 就永久丢了。usage.go 早就按这个范式修过，pool 侧没对齐。
-				if p.dirty.Swap(false) {
-					if err := p.saveLocked(); err != nil {
-						p.dirty.Store(true)
-					}
-				}
-				p.mu.Unlock()
+				// 锁内只取快照，IO 在锁外（审查 C5-37）：失败时 flushNow 会把 dirty 放回去，
+				// 下一轮 tick / 退出前还会再试（bug #1 的语义不变）。
+				p.flushNow()
 			case <-stopCh:
 				return
 			}
@@ -115,15 +107,7 @@ func (p *Pool) startFlusher() {
 }
 
 // Flush 同步把内存状态落盘（幂等：无变更不写盘）。供进程退出前调用。
-func (p *Pool) Flush() {
-	p.mu.Lock()
-	if p.dirty.Swap(false) {
-		if err := p.saveLocked(); err != nil {
-			p.dirty.Store(true) // 失败回置：下次 tick / 退出前还会再试（bug #1）
-		}
-	}
-	p.mu.Unlock()
-}
+func (p *Pool) Flush() { p.flushNow() }
 
 // load 读取 state.json 到 p.byUID（文件不存在/损坏时静默从空状态开始）。
 func (p *Pool) load() {
@@ -338,15 +322,30 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 
 // saveLocked 落盘 state.json，返回失败原因（调用方据此回置 dirty 以便重试）。
 // 返回 nil 表示成功（或未配置 stateFp，视为无事可做）。
-func (p *Pool) saveLocked() error {
+// snapshotLocked 生成一份 state.json 字节（**只做内存操作**，不做任何磁盘 IO）。
+// 调用方必须已持有 p.mu；返回的字节可以安全地在锁外落盘。
+//
+// 为什么要拆开（审查 C5-37）：此前 saveLocked 在**写锁内**做四次 IO —— MkdirAll、
+// ReadFile(.bak 前置读)、ReplaceAtomic(.bak)、ReplaceAtomic(state.json)，每个都带
+// fsync。磁盘慢或 bind mount 时单次可达几十毫秒，期间整个账号池被堵死：选号、冷却、
+// 在途释放全部排队，表现为面板「偶发整秒卡顿」与请求尖刺。
+func (p *Pool) snapshotLocked() ([]byte, error) {
 	if p.stateFp == "" {
-		return nil
+		return nil, nil
 	}
 	sf := p.stateOverviewLocked()
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
-		p.notePersistFail(err)
-		return err
+		return nil, err
+	}
+	return raw, nil
+}
+
+// writeSnapshot 把快照字节落到 state.json（**不加 p.mu**：纯 IO）。
+// 失败时把脏标记放回去，下一轮 tick / 退出前还会再试（bug #1）。
+func (p *Pool) writeSnapshot(raw []byte) error {
+	if p.stateFp == "" || raw == nil {
+		return nil
 	}
 	if dir := filepath.Dir(p.stateFp); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
@@ -377,13 +376,49 @@ func (p *Pool) saveLocked() error {
 		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
 		p.persistFails = 0
 	}
-	// 同步镜像一份快照到 Redis（fire-and-forget），与本地 state.json 并存作恢复备份。
-	if p.store != nil {
-		snapRaw, err := json.Marshal(snapshot{stateFile: sf, SavedAt: time.Now()})
-		if err == nil {
-			p.store.SaveState(snapRaw)
-		}
+	return nil
+}
+
+// mirrorToStore 把快照镜像到 Redis（fire-and-forget，**不加 p.mu**）。
+// 与本地 state.json 并存作恢复备份；锁外做，避免 Redis 客户端抖动传导到账号池。
+func (p *Pool) mirrorToStore(sf stateFile) {
+	if p.store == nil {
+		return
 	}
+	raw, err := json.Marshal(snapshot{stateFile: sf, SavedAt: time.Now()})
+	if err != nil {
+		return
+	}
+	p.store.SaveState(raw)
+}
+
+// flushNow 周期性落盘入口（flusher / 退出前）：**只在有变更时**写。
+func (p *Pool) flushNow() {
+	if !p.dirty.Load() {
+		return
+	}
+	_ = p.flushNowErr()
+}
+
+// flushNowErr 无条件写一次（保留原 saveLocked 的语义：调用方要的是「现在就落盘」，
+// 例如面板删除账号、热重载剔除、以及直接调它的测试）。错误交给调用方。
+// 锁内只取快照，IO 全在锁外（审查 C5-37）。
+func (p *Pool) flushNowErr() error {
+	p.mu.Lock()
+	p.dirty.Store(false)
+	sf := p.stateOverviewLocked() // 与 raw 同一份口径（snapshotLocked 内部再取一次）
+	raw, err := p.snapshotLocked()
+	p.mu.Unlock()
+	if err != nil {
+		p.notePersistFail(err)
+		p.dirty.Store(true)
+		return err
+	}
+	if werr := p.writeSnapshot(raw); werr != nil {
+		p.dirty.Store(true)
+		return werr
+	}
+	p.mirrorToStore(sf)
 	return nil
 }
 

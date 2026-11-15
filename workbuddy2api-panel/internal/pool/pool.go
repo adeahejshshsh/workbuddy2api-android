@@ -515,14 +515,16 @@ func (p *Pool) Add(a *auth.Auth) {
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。
 // 剔除结果持久化回 state.json，避免已删账号在下次启动时被 load() 复活。
 func (p *Pool) SyncToDir(auths []*auth.Auth) {
+	// 手动解锁（不用 defer）：落盘必须在**锁外**做（审查 C5-37），否则热重载剔除账号时
+	// 的 fsync 会把选号一起堵住。所有提前 return 的路径自己解锁。
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	// 防「扫到 0 个账号 → 把整池剔光并立刻落盘」（review P0-4）：
 	// filepath.Glob 对不存在的目录**不报错**，只返回空列表，于是 auth_dir 配错
 	// 或 Docker 卷没挂上时，这里会把 credits/冷却/熔断计数/成本账本一次性清零，
 	// 而且 saveLocked 当场写进 state.json —— 重启也找不回来。
 	if len(auths) == 0 && len(p.byUID) > 0 {
 		log.Printf("WARN: [pool] auth 目录扫描到 0 个账号，但池内有 %d 个 —— 疑似 auth_dir 配错/卷未挂载，跳过剔除以免清空状态", len(p.byUID))
+		p.mu.Unlock()
 		return
 	}
 	seen := make(map[string]bool, len(auths))
@@ -537,9 +539,13 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 			changed = true
 		}
 	}
-	if changed {
-		p.saveLocked()
+	if !changed {
+		p.mu.Unlock()
+		return
 	}
+	p.dirty.Store(true)
+	p.mu.Unlock()
+	_ = p.flushNowErr() // 热重载要「返回即已落盘」，但 IO 在锁外（审查 C5-37）
 }
 
 // Remove 从池中移除账号并立即落盘（管理面板用）。返回被移除账号的凭证
@@ -547,14 +553,15 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 // 在途请求的 Release 对已删条目是 no-op，无需等待。
 func (p *Pool) Remove(uid string) *auth.Auth {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
+		p.mu.Unlock()
 		return nil
 	}
 	delete(p.byUID, uid)
 	p.dirty.Store(true)
-	p.saveLocked()
+	p.mu.Unlock()
+	p.flushNow() // 面板「删除即落盘」的语义保留，但 IO 在锁外（审查 C5-37）
 	return e.a
 }
 
@@ -576,7 +583,6 @@ func (p *Pool) RemoveMany(uids []string) []string {
 	}
 	if len(removed) > 0 {
 		p.dirty.Store(true)
-		p.saveLocked()
 	}
 	return removed
 }
@@ -623,7 +629,6 @@ const maxParked = 4096
 // 与 RemoveMany 的差别只在暂存：面板手动删除是「不要了」，热重载删除是「文件暂时不见了」。
 func (p *Pool) ParkMany(uids []string) []string {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	var removed []string
 	for _, uid := range uids {
 		e, ok := p.byUID[uid]
@@ -639,9 +644,13 @@ func (p *Pool) ParkMany(uids []string) []string {
 		}
 		removed = append(removed, uid)
 	}
-	if len(removed) > 0 && p.saveLocked() != nil {
-		p.dirty.Store(true)
+	if len(removed) == 0 {
+		p.mu.Unlock()
+		return removed
 	}
+	p.dirty.Store(true)
+	p.mu.Unlock()
+	_ = p.flushNowErr() // 「返回即已落盘」的语义保留，IO 在锁外（审查 C5-37）
 	return removed
 }
 
