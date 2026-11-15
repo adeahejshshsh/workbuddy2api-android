@@ -31,7 +31,18 @@ import (
 )
 
 // hourlyKeep 小时桶的保留时长；超出后折叠为日桶。
-const hourlyKeep = 90 * 24 * time.Hour
+//
+// 7 天而非 90 天（审查 U3）：此前小时桶留 90 天 = 2160 个小时/维度，而 maxBuckets
+// 固定 400k —— 只够约 185 个 (realm,uid,model,rate) 组合，20 账号 × 30 模型就已经
+// 1.3M。也就是说**正常规模下最旧小时桶一直在被静默丢弃**（只打一行 WARN，面板无提示），
+// 「长期保留」的承诺从第一天起就不成立。
+//
+// 现在分层：小时桶保 7 天（看尖峰够用），日桶保 90 天（长期趋势由它承担）。
+// 桶数从「维度 × 2160」降到「维度 × (168+90)」，400k 够约 1550 个组合。
+const hourlyKeep = 7 * 24 * time.Hour
+
+// dailyKeep 日桶保留时长（长期趋势）。超期日桶由 Rollup 删除。
+const dailyKeep = 90 * 24 * time.Hour
 
 // flushInterval 防抖落盘间隔。
 const flushInterval = 30 * time.Second
@@ -287,7 +298,11 @@ func (r *Recorder) Rollup(now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	type move struct{ from, to string }
+	// scope 单独带一份（审查 U3）：此前从 m.to 用 `strings.SplitN(m.to, "|", 2)[0]`
+	// 反解 scope，而 m.to 已改成 keyPart 长度前缀编码 —— 反解出来的 Scope 会带上
+	// `10:` 之类的前缀，不再以 "d:" 开头，聚合与窗口筛选全部认不出这个桶。
+	// 键里塞语义再反解本来就不该做。
+	type move struct{ from, to, scope string }
 	var moves []move
 	for k, b := range r.buckets {
 		if !strings.HasPrefix(b.Scope, "h:") {
@@ -298,7 +313,26 @@ func (r *Recorder) Rollup(now time.Time) {
 			continue
 		}
 		day := "d:" + ts.Format(dayLayout)
-		moves = append(moves, move{from: k, to: day + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate})
+		// 键编码必须与 Add 一致（审查 A8 的长度前缀）：此前日桶用裸 "|" 拼接，
+		// 与小时桶的 keyPart 编码不同 —— 两套键空间在同一个 map 里并存，带 "|" 的
+		// 模型名仍然能造出撞键。
+		moves = append(moves, move{
+			from:  k,
+			to:    keyPart(day) + keyPart(b.Realm) + keyPart(b.UID) + keyPart(b.Model) + keyPart(b.Rate),
+			scope: day,
+		})
+	}
+	// 日桶超期清理（审查 U3）：分层保留的长期那一半也必须过期，否则「小时桶缩短」
+	// 只是把无界增长从小时挪到天。
+	dayCutoff := now.Add(-dailyKeep)
+	for k, b := range r.buckets {
+		if !strings.HasPrefix(b.Scope, "d:") {
+			continue
+		}
+		if ts, err := time.ParseInLocation(dayLayout, strings.TrimPrefix(b.Scope, "d:"), time.Local); err == nil && ts.Before(dayCutoff) {
+			delete(r.buckets, k)
+			r.dirty = true
+		}
 	}
 	for _, m := range moves {
 		src := r.buckets[m.from]
@@ -308,7 +342,7 @@ func (r *Recorder) Rollup(now time.Time) {
 		dst := r.buckets[m.to]
 		if dst == nil {
 			cp := *src
-			cp.Scope = strings.SplitN(m.to, "|", 2)[0]
+			cp.Scope = m.scope
 			dst = &cp
 			r.buckets[m.to] = dst
 		} else {

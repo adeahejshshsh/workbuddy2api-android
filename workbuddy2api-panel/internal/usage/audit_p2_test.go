@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,5 +90,50 @@ func TestLoadRejectsNewerFileVersion(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".v" + strconv.Itoa(fileVersion+1) + ".bak"); err != nil {
 		t.Fatalf("应留下备份文件：%v", err)
+	}
+}
+
+// 分层保留（审查 U3）：小时桶 7 天折叠成日桶，日桶再保留 90 天。
+// 此前小时桶留 90 天 = 2160 个小时/维度，而 maxBuckets 只有 400k ——
+// 正常规模下最旧小时桶一直在被静默丢弃。
+func TestRollupFoldsHoursAndExpiresDays(t *testing.T) {
+	r := New("")
+	now := time.Now().In(time.Local)
+
+	// 8 天前的小时桶：应被折叠成日桶。
+	old := now.Add(-8 * 24 * time.Hour)
+	r.Add(old, "cn", "u1", "m1", Delta{PromptTokens: 10, HasPromptTokens: true}, true)
+	// 100 天前的日桶：应被删除。
+	staleDay := "d:" + now.Add(-100*24*time.Hour).Format(dayLayout)
+	r.mu.Lock()
+	r.buckets[keyPart(staleDay)+keyPart("cn")+keyPart("u1")+keyPart("m1")+keyPart("")] = &bucket{
+		Scope: staleDay, Realm: "cn", UID: "u1", Model: "m1", Req: 1,
+	}
+	r.mu.Unlock()
+
+	r.Rollup(now)
+
+	r.mu.Lock()
+	var hasDay, hasStale, hasHour bool
+	for _, b := range r.buckets {
+		switch {
+		case b.Scope == staleDay:
+			hasStale = true
+		case strings.HasPrefix(b.Scope, "d:") && b.Scope != staleDay:
+			hasDay = true
+		case strings.HasPrefix(b.Scope, "h:"):
+			hasHour = true
+		}
+	}
+	r.mu.Unlock()
+
+	if hasHour {
+		t.Fatal("8 天前的小时桶应已折叠（hourlyKeep 是 7 天）")
+	}
+	if !hasDay {
+		t.Fatal("折叠后应留下日桶")
+	}
+	if hasStale {
+		t.Fatal("100 天前的日桶应已删除（dailyKeep 是 90 天）")
 	}
 }
