@@ -101,7 +101,10 @@ type Scheduler struct {
 	mu sync.Mutex
 	// taskLocks 每个任务族一把锁（bug P0-3）：同一族不允许两轮并发。
 	// runBatch 与面板手动入口共用，key 见 Task* 常量。
-	taskLocks  sync.Map // key: string → *sync.Mutex
+	taskLocks sync.Map // key: string → *sync.Mutex
+	// family 账号级 × 任务族 的互斥（审查 E4）：族级 taskLocks 挡不住「手动入口 vs 排程」
+	// 对同一个号的并发，见 familylock.go。
+	family     familyLocks
 	adoptTried map[string]string
 
 	// stampMu 串行化补跑标记文件的读写（见 runstamps.go）。
@@ -766,6 +769,15 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
+		// 账号级摊开（issue #45 方案 A）：等本号在窗口内的偏移时刻再动手；
+		// 没配摊开窗口时回落到签到族的固定间隔（见 accountPace）。
+		//
+		// **必须放在国际版分支之前**（审查 E4）：此前 global 号在这里 `continue`，
+		// 完全跳过下面的 accountPace —— 一个池子里只要国际号占多数，它们就会在同一秒
+		// 连发，正是 checkinAccountDelay 要防的 WAF 频控形态。
+		if !s.accountPace(ctx, plan, st.UID, checkinAccountDelay) {
+			return // 停机/取消：不再把剩余账号的等待全睡完
+		}
 		// 国际版签到：**不是**「无签到体系」—— checkin-activity-status 与
 		// daily-checkin 两个端点在国际域都存在（2026-10-29 复验：前者 200，后者在
 		// 活动未开启时 400 code=10001），国际客户端源码里也有 checkinStatus /
@@ -780,11 +792,6 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 		// 400 code 10001「企业账号不支持该操作」。跳过签到，但**不 continue**——
 		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
 		// credit_floor 判定与面板额度展示的唯一数据源）。
-		// 账号级摊开（issue #45 方案 A）：等本号在窗口内的偏移时刻再动手；
-		// 没配摊开窗口时回落到签到族的固定间隔（见 accountPace）。
-		if !s.accountPace(ctx, plan, st.UID, checkinAccountDelay) {
-			return // 停机/取消：不再把剩余账号的等待全睡完
-		}
 		if a.SupportsPersonalEndpoints() {
 			done, err := s.checkinOne(ctx, a, st.UID)
 			// 瞬时失败（上游 500 + 「请稍后重试」）收进补签队列：2s/4s 的内联重试
@@ -998,7 +1005,14 @@ func (s *Scheduler) runKeepalive(ctx context.Context, spread, selective bool) {
 		if !s.accountPace(ctx, plan, st.UID, keepaliveAccountDelay) {
 			return // 停机/取消：立刻退出
 		}
-		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+		// 账号级族锁（审查 E4）：余额 401 的求证刷新也抢这一把（见 balance_401.go），
+		// 两条路径并发轮换同一个 RT 会让后到的那个拿着已作废的 RT 去换 → 健康号被判死。
+		if !s.TryBeginAccountTask(st.UID, TaskKeepalive) {
+			continue // 该号正在别处刷新：本轮让位
+		}
+		err := s.cfg.Upstream.RefreshToken(a)
+		s.EndAccountTask(st.UID, TaskKeepalive)
+		if err != nil {
 			var ue *upstream.Error
 			// refresh token 失效 ≠ 账号不可用：AT 还没过期时 chat 仍正常（issue #83）。
 			// 这种号既不计 session dead（连续 3 次保活就会禁用掉健康号），也不打 WARN——

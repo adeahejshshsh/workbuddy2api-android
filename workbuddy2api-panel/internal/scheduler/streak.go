@@ -53,7 +53,13 @@ func (s *Scheduler) RunStreakBonusNowCtx(ctx context.Context) {
 			}
 		}
 		first = false
+		// 账号级族锁（审查 E4）：手动入口与排程签到末尾的这次调用会撞车，
+		// 撞上就是同一档位重复兑换、同一批 chances 重复抽。
+		if !s.TryBeginAccountTask(st.UID, TaskActivity) {
+			continue
+		}
 		s.streakBonusAccount(a)
+		s.EndAccountTask(st.UID, TaskActivity)
 	}
 }
 

@@ -159,6 +159,12 @@ func (s *Scheduler) runWindowProbes(ctx context.Context, due []pool.ModelWindow)
 // probeWindow 处理单个窗口，返回是否真的发出了上游请求。
 // 每条路径都会删记录或把到点时刻推后，循环不会空转。
 func (s *Scheduler) probeWindow(ctx context.Context, w pool.ModelWindow) bool {
+	// 账号级族锁（审查 E4）：后台循环与面板「立即探针」会同时打同一个窗口，
+	// 而每次探针都是**真实计费**的上游请求。
+	if !s.TryBeginAccountTask(w.UID, TaskWindowProbe) {
+		return false
+	}
+	defer s.EndAccountTask(w.UID, TaskWindowProbe)
 	p := s.cfg.Pool
 	if why := p.WindowProbeBlocked(w.UID, w.Model); why != "" {
 		// 不发：记录留着只会每轮都被取出来。真实请求照常会开窗，所以直接删。

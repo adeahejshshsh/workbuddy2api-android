@@ -107,7 +107,14 @@ func (s *Scheduler) checkinRetryLoop(ctx context.Context, pending []string) {
 			if st, ok := s.cfg.Pool.Status(uid); ok && st.Disabled && !s.includeDisabledInTasks() {
 				continue
 			}
+			// 账号级族锁（审查 E4）：此前补签不抢 TaskCheckin，与 21:00 那一轮是
+			// check-then-act —— 两边都看到「今天没签」，然后各签一次。
+			if !s.TryBeginAccountTask(uid, TaskCheckin) {
+				still = append(still, uid) // 该号正在别的路径签：下一轮再看
+				continue
+			}
 			done, err := s.checkinOne(ctx, a, uid)
+			s.EndAccountTask(uid, TaskCheckin)
 			switch {
 			case done:
 				log.Printf("[checkin] 补签成功 %s（第 %d 轮 / 共 %d 轮）",
