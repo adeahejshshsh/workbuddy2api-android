@@ -10,6 +10,7 @@ package upstream
 // 4 轮请求 prompt_tokens 958 → 38。
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -65,20 +66,37 @@ func TrimRounds(body []byte, keep int) []byte {
 	if !ok {
 		return body
 	}
+	// 审查 W4-U1-34 / F-07（P2）：**必须 UseNumber**。
+	//
+	// 缺陷：json.Unmarshal 把 messages 里所有数字落成 float64，裁剪后重新编码时
+	// 工具参数里的 >2^53 整数（雪花 ID、微秒时间戳）被改写成
+	// `1.2345678901234568e+15` —— 上游/下游 ID 对不上，且与 payload.go BUG-2
+	// 刻意用 UseNumber 保住原文的纪律直接冲突（TrimRounds 在 client.go 里
+	// **先于** prepareBodyOptFull 执行，主管线救不回来）。
 	var messages []any
-	if err := json.Unmarshal(rawMsgs, &messages); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(rawMsgs))
+	dec.UseNumber()
+	if derr := dec.Decode(&messages); derr != nil {
 		return body
 	}
 	trimmed := trimMessages(messages, keep)
 	if len(trimmed) == len(messages) {
 		return body // 没裁就别重编码（保持逐字节一致）
 	}
-	enc, err := json.Marshal(trimmed)
+	// 审查 W4-U1-33（P2）：用 marshalNoEscape 而不是 json.Marshal —— 后者把
+	// `<`/`>`/`&` 转成 \u003c 等，开启 keep_recent_rounds 后出站 body 与客户端原文
+	// 成片不同，正是 payload.go 要避免的「指纹面」。
+	//
+	// 未改的剩余面（记录在案）：root 是 map[string]json.RawMessage，Marshal 会把
+	// 顶层键按字典序重排，丢掉客户端的键序。要修得引入「顶层值字节区间」扫描器，
+	// 改动面与收益不成比例（JSON 对象本就无序，上游解码不看键序），且本功能
+	// 默认关闭（keep_recent_rounds=0）。这里只保证**值**逐字节不变。
+	enc, err := marshalNoEscape(trimmed)
 	if err != nil {
 		return body
 	}
 	root["messages"] = enc
-	out, err := json.Marshal(root)
+	out, err := marshalNoEscape(root)
 	if err != nil {
 		return body
 	}

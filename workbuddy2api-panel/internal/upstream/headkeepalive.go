@@ -58,7 +58,11 @@ func newHeadHeartbeat(br *bufio.Reader, every time.Duration) *headHeartbeat {
 			case <-h.quit:
 				return
 			case <-h.req:
-				line, err := br.ReadString('\n')
+				// 审查 W4-U1-02 / F-11：首帧窗口读的也是同一个 br，同样必须有行
+				// 长上限（否则「首帧前先发一条无换行超长行」就能绕过 StreamHint
+				// 主循环那处 cap）。超限错误经 readLine 原样回给调用方，走它的
+				// readErr 收尾路径。
+				line, err := readLineLimited(br, MaxSSELineBytes)
 				h.resp <- headLine{line, err} // 缓冲 1：调用方总会来取，不会卡住
 			}
 		}

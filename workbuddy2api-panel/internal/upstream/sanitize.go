@@ -87,8 +87,46 @@ const (
 )
 
 // containsFoldASCII 大小写不敏感的子串查找（只折 ASCII：探针本身就是小写 ASCII）。
+// 审查 W4-U2-017（P2）：零分配实现。
+//
+// 缺陷：原来是 strings.Contains(strings.ToLower(s), sub) —— 每调一次就为整串生成
+// 一份等长小写副本。hasFingerprint 对**每条消息**都会走这条路径（Contains 快路失败
+// 之后），2.73MB 级请求体每轮多分配一份等长字符串，消息多则 N 份，GC 压力与延迟
+// 随上下文线性放大 —— 与「普通请求本应零分配」的设计意图相反。
+// 现在逐字节比较、只对 ASCII 字母做折叠（needle 全是 ASCII 英文短语），零分配。
 func containsFoldASCII(s, sub string) bool {
-	return strings.Contains(strings.ToLower(s), sub)
+	n := len(sub)
+	if n == 0 {
+		return true
+	}
+	if len(s) < n {
+		return false
+	}
+	first := lowerASCII(sub[0])
+	for i := 0; i+n <= len(s); i++ {
+		if lowerASCII(s[i]) != first {
+			continue
+		}
+		matched := true
+		for j := 1; j < n; j++ {
+			if lowerASCII(s[i+j]) != lowerASCII(sub[j]) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+// lowerASCII 只折叠 ASCII 大写字母（非 ASCII 字节原样比较）。
+func lowerASCII(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
 }
 
 // sanitizeModelIdentityTagRe 去掉 <model_identity> 包裹本身（保留内部文本）。
@@ -276,9 +314,11 @@ func hasFingerprint(text string) bool {
 		return true
 	}
 	// 身份句式：品牌词表命不中（骨架相同、品牌已换），必须单独判。
-	low := strings.ToLower(text)
+	// 审查 W4-U2-017（P2）：这里原来无条件 `low := strings.ToLower(text)` 生成
+	// 整串小写副本，而动词表全是 ASCII 小写短语 —— 用零分配的 containsFoldASCII
+	// 就够了，不必为每条消息多分配一份等长字符串。
 	for _, v := range sanitizeIdentityVerbs {
-		if strings.Contains(low, v) {
+		if containsFoldASCII(text, v) {
 			return sanitizeIdentitySentenceRe.MatchString(text)
 		}
 	}
@@ -343,7 +383,15 @@ func sanitizeToolCalls(v any, brand bool) bool {
 		if !ok {
 			continue
 		}
-		if s := sanitizeTextWith(args, brand); s != args {
+		// 审查 W4-U2-016（P2）：arguments **不做身份类（品牌词）改写**。
+		//
+		// 缺陷：原来把 brand 原样传下去，于是品牌词替换也作用在 function.arguments
+		// 上 —— 那条规则往词中间插一个 U+200B 零宽空格。工具参数是**会被执行的
+		// 数据**：模型发起的写文件/发请求/正则里凭空多出不可见字符，落盘内容与预期
+		// 不一致、URL 与正则匹配失败、diff 里完全看不见，下游再清洗也还原不回来。
+		// 传 false 只保留「纯删除」类规则（header 段、裸键名），它们删掉的是必然
+		// 被上游拦的指纹，不会把合法值改成另一个合法值。
+		if s := sanitizeTextWith(args, false); s != args {
 			fn["arguments"] = s
 			changed = true
 		}

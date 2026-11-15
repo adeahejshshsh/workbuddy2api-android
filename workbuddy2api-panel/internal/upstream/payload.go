@@ -166,7 +166,15 @@ func translateMaxCompletionTokens(obj map[string]any) {
 	//   - 字符串（"1000"）→ 同样被删，而函数注释承诺"非数值别名不翻译、原样透传
 	//     由上游报 11101" —— 删掉之后连 11101 都报不出来。
 	// 现在：能翻成正整数就翻（小数四舍五入），翻不了就保留别名交给上游判定。
-	if _, explicit := obj["max_tokens"]; !explicit {
+	// 审查 W4-U1-13（P2）：守卫必须是「**值有效**」而不是「键存在」。
+	//
+	// 缺陷：`if _, explicit := obj["max_tokens"]; !explicit` 只看键在不在。
+	// 客户端发 `{"max_tokens":null,"max_completion_tokens":1000}` 时键存在 → 不翻译；
+	// 而收尾的删除守卫用的是 hasPositiveInt（值有效）→ null 不是有效值 → 别名也不删。
+	// 结果是 body 里同时带 null 的 max_tokens 和 1000 的别名，上游只认 max_tokens →
+	// 按默认上限截断或直接 11101，而客户端明明给了额度。
+	// 改成 !hasPositiveInt：null / 0 / 非数值一律视为「没给」，照常从别名翻译。
+	if !hasPositiveInt(obj["max_tokens"]) {
 		// json.Unmarshal 数字 → float64（整数去整后回写，避免 1.28e5 科学计数法/小数
 		// 尾巴进上游 body）；其他数值类型防御性兼容（int 家族——手构造 map 的调用方）。
 		switch v := alias.(type) {
@@ -458,7 +466,22 @@ func dropReasoningContentParts(obj map[string]any) {
 			kept = append(kept, rawPart)
 		}
 		if len(kept) == 0 {
-			if _, hasToolCalls := msg["tool_calls"]; !hasToolCalls {
+			// 审查 W4-U1-18（P2）：**「置空保留」只对 assistant 轮成立**。
+			//
+			// 缺陷：原来对所有角色一律 `msg["content"] = ""`。user 消息的 content
+			// 全被识别成 reasoning 片段时（responses→chat 转换的畸形历史、或客户端
+			// 把思考塞进 user 轮），出站就多一条**空 content 的 user 消息** ——
+			// 上游对空内容直接 11151/400，而日志里没有任何痕迹（原注释只讨论
+			// assistant 轮的交替关系，把 user 轮一起带进去了）。
+			// 空 user 轮本身不携带任何可用信息（片段全是思考），整条删掉比留空更安全：
+			// 留空是**确定**的 400，删掉最坏只是少一轮无信息量的历史。
+			role, _ := msg["role"].(string)
+			_, hasToolCalls := msg["tool_calls"]
+			if !hasToolCalls {
+				if role != "assistant" {
+					log.Printf("WARN: [upstream] %s 消息的 content 全是 reasoning 片段，已整条丢弃（留空 content 会 11151）", role)
+					continue
+				}
 				// 整条删掉会破坏 user/assistant 交替（报告 #6）：Codex 经
 				// responses→chat 转换后会产出「content 全是 reasoning 片段」的 assistant
 				// 轮，删掉它历史就少一轮，上游可能直接 400，而日志里毫无痕迹。

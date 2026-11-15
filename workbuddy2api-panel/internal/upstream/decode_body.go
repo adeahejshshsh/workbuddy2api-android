@@ -12,6 +12,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -51,7 +52,22 @@ func decodeBodyIfNeeded(resp *http.Response) *http.Response {
 		// 处理（原样交回调用方，让它按原文报错，而不是当成合法 JSON 去解析）。
 		raw, rerr := io.ReadAll(io.LimitReader(resp.Body, deflateMaxBytes+1))
 		_ = resp.Body.Close()
-		if rerr != nil || int64(len(raw)) > deflateMaxBytes {
+		// 审查 A1-05（P2，剩余面）：读失败/超限时**不能**原样 return resp。
+		// 此刻 resp.Body 已经被 Close 且半消费，调用方 io.ReadAll 会拿到 0 字节 + nil
+		// 错误，而 doJSONRaw 对空 body 的语义是「200 + 空体 = 成功」→ 一个解不开的
+		// deflate 响应被当成「成功但没数据」，错误被彻底吞掉（调用方拿到 nil env、
+		// nil err，只能靠上层 nil 检查兜，日志里没有任何线索）。
+		// 改成把 body 换成「读即报错」的 reader：错误沿调用方的 ReadAll 正常上抛，
+		// 归因也说得清（是解码层失败，不是上游给了坏 JSON）。
+		if rerr != nil {
+			resp.Body = readCloser{r: errReader{err: rerr}, c: io.NopCloser(nil)}
+			return resp
+		}
+		if int64(len(raw)) > deflateMaxBytes {
+			resp.Body = readCloser{
+				r: errReader{err: fmt.Errorf("deflate body exceeds %d bytes (%w)", deflateMaxBytes, ErrResponseTooLarge)},
+				c: io.NopCloser(nil),
+			}
 			return resp
 		}
 		if zr, err := zlib.NewReader(bytes.NewReader(raw)); err == nil {
@@ -81,3 +97,9 @@ type readCloser struct {
 
 func (rc readCloser) Read(p []byte) (int, error) { return rc.r.Read(p) }
 func (rc readCloser) Close() error               { return rc.c.Close() }
+
+// errReader 一个「读即失败」的 reader：把解码层的失败沿调用方的 ReadAll 上抛，
+// 而不是让调用方读到 0 字节 + nil error（那会被当成「200 + 空体 = 成功」）。
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }

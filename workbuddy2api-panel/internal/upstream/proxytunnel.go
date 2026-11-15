@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // outboundProxy 解析目标该走的代理。包级变量是为了让测试注入 —— 生产恒为
@@ -92,12 +93,39 @@ func proxyAddr(pu *url.URL) string {
 	return net.JoinHostPort(pu.Hostname(), port)
 }
 
+// proxyHandshakeTimeout 代理**握手阶段**的读超时（审查 F-09 / W4-U2-030）。
+//
+// 为什么必须有：DialContext 只对 TCP 建连负责（net.Dialer.Timeout），一旦连上代理，
+// 后面的读（https 代理的 TLS 握手、CONNECT 应答、SOCKS5 问候/认证/应答）全是裸阻塞读，
+// 既没有 conn deadline 也不看 ctx。代理接受 TCP 但永不回包时（半开、被中间设备静默
+// 丢包、代理进程卡死），dial 线程会一直挂在读上：ctx 取消不会中断它，只有上层
+// http.Client.Timeout 能兜，而 ChatHTTP 没有总超时 —— 于是占住一条连接 + 一个
+// goroutine + 一个上游在途槽位，直到进程重启。
+//
+// 10s 是握手阶段的合理上限（真实代理在本机/同机房都是毫秒级）。
+const proxyHandshakeTimeout = 10 * time.Second
+
+// armProxyHandshakeDeadline 给握手阶段装上读/写 deadline，返回「清 0」函数。
+// 取 min(now+proxyHandshakeTimeout, ctx 的 deadline)：调用方已有更紧的预算时不越权放宽。
+func armProxyHandshakeDeadline(ctx context.Context, conn net.Conn) func() {
+	dl := time.Now().Add(proxyHandshakeTimeout)
+	if cd, ok := ctx.Deadline(); ok && cd.Before(dl) {
+		dl = cd
+	}
+	_ = conn.SetDeadline(dl)
+	return func() { _ = conn.SetDeadline(time.Time{}) }
+}
+
 // dialHTTPConnect 经 HTTP(S) 代理建隧道：dial 代理 →（https 代理先握 TLS）→ CONNECT。
 func dialHTTPConnect(ctx context.Context, d *net.Dialer, pu *url.URL, target string) (net.Conn, error) {
 	conn, err := d.DialContext(ctx, "tcp", proxyAddr(pu))
 	if err != nil {
 		return nil, err
 	}
+	// 握手阶段必须有 deadline（审查 F-09 / W4-U2-030）：返回前清 0，
+	// 隧道建立之后的长连接不能被这 10s 误伤。
+	clearHandshakeDeadline := armProxyHandshakeDeadline(ctx, conn)
+	defer clearHandshakeDeadline()
 	if strings.EqualFold(pu.Scheme, "https") {
 		tc := tlsClientTo(conn, pu.Hostname())
 		if herr := tc.HandshakeContext(ctx); herr != nil {
@@ -156,6 +184,9 @@ func dialSOCKS5(ctx context.Context, d *net.Dialer, pu *url.URL, target string) 
 	if err != nil {
 		return nil, err
 	}
+	// 同 dialHTTPConnect：SOCKS5 的问候/认证/应答全是裸阻塞读（审查 F-09 / W4-U2-030）。
+	clearHandshakeDeadline := armProxyHandshakeDeadline(ctx, conn)
+	defer clearHandshakeDeadline()
 	fail := func(e error) (net.Conn, error) {
 		conn.Close()
 		return nil, e

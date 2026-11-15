@@ -399,9 +399,20 @@ func closeTruncatedJSON(raw string) (string, bool) {
 		// 结尾是裸反斜杠：补引号会改变转义语义，放弃。
 		return "", false
 	}
-	openedString := inStr
+	// 审查 W4-U2-002（P1）：截断落在**字符串内部**时不再补引号闭合。
+	//
+	// 旧实现是 `if inStr { s += "\"" }`，把 `{"url":"https://host/pa` 修成
+	// `{"url":"https://host/pa"}` —— 语法合法，语义却是**另一个值**。上层拿到的是
+	// 一份「合法 JSON」，无从区分「上游给的就是这个半截 URL」与「被截断了」，于是
+	// WebFetch 去访问半截地址、写文件工具写错路径、SQL/命令行少一半条件：静默产生
+	// 错误副作用，日志里只有一行 INFO。
+	//
+	// 正确取舍：字符串内截断 = **参数值不可知** → 放弃修复，让调用方按「无法修复的
+	// 残缺参数」处置（repairDeferredArgs 返回原文，上层终态仍是截断）。
+	// 容器边界上的截断（末尾是 } / ] / 已闭合的字符串值 "）仍然可修：那里缺的只是
+	// 闭合括号，每个值本身都是完整的。
 	if inStr {
-		s += `"`
+		return "", false
 	}
 	s = strings.TrimRight(s, " \t\r\n")
 	if strings.HasSuffix(s, ":") {
@@ -412,13 +423,13 @@ func closeTruncatedJSON(raw string) (string, bool) {
 		// 截断在值后的逗号：去掉尾逗号再闭括号。
 		s = strings.TrimRight(s[:len(s)-1], " \t\r\n")
 	}
-	if len(stack) == 0 && !openedString {
+	if len(stack) == 0 {
 		return "", false
 	}
 	// 裸数字、true/false/null 截断后也能被闭括号“修好”，但补括号会猜出另一个值：
 	// 例如 1 → 10、e → 1e10。这里只接受语法上已结束的对象、数组或字符串。
 	last := s[len(s)-1]
-	if !inStr && last != '}' && last != ']' && last != '"' {
+	if last != '}' && last != ']' && last != '"' {
 		return "", false
 	}
 	for i := len(stack) - 1; i >= 0; i-- {

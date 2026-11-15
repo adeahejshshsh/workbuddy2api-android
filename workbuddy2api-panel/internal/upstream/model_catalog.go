@@ -148,6 +148,32 @@ func (c *modelCatalog) put(model string, e ModelCapEntry) {
 	c.saveLocked()
 }
 
+// putMany 批量写入并**只落盘一次**（审查 W4-U2-047）。
+//
+// 为什么需要：put 每次都在持全局 mu 的情况下 MarshalIndent 整个 entries 并原子落盘，
+// 而 backfillMisses 对每个 miss 过的模型各调一次 put —— N 个模型 miss 就是 N 次
+// O(n) 序列化 + N 次磁盘写，全程持锁阻塞所有 /v1/models 的 get。磁盘慢时表现为
+// 整站模型列表卡顿（写放大）。批量入口把它们合并成一次落盘。
+func (c *modelCatalog) putMany(items map[string]ModelCapEntry) {
+	if len(items) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.initLocked()
+	changed := false
+	for m, e := range items {
+		if m == "" || !validCapEntry(e) {
+			continue
+		}
+		c.entries[m] = e
+		changed = true
+	}
+	if changed {
+		c.saveLocked()
+	}
+}
+
 // saveLocked 原子落盘（tmp + rename，pool state.json 同模式）。持锁调用。
 // path 为空 / 目录不可写 / 序列化失败 → 静默（内存缓存仍生效，下次进程重拉）。
 func (c *modelCatalog) saveLocked() {
@@ -250,15 +276,23 @@ func ContextWindowListingV4(model string, remote int64, client *http.Client) int
 	if e, ok := modelCatalogGet(model); ok {
 		return e.ContextLength // 第 3 级：model.json
 	}
+	// 审查 W4-U2-053（P2）：负缓存只用来**跳过 lookup**，绝不能短路文档拉取。
+	//
+	// 缺陷：原来整段都在 `if !negativeFresh` 里面 —— 首次拉取失败（或拉取之前就
+	// miss 过一次）之后，该模型 24h 内再也不会触发 ensureDocAsync，
+	// context_length 固定在 1M 兜底，即使 5min 冷却早已过去。面板上看不到任何
+	// 「降级中」信号，只能重启恢复。
+	// ensureDocAsync 自带「doc 已就绪」「冷却期内」「in-flight」三重短路，重复调用
+	// 只是一次 mutex 判读，代价可以忽略。
 	if !modelsDev.negativeFresh(model) {
 		// 第 4 级触发：先查进程内文档索引（拉过一次即常驻），命中直接入缓存
-		// 返回（不等待异步拉取）；未命中 → 记负缓存 + 异步拉取（本次先回 1M）。
+		// 返回（不等待异步拉取）；未命中 → 记负缓存（本次先回 1M）。
 		if e, ok := modelsDev.lookup(model); ok {
 			modelCatalogPut(model, e.Context, e.Output)
 			return e.Context
 		}
-		modelsDev.ensureDocAsync(client, "")
 	}
+	modelsDev.ensureDocAsync(client, "")
 	return DefaultContextWindow // 第 4 级兜底：1M（本次先回，拉到后下次命中）
 }
 
@@ -310,16 +344,31 @@ func (f *modelsDevFetcher) backfillMisses() {
 	if doc == nil {
 		return
 	}
+	// 审查 W4-U2-047（P2）：先攒成一批再落盘（原来是逐个 put → N 次全量序列化 +
+	// N 次持锁磁盘写）。doc 是**整体替换**语义（fetchDoc 只做 f.doc = doc，从不就地
+	// 修改），所以在锁外遍历它读值是安全的 —— 这也回答了 W4-U2-050 的疑问。
+	batch := make(map[string]ModelCapEntry, len(missed))
+	var hit []string
 	for _, m := range missed {
 		e, ok := doc[m]
 		if !ok {
 			continue // 仍查不到：负缓存 24h 生效，不写
 		}
-		modelCatalogPut(m, e.Context, e.Output)
-		// 回流成功：清除负缓存条目（该模型已有值，后续走第 3 级缓存，
-		// 不再进本清单）。
+		batch[m] = ModelCapEntry{
+			ContextLength:   e.Context,
+			MaxOutputTokens: e.Output,
+			FetchedAt:       time.Now().UTC().Format(time.RFC3339),
+			Source:          "modelsdev",
+		}
+		hit = append(hit, m)
+	}
+	catalogState.putMany(batch)
+	// 回流成功：清除负缓存条目（该模型已有值，后续走第 3 级缓存，不再进本清单）。
+	if len(hit) > 0 {
 		f.mu.Lock()
-		delete(f.negatives, m)
+		for _, m := range hit {
+			delete(f.negatives, m)
+		}
 		f.mu.Unlock()
 	}
 }
