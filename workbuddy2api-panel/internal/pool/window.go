@@ -172,11 +172,29 @@ func (p *Pool) RecordWindowProbe(uid, model string, resetAt time.Time, attempts 
 	}
 	w.Attempts = attempts
 	if len(result) > 200 {
-		result = result[:200]
+		// 按 rune 截断（审查 C5-65）：原先按**字节**切，中文/emoji 结果会被切成
+		// 半个 UTF-8 序列 —— 落盘与面板展示成 U+FFFD 乱码，运维看不清探针到底
+		// 返回了什么（这条字段存在的唯一意义就是给人看）。
+		result = truncateRunes(result, 200)
 	}
 	w.LastResult = result
 	p.dirty.Store(true)
 	return true
+}
+
+// truncateRunes 按 rune 截断到 max 个字符（审查 C5-65）。
+//
+// 按字节切会切断多字节 UTF-8 序列（中文/emoji），落盘与面板展示成 U+FFFD 乱码。
+// 快路径：字节数本身不超上限时 rune 数必然不超，直接返回，避免为长尾输入分配切片。
+func truncateRunes(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }
 
 // DropModelWindow 撤销一条窗口记录（探针成功、放弃、或账号已不在池中）。

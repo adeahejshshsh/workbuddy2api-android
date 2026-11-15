@@ -78,6 +78,9 @@ func TestHTTPAndHTTPSProxyAuthenticationAndCONNECT(t *testing.T) {
 			}
 			defer m.Close()
 			settings := DefaultSettings()
+			// 这条用例测的是传输层（隧道/握手），健康探测 URL 只是配置项；
+			// 内网/无效主机默认被 SSRF 校验拦下（审查 W2-C6-14），这里显式放行。
+			settings.AllowInternal = true
 			settings.URL = "http://health.invalid/"
 			if err := m.Configure(settings); err != nil {
 				t.Fatal(err)
@@ -214,6 +217,7 @@ func TestSOCKSAuthenticationAndDNSModes(t *testing.T) {
 				host = "remote-only.invalid"
 			}
 			settings := DefaultSettings()
+			settings.AllowInternal = true // 同上：测试目标是 127.0.0.1 的 httptest 服务
 			settings.URL = "https://" + net.JoinHostPort(host, targetURL.Port()) + "/"
 			if err := m.Configure(settings); err != nil {
 				t.Fatal(err)

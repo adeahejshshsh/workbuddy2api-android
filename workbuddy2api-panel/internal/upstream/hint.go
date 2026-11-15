@@ -111,6 +111,12 @@ func NoHealthyAccountHint() string { return noHealthyHint }
 // ctxFn 惰性求值：仅在实际撞到 error 帧才调用（正常流零开销，模型目录查询
 // 不会为每个成功请求触发）。
 func FrameHintFunc(ctxFn func() HintContext) func(string) string {
+	// ctxFn 为 nil 时补一个恒空实现（审查 A1-23）：调用方传 nil 表达的是「没有上下文
+	// 可给」，但此前是直接调用 → 一撞到 error 帧就 panic 在 SSE 错误帧路径上，
+	// 客户端拿到的是断流而不是错误帧（比没有 hint 糟糕得多）。
+	if ctxFn == nil {
+		ctxFn = func() HintContext { return HintContext{} }
+	}
 	return func(payload string) string {
 		if payload == "" || payload == "[DONE]" {
 			return ""

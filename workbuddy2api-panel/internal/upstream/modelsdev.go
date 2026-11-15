@@ -214,6 +214,15 @@ func (f *modelsDevFetcher) ensureDocAsync(client *http.Client, baseOverride stri
 // 测试疏漏——DefaultClient 无超时（挂起隐患）且会打真网（测试污染 + 不确定延迟），
 // 静默 WARN + 返回（与 fetch 失败同语义，降级 1M 兜底）让疏漏显式化。
 func (f *modelsDevFetcher) fetchDoc(client *http.Client, baseOverride string) {
+	// 注释一直声称「永不 panic 上抛」，但函数体里此前没有任何 recover（审查 W4-U2-055）：
+	// 这条 goroutine 只是**可选兜底**（拿不到就回落 1M 上下文窗口），它里面任何
+	// panic（自定义 RoundTripper、超大文档解析、nil deref）都会打死整个网关进程。
+	// 兜底路径不该有这种权限，加一层 recover 把它降级成一行 WARN。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("WARN: [upstream] models.dev fetch panic（已吞，回落 1M 兜底）: %v", r)
+		}
+	}()
 	if client == nil {
 		log.Printf("WARN: [upstream] models.dev fetch: nil client rejected (no DefaultClient fallback, silent fallback to 1M)")
 		return
@@ -247,6 +256,15 @@ func (f *modelsDevFetcher) fetchDoc(client *http.Client, baseOverride string) {
 	doc, err := parseModelsDevDoc(raw)
 	if err != nil {
 		log.Printf("WARN: [upstream] models.dev parse failed (silent fallback to 1M): %v", err)
+		return
+	}
+	// 空索引不能落库（审查 W4-U2-054）：`{"error":"..."}`（CDN 错误页）、被劫持返回
+	// `{}` 这类响应都能被 Unmarshal 成对象 → 得到一个**非 nil 的空 map**，而
+	// ensureDocAsync 的短路条件是 `f.doc != nil`，于是 models.dev 兜底在本进程内
+	// 彻底失效（只剩重启才恢复），冷却重试机制形同不存在。
+	// 只有真的解析出条目才认作「文档就绪」，否则按失败处理、保持 doc=nil 走冷却。
+	if len(doc) == 0 {
+		log.Printf("WARN: [upstream] models.dev 文档解析出 0 条模型（按失败处理，稍后冷却重试）")
 		return
 	}
 	f.mu.Lock()

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -89,8 +90,12 @@ func (c *Client) TravelClaim(a *auth.Auth, recordID int64) (int64, error) {
 		RewardCredit int64 `json:"reward_credit"`
 	}
 	if len(data) > 0 {
-		// 奖励字段缺失不视为失败：调用方按 0 记日志即可。
-		_ = json.Unmarshal(data, &resp)
+		// 解析失败要报（审查 W4-U2-101 同类）：奖励字段缺失是合法的（结构体解出来
+		// 就是 0），但**报文本身解不出**（HTML/改字段）必须区分开 —— 否则
+		// 「领到了 0 分」与「上游回了一坨非 JSON」在上层看起来一模一样。
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return 0, fmt.Errorf("travel claim parse: %w (body: %s)", err, truncate(string(data), 120))
+		}
 	}
 	return resp.RewardCredit, nil
 }
@@ -107,14 +112,21 @@ func (c *Client) BuddyInfo(a *auth.Auth) (*Buddy, error) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
-	// null / 缺字段 / 空对象都按无猫处理。
+	// null / 缺字段 / 空对象都按无猫处理（审查 W4-U2-090）：此前只判空串与 "null"，
+	// 而 `{}` 会被解成零值 Buddy 并返回**非 nil** —— 调用方按 `b != nil` 判「已有猫」，
+	// 于是上游回 `{}`（活动未开 / 字段改名）时会跳过领养逻辑，300 分永远领不到，
+	// 且没有任何错误信号。id 与 name 同时为空即视为「没有猫档案」。
 	trimmed := strings.TrimSpace(string(resp.Buddy))
-	if trimmed == "" || trimmed == "null" {
+	if trimmed == "" || trimmed == "null" || trimmed == "{}" {
 		return nil, nil
 	}
 	var b Buddy
 	if err := json.Unmarshal(resp.Buddy, &b); err != nil {
 		return nil, err
+	}
+	if b.ID == 0 && strings.TrimSpace(b.Name) == "" {
+		// 同上：字段存在但全为空值（`{"id":0,"name":""}`）等价于没有猫。
+		return nil, nil
 	}
 	return &b, nil
 }

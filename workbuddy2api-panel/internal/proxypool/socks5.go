@@ -46,7 +46,7 @@ const (
 
 // socks5Dialer 经指定 SOCKS5 代理建 TCP 隧道。
 type socks5Dialer struct {
-	proxyAddr string    // host:port
+	proxyAddr string // host:port
 	auth      *socksAuth
 	forward   *net.Dialer
 }
@@ -62,6 +62,10 @@ func newSocks5Dialer(proxyAddr string, auth *socksAuth, forward *net.Dialer) (*s
 	return &socks5Dialer{proxyAddr: proxyAddr, auth: auth, forward: forward}, nil
 }
 
+// socks5HandshakeTimeout SOCKS5 握手（方法协商 + 认证 + CONNECT 应答）的总超时。
+// 正常代理在毫秒级完成；10s 足够覆盖高延迟链路，又不至于让坏代理长期占 fd。
+const socks5HandshakeTimeout = 10 * time.Second
+
 // DialContext 建到 address 的隧道（ctx 取消会中断建连与握手）。
 func (d *socks5Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	if network != "tcp" && network != "tcp4" && network != "tcp6" {
@@ -74,9 +78,15 @@ func (d *socks5Dialer) DialContext(ctx context.Context, network, address string)
 	// ctx 取消 → 立刻打断阻塞的读写（握手里可能正等一个不回话的代理）。
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	defer stop()
-	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(dl)
+	// 握手必须有**独立**超时（审查 W2-C6-20）：此前只在 ctx 带 deadline 时才 SetDeadline，
+	// ctx 无 deadline（调用方用 context.Background）时，一个只 accept 不响应的 SOCKS5
+	// 就能把 goroutine + fd 永久挂住——每请求一个，累积到 fd 耗尽（EMFILE）网关整体不可用。
+	// 与 ctx 的 deadline 取更早者。
+	hs := time.Now().Add(socks5HandshakeTimeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(hs) {
+		hs = dl
 	}
+	_ = conn.SetDeadline(hs)
 	if err := d.handshake(conn, address); err != nil {
 		_ = conn.Close()
 		return nil, err

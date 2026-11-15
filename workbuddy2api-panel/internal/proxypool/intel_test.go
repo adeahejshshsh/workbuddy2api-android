@@ -1,10 +1,10 @@
 package proxypool
 
 import (
-	"sync/atomic"
-	"strings"
-	"net/http/httptest"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )

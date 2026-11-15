@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -88,12 +89,27 @@ func (s *threeDTaskStore) put(id, uid, realm, model string, state upstream.Three
 }
 
 // putFor 记录归属调用方（caller 为空 = 不校验，供上游用例与旧调用方使用）。
+//
+// 已存在的条目不再无条件重建（审查 W3C8-03 的视频侧同款）：上游对同一请求回同一个
+// job_id 时，重建会把 Charged 清回 false → 同一笔 credit 被记两次，Created 也被刷新、
+// TTL 跟着续命。已记账 → 原样保留；未记账 → 只更新归属与最新状态。
 func (s *threeDTaskStore) putFor(id, uid, realm, model, caller string, state upstream.ThreeDState) {
 	if s == nil || id == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if old, ok := s.m[id]; ok {
+		if old.Charged {
+			return
+		}
+		old.UID, old.Realm, old.Model = uid, realm, model
+		if caller != "" {
+			old.Caller = caller
+		}
+		old.State, old.HasState = state, true
+		return
+	}
 	s.m[id] = &threeDTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), State: state, HasState: true, Caller: caller}
 	s.gcLocked()
 }
@@ -106,10 +122,20 @@ func (s *threeDTaskStore) adopt(id, uid, realm, model string, charged bool) {
 	s.adoptFor(id, uid, realm, model, charged, "")
 }
 
+// threeDModelAdopted 收养任务在台账里的模型占位（见 adoptFor）。
+//
+// 3D 的账记在固定模型 "hy-3d" 上（recordThreeDUsage 不读 owner.Model），所以这里不需要
+// 像视频那样靠占位去救 NoteModelCost；占位的唯一用途是**标记「这个 job 是收养来的、
+// 版本未知」**，让 threeDPayload 省略 model 字段而不是编一个版本号（审查 W1A4-18）。
+const threeDModelAdopted = "unknown-adopted"
+
 // adoptFor 收养并记录归属调用方（探测命中走这条）。
 func (s *threeDTaskStore) adoptFor(id, uid, realm, model string, charged bool, caller string) {
 	if s == nil || id == "" || uid == "" {
 		return
+	}
+	if model == "" {
+		model = threeDModelAdopted
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -117,6 +143,9 @@ func (s *threeDTaskStore) adoptFor(id, uid, realm, model string, charged bool, c
 		return
 	}
 	s.m[id] = &threeDTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Charged: charged, Caller: caller}
+	// 审查 W3C8-01 的 3D 侧：adopt 是第二条写路径，此前不调 gcLocked，容量上限只在 put 里
+	// 执行。job_id 由客户端控制（探测路径），不 GC 就是一条无界增长的内存写入通道。
+	s.gcLocked()
 }
 
 // ownedBy 该任务是否属于这个调用方（空 Caller = 公共，兼容旧条目）。
@@ -255,11 +284,9 @@ func (s *threeDTaskStore) gcLocked() {
 	for id, o := range s.m {
 		all = append(all, pair{id, o.Created})
 	}
-	for i := 1; i < len(all); i++ { // 插入排序：容量上限内，n 很小
-		for j := i; j > 0 && all[j].at.Before(all[j-1].at); j-- {
-			all[j], all[j-1] = all[j-1], all[j]
-		}
-	}
+	// sort.Slice 替代手写插入排序（审查 W1A4-16）：这里持着台账锁，插入排序是 O(n²)
+	// （n 上限 2048 ≈ 2M 次比较），会把 get/note 一起堵住；同序 O(n log n)，语义不变。
+	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
 	drop := len(all) - threeDTaskMax*3/4
 	for i := 0; i < drop; i++ {
 		delete(s.m, all[i].id)
@@ -754,15 +781,26 @@ func (h *Handler) recordThreeDUsage(st *chatStat, uid string, state upstream.Thr
 	}
 }
 
+// displayThreeDModel 回执里的 model：收养来的未知版本折成空串（见 threeDPayload）。
+func displayThreeDModel(model string) string {
+	if model == threeDModelAdopted {
+		return ""
+	}
+	return model
+}
+
 // threeDPayload 组装回执。model 取台账里记下的提交版本；上游后续查询不再回 credit 时
 // 用台账快照补齐，免得重复查询看不到积分明细。
 func (h *Handler) threeDPayload(id string, state upstream.ThreeDState, model string) map[string]any {
-	if model == "" {
-		model = "3.1"
-	}
 	out := map[string]any{
 		"id": id, "job_id": id, "object": "3d.task",
-		"status": state.Status, "model": model,
+		"status": state.Status,
+	}
+	// 模型未知时**省略**字段，不编造版本（审查 W1A4-18）：此前 model 为空一律写成 "3.1"，
+	// 于是用 3.0 生成、重启后收养回来的任务在回执/面板里都显示 3.1 —— 排障与对账都拿到
+	// 错信息。与 videos 侧 displayModel 同一口径：不知道就不说。
+	if m := displayThreeDModel(model); m != "" {
+		out["model"] = m
 	}
 	if state.RequestID != "" {
 		out["request_id"] = state.RequestID

@@ -129,9 +129,23 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	return err
 }
 
+// shortIDTail 取 id 的尾 8 位；不足 8 位时整串返回（审查 W4-U2-083）。
+// 单独抽出来是为了能被用例直接钉住：上游 session.NewConversationID 今天是恒长
+// 36 字符，但「恒长」是它的实现细节，不该成为本包的隐式 panic 契约。
+func shortIDTail(id string) string {
+	if len(id) > 8 {
+		return id[len(id)-8:]
+	}
+	return id
+}
+
 // SchoolChatTimesEvents 构造一条 chat_request_send 事件（chat_3_times 计数）。
 func SchoolChatTimesEvents(conversationID string) map[string]any {
 	rid := session.NewConversationID()
+	// 尾 8 位截取要判长度（审查 W4-U2-083）：当前 NewConversationID 恒 36 字符
+	// （兜底 32 hex），所以不会 panic；但这是「靠上游函数长度约定」的隐式契约 ——
+	// 哪天 id 生成改成短串，这里就是在事件构造里 panic（500 级故障）。
+	tail := shortIDTail(rid)
 	return map[string]any{
 		"eventCode":   "chat_request_send",
 		"inputLength": 14, "isPlan": false, "isAutoExecuteTerminal": false,
@@ -142,7 +156,7 @@ func SchoolChatTimesEvents(conversationID string) map[string]any {
 		"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
 		"traceId": rid, "rootRequestId": rid,
 		"parentConversationId": conversationID, "conversationId": conversationID,
-		"messageId": "msg-" + rid[len(rid)-8:],
+		"messageId": "msg-" + tail,
 		"agentName": "mp", "agentType": "main",
 		"codebuddy.session_id":              conversationID,
 		"codebuddy.conversation_request_id": rid,

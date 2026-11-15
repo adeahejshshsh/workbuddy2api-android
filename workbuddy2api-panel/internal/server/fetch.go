@@ -19,8 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -41,9 +41,9 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 	if !h.admitBudget(w, r) {
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+	// 超限 413，不静默截断（审查 W3C8-32 / W1A4-20）：与 search 同一处修复、同一文案口径。
+	raw, ok := readBodyCapped(w, r, 1<<20, `（/v1/fetch 只收 url / realm 两个短字段）`)
+	if !ok {
 		return
 	}
 	var req fetchRequest
@@ -64,12 +64,29 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 			"url must be an absolute http(s) URL")
 		return
 	}
+	// 私网/回环/链路本地/云元数据一律本地拦掉（审查 W1A4-10 / W3C8-29）：本端点把 url
+	// 原样交给上游 webfetch 代取，等于给任何持 key 的调用方开了一个 SSRF 代理 ——
+	// `http://169.254.169.254/latest/meta-data/iam/security-credentials/` 拿到的是云凭据，
+	// `http://127.0.0.1:PORT/` / `10.0.0.0/8` 是内网探测面。可达性取决于上游的网络位置，
+	// 但那不是本网关能赌的事：字面量地址先拒，域名交给上游（见 fetchURLGuard 的边界说明）。
+	if err := fetchURLGuard(target); err != nil {
+		writeOpenAIErrorHint(w, http.StatusBadRequest, "invalid_request", err.Error(),
+			"本端点只抓公网 http(s) 页面；内网/回环/云元数据地址在网关侧就被拒绝")
+		return
+	}
 	realm, _ := resolveModel(req.Model)
 	if req.Realm != "" {
 		realm = req.Realm
 	}
 	if realm != "global" {
 		realm = "cn"
+	}
+	// realm=global 但部署没开 global 域时直接拒（审查 W3C8-32）：否则「只开 cn」的部署意图
+	// 被一个请求字段绕过（global 池非空时会真的去 global 号上抓）。与 embeddings 同口径。
+	if realm == "global" && !h.cfg.GlobalEnabled {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+			"realm=global 未启用：本网关只开了 cn 域（config.features.global_enabled=false）")
+		return
 	}
 
 	tried := map[string]bool{}
@@ -126,8 +143,13 @@ func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, r
 			break
 		}
 		tried[a.UID] = true
-		data, ferr := h.cfg.Upstream.WebFetch(r.Context(), a, target)
-		h.cfg.Pool.Release(a.UID)
+		// 在途名额用 defer 释放（审查 W3C8-30）：此前是普通语句，WebFetch 一旦 panic
+		// （JSON 解析 / TLS / 代理层都可能），该账号的在途计数永久 +1，累积到上限后
+		// 这个号再也选不出来 —— 表现为「幽灵在途」一个个吃掉可用账号，最后 no_account。
+		data, ferr := func() ([]byte, error) {
+			defer h.cfg.Pool.Release(a.UID)
+			return h.cfg.Upstream.WebFetch(r.Context(), a, target)
+		}()
 		if ferr == nil {
 			out, perr := normalizeFetchResponse(data, target)
 			if perr != nil {
@@ -146,8 +168,11 @@ func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, r
 		// 就是上游 #130 的实案。用字符串判据（不依赖 error 类型的 Kind 归类），
 		// 因为 15021 会以 Kind=client + 403 的形态出现，走的是请求级 fail-fast 那条路。
 		if fetchDomainRejected(ferr) {
+			// 直接收工交给跨域兜底（审查 W3C8-31）：注释一直写「不换号」，代码却是 continue
+			// → 下一轮 PickAcquire 换**另一个**账号再抓同一个域名，把 searchAttempts 个号
+			// 全部白烧一遍（每次都是同一个域名级 403），账号的在途槽位也被无谓占用。
 			log.Printf("fetch realm=%s: 域名被路由策略拒绝（15021），不记账号失败、不换号", realm)
-			continue
+			return lastErr, false
 		}
 		var ue *upstream.Error
 		if errors.As(ferr, &ue) {
@@ -181,6 +206,60 @@ func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, r
 // 走的是「请求级 fail-fast」那条路 —— 按 Kind 判会把它和普通的 url 校验失败混在一起。
 func fetchDomainRejected(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "15021")
+}
+
+// fetchURLGuard 拒绝「不该由网关代取」的目标（审查 W1A4-10 / W3C8-29）。
+//
+// 边界说明（刻意如此）：只校验**字面量**主机与端口，不做 DNS 解析。
+//   - 做 DNS 再校验需要真的联网解析，会把一个纯本地校验变成可能阻塞/失败的调用，
+//     而且解析结果与实际连接时的解析结果可以不同（DNS rebinding 照样绕过）；
+//   - 真正的收口位置是上游 webfetch 的出口策略（本网关只是转发方，拿不到它的 socket）。
+// 所以这里的目标是：把「一眼就是内网/元数据」的目标在本地拦掉，让误用与低级探测失败在
+// 网关侧、而不是变成一次上游调用。域名形态的内网地址（如 intranet.corp）不在拦截范围内。
+func fetchURLGuard(target string) error {
+	u, err := url.Parse(target)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("url 缺少主机：%s", target)
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "" {
+		return fmt.Errorf("url 缺少主机：%s", target)
+	}
+	// 端口只放行 80/443（含缺省）：上游 webfetch 只会走这两个，其余端口是内网服务探测的典型形态。
+	if port := u.Port(); port != "" && port != "80" && port != "443" {
+		return fmt.Errorf("只允许 80/443 端口（收到 %s）", port)
+	}
+	switch host {
+	case "localhost", "metadata", "metadata.google.internal", "instance-data":
+		return fmt.Errorf("拒绝内网/元数据地址：%s", host)
+	}
+	if strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".internal") {
+		return fmt.Errorf("拒绝内网/元数据地址：%s", host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if fetchIPBlocked(ip) {
+			return fmt.Errorf("拒绝私网/回环/链路本地地址：%s", host)
+		}
+	}
+	return nil
+}
+
+// fetchIPBlocked 回环 / 私网 / 链路本地（含云元数据 169.254.169.254）/ 未指定 / 组播。
+func fetchIPBlocked(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	// IPv4 映射到 IPv6 的形态（::ffff:127.0.0.1）：IsLoopback 已覆盖，但 ::ffff:10.x 不是
+	// IsPrivate 的判定对象（Go 只对 4in6 的 To4 结果判私网），这里显式再判一次。
+	if v4 := ip.To4(); v4 != nil && net.IP(v4).IsPrivate() {
+		return true
+	}
+	// IPv6 唯一本地地址 fc00::/7（云上常见的内部服务网段）。
+	if len(ip) == net.IPv6len && (ip[0]&0xfe) == 0xfc {
+		return true
+	}
+	return false
 }
 
 // normalizeFetchResponse 确保响应是 DSH 需要的 {"content": "<markdown>"} 形状。

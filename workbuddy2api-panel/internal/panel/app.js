@@ -5,6 +5,15 @@ let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
 let logPin = true, loginState = null, loginTimer = null;
+/* 添加账号（浏览器登录）的轮询状态（审查 W4F1-027/028）：
+   loginGen   —— 弹窗代数：关窗/重开都自增，在途请求回来时代数不符就整段作废。
+                 否则「请求在途时点关闭」之后 .then 落地仍会把 3s 轮询复活，
+                 弹窗已关却还在每 3s 打一次登录态；
+   loginBusy  —— 单飞：上游慢于 3s 时 setInterval 会叠请求，后端 poll 若是
+                 「消费一次即失效」，并发 poll 会互相抢结果导致 done 丢失；
+   closeAddTimer —— 成功后 1.6s 的自动关窗定时器，必须纳入 stopPoll 一起清，
+                 否则它会在用户重新打开添加弹窗时把新弹窗关掉。 */
+let loginGen = 0, loginBusy = false, closeAddTimer = null;
 let refTimer = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
 let mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' };
@@ -16,6 +25,17 @@ let reqEntries = [];
 let reqErrText = '';
 let usDim = 'account', usCreditDim = 'account', usSort = 'total';
 let usageData = null;
+
+/* 列表请求序号（审查 W4F1-015 / 016 / 043 / 061 / 065）：日志 / 模型 / 任务 / 余额 /
+   积分包五个列表都可能被多个入口并发触发（导航、频道 chip、下拉 change、刷新按钮、
+   轮询）。没有序号时「先发后到」的旧响应会覆盖新数据 —— 表现为「切了域却显示上一个
+   域」「刚领取的任务又变回可领取」「旧窗口的曲线盖掉新窗口」。做法：每次请求自增一份
+   序号，回来时只接受序号仍是最新的那一份，旧的直接丢弃（不写 DOM、不写缓存）。 */
+let logsSeq = 0, modelsSeq = 0, tasksSeq = 0, balanceSeq = 0, packagesSeq = 0;
+/* 401 单飞（审查 W4F1-003）：首屏 go() 并发 5+ 请求，全部 401 时 openKey() 会被连调
+   多次 —— 重复 openVeil 会反复覆盖 veilOpener（关闭后焦点还原错位），更糟的是密钥
+   弹窗已被用户关掉后，后到的 401 又把它弹回来。一轮 401 只弹一次，提交密钥时复位。 */
+let keyPrompting = false;
 
 const $ = id => document.getElementById(id);
 
@@ -32,7 +52,15 @@ function applyTheme() {
     : '<path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/>';
   $('btnTheme').title = eff === 'light' ? '切换到深色' : '切换到浅色';
 }
-addEventListener('change', applyTheme);
+// 只跟随系统配色变化（审查 W4F1-005）：此前把 applyTheme 挂在 window 的 change 上，
+// 页面上**任意** select/input 的 change 都会触发它重写 #icoTheme 与按钮 title ——
+// 改时间范围、改筛选都在做一次无意义的 DOM 写。要的是「系统深/浅色切换时跟一下」。
+try {
+  if (typeof matchMedia === 'function') {
+    const mq = matchMedia('(prefers-color-scheme: dark)');
+    if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', applyTheme);
+  }
+} catch (e) { /* 旧 WebView 无 MediaQueryList.addEventListener：忽略，主题仍可手动切换 */ }
 $('btnTheme').onclick = () => {
   theme = effTheme() === 'light' ? 'dark' : 'light';
   localStorage.setItem(LS_THEME, theme);
@@ -41,13 +69,45 @@ $('btnTheme').onclick = () => {
 applyTheme();
 
 /* ── 请求 ─────────────────────────────────────────────────────────── */
+/* 请求超时（审查 W4F1-002）：此前 fetch 既无超时也无 abort，上游 60s 卡住时
+   Promise 永久挂起 —— 调用方的「加载中…」态永不结束，而 go() 每次切页又发一轮，
+   悬挂请求越积越多。
+   分两档：普通接口 15s；「逐账号实时查上游」的接口给 120s —— 46 个号在慢上游下
+   本来就要几十秒，用 15s 会把「慢」误判成「挂」，比不加超时更糟。 */
+const REQ_TIMEOUT_MS = 15000;
+const REQ_TIMEOUT_SLOW_MS = 120000;
+const SLOW_API_RE = /^(packages|models|model_probes|balance_history|usage|request_logs|logs\/export|config)(\?|$)/;
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
-  const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
-  if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
+  const init = Object.assign({}, opts, { headers: h });
+  const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs)
+    : (SLOW_API_RE.test(path) ? REQ_TIMEOUT_SLOW_MS : REQ_TIMEOUT_MS);
+  delete init.timeoutMs;   // 这是 api() 自己的选项，不该出现在 fetch 的 init 里
+  // AbortSignal.timeout 是 Chrome 103+ 才有的（部分 Android WebView 更旧）：探测不到
+  // 就不设超时、退回旧行为 —— 不能为了「加超时」把面板打成所有请求立刻失败。
+  const canTimeout = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function';
+  if (canTimeout && !init.signal) init.signal = AbortSignal.timeout(timeoutMs);
+  let r;
+  try {
+    r = await fetch('/panel/api/' + path, init);
+  } catch (e) {
+    // 超时/中断的原文是英文（"signal timed out" / "The user aborted a request"），
+    // 直接冒到 toast 里运维看不懂：统一换成中文，并把秒数与接口名写出来。
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+      const te = new Error('请求超时（' + Math.round(timeoutMs / 1000) + ' 秒）：' + path);
+      te.status = 0;
+      throw te;
+    }
+    throw e;
+  }
+  // 401 单飞（审查 W4F1-003）：见 keyPrompting 注释，只弹一次密钥门。
+  if (r.status === 401) {
+    if (!keyPrompting) { keyPrompting = true; openKey(); }
+    throw new Error('密钥无效或未填写');
+  }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) {
     // 带上状态码（BUG-14）：调用方要区分「state 真失效（4xx）」与「网络抖动/5xx（可重试）」
@@ -422,7 +482,9 @@ const VEIL_CLOSERS = {
   addVeil: () => closeAdd(),
   remarkVeil: () => closeRemarks(),
   evCtxVeil: () => { $('evCtxVeil').classList.remove('on'); restoreFocus('evCtxVeil'); },
-  keyVeil: () => { $('keyVeil').classList.remove('on'); restoreFocus('keyVeil'); },
+  // keyVeil 关闭时必须复位 401 单飞标志（审查 W4F1-003）：否则用户误关密钥弹窗后，
+  // 后续 401 因 keyPrompting=true 不再弹窗，面板就永久停在「拿不到密钥」的状态。
+  keyVeil: () => { keyPrompting = false; $('keyVeil').classList.remove('on'); restoreFocus('keyVeil'); },
   ruleVeil: () => closeRuleDlg(),
   accRuleVeil: () => closeAccRuleDlg(),
   accPickVeil: () => closeAccPickDlg(),
@@ -489,13 +551,20 @@ function openKey() { openVeil('keyVeil', '#keyInput'); }
 $('btnKey').onclick = async () => {
   const v = $('keyInput').value.trim();
   if (!v) return;
+  // 先存再校验会留下坏值（审查 W4F1-008）：密钥错时坏值已落盘，刷新后 start()
+  // 仍带着它跑一轮全量 401。这里记下原值，校验失败就回滚。
+  const prev = localStorage.getItem(LS_KEY);
   localStorage.setItem(LS_KEY, v);
   try {
     await api('overview');
     $('keyErr').hidden = true;
+    keyPrompting = false;   // 密钥已通过校验：解除 401 单飞（审查 W4F1-003），下一轮再失效还能再弹
     closeVeil('keyVeil');
     start();
-  } catch (e) { $('keyErr').hidden = false; }
+  } catch (e) {
+    if (prev == null) localStorage.removeItem(LS_KEY); else localStorage.setItem(LS_KEY, prev);
+    $('keyErr').hidden = false;
+  }
 };
 // 表单提交必须显式拦掉（bug #17）：CSP 是 script-src 'self'，HTML 里原来的
 // onsubmit="return false" 内联处理器**不会执行**，回车触发浏览器隐式提交 →
@@ -610,10 +679,17 @@ function refreshGroupFilter() {
 
 // visibleAccounts 当前筛选下真正可见的行 —— 组内批量的作用域就是它，
 // 不是「整池」：按钮文案与作用域必须一致，否则一次误点会波及全池。
+//
+// realm 也必须纳入（审查 W4F1-073）：表格显示的是「realm ∧ group」的交集，
+// 而这里此前只看 group —— 在「国内版」标签下点「组内签到」，实际会对同组里
+// **看不见的**国际版账号发起上游请求（确认框还只报总数，不暴露这件事）。
+// 过滤顺序与 renderAccounts 完全一致：先 realm、后 group，两处口径同源。
 function visibleAccounts() {
-  return accGroupFilter
-    ? lastAccountsList.filter(s => String(s.group || '') === accGroupFilter)
-    : lastAccountsList;
+  let rows = lastAccountsList;
+  if (accRealmFilter === 'cn') rows = rows.filter(s => s.realm !== 'global');
+  else if (accRealmFilter === 'global') rows = rows.filter(s => s.realm === 'global');
+  if (accGroupFilter) rows = rows.filter(s => String(s.group || '') === accGroupFilter);
+  return rows;
 }
 
 /* 签到四态文案（checkin_state 由后端按回执判定，见 upstream.CheckinState）：
@@ -678,7 +754,11 @@ function renderAccounts(list) {
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
-  const maxCred = Math.max(1, ...filtered.map(s => s.credits || 0));
+  // 用 reduce 而不是 Math.max(1, ...arr)（审查 W4F1-009）：展开会把整表塞进实参，
+  // 账号数上万时抛 RangeError: Maximum call stack size exceeded，renderAccounts 整个
+  // 崩掉、表格只剩空白；同时 Number() 兜底，credits 是字符串/缺字段时不再算出 NaN%
+  // 的进度条宽度。
+  const maxCred = filtered.reduce((m, s) => Math.max(m, Number(s.credits) || 0), 1);
   tb.innerHTML = filtered.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
@@ -717,8 +797,11 @@ function renderAccounts(list) {
     // 缺该字段但 credits 是 1<<40 哨兵的账号会在表里显示成 1e12 的巨额余额，
     // 而汇总卡把它排除了 —— 两处互相打架。
     const unlimited = Number(s.credits_total) === -1 || Number(s.credits) >= 1e12;
+    // 两个数值都过 esc（审查 W4F1-017）：这是本函数里唯一直接拼 innerHTML 的数值。
+    // 现在后端字段恰好是数字，但一旦透传成字符串（上游异常文本 / 字段放宽）就是注入点，
+    // 而同一行其余字段全都 esc 过了 —— 这里属于防线缺口，不是「已经安全」。
     const cred = unlimited ? '不限'
-      : (s.credits == null ? '—' : (s.credits_total > 0 ? s.credits + '<span class="of">/' + s.credits_total + '</span>' : String(s.credits)));
+      : (s.credits == null ? '—' : (s.credits_total > 0 ? esc(s.credits) + '<span class="of">/' + esc(s.credits_total) + '</span>' : esc(s.credits)));
     const pct = unlimited ? 100
       : (s.credits_total > 0
         ? Math.min(100, Math.round((s.credits || 0) / s.credits_total * 100))
@@ -820,7 +903,9 @@ function renderModelLocks(rows) {
     const _alt = fallbackTargetFor(r.model, r.realm);
     const fbTag = _alt ? '<div class="note" title="该模型在本域不可用时，请求已自动改道到 ' +
       esc(_alt) + '">⤳ 已路由至 ' + esc(_alt) + '</div>' : '';
-    const st = STATE[r.state] || ['mute', r.state || '—'];
+    // 兜底分支的 r.state 是服务端原值，必须 esc（审查 W4F1-018）：本函数其余字段
+    // 全部转义过，只有这一处把状态串原样拼进 innerHTML，属防线缺口。
+    const st = STATE[r.state] || ['mute', esc(r.state || '—')];
     const realm = r.realm === 'global' ? '国际版' : '国内版';
     return '<tr>' +
       '<td><b>' + esc(r.model) + '</b>' + fbTag + '</td>' +
@@ -963,22 +1048,29 @@ $('accBody').addEventListener('click', async ev => {
   finally { b.disabled = false; loadOverview(true); }
 });
 
-$('btnCheckinAll').onclick = async () => {
-  try { await api('checkin_all', { method: 'POST' }); toast('全部签到已开始，结果见日志', 'ok'); }
-  catch (e) { toast(e.message, 'err'); }
-};
-$('btnKeepaliveAll').onclick = async () => {
-  try { await api('keepalive_all', { method: 'POST' }); toast('全部保活已开始，结果见日志', 'ok'); }
-  catch (e) { toast(e.message, 'err'); }
-};
-$('btnTravelAll').onclick = async () => {
-  try { await api('travel_all', { method: 'POST' }); toast('旅行巡检已开始（含领养链路），结果见日志', 'ok'); }
-  catch (e) { toast(e.message, 'err'); }
-};
-$('btnActivityAll').onclick = async () => {
-  try { await api('activity_all', { method: 'POST' }); toast('活跃上报已开始，结果见日志', 'ok'); }
-  catch (e) { toast(e.message, 'err'); }
-};
+/* 全池批量动作统一入口（审查 W4F1-014）：这四个按钮此前既无 disabled 也无二次
+   确认，onclick 直接 POST —— 连点 3 次 = 对全池发起 3 轮签到/巡检，上游按账号
+   计数，直接触发限流甚至封号（对比行内按钮的 b.disabled = true，此处是遗漏）。
+   现在：点击即 disable（finally 恢复），并先确认把「影响多少个账号」讲清楚。 */
+function bindPoolAction(id, path, label, okMsg) {
+  const b = $(id);
+  if (!b) return;
+  b.onclick = async () => {
+    const n = lastAccountsList.length;
+    if (!confirm('将对全池 ' + (n ? n + ' 个' : '全部') + '账号执行「' + label +
+      '」，上游按账号计入风控且无法撤回。确认继续？')) return;
+    b.disabled = true;
+    try {
+      await api(path, { method: 'POST' });
+      toast(okMsg, 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    finally { b.disabled = false; }
+  };
+}
+bindPoolAction('btnCheckinAll', 'checkin_all', '全部签到', '全部签到已开始，结果见日志');
+bindPoolAction('btnKeepaliveAll', 'keepalive_all', '全部保活', '全部保活已开始，结果见日志');
+bindPoolAction('btnTravelAll', 'travel_all', '旅行巡检', '旅行巡检已开始（含领养链路），结果见日志');
+bindPoolAction('btnActivityAll', 'activity_all', '活跃上报', '活跃上报已开始，结果见日志');
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
 /* 实测上限标注：scripts/probe_max_tokens.py --panel-out 写入探测结果，
@@ -1034,6 +1126,10 @@ function rateCell(m) {
 let mdLoaded = false;
 
 async function loadModels() {
+  // 请求序号（审查 W4F1-016）：btnModels（刷新）、go('models')、mdTier change 都能
+  // 并发触发本函数。此前没有序号，先发后到的旧目录会覆盖新目录，还会把 mdLoaded
+  // 按旧响应置真/置假（表现为「切回模型页却看到旧列表」「勾了显示全部又被刷回」）。
+  const seq = ++modelsSeq;
   const tb = $('mdBody');
   tb.innerHTML = '<tr><td colspan="9"><div class="empty">正在向上游查询…</div></td></tr>';
   try {
@@ -1042,6 +1138,7 @@ async function loadModels() {
       const [d, pr] = await Promise.all([
         api('models' + (showTier ? '?all=1' : '')),
         api('model_probes').catch(() => ({}))]);
+    if (seq !== modelsSeq) return;   // 旧目录：直接丢弃，不写 mdAll / mdLoaded / DOM
     mdAll = d.models || [];
     mdProbes = pr.probes || {};
     if (!mdAll.length) {
@@ -1065,6 +1162,7 @@ async function loadModels() {
     mdLoaded = true;
     renderModels();
   } catch (e) {
+    if (seq !== modelsSeq) return;   // 旧请求的失败不该把最新一次的成功结果打回错误态
     mdLoaded = false;
     mdAll = [];
     tb.innerHTML = '<tr><td colspan="9"><div class="empty">' + esc(e.message) + '</div></td></tr>';
@@ -1228,7 +1326,9 @@ function renderModels() {
   $('mdCount').textContent = !mdAll.length ? ''
     : filtered ? '命中 ' + list.length + ' / ' + mdAll.length + ' 个模型'
     : mdAll.length + ' 个模型';
-  $('mdCount').className = filtered ? 'note src-off' : 'note';
+  // 只切换修饰类（审查 W4F1-023）：整串覆盖 className 会抹掉 HTML 上原有的其它类，
+  // 以后往 #mdCount 加任何样式类都会被这一行清掉。
+  $('mdCount').classList.toggle('src-off', filtered);
 }
 
 function resetModelFilter() {
@@ -1310,6 +1410,11 @@ if ($('reqLimit')) {
 }
 
 async function loadLogs() {
+  // 请求序号（审查 W4F1-015）：频道 chip、切页、reqLimit change、清空归档后的刷新
+  // 都能并发触发本函数。此前没有序号，后返回的旧响应会覆盖新响应；更麻烦的是
+  // reqErrText 是模块级的，会被两次请求交替写 —— 错误文案与表格数据可能来自
+  // 两次不同的请求。现在错误文案随序号一起提交。
+  const seq = ++logsSeq;
   const box = $('logBox');
   const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
   if ($('reqLimit') && !$('reqLimit').value) {
@@ -1325,9 +1430,10 @@ async function loadLogs() {
     // 请求记录接口失败要透出来（bug #7）：此前 `.catch(() => ({entries: []}))` 把
     // 500/超时/密钥失效静默替换成空数组，而 archiveOn 为真 → 表格显示「暂无请求记录」、
     // 计数显示 0 条，用户以为筛选或归档没数据，实际是接口挂了。
-    reqErrText = '';
+    // 文案先存局部（审查 W4F1-015），过序号校验后再落到模块级 reqErrText。
+    let errText = '';
     const requestLogs = api('request_logs?' + rq.toString())
-      .catch(e => { reqErrText = e.message; return { entries: [] }; });
+      .catch(e => { errText = e.message; return { entries: [] }; });
     const [d, metrics, requestRows, errSum] = await Promise.all([
       api('logs'),
       api('request_metrics').catch(() => ({})),
@@ -1335,6 +1441,8 @@ async function loadLogs() {
       // 错误汇总失败不该拖垮整页日志（它只是视图之一）：失败按 null 渲染成「—」。
       api('error_summary').catch(() => null),
     ]);
+    if (seq !== logsSeq) return;   // 旧响应：不写 DOM、不覆盖 reqErrText
+    reqErrText = errText;
     // 归档开启时以归档为准——「区间内没有记录」是一个真实结果，不能回落成内存里
     // 的最近 100 条（那会把筛选条件之外、时间范围之外的请求显示出来）。
     // 只有归档关闭时才回落到内存指标，保证没有归档的部署仍能看到最近请求。
@@ -1355,7 +1463,9 @@ async function loadLogs() {
         // 后端日志前缀是 WARN: / ERR:（大写），正则必须带 i（报告 #7）
     const lvl = /error|失败|错误/i.test(e.text) ? ' e' : /warn|冷却|熔断/i.test(e.text) ? ' w' : '';
         const t = e.ts ? new Date(e.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '';
-        const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
+        // 频道兜底分支必须 esc（审查 W4F1-019）：左侧 class 用了 esc(e.ch)，右侧的
+        // 显示文案却把同一个服务端原值裸拼进 innerHTML —— 同一表达式两套口径。
+        const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + esc({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
         return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
       }).join('')
       : '<span style="color:var(--ink-3)">暂无日志</span>';
@@ -1367,6 +1477,7 @@ async function loadLogs() {
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
     renderErrorSummary(errSum);
   } catch (e) {
+    if (seq !== logsSeq) return;   // 旧请求的失败不该覆盖最新一次的结果
     // 拉取失败要提示（bug #15）：此前完全吞掉，页面保持上一次内容，
     // 用户以为"日志没更新"，实际是请求失败了。
     const n = $('logNote');
@@ -1476,7 +1587,8 @@ function renderRequestTable() {
   $('reqCount').textContent = !reqEntries.length ? ''
     : (filtered ? '命中 ' + list.length + ' / ' + reqEntries.length + ' 条' : reqEntries.length + ' 条') +
       (hasSource ? '' : ' · 来源未记录');
-  $('reqCount').className = (filtered || !hasSource) ? 'note src-off' : 'note';
+  // 只切换修饰类（审查 W4F1-035）：整串覆盖 className 会抹掉 HTML 上的其它类。
+  $('reqCount').classList.toggle('src-off', (filtered || !hasSource));
 }
 
 /* renderErrorSummary 渲染错误汇总（后端 /panel/api/error_summary 已聚合+排序）：
@@ -1491,7 +1603,9 @@ function renderErrorSummary(d) {
       '<td>' + esc(r.kind) + '</td>' +
       '<td>' + esc(r.code || '—') + '</td>' +
       '<td>' + esc(r.model || '—') + '</td>' +
-      '<td class="num">' + r.count + '</td>' +
+      // count 是聚合出来的计数，同表其余列都 esc 过（审查 W4F1-036）：字段一旦
+      // 被序列化成字符串（JSON number→string 的字段漂移）就是注入点。
+      '<td class="num">' + esc(r.count == null ? 0 : r.count) + '</td>' +
       '<td>' + esc(r.last || '—') + '</td>' +
       '<td>' + esc(r.until || '—') + '</td>' +
       '<td class="sample" title="' + esc(r.sample_full || r.sample || '') + '">' + esc(r.sample || '') + '</td></tr>'
@@ -1594,25 +1708,48 @@ function fmtBytes(bytes) {
   return (n / 1024 / 1024).toFixed(1) + ' MB';
 }
 /* 运行日志导出：落盘文件按区间打包成 ZIP。
- * 用 location.href 直接触发下载而不是 fetch+blob——落盘包可能几十 MB，
- * blob 会把整包读进内存再复制一份；href 让浏览器原生流式落盘。
- * 失败（落盘未启用 / 区间无数据）时后端回 JSON 错误，浏览器会把它当文件下载，
- * 所以先 HEAD 一次拿状态码，非 2xx 再 GET 回文案弹出来。 */
+ *
+ * 必须自己带 Authorization（审查 W4F1-026）：/panel/api/* 全部由 httpauth.VerifyBearer
+ * 统一鉴权，而原来的 `fetch(url,{method:'HEAD'})` 与随后的 `fetch(url)` 都不带 Bearer
+ * → HEAD 得 401 → !resp.ok → GET 再 401 → 弹「密钥无效或未填写」，功能整体不可用。
+ * 更根本的是 `location.href = url` 这种**导航请求**永远带不上 Authorization：
+ * 即便 HEAD 通过也只会把 401 JSON 当文件下载下来。
+ * 所以改成 fetch + blob：鉴权头照常带，成功后用 blob URL 触发下载。
+ * 代价是整包进内存（运维本地面板，可接受）；拿不到 createObjectURL 时退回
+ * location.href —— 那是「后端未配 api_key」的部署，导航请求本来也不需要头。 */
 $('btnLogExport').onclick = async () => {
+  const b = $('btnLogExport');
   const days = $('logExportDays').value || '3';
   const url = '/panel/api/logs/export?days=' + encodeURIComponent(days);
+  // 打包几十 MB 要时间：按钮进禁用态并改文案，避免连点叠出多个下载。
+  if (b) { b.dataset.label = b.textContent; b.disabled = true; b.textContent = '打包中…'; }
   try {
-    const resp = await fetch(url, {method: 'HEAD'});
+    const k = localStorage.getItem(LS_KEY);
+    const resp = await fetch(url, { headers: k ? { Authorization: 'Bearer ' + k } : {} });
     if (!resp.ok) {
-      const detail = await fetch(url).then(r => r.text()).catch(() => '');
+      const detail = await resp.text().catch(() => '');
       let msg = 'HTTP ' + resp.status;
       try { msg = JSON.parse(detail).error || msg; } catch (e) { }
       alert('导出失败：' + msg);
       return;
     }
-    location.href = url;
+    const blob = await resp.blob();
+    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'workbuddy2api-logs-' + days + 'd.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // 立刻 revoke 会让部分 WebView 取消下载：留 30s 余量再释放。
+      setTimeout(() => { try { URL.revokeObjectURL(a.href); } catch (e) { } }, 30000);
+    } else {
+      location.href = url;
+    }
   } catch (e) {
-    alert('导出失败：' + e);
+    alert('导出失败：' + (e && e.message ? e.message : e));
+  } finally {
+    if (b) { b.disabled = false; b.textContent = b.dataset.label || '导出 ZIP'; }
   }
 };
 $('btnLogPin').onclick = () => {
@@ -1954,6 +2091,9 @@ function openAdd() {
   $('importDone').hidden = true; $('importErr').hidden = true;
   $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
   $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
+  // 重开弹窗 = 新一代（审查 W4F1-027）：上一轮在途的 login/start 落地后不得再把
+  // 3s 轮询挂到这个刚打开的空弹窗上（否则会显示上一次会话的链接并开始轮询）。
+  loginGen++;
   stopPoll();
 }
 function switchAddTab(tab) {
@@ -1973,9 +2113,14 @@ document.querySelectorAll('#addTabs .tab').forEach(b => {
 });
 function startAddLogin() {
   const realm = (document.querySelector('input[name="addRealm"]:checked') || {}).value || 'cn';
+  // 弹窗代数（审查 W4F1-027）：这次登录属于「当前这一代」弹窗。请求在途时用户点了
+  // 关闭 → closeAdd 把代数 +1，下面的 .then 落地时代数已不符 → 直接作废，
+  // 不会再把 3s 轮询复活到一个已经关掉的弹窗上。
+  const gen = ++loginGen;
   $('btnStartLogin').disabled = true;
   $('addLoad').hidden = false; $('addErr').hidden = true;
   api('login/start', { method: 'POST', body: JSON.stringify({ realm }) }).then(r => {
+    if (gen !== loginGen) return;   // 弹窗已关/已重开：这次结果作废
     loginState = r.state;
     $('addUrl').textContent = r.url;
     $('addPick').hidden = true; // 选域锁定（会话已按该域发起）
@@ -1987,17 +2132,31 @@ function startAddLogin() {
     stopPoll();
     loginTimer = setInterval(pollLogin, 3000);
   }).catch(e => {
+    if (gen !== loginGen) return;   // 弹窗已关：不要把错误写回一个已关闭的弹窗
     $('addLoad').hidden = true;
     $('btnStartLogin').disabled = false;
     $('addErr').hidden = false;
     $('addErr').textContent = e.message;
   });
 }
-function stopPoll() { if (loginTimer) { clearInterval(loginTimer); loginTimer = null; } }
+/* stopPoll 一次清干净两条定时器（审查 W4F1-027）：只清 loginTimer 的话，
+   登录成功后那个 1.6s 的「自动关窗」还会落地 —— 用户在这 1.6s 内重新打开添加
+   弹窗，就会被上一次的延迟关闭打断。 */
+function stopPoll() {
+  if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+  if (closeAddTimer) { clearTimeout(closeAddTimer); closeAddTimer = null; }
+}
 async function pollLogin() {
   if (!loginState) return;
+  // 单飞（审查 W4F1-028）：上游慢于 3s 时 setInterval 会让请求叠加，同一个 state
+  // 并发多个 poll；后端 poll 若是「消费一次即失效」，并发会互相抢掉结果导致
+  // done 永远拿不到（表现为「登录成功了但弹窗一直转圈」）。
+  if (loginBusy) return;
+  loginBusy = true;
+  const gen = loginGen, state = loginState;
   try {
-    const r = await api('login/poll?state=' + encodeURIComponent(loginState));
+    const r = await api('login/poll?state=' + encodeURIComponent(state));
+    if (gen !== loginGen) return;   // 弹窗已关/已换：结果作废（finally 仍会解锁）
     if (r.done) {
       stopPoll();
       $('addReady').hidden = true;
@@ -2010,19 +2169,36 @@ async function pollLogin() {
           ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '')
           : '');
       $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + credTxt + '，账号已载入池中';
-      setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
+      closeAddTimer = setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
     }
   } catch (e) {
+    if (gen !== loginGen) return;
     stopPoll();
     $('addReady').hidden = true;
     $('addErr').hidden = false;
     $('addErr').textContent = e.message + '（关闭后重新添加）';
+  } finally {
+    loginBusy = false;
   }
 }
-function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); restoreFocus('addVeil'); }
+function closeAdd() {
+  loginGen++;                 // 让在途的 login/start 与 login/poll 结果全部作废（审查 W4F1-027）
+  stopPoll();
+  loginState = null;
+  $('addVeil').classList.remove('on');
+  restoreFocus('addVeil');
+}
 $('btnCloseAdd').onclick = closeAdd;
 $('btnStartLogin').onclick = startAddLogin;
-$('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
+// 只放行 http(s)（审查 W4F1-034）：addUrl 是服务端/上游下发的登录地址，直接 open()
+// 一个 javascript: 会让部分 WebView 在 opener 上下文执行脚本。
+$('btnOpenUrl').onclick = () => {
+  const u = $('addUrl').textContent;
+  let ok = false;
+  try { const p = new URL(u); ok = p.protocol === 'https:' || p.protocol === 'http:'; } catch (e) { ok = false; }
+  if (!ok) { toast('登录链接不是 http(s) 地址，已拒绝打开', 'err'); return; }
+  open(u, '_blank');
+};
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
 // 粘贴导入（WebView 里 <input type=file> 唤不起选择器时的兜底）：
@@ -2081,11 +2257,22 @@ $('btnExportAccounts').onclick = async () => {
     // 而 blob: URL 宿主读不到内容 —— 所以「导出为文件」必须由壳来写。
     let savedPath = '', saveErr = '';
     if (arr.length && window.WB2API && typeof window.WB2API.saveJson === 'function') {
+      // 写盘前二次确认（审查 W4F1-029）：导出内容含 refresh token，落到系统「下载」
+      // 目录后任何 App 都能读；此前是静默写盘，用户以为只是「导出看看」。
+      // 取消时不写文件，下面的提示自然走「未落盘」分支（复制 / 下载链接仍可用）。
+      // confirm 用 try 包住：个别宿主/内嵌环境不实现 window.confirm，调用会抛错 ——
+      // 不能因为「弹不出确认框」就让整个导出功能失效（此时按确认处理，行为同旧版）。
+      let ok = true;
       try {
-        const res = String(window.WB2API.saveJson(fname, txt) || '');
-        if (res.indexOf('ok|') === 0) savedPath = res.slice(3);
-        else saveErr = (res.indexOf('err|') === 0 ? res.slice(4) : res) || '未知错误';
-      } catch (e) { saveErr = String(e && e.message ? e.message : e); }
+        ok = confirm('导出文件包含账号 refresh token，将写入系统「下载」文件夹（其它 App 可读）。\n\n确认写入？点「取消」则只在页面里显示，可手动复制。');
+      } catch (e) { ok = true; }
+      if (ok) {
+        try {
+          const res = String(window.WB2API.saveJson(fname, txt) || '');
+          if (res.indexOf('ok|') === 0) savedPath = res.slice(3);
+          else saveErr = (res.indexOf('err|') === 0 ? res.slice(4) : res) || '未知错误';
+        } catch (e) { saveErr = String(e && e.message ? e.message : e); }
+      }
     }
 
     $('exportHint').hidden = false;
@@ -2212,13 +2399,18 @@ $('btnRefresh').onclick = async () => {
     // 余额刷新是**异步长任务**（46 个号在慢上游下最坏几分钟）：固定轮询 3 次 ×1.5s
     // 只覆盖前 4.5 秒，慢的时候面板停在半程数据且没有任何提示（报告 #21）。
     // 改为按「仍在刷新」状态轮询，最多 ~30s，超时如实告知还在后台跑。
-    let done = false;
+    let done = false, left = false;
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 1500));
+      // 用户切走后别再空转（审查 W4F1-040）：此前跑满 30s 且每轮 loadOverview，
+      // 人已经在别的页面上，后台却还在每 1.5s 拉一次账号池。
+      // 余额趋势页也用这份 overview 缓存（「可用 N/M」），所以这两屏都继续。
+      if (view !== 'accounts' && view !== 'balhist') { left = true; break; }
       const ov = await loadOverview(true);
       if (ov && ov.balance_refreshing === false) { done = true; break; }
     }
-    if (!done) toast('余额刷新仍在后台进行，稍后自动更新', 'ok');
+    // 只有「还在本页且没等到结束」才提示；用户主动切走不该再弹一条 toast。
+    if (!done && !left) toast('余额刷新仍在后台进行，稍后自动更新', 'ok');
   } catch (e) { toast('刷新失败：' + e.message, 'err'); await loadOverview(true); }
   finally { b.disabled = false; b.textContent = '刷新'; }
   if (view === 'logs') loadLogs();
@@ -2258,6 +2450,11 @@ start();
 
 /* ── 积分任务 ─────────────────────────────────────────────────────── */
 let taskUID = null;
+/* taskGen 任务弹窗代数（审查 W4F1-039）：openTasks / closeTasks 各 +1。
+   auto_all 的异步作业轮询最多跑 400×3s = 20 分钟，此前**不随弹窗关闭而中止** ——
+   关掉弹窗后循环照样打接口、照样往已隐藏的按钮写文字；此时再开另一个账号的任务
+   弹窗，就会有两个循环并行跑。每轮校验代数，不符即退出。 */
+let taskGen = 0;
 
 // 可自动完成的任务（与后端 autoActions 表一致）：判据为行为事件、可经网关复现。
 // 其余任务需在官方客户端内交互，面板只展示指引（行 title 提示）。
@@ -2320,13 +2517,19 @@ function entTypeTip(s) {
 }
 
 function openTasks(uid) {
+  taskGen++;                  // 新一次打开 = 新一代（审查 W4F1-039），上一代的作业轮询自动失效
   taskUID = uid;
   $('taskWho').textContent = uid.slice(0, 16);
   openVeil('taskVeil', '#btnCloseTask');
   $('btnTaskReload').hidden = false;
   loadTasks();
 }
-function closeTasks() { $('taskVeil').classList.remove('on'); taskUID = null; restoreFocus('taskVeil'); }
+function closeTasks() {
+  taskGen++;                  // 关闭即中止该弹窗的一切在途轮询（审查 W4F1-039）
+  $('taskVeil').classList.remove('on');
+  taskUID = null;
+  restoreFocus('taskVeil');
+}
 $('btnCloseTask').onclick = closeTasks;
 $('btnTaskReload').onclick = loadTasks;
 
@@ -2368,6 +2571,8 @@ $('btnTaskAutoAll').onclick = async () => {
   if (!taskUID) return;
   const btn = $('btnTaskAutoAll');
   if (!confirm('将依次执行：补报对话事件、领取 Buddy、glm-5.2 对话、尝试上报。\n过程约 1-2 分钟（含真实对话），确认继续？')) return;
+  // 记下这一代弹窗（审查 W4F1-039）：关窗/换号后循环必须自己退出。
+  const gen = taskGen;
   btn.disabled = true; btn.textContent = '执行中…';
   try {
     const base = 'accounts/' + encodeURIComponent(taskUID);
@@ -2376,6 +2581,9 @@ $('btnTaskAutoAll').onclick = async () => {
     if (r.async) {
       for (let i = 0; i < 400; i++) {
         await new Promise(res => setTimeout(res, 3000));
+        // 弹窗已关 / 已换账号：停止轮询（审查 W4F1-039）。finally 仍会恢复按钮，
+        // 后端作业不受影响，只是不再有人盯进度。
+        if (gen !== taskGen) return;
         const d = await api(base + '/tasks/job');
         j = d.job;
         if (!j) continue;
@@ -2404,13 +2612,18 @@ $('btnTaskAutoAll').onclick = async () => {
 
 async function loadTasks() {
   if (!taskUID) return;
+  // 序号 + 弹窗代数（审查 W4F1-043 / 039）：btnTaskReload、行内动作的 finally、
+  // 「全部接受」的 finally、清空跳过名单后的刷新都能并发触发本函数 —— 后返回的旧
+  // 任务列表会把刚领取的任务又显示成「可领取」。弹窗关闭后落地的那份同样丢弃。
+  const seq = ++tasksSeq, gen = taskGen, uid = taskUID;
   const st = $('taskState'), tb = $('taskTable');
   st.hidden = false;
   st.className = 'state';
   st.innerHTML = '<span class="dots">查询中</span>';
   tb.hidden = true;
   try {
-    const d = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks');
+    const d = await api('accounts/' + encodeURIComponent(uid) + '/tasks');
+    if (seq !== tasksSeq || gen !== taskGen) return;   // 旧响应 / 弹窗已关：不写 DOM
     const list = d.tasks || [];
     // capabilities：国际区任务只读（accept/claim/automate 均为 false），按钮据此关掉，
     // 而不是让用户点了必然失败。message 里是「为什么只读」的一句话说明。
@@ -2458,6 +2671,7 @@ async function loadTasks() {
     st.hidden = true;
     tb.hidden = false;
   } catch (e) {
+    if (seq !== tasksSeq || gen !== taskGen) return;   // 旧请求的失败别覆盖最新一次结果
     st.className = 'state err';
     st.textContent = e.message;
   }
@@ -2507,7 +2721,9 @@ function staskHTML(t) {
   if (t.status === 'claimed') return '<span class="stask ok"><span class="mark">✓</span>已领</span>';
   if (t.status === 'completed') return '<span class="stask warn"><span class="mark">◆</span>可领</span>';
   if (t.status === 'in_progress') {
-    const fr = t.target_count ? '<span class="fr">' + t.progress + '/' + t.target_count + '</span>' : '';
+    // progress / target_count 来自上游，必须 esc（审查 W4F1-044）：本函数其余分支
+    // 都是常量，只有这一处把服务端原值插进 innerHTML。
+    const fr = t.target_count ? '<span class="fr">' + esc(t.progress) + '/' + esc(t.target_count) + '</span>' : '';
     return '<span class="stask warn"><span class="mark">◐</span>' + fr + '</span>';
   }
   return '<span class="stask todo"><span class="mark">○</span>未做</span>';
@@ -3037,12 +3253,23 @@ if ($('mdBody')) {
   $('mdBody').addEventListener('change', async ev => {
     const sel = ev.target.closest('select[data-effort-id]');
     if (sel) {
+      // 保存失败要回滚选中值（审查 W4F1-049）：此前只把 disabled 解开，界面就停在
+      // 一个后端并未接受的档位上，与旁边「保存失败」的 toast 自相矛盾。
+      // 旧值取 option[selected]：那是渲染时写进 HTML 的**属性**，用户改选只改
+      // property，属性仍指向原来那一档（不必给 mdRowHtml 加额外字段，避免影响
+      // 模型行 HTML 的既有契约）。
+      const prevOpt = sel.querySelector('option[selected]');
+      const prev = prevOpt ? prevOpt.value : sel.value;
       sel.disabled = true;
       try {
         await api('model_effort', { method: 'POST', body: JSON.stringify({ id: sel.dataset.effortId, effort: sel.value }) });
         toast('网关档位已更新：' + sel.dataset.effortId + ' → ' + sel.value, 'ok');
         await loadModels();
-      } catch (e) { toast('网关档位保存失败：' + e.message, 'err'); sel.disabled = false; }
+      } catch (e) {
+        sel.value = prev;
+        toast('网关档位保存失败：' + e.message, 'err');
+        sel.disabled = false;
+      }
       return;
     }
     const box = ev.target.closest('input[data-model-id]');
@@ -3339,7 +3566,11 @@ async function loadCreditHistory() {
 async function loadUsage() {
   const q = trangeQuery('usRange', true);
   try {
-    await warmUsageModelRates();
+    // 倍率预热改成旁路（审查 W4F1-048）：warmUsageModelRates 内部是 api('models') ——
+    // 直连上游的实时目录查询，与本次用量统计**无关**。此前 await 它，上游慢时
+    // （几十秒）整页被串行阻塞、且这一页没有「查询中」占位，用户看到的是上一屏残留。
+    // 失败也不影响统计（它自己已经吞异常，这里再兜一层防止未处理的 rejection）。
+    warmUsageModelRates().catch(() => {});
     const d = await api('usage?' + q.toString());
     renderUsage(d);
     loadCreditHistory(); // 旁路，不阻塞用量渲染
@@ -3644,7 +3875,10 @@ function renderPackages(d, detailLimit) {
   const labelOf = {};
   for (const a of list) for (const s of pkBySource(a.packages || [])) labelOf[s.key] = s;
 
-  const maxRemain = Math.max(1, ...list.map(a => Number(a.remain || 0)));
+  // 用 reduce 而不是 Math.max(1, ...arr)（审查 W4F1-058，与 W4F1-009 同型）：
+  // 账号数上万时展开会把整表塞进实参并抛 RangeError，renderPackages 直接中断、
+  // 「积分构成」整页空白。
+  const maxRemain = list.reduce((m, a) => Math.max(m, Number(a.remain || 0)), 1);
 
   $('pkSummary').innerHTML = list.map(a => {
     if (a.error) {
@@ -3806,13 +4040,17 @@ if ($('pkSort')) {
 // 不再「切进积分构成页就打一次上游」——逐账号实时查询在账号多时既慢又压上游。
 // 无缓存（首次进入）才自动查一次；显式刷新（force=true，点「刷新」按钮）始终实时查。
 async function loadPackages(force) {
+  // 请求序号（审查 W4F1-061）：btnPk（force）、go('packages')、排序切换重排、首页
+  // 到期卡片的 loadExpiry 都会打 /packages。两次实时查询并发时，后完成的旧快照会
+  // 写进 lastPackages/lastPackagesAt —— 首页到期卡片随后就显示旧数据。
+  const seq = ++packagesSeq;
   if (!force && lastPackages) {
     // 缓存分支也要确保 limit 已解析（bug #15/#11）：先打开首页让到期卡片拉过
     // packages（写 lastPackages 但**不**写 lastDetailLimit），再切到「积分构成」时
     // 会用默认 5。而 cfgLoaded 只在打开配置页时才赋值 —— 所以这里缺配置时补拉一次，
     // 否则配置里的 panel.package_detail_limit 永远不生效。
     if (!cfgLoaded) {
-      try { const c = await api('config'); cfgLoaded = c && c.config ? c.config : null; } catch (e) {}
+      try { const c = await api('config'); if (seq !== packagesSeq) return; cfgLoaded = c && c.config ? c.config : null; } catch (e) {}
     }
     lastDetailLimit = pkDetailLimit(cfgLoaded);
     renderPackages(lastPackages, lastDetailLimit);
@@ -3828,11 +4066,13 @@ async function loadPackages(force) {
       api('packages'),
       api('config').catch(() => null),
     ]);
+    if (seq !== packagesSeq) return;   // 旧快照：不写缓存、不渲染
     lastPackages = d;                            // 缓存供首页到期卡片与排序切换复用
     lastPackagesAt = Date.now();
     lastDetailLimit = pkDetailLimit(c && c.config);
     renderPackages(d, lastDetailLimit);
   } catch (e) {
+    if (seq !== packagesSeq) return;
     $('pkSummary').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
     $('pkExpiry').innerHTML = '<div class="pk-expiry-empty">读取失败：' + esc(e.message) + '</div>';
   }
@@ -4023,6 +4263,11 @@ async function loadExpiry(force) {
   } catch (e) {
     // textContent 本身不解析 HTML，再套 esc() 会把 `<` 显示成 `&lt;`（bug #18）。
     $('expNote').textContent = '查询失败：' + e.message;
+    // 列表不能停在「查询中…」（审查 W4F1-062）：renderExpiry 内部抛错时占位文案永不
+    // 更新，用户看到的是一句「查询中」配一句「查询失败」，只能靠刷新页面自救。
+    // 已经渲染出真实数据的旧结果保留（比清空更有用），只替换占位态。
+    const box = $('expList');
+    if (box && /查询中/.test(box.textContent || '')) box.innerHTML = '<div class="empty">查询失败，点「检查」重试</div>';
   }
   expFetching = false;
 }
@@ -4105,6 +4350,11 @@ const BH_REALMS = [
 ];
 /* bhRealm 当前选中的域。null = 尚未初始化（首次加载时按数据自动选一个非空域）。 */
 let bhRealm = null;
+/* bhRealmPicked 用户是否**显式**点过域切换（审查 W4F1-065）。
+   为什么需要它：loadBalance 每次响应都会跑 `!all.some(s => realmOf(s) === bhRealm)`
+   来兜「记住的域已无数据」，但并发时旧响应（只有 cn 数据）回来会把用户刚点的
+   global 弹回 cn —— 那一刻新域的 series 还没到。显式选过之后就不再自动改域。 */
+let bhRealmPicked = false;
 /* realmOf 归一化账号域：空/未知归入 'other'（不静默丢弃，让它可见）。 */
 function realmOf(s) {
   const r = (s && s.realm) || '';
@@ -4213,10 +4463,15 @@ function renderBalanceChart(series) {
   }
 
   // 色板序号只按**健康系列**推进：失效号用灰线但不占号，避免健康号换色。
+  // colorOf 顺带记下每条线**实际**用的颜色（审查 W4F1-064）：图例此前用
+  // `BH_COLORS[i % ...]`（i 是含失效号的行下标），只要域里有一个失效号且不在末尾，
+  // 其后的每条线都与图例错位一格 —— 用户按图例认账号会认错。
   let liveIdx = 0;
+  const colorOf = new Map();
   rows.forEach((s, si) => {
     const dead = bhIsDead(s);
     const color = bhColorOf(s.uid, dead ? 0 : liveIdx++, dead);
+    colorOf.set(s.uid, color);
     const pts = s.points.map(p => ({ x: X(Number(p.t) * 1000), y: Y(Number(p.c)), c: Number(p.c), t: Number(p.t) * 1000, g: p.d }));
     // 平滑 <path>（monotone，不过冲 —— 见 smoothPath 注释）+ 统一线宽/线帽。
     // 线宽按**本图系列数**取档，两处折线共用同一函数，风格不会各走各的。
@@ -4269,9 +4524,11 @@ function renderBalanceChart(series) {
   const lg = $('bhLegend');
   // 账号名加 truncate 包装：超长名（如「汪羽杰（工作相关内容不要发v）」）会挤压卡头，
   // 按 12em 截断 + 省略号，完整名放 title 悬浮可见（识别优先、完整信息可及）。
+  // 取色一律复用上面的 colorOf（审查 W4F1-064）：图例与线必须是同一套颜色。
   if (lg) lg.innerHTML = rows.map((s, i) => {
     const nm = s.name || s.uid.slice(0, 8);
-    return '<i class="sw" style="background:' + BH_COLORS[i % BH_COLORS.length] + '"></i>' +
+    const sw = colorOf.get(s.uid) || BH_COLORS[i % BH_COLORS.length];
+    return '<i class="sw" style="background:' + sw + '"></i>' +
       '<span class="lg-name" title="' + esc(nm) + '">' + esc(nm) + '</span>';
   }).join(' ');
 }
@@ -4493,6 +4750,9 @@ function monthFlowOf(s, now) {
 function fmtFlow(v, dim, dimTitle) {
   if (v === null || v === undefined) return '<span class="fl-na">—</span>';
   const n = Number(v);
+  // NaN 不能落进「零」分支（审查 W4F1-071）：`!n` 对 NaN 同样为真，于是「数据异常」
+  // 被渲染成「确实没有消耗」—— 两个完全不同的结论共用了同一个符号。
+  if (!Number.isFinite(n)) return '<span class="fl-na" title="数据异常（不是数值）">—</span>';
   if (!n) {
     return '<span class="fl-zero" title="' + (dim ? esc(dimTitle || "该日采样不完整") :
       "该区间无消耗记录（余额未下降过）") + '">0</span>';
@@ -4544,6 +4804,7 @@ function renderRealmSeg(all) {
     esc(r.label) + ' · ' + count[r.key] + '</button>').join('');
   Array.prototype.forEach.call(seg.querySelectorAll('button'), function (b) {
     b.onclick = function () {
+      bhRealmPicked = true;   // 用户显式选域（审查 W4F1-065）：此后不再自动改域
       bhRealm = b.getAttribute('data-realm');
       try { localStorage.setItem('bhRealm', bhRealm); } catch (e) { /* 隐私模式：忽略 */ }
       loadBalance();
@@ -4648,13 +4909,19 @@ function renderBalanceFoot(rows, now, winDays) {
     '</tr>';
 }
 async function loadBalance() {
+  // 请求序号（审查 W4F1-065）：btnBalHist、bhWindow change、域切换、go('balhist')、
+  // refreshVisible 的每轮轮询都能并发。后返回的旧响应会覆盖新域/新窗口的数据，
+  // 还会用 `!all.some(...)` 把用户刚点的域弹回去。
+  const seq = ++balanceSeq;
   const host = $('bhChart');
   const days = Number(($('bhWindow') || {}).value || 30);
   try {
     const d = await api('balance_history?days=' + days);
+    if (seq !== balanceSeq) return;   // 旧响应：不写图表、不写缓存、不改域
     const all = d.series || [];
-    // 首次进入（或记忆的域已无数据）时确定默认域；之后保持用户的显式选择。
-    if (bhRealm === null || !all.some(s => realmOf(s) === bhRealm)) {
+    // 首次进入（或用户没显式选过、记忆的域确实无数据）时才自动定域；
+    // 显式选过之后一律保持用户的选择（审查 W4F1-065）。
+    if (bhRealm === null || (!bhRealmPicked && !all.some(s => realmOf(s) === bhRealm))) {
       bhRealm = pickRealm(all);
     }
     renderRealmSeg(all);
@@ -4727,7 +4994,15 @@ async function loadBalance() {
     const note = $('bhNote');
     if (note) note.textContent = '更新于 ' + new Date(d.now).toLocaleTimeString('zh-CN', { hour12: false });
   } catch (e) {
+    if (seq !== balanceSeq) return;   // 旧请求的失败别把最新一次的成功结果打回错误态
     if (host) host.innerHTML = '<div class="us-empty">读取余额趋势失败：' + esc(e.message) + '</div>';
+    // 统计卡与两张表必须一起进错误态（审查 W4F1-066）：此前只清图表，页面上
+    // 「读图失败」旁边还挂着上一轮的「当前合计 7499」—— 比全空更危险（会被人当真值用）。
+    const st = $('bhStats'); if (st) st.innerHTML = '';
+    const tb = $('bhAccBody');
+    if (tb) tb.innerHTML = '<tr><td colspan="11"><div class="empty">读取失败，点「刷新」重试</div></td></tr>';
+    const ft = $('bhAccFoot'); if (ft) ft.innerHTML = '';
+    const lg = $('bhLegend'); if (lg) lg.innerHTML = '';
   }
 }
 
@@ -4879,8 +5154,11 @@ function realmLabel(key) {
 
 /* ── 数值格式化（迁移遗漏）── */
 function fmtNum(v) {
-  const n = Number(v) || 0;
-  return n.toLocaleString('zh-CN');
+  // 缺失/非数值返回「—」而不是 0（审查 W4F1-070）：`Number(v) || 0` 会把
+  // NaN/undefined/null 全显示成 0 —— 余额缺失与余额为零在图上就不可区分了
+  // （fmtFlow 特意区分了「0 与 —」，这里不能又混回去）。
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toLocaleString('zh-CN') : '—';
 }
 /* fmtTokens 人类可读 token 量（额度评估的数量级都是"亿"）。 */
 function fmtTokens(n) {
@@ -4962,21 +5240,36 @@ function saveRemarkForm() {
   });
   const saved = storeRemarks(map);
   // 分组走服务端：**只提交真正改动的行**（几十个号逐个 PUT 是白打上游）。
-  const groupPuts = [];
+  // 失败项要收集（审查 W4F1-074）：此前每项都 `.catch(() => null)`，分组**全部**
+  // 失败也完全静默 —— 弹窗照关、toast 只说「备注已保存（仅本机浏览器）」，
+  // 用户以为分组也存上了。现在把失败的 uid 报出来。
+  const groupPuts = [], groupFails = [];
   document.querySelectorAll('#remarkBody input[data-guid]').forEach(inp => {
     const uid = inp.getAttribute('data-guid');
     const orig = inp.getAttribute('data-orig') || '';
     const v = inp.value.trim();
     if (v !== orig) groupPuts.push(api('accounts/' + encodeURIComponent(uid) + '/group',
-      { method: 'POST', body: JSON.stringify({ group: v }) }).catch(() => null));
+      { method: 'POST', body: JSON.stringify({ group: v }) })
+      .then(() => null, () => { groupFails.push(String(uid).slice(0, 8)); return null; }));
   });
   if (groupPuts.length) {
-    Promise.all(groupPuts).then(() => { if (view === 'accounts') loadOverview(true); });
+    Promise.all(groupPuts).then(() => {
+      if (groupFails.length) {
+        toast('分组保存失败 ' + groupFails.length + ' 个（' + groupFails.join('、') + '），其余已保存', 'err');
+      }
+      // 成败都回读一次真实状态：失败的行不能继续在界面上显示成「已改好」。
+      if (view === 'accounts') loadOverview(true);
+    });
   }
   closeRemarks();
-  // 备注只影响本机展示：重渲染当前视图即可，无需后端参与。
-  if (view === 'accounts') loadOverview(true);
-  else if (view === 'usage' && usageData) renderUsage(usageData);
+  // 备注只影响本机展示，重渲染当前视图即可（审查 W4F1-072）：loadOverview 的轮询
+  // 指纹只取 accounts/model_locks，备注不在载荷里 → 签名不变 → renderAccounts
+  // 根本不执行 → 用户刚改的备注在账号池表格里看不到，直到下一次账号状态变化。
+  // 这里先用内存里的账号列表显式重渲染一次（备注是纯前端数据，不必等后端）。
+  if (view === 'accounts') {
+    if (lastAccountsList.length) renderAccounts(lastAccountsList);
+    loadOverview(true);
+  } else if (view === 'usage' && usageData) renderUsage(usageData);
   toast(saved ? '备注已保存（仅本机浏览器）' : '备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失', saved ? '' : 'err');
 }
 // 分组筛选联动（issue #159）：只重渲染，不重新拉数据。
@@ -4995,12 +5288,20 @@ if ($('accGroupActions')) $('accGroupActions').onclick = async ev => {
   const rows = visibleAccounts();
   if (!rows.length) return;
   const label = { checkin: '签到', pause: '暂停选号', resume: '恢复选号' }[act] || act;
-  if (!confirm('将对分组「' + accGroupFilter + '」的 ' + rows.length + ' 个账号执行「' + label + '」，继续？')) return;
+  // 确认框要把作用域讲全（审查 W4F1-073）：作用域是「当前 realm 标签 ∧ 分组」的交集，
+  // 只报总数会让人不知道里面有没有国际版账号。
+  const gl = rows.filter(r => r.realm === 'global').length;
+  const scopeTxt = '分组「' + accGroupFilter + '」' +
+    (accRealmFilter === 'cn' ? '（国内版标签）' : accRealmFilter === 'global' ? '（国际版标签）' : '（全部域）') +
+    ' 的 ' + rows.length + ' 个账号' + (gl ? '（其中国际版 ' + gl + ' 个）' : '');
+  if (!confirm('将对' + scopeTxt + '执行「' + label + '」，继续？')) return;
   btn.disabled = true;
   let ok = 0, skipped = 0, failed = 0;
   try {
     for (const r of rows) {
-      if (act === 'checkin' && (r.disabled || r.enterprise || r.api_key)) { skipped++; continue; }
+      // 国际版与行内按钮同口径跳过（审查 W4F1-073 的延伸）：账号池行里国际版
+      // 根本不渲染「签到」，它没有签到体系，打过去必吃上游 404/403。
+      if (act === 'checkin' && (r.disabled || r.enterprise || r.api_key || r.realm === 'global')) { skipped++; continue; }
       try {
         await api('accounts/' + encodeURIComponent(r.uid) + '/' + act, { method: 'POST' });
         ok++;
@@ -5014,8 +5315,14 @@ if ($('accGroupActions')) $('accGroupActions').onclick = async ev => {
 if ($('btnRemarks')) $('btnRemarks').onclick = () => openRemarks('');
 if ($('btnRemarkClose')) $('btnRemarkClose').onclick = closeRemarks;
 if ($('btnRemarkClear')) $('btnRemarkClear').onclick = () => {
+  // 二次确认（审查 W4F1-080）：其它破坏性操作（移除账号 / 清空归档 / 清空跳过名单）
+  // 都有 confirm，只有「清空全部备注」没有 —— 一次误点就抹掉所有账号的显示名。
+  if (!confirm('清空全部账号备注？只影响本机浏览器，但清掉后无法恢复。')) return;
   if (!storeRemarks({})) toast('清空未能写入浏览器存储，刷新后备注会回来', 'err');
   renderRemarkBody();
+  // 账号池表格也要跟着刷新（与 W4F1-072 同源）：备注不在 overview 载荷里，
+  // 光靠 loadOverview 的指纹比对不会重渲染。
+  if (view === 'accounts' && lastAccountsList.length) renderAccounts(lastAccountsList);
 };
 if ($('btnRemarkSave')) $('btnRemarkSave').onclick = saveRemarkForm;
 // >>> modelrules-app
@@ -5048,6 +5355,11 @@ async function mrLoadCatalog() {
     }
   } catch (e) {
     toast('模型目录读取失败：' + e.message, 'err');
+    // 失败**不能**缓存成 []（审查 W4F1-075）：空数组是 truthy，函数开头的
+    // `if (mrCatalog) return mrCatalog` 会让「一次失败」变成「永久空目录」——
+    // 规则编辑弹窗此后一直显示「模型目录是空的，可能上游不可达」，勾不了任何模型，
+    // 只能整页刷新才能恢复。保持 null，下次打开弹窗自动重试。
+    return null;
   }
   mrCatalog = [...seen.values()].sort((a, b) => a.key.localeCompare(b.key));
   return mrCatalog;
@@ -5145,7 +5457,7 @@ function renderRulePick() {
   const list = q ? cat.filter(m => m.key.toLowerCase().includes(q) || String(m.label).toLowerCase().includes(q)) : cat;
   const box = $('rulePick');
   if (!list.length) {
-    box.innerHTML = '<div class="empty"><div class="big">没有匹配的模型</div>' + (cat.length ? '换个关键词' : '模型目录是空的，可能上游不可达') + '</div>';
+    box.innerHTML = '<div class="empty"><div class="big">没有匹配的模型</div>' + (cat.length ? '换个关键词' : '模型目录是空的，可能上游不可达（关掉本弹窗再打开会重试）') + '</div>';
     updateRuleCount();
     return;
   }
@@ -5180,11 +5492,17 @@ async function saveRule() {
     mode: $('ruleMode').value,
     models: [...mrPick],
   };
+  // 禁用态（审查 W4F1-081）：三个保存按钮都没有防重，连点两次会重复 POST ——
+  // 新建规则时 id 为空，后端可能直接建出两条同名规则。
+  const b = $('btnRuleSave');
+  if (b) b.disabled = true;
   try {
     await api('model_rules', { method: 'POST', body: JSON.stringify(body) });
   } catch (e) {
     toast('保存失败：' + e.message, 'err');
     return;
+  } finally {
+    if (b) b.disabled = false;
   }
   closeRuleDlg();
   toast('已保存规则「' + name + '」', 'ok');
@@ -5244,10 +5562,16 @@ function updateAccPickCount() {
 }
 
 function bulkAccPick(mode) {
+  // 用 dataset 比对代替 `querySelector('.pick[data-uid="' + uid + '"]')`（审查 W4F1-076）：
+  // uid 里出现 `"` / `]` / `\` 时 querySelector 会抛 SyntaxError，批量全选**中途中断**
+  // —— 前面的行已改、后面的没改，而 mrApplyPick 已经全改过，UI 与内部状态不一致，
+  // 随后点保存会提交一个用户没预期的集合。
+  const els = new Map();
+  Array.prototype.forEach.call($('accPickList').querySelectorAll('.pick'), el => els.set(String(el.dataset.uid), el));
   accPickRows().forEach(s => {
     const on = mode === 'all' ? true : mode === 'none' ? false : !mrApplyPick.has(s.uid);
     if (on) mrApplyPick.add(s.uid); else mrApplyPick.delete(s.uid);
-    const el = $('accPickList').querySelector('.pick[data-uid="' + s.uid + '"]');
+    const el = els.get(String(s.uid));
     if (!el) return;
     el.classList.toggle('on', on);
     const cb = el.querySelector('input');
@@ -5268,6 +5592,9 @@ async function saveAccPick() {
     if (!want && had) del.push(s.uid);
   });
   if (!add.length && !del.length) { closeAccPickDlg(); return; }
+  // 保存按钮进禁用态（审查 W4F1-081 同型）：连点两次会重复提交同一批挂载。
+  const saveBtn = $('btnAccPickSave');
+  if (saveBtn) saveBtn.disabled = true;
   try {
     if (add.length) {
       await api('model_rules/apply', { method: 'POST', body: JSON.stringify({ id: rule.id, uids: add, assigned: true }) });
@@ -5276,8 +5603,15 @@ async function saveAccPick() {
       await api('model_rules/apply', { method: 'POST', body: JSON.stringify({ id: rule.id, uids: del, assigned: false }) });
     }
   } catch (e) {
-    toast('保存失败：' + e.message, 'err');
+    // 两条请求不是原子的（审查 W4F1-077）：add 成功、del 失败时挂载已**部分**生效，
+    // 而 mrAssign 还是旧值 —— 用户再点一次会把已生效的那部分重发一遍。
+    // 真正原子的修法是后端接受 add/del 双数组（见报告「需要后端配合」）；
+    // 前端先做能做到的：回读服务端真实状态，让界面不再停留在错误的旧值上。
+    toast('保存失败：' + e.message + '（已回读服务端状态，请核对后再操作）', 'err');
+    loadModelRules();
     return;
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
   }
   closeAccPickDlg();
   toast('已应用「' + rule.name + '」：新增 ' + add.length + ' 个、移除 ' + del.length + ' 个账号', 'ok');
@@ -5312,6 +5646,9 @@ function renderAccRulePick() {
 
 async function saveAccRule() {
   const ids = [...$('accRuleList').querySelectorAll('.pick.on')].map(el => el.dataset.id);
+  // 禁用态（审查 W4F1-081）：无防重时连点会重复 POST 同一份规则列表。
+  const b = $('btnAccRuleSave');
+  if (b) b.disabled = true;
   try {
     await api('accounts/' + encodeURIComponent(mrAccUid) + '/model_rules', {
       method: 'POST', body: JSON.stringify({ ids }),
@@ -5319,6 +5656,8 @@ async function saveAccRule() {
   } catch (e) {
     toast('保存失败：' + e.message, 'err');
     return;
+  } finally {
+    if (b) b.disabled = false;
   }
   closeAccRuleDlg();
   toast('已更新该账号的规则', 'ok');

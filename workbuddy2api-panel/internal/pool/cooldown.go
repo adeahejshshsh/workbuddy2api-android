@@ -179,14 +179,12 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 			// reviveCoolingLocked 随后按 coolKind 解冻，一次余额刷新就把它提前清掉。
 			return
 		}
-		// 「更晚但更弱」也要挡：未到期的 CoolHard 不许被 CoolSoft 覆盖。
-		// CooldownSoftRate / CooldownSoftForModel 都显式挡了这件事，唯独这里没挡 ——
-		// 后果是 until 被推得更晚、coolKind 却变成 soft，于是签到回血后
-		// reviveCoolingLocked（只认 CoolHard）直接跳过：余额已恢复，号还锁到墙钟，
-		// 只能人工 revive，而面板上写的还是 hard_credit。
-		if e.coolKind == CoolHard && kind != CoolHard && now.Before(e.until) {
-			return
-		}
+		// 「更晚但更弱」的守卫**只有上面那一处**（审查 C5-22）：此前这里还写了一遍
+		// 完全相同的条件 `e.coolKind == CoolHard && kind != CoolHard && now.Before(e.until)`，
+		// 而两处之间没有任何字段变更 —— 第二处永远不可能成立，是死代码。
+		// 危险之处不是冗余本身：后来的人若在中间插入字段修改（比如先清模型豁免），
+		// 第二处会「突然」开始生效，行为随改动漂移且无从推断。删掉它，把语义
+		// 钉在唯一一处守卫上（CoolHard 不被 CoolSoft 降级/缩短，见上方注释）。
 		e.until = next
 		e.coolKind = kind
 		e.reason = reason

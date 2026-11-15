@@ -110,16 +110,26 @@ func (p *taskProber) missed(id string, advanced int, now time.Time) {
 	m := p.miss[id]
 	if m == nil {
 		if len(p.miss) >= p.cfg.missed {
-			for k, v := range p.miss { // 先清过期的；仍满就随手丢一条，容量是硬上限
+			for k, v := range p.miss { // 先清过期的
 				if now.After(v.expire) {
 					delete(p.miss, k)
 				}
 			}
-			for k := range p.miss {
-				if len(p.miss) < p.cfg.missed {
+			// 仍满：淘汰**最早过期**的那条（审查 W1A4-21）。此前是 map 迭代序「随手丢一条」，
+			// 而 map 顺序是随机的 —— 垃圾 id 有机会挤掉正常 id 的静默期记录，让正常用户的未知
+			// 任务查询被反复真探测，最后把 30/min 的全局探测额度耗在别人身上（表现为「额度已用尽」）。
+			// 按 expire 取最旧是确定性的，且优先丢最没价值的记录。
+			for len(p.miss) >= p.cfg.missed {
+				oldestKey, oldest := "", time.Time{}
+				for k, v := range p.miss {
+					if oldestKey == "" || v.expire.Before(oldest) {
+						oldestKey, oldest = k, v.expire
+					}
+				}
+				if oldestKey == "" {
 					break
 				}
-				delete(p.miss, k)
+				delete(p.miss, oldestKey)
 			}
 		}
 		m = &probeMiss{}

@@ -80,7 +80,13 @@ func (c *Client) globalRegisterJSON(req *http.Request) (code int, msg string, ra
 		return 0, "", nil, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// 读失败必须报（审查 A1-21）：此前 `data, _ := io.ReadAll(...)` 把传输中断丢掉，
+	// 随后 json.Unmarshal 必然失败 → 报 "global register parse"，真实原因（连接被
+	// 掐断/超时）被完全覆盖，排障方向被带偏。截断同理（A1-15）。
+	data, err := readAllLimitedStrict(resp.Body, 1<<20)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("global register read: %w", err)
+	}
 	var env struct {
 		Code int             `json:"code"`
 		Msg  string          `json:"msg"`

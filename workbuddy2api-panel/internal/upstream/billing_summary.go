@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -201,8 +202,11 @@ func (c *Client) globalUserResourceBuckets(a *auth.Auth, soon time.Duration) (re
 	remainByCode := make(map[string]int64, len(sum.Packages))
 	codes := make([]string, 0, len(sum.Packages))
 	for _, p := range sum.Packages {
-		r := int64(p.CycleRemainCapacity)
-		s := int64(p.CycleTotalCapacity)
+		// 四舍五入而不是截断（审查 A1-07）：CycleRemainCapacity 是字符串小数
+		// （"335.47000026"），直接 int64() 会把 0.9 分余额记成 0 —— 面板显示「余额 0」，
+		// 路由权重与 credit_floor 也跟着低估。口径与 CN 侧 packageRemainUsed 一致。
+		r := roundCapacity(float64(p.CycleRemainCapacity))
+		s := roundCapacity(float64(p.CycleTotalCapacity))
 		if r < 0 {
 			r = 0
 		}
@@ -267,16 +271,21 @@ func (c *Client) globalUserResourceBuckets(a *auth.Auth, soon time.Duration) (re
 	byDate := make(map[string]*ExpiryBucket)
 	for k, p := range merged {
 		// 每行用**自己的**剩余；只有单周期码才允许回落到 summary 的余额。
-		r := int64(p.d.balanceRemain())
-		if r <= 0 && futurePerCode[k.code] == 1 {
+		// 判「是否用完」必须用 **float 原值**（审查 A1-07）：balanceRemain 是字符串
+		// 小数（"0.9" 这种），先 int64() 截断再判 `<= 0` 会把 0.9 分当成「已用完」，
+		// 该批到期信息整条丢弃 —— earliestAt/expiring 少算，池子可能把仍有余额的号
+		// 判成耗尽。四舍五入只发生在**计入金额**那一步。
+		rf := p.d.balanceRemain()
+		if rf <= 0 && futurePerCode[k.code] == 1 {
 			if sr, ok := remainByCode[k.code]; ok {
-				r = sr
+				rf = float64(sr)
 			}
 		}
-		if r <= 0 {
+		if rf <= 0 {
 			// 该周期已用完 / 明细没给剩余：不贡献额度，也不该拉早 earliestAt。
 			continue
 		}
+		r := roundCapacity(rf)
 		end := p.end
 		if earliestAt.IsZero() || end.Before(earliestAt) {
 			earliestAt = end
@@ -321,7 +330,13 @@ func (c *Client) globalUserResourceBuckets(a *auth.Auth, soon time.Duration) (re
 		log.Printf("WARN: [billing] %d 个自然日的到期日只能按计量周期（CycleEndTime）推算，非真实扣费截止（acct=%s）",
 			estimateCount, a.UID)
 	}
-	c.notifyCredits(a, remain, nil)
+	// 与 CN 口径统一（审查 A1-03）：summary 回 200 但 Packages 为空时 remain=0 是
+	// **没有观测**，不是「余额归零」。此前无条件 notifyCredits，积分台账里就多出
+	// 一条假「余额归零」观测，下一轮真实余额再产生一条虚假大额 delta，下游若据台账
+	// 做余额判断会误杀好号。CN 侧早有 hasAccounts 守卫（client.go），这里补齐。
+	if len(sum.Packages) > 0 {
+		c.notifyCredits(a, remain, nil)
+	}
 	return remain, total, expiring, earliestAt, earliestRemaining, buckets, nil
 }
 
@@ -372,8 +387,9 @@ func (c *Client) globalCreditPackages(a *auth.Auth) ([]CreditPackage, int64, int
 	out := make([]CreditPackage, 0, len(sum.Packages))
 	var remainSum, totalSum int64
 	for _, p := range sum.Packages {
-		remain := int64(p.CycleRemainCapacity)
-		size := int64(p.CycleTotalCapacity)
+		// 同上：字符串小数四舍五入（审查 A1-07）。
+		remain := roundCapacity(float64(p.CycleRemainCapacity))
+		size := roundCapacity(float64(p.CycleTotalCapacity))
 		if remain < 0 {
 			remain = 0
 		}
@@ -387,8 +403,14 @@ func (c *Client) globalCreditPackages(a *auth.Auth) ([]CreditPackage, int64, int
 			Size:        size,
 			Cycle:       true,
 		}
-		if size >= 0 {
+		// Used 只在**知道面额**时算（审查 A1-28）：size==0（不限量 / 上游没下发面额）
+		// 时 `size-remain` 是负数，面板「已用」列出现 -N，与「剩余 N」自相矛盾。
+		// 面额未知时留 0（= 不可算），不要拿负数冒充观测值。
+		if size > 0 {
 			pkg.Used = size - remain
+			if pkg.Used < 0 {
+				pkg.Used = 0
+			}
 		}
 		if bp, ok := best[p.PackageCode]; ok {
 			if bp.d.PackageName != "" {
@@ -454,6 +476,31 @@ func (c *Client) globalPackageDetails(a *auth.Auth, codes []string) []packageDet
 		out = append(out, rep.Accounts...)
 	}
 	return out
+}
+
+// roundCapacity 把上游的（可能是字符串小数形态的）容量四舍五入成 int64。
+//
+// 为什么不能直接 `int64(x)`（审查 A1-07）：summary 里 CycleRemainCapacity /
+// CycleTotalCapacity 是 **"335.47000026" 这样的字符串小数**，直接截断会把 0.9 分
+// 余额记成 0 —— 面板显示「余额 0」、该批到期信息整条被丢弃（`r <= 0 → continue`），
+// 池子可能把仍有余额的号判成耗尽。口径与 CN 侧 packageRemainUsed 的
+// 「四舍五入到最近整数」一致，两条链路不再各说各话。
+//
+// 越界保护：flexFloat 来自上游文本，可能是 1e300 这种脏值；math.Round 后直接转
+// int64 在 Go 里是**未定义行为**（实现相关，常见结果是 -9223372036854775808）。
+// 超出 int64 范围时钳到边界，宁可记成「很大」也不要变成负数。
+func roundCapacity(v float64) int64 {
+	if math.IsNaN(v) {
+		return 0
+	}
+	r := math.Round(v)
+	if r >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	if r <= math.MinInt64 {
+		return math.MinInt64
+	}
+	return int64(r)
 }
 
 // balanceRemain 明细自报的剩余额度：Cycle 期套餐优先，回退整包容量；Precise 形态优先。

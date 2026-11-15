@@ -13,8 +13,11 @@ services:
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
       - TZ=Asia/Shanghai
+    # 默认只绑宿主机回环（审查 E3）：容器内仍监听 0.0.0.0（否则端口映射无效），
+    # 但**对外暴露**必须是显式决定。要让局域网访问就把下面改成 "7863:7863"，
+    # 并先确认 api_key / admin_api_key 都已配置 —— 这个端口同时是面板与 API。
     ports:
-      - "7863:7863"
+      - "127.0.0.1:7863:7863"
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data

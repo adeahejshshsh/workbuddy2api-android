@@ -380,7 +380,12 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 					if v, ok := chunk["created"].(float64); ok && created == 0 {
 						created = v
 					}
-					if u, ok := chunk["usage"].(map[string]any); ok {
+					// usage 只接受**非空**对象（审查 F-13 / W4-U1-40）：此前无条件覆盖，
+					// 上游先发带数值的 usage、末帧再发一个空 `usage:{}` 时，真实用量被
+					// 抹成空 map → 非流式响应丢 usage → 计费/观测记 0。
+					// 仍保留「后到覆盖先到」语义：上游分帧补报时最后一份才是最终口径
+					// （改成按键求和会把同一份用量重复计一次，那是更大的错）。
+					if u, ok := chunk["usage"].(map[string]any); ok && len(u) > 0 {
 						usage = u
 					}
 					if ch, ok := chunk["choices"].([]any); ok {

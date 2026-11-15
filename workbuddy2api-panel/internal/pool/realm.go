@@ -56,6 +56,17 @@ func (p *Pool) AvailableUIDsForRealm(realm string) []string {
 		if !e.healthy(now) {
 			continue
 		}
+		// 积分保底 / 保留积分（审查 C5-84）：本系列是**生产调用方**（面板 /v1/models、
+		// 启动预热、handler 选号对齐）用的「可用集合」。只判 healthy+inFlightFull 时，
+		// 触底号会出现在可用集合里、而 pick 永远不选它 —— 两侧口径裂缝的典型症状是
+		// 「面板说 N 个可用，请求却报 no_healthy_account」，或会话层绑定后每请求
+		// 一次 unbind 抖动。无模型上下文 → 走证据式保底（见 floorBlockedNoModelLocked）。
+		if p.floorBlockedNoModelLocked(e, e.a.Realm(), now) {
+			continue
+		}
+		if p.reserveBlocked(e, p.modelFreeOf(e, "")) {
+			continue
+		}
 		if p.inFlightFull(e) {
 			continue
 		}
@@ -85,6 +96,15 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 		if !e.healthyForModel(now, model) {
 			continue
 		}
+		// 与 pick 同口径（审查 C5-84）：可用集合必须叠加积分保底与保留积分。
+		// 这条路径供会话粘性的加权分配（cmd/server/wiring.go）用 —— 少了保底判定，
+		// 会话会把流量绑到 pick 侧已停单的号上，每次请求多一次解绑 + 一条 WARN。
+		if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
+			continue
+		}
+		if p.reserveBlocked(e, p.modelFreeOf(e, model)) {
+			continue
+		}
 		if p.inFlightFull(e) {
 			continue
 		}
@@ -96,7 +116,10 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 	for _, uid := range uids {
 		slots := 1
 		if p.preferExpiring {
-			if e := p.byUID[uid]; expiringNow(e, now) {
+			// 显式判 ok（审查 C5-86）：uid 来自同锁内的遍历，当前恒存在；但
+			// expiringNow 直接解引用 e，写法一旦被复用到「可能已删除」的场景就是
+			// nil panic。判一下的成本可忽略，换掉一类脆弱写法。
+			if e, ok := p.byUID[uid]; ok && expiringNow(e, now) {
 				slots = expiringVirtualSlots
 			}
 		}
@@ -119,6 +142,15 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 			continue
 		}
 		if !e.healthyForModel(now, model) {
+			continue
+		}
+		// 与 pick 同口径（审查 C5-84）：可用集合必须叠加积分保底与保留积分。
+		// 这条路径供会话粘性的加权分配（cmd/server/wiring.go）用 —— 少了保底判定，
+		// 会话会把流量绑到 pick 侧已停单的号上，每次请求多一次解绑 + 一条 WARN。
+		if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
+			continue
+		}
+		if p.reserveBlocked(e, p.modelFreeOf(e, model)) {
 			continue
 		}
 		if p.inFlightFull(e) {

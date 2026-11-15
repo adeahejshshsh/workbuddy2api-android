@@ -107,10 +107,24 @@ func (b *bodyLimiter) Close() error { return b.rc.Close() }
 // 超限时**必须**做这一步：直接 return 会让 net/http 关掉连接，客户端只看到
 // connection reset，看不到那份 413（hub #799 的同款坑）。
 func (b *bodyLimiter) drain(w http.ResponseWriter, limit int64) {
-	if w != nil {
-		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(drainDeadline))
+	drainTo(w, b.rc, limit)
+}
+
+// drainTo 在读截止时间窗口内排空 src，收尾把截止时间复位。
+//
+// 审查 W3C8-21（P2）：此前排空后**不重置**读截止时间。该 deadline 属于底层连接
+// 而不是本次请求 —— keep-alive 复用时，下一个请求的读会带着这个早已过期的截止
+// 时间，表现为「同一条连接上的第二个请求莫名超时/被断」。排空结束必须
+// SetReadDeadline(time.Time{}) 复位（复位失败不致命：那条连接本来就不会复用）。
+func drainTo(w http.ResponseWriter, src io.Reader, limit int64) {
+	if w == nil {
+		_, _ = io.CopyN(io.Discard, src, limit)
+		return
 	}
-	_, _ = io.CopyN(io.Discard, b.rc, limit)
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(drainDeadline))
+	_, _ = io.CopyN(io.Discard, src, limit)
+	_ = rc.SetReadDeadline(time.Time{})
 }
 
 // limitBody 给入站请求体套上上限，返回实际生效的字节数（供 413 文案用）。
@@ -132,10 +146,7 @@ func drainBody(w http.ResponseWriter, r *http.Request, limit int64) {
 		bl.drain(w, limit)
 		return
 	}
-	if w != nil {
-		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(drainDeadline))
-	}
-	_, _ = io.CopyN(io.Discard, r.Body, limit)
+	drainTo(w, r.Body, limit)
 }
 
 // bodyTooLarge 报告读体错误是否是「超过上限」——调用方据此回 413 而不是 400：

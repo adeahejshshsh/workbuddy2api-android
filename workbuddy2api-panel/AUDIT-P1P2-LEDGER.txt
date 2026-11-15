@@ -1,59 +1,71 @@
 审查报告 P1/P2 落地台账（CODE-AUDIT-FULL.md）
 =============================================
 
-已在前 9 个 PR 修完（P0 全部 + P1 11 条）
------------------------------------------
-#148 P0-1 面板门禁改用独立 admin_api_key
-#149 C1 proxypool Realms 共享 map（fatal） / C2 清扫锁 panic 泄漏 / C3 暂存期 Release 失效
-     C7 工具参数修复器 nil map panic / C8 redis worker 无 recover
-#150 A1 代理静默直连 / A2 webhook 日志泄凭据 / A3 临时文件符号链接 / A8 桶键串账
-#151 C4 冷却被砍短 / C5 换凭证不重算规则 / C6 僵尸窗口 / B4 multipart 无上限
-#152 B2 无 token 扣费丢失 / B3 三个贵端点不占在途
-#153 B1 积分闸覆盖 embeddings/search/fetch/3D
-#154 A6 视频/3D 任务按调用方归属
-#155 B5 视频扣费幂等与 3D 统一
-#156 A5 显式会话键按调用方隔离
+总进度（截至本分支）
+--------------------
+P0   1 / 1     ✅ 全部
+P1   37 / 37（精编）✅ 全部；完整 80 条里已修 47 条，其余为误报或需跨包改造
+P2   约 360 条里已修 168 条（按主题分组推进）
 
-本 PR（audit/p1-p2-full）已修
------------------------------
-pool
-  C5-04 SetRemark 无长度上限 → rune 截断 200
-  C5-05 modelCost 写侧永不清理 → 表长 >32 时 TTL 清理
-  C5-07 disabled 账号仍累计 12153 计数 → 入口短路
-  C5-16 兜底选号 lastUsed 用 time.Now() → 用锁内 now
-  C5-17 exploreLast 清理在探索分支内 → 移到分支外
-  C5-24 熔断时长配置为 0 时静默失效 / 溢出 → default 兜底 + 溢出前置判断
-  P-19 SetNickname 落盘失败不回滚内存 → 回滚
-usage
-  数值毒化：一个 NaN/±Inf 让 json.Marshal 永久失败 → 清零重试
-session
-  绑定表无上限 → maxSessionEntries=20000 + 按 lastActive 淘汰到 90% 水位
-server/images
-  fileToDataURL 8MiB 静默截断 → 报错
-  multipart ReadForm 后无 RemoveAll → defer 清理
-server/videos
-  numberToInt 对 NaN/±Inf/超界无校验 → 判非法
-upstream/decode_body
-  deflate 无界 ReadAll → 8MiB 上限
-upstream/client
-  F-08 doJSON 空体成功被判成解析失败 → 填 null（env.Data 同步）
-upstream/streak_extras
-  W4-U2-101 三处 `_ = json.Unmarshal` → 解析失败返回 error
-upstream/school
-  W4-U2-084 `raw, _ = json.Marshal(body)` → 检查 err
-upstream/report
-  W4-U2-028 失败分支返回半截信封 → 返回零值信封
-scheduler/windowprobe
-  P-25 clip 按字节截断 UTF-8 → 按 rune
+按提交划分
+----------
+前 9 个 PR（P0 + P1 首批 11 条）
+  #148 P0-1 面板门禁改用独立 admin_api_key
+  #149 C1/C2/C3/C7/C8（崩溃·死锁·泄漏·panic·worker 死）
+  #150 A1/A2/A3/A8（代理静默直连·webhook 日志·临时文件符号链接·桶键串账）
+  #151 C4/C5/C6/B4（冷却砍短·规则不重算·僵尸窗口·multipart 无上限）
+  #152 B2/B3（无 token 扣费丢失·贵端点不占在途）
+  #153 B1（积分闸覆盖 embeddings/search/fetch/3D）
+  #154 A6（视频/3D 任务按调用方归属）
+  #155 B5（视频扣费幂等与 3D 统一）
+  #156 A5（显式会话键按调用方隔离）
+  #157/#158 审计第一批 20 条 + 面板配置打码
 
-本 PR 未覆盖（下一批，按模块推进）
----------------------------------
-- APK Java 层：A7 端口冒充链、A9 默认绑全网卡+明文、A10 WebView 注入 key 不校验来源
-  （需 Linux 环境跑 Gradle 构建验证，且改动在壳侧）
-- A4 realm 迁移陈旧快照覆盖新 RT（启动路径，需加文件锁/版本比较）
-- pool 锁内 IO 与选号口径：C5-01/02/03/11/12/13/14/15/18/19/20、C5-25 等
-- 面板导出接口条数/速率限制 + 审计行；getConfig 白名单脱敏 + no-store
-- reqlog 文件数无界、media_fetch 名额无超时回收、metrics 其余口径项
-- 前端 app.js 状态与竞态（12 条）、Java UI 层资源泄漏
-- 剩余 P2 约 300 条：按「无界增长 / 锁内 IO / 静默截断 / 计费口径 / 资源泄漏 / 前端竞态」
-  六组继续。
+本分支（audit/p1p2-parallel）
+  e88f082  session S1 + usage U5-U8 + 部署链 E1/E2/E3
+  b803a42  pool 21 条（C5-01/02/11/13/14/18/19/20/36/19/30/32/52/65/72/73/74/82/84/22）
+  c55e886  前端 34 条（W4F1 系列）
+  4a5e48c  server 端点 24 条（W1A4/W3C8）+ E5 保活临期窗口死路
+  461a129  观测 25 条（C9-MF/C9-MT/C7 四条 P1/W3C8-21）
+  a4b4dd1  auth+alert 20 条（A4 陈旧快照 / W2-C2 系列 / webhook SSRF）
+  e1a6711  upstream 22 条（A1/W4-U2/F 系列）
+  73a0014  proxypool 5 条（W2-C6-12/13/14/16/20）
+
+关键修复（按危害排序）
+----------------------
+1. A4 双实例共享 auths/ 时用陈旧快照覆盖新 RT → 账号掉线
+   （CAS + 只改 realm 键 + ErrStaleSnapshot，比报告建议更保守）
+2. C5-01 无模型粘性直取没有积分保底 → 持续选中触底号打穿余额
+3. C5-36/C10 pick 与 Acquire 并发把 inFlight 推过 max_in_flight → 自己打出上游 14003
+4. C7-014/015/016 reqlog 大事件逐条轮转（文件数无界）+ O(N²) stat + 时区错删数据
+5. D 组 SSE 四条（D2 非 data 行拆帧 / D3 chunked 半行 / D6 心跳破坏 wroteAny /
+   D7 正常终态被补 length）—— **本轮未做**，见下
+6. E5 keepalive_refresh_window 生产路径完全没生效 → 每天全池换一次 RT
+7. W2-C6-14 探测 URL 可指向内网/元数据（SSRF）
+
+未做（明确记录）
+----------------
+A7 / A9 / A10  APK Java 层：端口冒充链、默认绑全网卡+明文、WebView 注入 key 不校验来源
+               需要 Linux 环境跑 Gradle 构建验证（当前 linux_environment_status =
+               not-installed），改完无法验证就不该改。
+D2 / D3 / D6 / D7  SSE 四条：都在 internal/upstream/sse.go 主循环里，是整条链路的心脏。
+               需要带「对拍」的单独一轮（用真实上游流样本逐字节对比），不能顺手改。
+C5-37 / C5-46 / C5-47  pool 锁内落盘 IO 与空状态覆盖损坏文件：需要把 saveLocked 的
+               4 次 IO 整体移出写锁并改造 flusher/.corrupt 语义，属结构性重构。
+E4             调度族锁被 7 个旁路入口绕过：需要把族锁收进 Pool 层的
+               WithFamilyLock(uid, family, fn)，所有入口统一走它。
+W4F1-001       面板 api_key 明文存 localStorage：需要后端下发短期会话（httpOnly Cookie）。
+W4F1-077       model_rules/apply 非原子：需要接口改成 {id, add:[], del:[]} 或事务语义。
+W1A4-12/W3C8-10 出站 URL 策略（水印域名白名单、视频首帧 URL 白名单）：需要新增配置项。
+W3C8-25       embeddings 不记账：需要接 chatStat + usage.Add + 新 mode 值。
+W2-C2-21      EnterpriseOverride 字段改未导出：需同步改 6 个包 20+ 处直读。
+W2-C2-32      wbFieldAAD 不掺 uid：是桌面端互操作契约，改了桌面端读不回文件。
+W2-C2-01~06   cmd/trial 系列；W2-C2-39~47 internal/balance 系列。
+剩余 P2 约 190 条：多为「信息」级或已在上面分组里判定为「需结构性重构」。
+
+测试与验证
+----------
+- `bash tests/run.sh all` 19 个包全绿（每批独立验证 + 最终全量）。
+- 新增用例约 190 条，其中约 40 条做过「改回旧实现必红」的反向验证
+  （pool 17 条 / server 9 条 / upstream 9 条 / auth 5 条）。
+- 误报 11 条已带证据记录（C5-03 / W2-C2-25 / C7-024 / W4-U2-001 / bodylimit 静默截断 等）。

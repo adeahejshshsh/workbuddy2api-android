@@ -23,10 +23,12 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -116,13 +118,6 @@ func newVideoTaskStore() *videoTaskStore {
 
 func (s *videoTaskStore) put(id, uid, realm, model string) {
 	s.putFor(id, uid, realm, model, "")
-	if s == nil || id == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now()}
-	s.gcLocked()
 }
 
 func (s *videoTaskStore) get(id string) (videoTaskOwner, bool) {
@@ -147,9 +142,19 @@ func (s *videoTaskStore) adopt(id, uid, realm, model string, charged bool) {
 }
 
 // adoptFor 收养并记录归属调用方（探测命中走这条）。
+//
+// model 为空时落 sentinel（审查 W1A4-07）：收养发生在「进程重启 / 台账淘汰」之后，
+// 网关手上没有任何请求上下文可以回溯是哪个模型出的片。此前直接把空串写进台账，于是
+// recordVideoUsage → NoteModelCost(uid, "", ...) 被 pool 侧的 `model == ""` 早退挡掉，
+// 这条任务的积分**永久不入账**（余额虚高、保底/降权判断失真），成本报表也缺一块。
+// 落 sentinel 后：账照样下，报表里能按 "unknown-adopted" 聚合出「收养漏记量」，
+// 回执侧再用 displayModel 把这个 sentinel 折成「不显示 model」（不编造版本号）。
 func (s *videoTaskStore) adoptFor(id, uid, realm, model string, charged bool, caller string) {
 	if s == nil || id == "" || uid == "" {
 		return
+	}
+	if model == "" {
+		model = videoModelAdopted
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -157,15 +162,50 @@ func (s *videoTaskStore) adoptFor(id, uid, realm, model string, charged bool, ca
 		return
 	}
 	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Charged: charged, Caller: caller}
+	// 审查 W3C8-01：adopt 是**第二条写路径**，此前不调 gcLocked，容量上限只在 put 里执行。
+	// 而 adopt 由「台账里没有的 task_id」触发，task_id 完全由客户端控制 → 台账可无限增长
+	// （每条约 200B，百万级即数百 MB），且探测本身还烧上游查询额度。两条写路径必须共用 GC。
+	s.gcLocked()
+}
+
+// videoModelAdopted 收养任务在台账里的模型占位（见 adoptFor）。
+//
+// 用一个显式可见的字符串而不是空串：空串会被 NoteModelCost 当成「无模型」丢弃，
+// 而这个串既能让账本记上，又能在面板里一眼看出「这是重启/淘汰后收养的、模型未知」。
+const videoModelAdopted = "unknown-adopted"
+
+// displayModel 回执里要不要带 model：收养来的未知模型折成空串（审查 W1A4-18 同口径：
+// 模型未知时省略字段，不编造版本号）。
+func displayModel(bare, realm string) string {
+	if bare == "" || bare == videoModelAdopted {
+		return ""
+	}
+	return requestedModel(bare, realm)
 }
 
 // putFor 记录归属调用方（caller 为空 = 不校验）。
+//
+// 已存在的条目**不覆盖记账标记**（审查 W3C8-03）：上游对同一请求可能回同一个 task id
+// （客户端重试 / 上游幂等回执 / 网关换号后重提交），此时若按新条目重建，Charged 会被
+// 清回 false → 该任务下一次查到 completed 会再记一次账（重复扣费）；Created 也会被
+// 刷新，TTL 跟着重置，等于给同一笔用量无限续命。现在：已记账 → 原样保留；未记账 →
+// 只更新归属字段（账号/域/模型/调用方），用量快照与创建时间都不动。
 func (s *videoTaskStore) putFor(id, uid, realm, model, caller string) {
 	if s == nil || id == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if old, ok := s.m[id]; ok {
+		if old.Charged {
+			return
+		}
+		old.UID, old.Realm, old.Model = uid, realm, model
+		if caller != "" {
+			old.Caller = caller
+		}
+		return
+	}
 	s.m[id] = &videoTaskOwner{UID: uid, Realm: realm, Model: model, Created: time.Now(), Caller: caller}
 	s.gcLocked()
 }
@@ -329,9 +369,17 @@ type videoFlight struct {
 
 // pollShared 合并并发的同一任务查询：上游对同一账号密集查询会回 14003（Too many requests），
 // 而 MCP 客户端常常并发轮询同一个 task_id，所以这里做单飞（single-flight）。
-func (s *videoTaskStore) pollShared(id string, fn func() (upstream.VideoTaskState, string, string, error)) (upstream.VideoTaskState, string, string, error) {
+//
+// ctx 只影响**等待方**（审查 W1A4-05 / W3C8-04）：此前等待方是裸 `<-f.done`，客户端断开后
+// 仍要挂到发起方的上游调用结束（视频查询最长数十秒），热点任务并发轮询时会积压 goroutine
+// 与连接。与 3D 版 pollShared 对齐：自己的请求被取消就立刻返回 ctx.Err()，发起方照旧跑完
+// （它的结果还要落台账，不能因为别人走了就丢）。
+func (s *videoTaskStore) pollShared(ctx context.Context, id string, fn func() (upstream.VideoTaskState, string, string, error)) (upstream.VideoTaskState, string, string, error) {
 	if s == nil {
 		return fn()
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	s.mu.Lock()
 	if s.flights == nil {
@@ -339,8 +387,12 @@ func (s *videoTaskStore) pollShared(id string, fn func() (upstream.VideoTaskStat
 	}
 	if f, ok := s.flights[id]; ok {
 		s.mu.Unlock()
-		<-f.done
-		return f.state, f.uid, f.nick, f.err
+		select {
+		case <-f.done:
+			return f.state, f.uid, f.nick, f.err
+		case <-ctx.Done():
+			return upstream.VideoTaskState{}, "", "", ctx.Err()
+		}
 	}
 	f := &videoFlight{done: make(chan struct{})}
 	s.flights[id] = f
@@ -361,6 +413,28 @@ func (s *videoTaskStore) pollShared(id string, fn func() (upstream.VideoTaskStat
 	return f.state, f.uid, f.nick, f.err
 }
 
+// limitedWait 只返回「上游限流冷却」的剩余时间（0 = 没在冷却）。
+//
+// 与 pollWait 的区别：pollWait 还包含 videoTaskMinPoll（同任务两次真打上游的最小间隔）。
+// awaitVideo 的轮询间隔 videoPollInterval(5s) 本来就大于 videoTaskMinPoll(3s)，最小间隔
+// 天然满足；真正会自撞 14003 的是**限流冷却**（30s）—— 此前 awaitVideo 完全不看它，
+// 撞了 429 之后每 5s 继续打同一个账号（审查 W3C8-05）。
+func (s *videoTaskStore) limitedWait(id string) time.Duration {
+	if s == nil || id == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.m[id]
+	if !ok {
+		return 0
+	}
+	if d := time.Until(o.LimitedUntil); d > 0 {
+		return d
+	}
+	return 0
+}
+
 func (s *videoTaskStore) gcLocked() {
 	if len(s.m) <= videoTaskMax {
 		// 容量内也可能有超龄的（长时间低负载）：顺手按 TTL 清一遍。
@@ -373,6 +447,10 @@ func (s *videoTaskStore) gcLocked() {
 		return
 	}
 	// 超容量：按创建时间淘汰最旧的一批（留 3/4 容量，避免每次都全量排序）。
+	//
+	// 排序换成 sort.Slice（审查 W1A4-16）：此前是手写插入排序 O(n²)，而这里**持着台账锁**，
+	// n 上限 2048、每次超容量 put 都要全量排一遍（≈2M 次比较），把台账锁变成串行瓶颈，
+	// 同时阻塞 get / noteState / pollWait。sort.Slice 是同序 O(n log n)，语义不变。
 	type pair struct {
 		id string
 		at time.Time
@@ -381,11 +459,7 @@ func (s *videoTaskStore) gcLocked() {
 	for id, o := range s.m {
 		all = append(all, pair{id, o.Created})
 	}
-	for i := 1; i < len(all); i++ { // 插入排序：容量上限内，n 很小
-		for j := i; j > 0 && all[j].at.Before(all[j-1].at); j-- {
-			all[j], all[j-1] = all[j-1], all[j]
-		}
-	}
+	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
 	drop := len(all) - videoTaskMax*3/4
 	for i := 0; i < drop; i++ {
 		delete(s.m, all[i].id)
@@ -441,8 +515,19 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
-	raw, err := io.ReadAll(io.LimitReader(r.Body, videoMaxBody))
+	// 请求体超限回 413，不静默截断（审查 W3C8-07 / W1A4-20）：此前是
+	// io.LimitReader(r.Body, videoMaxBody)，4MB 之后的字节被悄悄丢掉，JSON 解析失败
+	// 又被报成 "invalid JSON body"（400）—— 客户端只看到「格式不对」，看不出「太大」，
+	// 于是把一个大 body 反复重发。MaxBytesReader 还顺带解决了截断后剩余字节没人读、
+	// keep-alive 连接复用异常的问题。
+	r.Body = http.MaxBytesReader(w, r.Body, videoMaxBody)
+	raw, err := io.ReadAll(r.Body)
 	if err != nil {
+		if bodyTooLarge(err) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("request body exceeds %d MiB（视频提交只收 prompt / 首帧图，别塞视频本体）", videoMaxBody>>20))
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
@@ -745,11 +830,40 @@ func (h *Handler) videoWait(req map[string]any) (time.Duration, bool) {
 
 // awaitVideo 轮询到终态或超时。返回最后一次状态（未终态时 Done()=false）。
 // ctx 取消（客户端断开）时立即停手并返回 ctx.Err()：没人等结果了，再问上游只是白占账号的查询额度。
+//
+// 限流冷却（审查 W3C8-05）：撞过一次 14003 之后，这个账号在该任务上有一段冷却窗口
+// （videoRateLimitBackoff）。此前 awaitVideo 完全不看它，冷却期内照样每 5s 打一次，
+// 于是同步等待的请求自己把冷却续上、最后返回 202 让用户以为任务丢了。现在冷却期内只在
+// 本地等（不碰上游），等完再问。
 func (h *Handler) awaitVideo(ctx context.Context, a *auth.Auth, taskID string, wait time.Duration) (upstream.VideoTaskState, error) {
 	deadline := time.Now().Add(wait)
 	var last upstream.VideoTaskState
 	for {
-		state, _, _, err := h.videoLedger.pollShared(taskID, func() (upstream.VideoTaskState, string, string, error) {
+		if d := h.videoLedger.limitedWait(taskID); d > 0 {
+			remain := time.Until(deadline)
+			if d >= remain {
+				// 冷却比剩余等待还长：等到截止就收工（返回未终态 → 调用方回 202），
+				// 冷却期内一次上游都不打。
+				if remain > 0 {
+					t := time.NewTimer(remain)
+					select {
+					case <-ctx.Done():
+						t.Stop()
+						return last, ctx.Err()
+					case <-t.C:
+					}
+				}
+				return last, nil
+			}
+			t := time.NewTimer(d)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return last, ctx.Err()
+			case <-t.C:
+			}
+		}
+		state, _, _, err := h.videoLedger.pollShared(ctx, taskID, func() (upstream.VideoTaskState, string, string, error) {
 			h.videoLedger.markQuery(taskID)
 			data, err := h.cfg.Upstream.VideoTask(a, taskID)
 			if err != nil {
@@ -760,6 +874,11 @@ func (h *Handler) awaitVideo(ctx context.Context, a *auth.Auth, taskID string, w
 			return st, a.UID, a.Nickname, nil
 		})
 		if err != nil {
+			// 限流：记冷却窗口，让下一次迭代（或下一次 GET 查询）先歇够再打。
+			var ue *upstream.Error
+			if errors.As(err, &ue) && ue.Status == http.StatusTooManyRequests {
+				h.videoLedger.noteLimited(taskID, videoRateLimitBackoff)
+			}
 			return last, err
 		}
 		last = state
@@ -793,8 +912,16 @@ func (h *Handler) videoTask(w http.ResponseWriter, r *http.Request) {
 // videoTasks POST /v1/videos/tasks {"task_id": "..."} —— 有些客户端（含部分 MCP 桥）
 // 只肯发 POST，给同一件事留一个入口。
 func (h *Handler) videoTasks(w http.ResponseWriter, r *http.Request) {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	// 同上：超限 413，不静默截断（审查 W3C8-24 / W1A4-20）。64KB 只装一个 task_id。
+	const tasksMaxBody = 64 << 10
+	r.Body = http.MaxBytesReader(w, r.Body, tasksMaxBody)
+	raw, err := io.ReadAll(r.Body)
 	if err != nil {
+		if bodyTooLarge(err) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("request body exceeds %d KiB（这里只收 {\"task_id\":\"...\"}）", tasksMaxBody>>10))
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
@@ -883,11 +1010,14 @@ func (h *Handler) serveVideoContent(w http.ResponseWriter, r *http.Request, st *
 			fmt.Sprintf("成品 %d 字节，超过转发上限 %d MiB，不转发；请直接用 GET /v1/videos/%s 里的直链下载", n, videoContentMax>>20, taskID), "")
 		return
 	}
-	ct := resp.Header.Get("Content-Type")
-	if ct == "" {
-		ct = "video/mp4"
-	}
+	// Content-Type 不再原样回写上游（审查 W3C8-06）：上游是签名直链，若它被替换/异常
+	// 返回 text/html，本网关就会在**自己的域**下把一段可执行脚本喂给浏览器（同源 XSS，
+	// 可读面板同源 Cookie）。只放行 video/*，其余一律 application/octet-stream；
+	// 再补 nosniff（禁止浏览器猜类型）与 attachment（不在页面内联渲染）。
+	ct := mediaResponseContentType(resp.Header.Get("Content-Type"))
 	w.Header().Set("Content-Type", ct)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", `attachment; filename="video.mp4"`)
 	if n > 0 {
 		w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
 	}
@@ -992,7 +1122,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 			writeVideoNotFound(w, taskID, videoNotFoundHint)
 			return
 		}
-		h.pollUnknownVideoTask(w, st, taskID, caller)
+		h.pollUnknownVideoTask(r.Context(), w, st, taskID, caller)
 		return
 	}
 	realm := owner.Realm
@@ -1004,7 +1134,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 	if cached, _, ok := h.videoLedger.cachedState(taskID); ok && cached.Done() {
 		st.uid, st.model = owner.UID, owner.Model
 		st.status, st.outcome = http.StatusOK, "success"
-		reply(st, cached, requestedModel(owner.Model, realm))
+		reply(st, cached, displayModel(owner.Model, realm))
 		return
 	}
 
@@ -1013,7 +1143,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 		if cached, _, ok := h.videoLedger.cachedState(taskID); ok {
 			st.uid, st.model = owner.UID, owner.Model
 			st.status, st.outcome = http.StatusOK, "throttled"
-			reply(st, cached, requestedModel(owner.Model, realm))
+			reply(st, cached, displayModel(owner.Model, realm))
 			return
 		}
 	}
@@ -1027,7 +1157,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 	}
 
 	// 2) 正常查询（并发同一任务只打一次上游）。
-	state, uid, nick, err := h.videoLedger.pollShared(taskID, func() (upstream.VideoTaskState, string, string, error) {
+	state, uid, nick, err := h.videoLedger.pollShared(r.Context(), taskID, func() (upstream.VideoTaskState, string, string, error) {
 		h.videoLedger.markQuery(taskID)
 		return h.queryVideoTask(taskID, acct)
 	})
@@ -1038,7 +1168,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 		if state.Succeeded() && h.videoLedger.claimCharge(taskID) {
 			h.recordVideoUsage(st, realm, uid, owner.Model, h.modelRate(realm, owner.Model), taskID, state, start)
 		}
-		reply(st, state, requestedModel(owner.Model, realm))
+		reply(st, state, displayModel(owner.Model, realm))
 		return
 	}
 
@@ -1050,7 +1180,7 @@ func (h *Handler) pollVideoTask(w http.ResponseWriter, r *http.Request, taskID s
 		if cached, _, ok := h.videoLedger.cachedState(taskID); ok {
 			st.model = owner.Model
 			st.status, st.outcome = http.StatusOK, "rate_limited_cached"
-			reply(st, cached, requestedModel(owner.Model, realm))
+			reply(st, cached, displayModel(owner.Model, realm))
 			return
 		}
 		st.status, st.outcome = ue.Status, "http_error"
@@ -1221,11 +1351,35 @@ func videoProgress(state upstream.VideoTaskState) int {
 }
 
 // clipText 截断超长文本（错误信息里带上游原文时用，避免把整段回执刷进日志）。
+//
+// 按 rune 边界回退（审查 W3C8-09）：此前直接 s[:n]，n 落在多字节字符中间时会产出非法
+// UTF-8，日志乱码、下游 JSON 编码还会把它替换成 U+FFFD（错误信息里出现「」）。
 func clipText(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
 	return s[:n] + "…"
+}
+
+// mediaResponseContentType 把上游的 Content-Type 收口成「可以安全回写给浏览器」的值。
+//
+// 只放行 video/*（本端点只转视频成品）；空值按 video/mp4（上游产物确实是 mp4），
+// 其余（text/html、image/svg+xml、application/json…）一律 application/octet-stream。
+func mediaResponseContentType(raw string) string {
+	mt := strings.ToLower(strings.TrimSpace(raw))
+	if i := strings.IndexByte(mt, ';'); i >= 0 {
+		mt = strings.TrimSpace(mt[:i])
+	}
+	switch {
+	case mt == "":
+		return "video/mp4"
+	case strings.HasPrefix(mt, "video/"):
+		return mt
+	}
+	return "application/octet-stream"
 }
 
 // numberToInt JSON 数字（float64）转 int。

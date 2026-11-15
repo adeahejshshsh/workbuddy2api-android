@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,6 +31,41 @@ const (
 	defaultQueue    = 1024
 	defaultReadMax  = 1000
 	archiveFileGlob = "requests-*.jsonl"
+
+	// defaultRetentionDays 归档保留天数缺省值（审查 C7-017）。
+	// 配置项是 logging.request_retention_days（缺省 7），这里兜住「直接 New(Config{})
+	// 或配了 <=0」的情形 —— 没有这个兜底，retention<=0 会让 cutoff 落在今天，
+	// 启动清理把**当天所有归档**删光。
+	defaultRetentionDays = 7
+
+	// maxEventBytes 单条归档事件的字节硬上限（审查 C7-014 P1）。
+	//
+	// 为什么必须有：开了 request_archive_context 时 Context 可以是整段对话（MB 级），
+	// 而轮转判据是「写完这条会不会超过 FileMaxBytes」。一条 8MB 的事件意味着
+	// **每条**事件都触发一次轮转、每条一个新文件 —— 文件数与 inode 无界增长，
+	// 磁盘几天就满。截断到 1MiB 后（Context 换成 truncated 标记）单文件最多
+	// 超出一条事件的长度，文件数重新被 MaxBytes/FileMaxBytes 夹住。
+	maxEventBytes = 1 << 20
+
+	// closeFlushTimeout Close 等写循环落盘的上限（审查 C7-021）。
+	// 存储满 / 慢卡时写循环会卡在磁盘 IO 上，无限等待等于把进程退出也拖住
+	// （run.sh 的停机预算是 8s，超时即被强杀，反而丢更多）。
+	closeFlushTimeout = 2 * time.Second
+
+	// statsCacheTTL Snapshot 归档统计的缓存时长（审查 C7-023）。
+	// 面板每 2s 轮询一次，每次 ReadDir + 全量 Stat 在文件上千时是持续的无谓 IO。
+	statsCacheTTL = 5 * time.Second
+)
+
+// readScanFileBudget / readScanByteBudget 面板检索的扫描预算（审查 C7-018）。
+//
+// 窄 filter（按 IP / UA 搜）命中稀疏时，read 会从最新文件一路回溯到读完整目录
+// （默认 100MiB），每块都做 JSON 解析。手机端一次「运行日志」搜索就能把 CPU/IO
+// 打满，所以给文件数与字节数都设上限，超预算即返回已读到的部分。
+// var 而不是 const：测试把它压小，避免真造上百个归档文件。
+var (
+	readScanFileBudget = 128
+	readScanByteBudget = int64(128 << 20)
 )
 
 // NewRequestID 生成不含用户信息的本地请求 ID。
@@ -131,6 +167,13 @@ type ArchiveStats struct {
 	Bytes         int64  `json:"bytes"`
 	DroppedWrites uint64 `json:"dropped_writes"`
 	LastError     string `json:"last_error,omitempty"`
+	// TruncatedWrites 因超过 maxEventBytes 被截断（丢 Context）后仍落盘的条数（审查 C7-014）。
+	TruncatedWrites uint64 `json:"truncated_writes,omitempty"`
+	// OversizedWrites 截断后仍然超限、只能整条丢弃的条数（不该发生，出现即要查）。
+	OversizedWrites uint64 `json:"oversized_writes,omitempty"`
+	// ReadErrors 面板检索时读失败的归档文件次数（审查 C7-026）：此前静默 continue，
+	// 「少了数据」和「文件坏了」在看板上分不开。
+	ReadErrors uint64 `json:"read_errors,omitempty"`
 }
 
 // Snapshot 一次面板读取的完整指标快照。
@@ -301,14 +344,33 @@ type archiveWriter struct {
 	// lastPrune 上次清理时刻（只由 run 协程读写，无需加锁）。
 	lastPrune time.Time
 	dropped   atomic.Uint64
+	// truncated / oversized 归档事件截断观测（审查 C7-014）：截断条数与整条丢弃条数。
+	truncated atomic.Uint64
+	oversized atomic.Uint64
+	// readErrs 检索期读失败的归档文件数（审查 C7-026）。
+	readErrs  atomic.Uint64
 	lastErrMu sync.Mutex
 	lastErr   string
+
+	// 统计缓存（审查 C7-023）：面板每 2s 轮询一次 Snapshot，而目录扫描是
+	// ReadDir + 每个文件 Stat。缓存 5s，命中期间只刷新 dropped 这类计数器。
+	statsMu     sync.Mutex
+	statsAt     time.Time
+	statsFiles  int
+	statsBytes  int64
+	statsCached bool
 
 	file *os.File
 	buf  *bufio.Writer
 	path string
 	day  string
 	size int64
+	// idxDay / nextIdx 当前日期的下一个轮转序号（审查 C7-015）。
+	// 此前每次轮转都从 i=1 逐个 os.Stat 探测，一天轮转 N 个文件就是 O(N²) 次 stat；
+	// Android 共享存储单次 stat 数毫秒，轮转抖动可达秒级，写循环卡住 → 队列积压 → 丢事件。
+	// 改成「换日时一次 ReadDir 求出最大序号，之后自增」，每次轮转只 stat 一次。
+	idxDay  string
+	nextIdx int
 }
 
 func newArchiveWriter(cfg Config) *archiveWriter {
@@ -316,7 +378,7 @@ func newArchiveWriter(cfg Config) *archiveWriter {
 		return &archiveWriter{cfg: cfg}
 	}
 	if cfg.RetentionDays <= 0 {
-		cfg.RetentionDays = 7
+		cfg.RetentionDays = defaultRetentionDays
 	}
 	if cfg.MaxBytes <= 0 {
 		cfg.MaxBytes = 100 << 20
@@ -343,6 +405,11 @@ func newArchiveWriter(cfg Config) *archiveWriter {
 		close(w.done)
 		return w
 	}
+	// 启动即清理一次（审查 C7-017 / 任务要求「启动与每次滚动时清理超出部分」）：
+	// 此前只有 1s ticker 的首轮触发，进程重启后到那一轮之间旧归档仍在；更糟的是
+	// 归档目录被换挂载卷/从备份恢复时，旧文件可能已远超保留期与大小上限。
+	// 此处尚未起 run 协程，单 goroutine 访问 file/buf，安全。
+	w.prune()
 	go w.run()
 	return w
 }
@@ -389,6 +456,15 @@ const pruneInterval = 10 * time.Minute
 
 func (w *archiveWriter) run() {
 	defer close(w.done)
+	// 写循环整体兜一层 recover（审查 C7-022）：一次 marshal/写盘异常不能让
+	// 「清空归档」的 HTTP 请求永久阻塞（它等的是这个协程的回包），也不能让后续
+	// 事件静默消失而面板看不出来（LastError 会亮）。
+	defer func() {
+		if r := recover(); r != nil {
+			w.setErr(fmt.Errorf("归档写循环 panic: %v", r))
+			log.Printf("WARN: [reqlog] 归档写循环 panic: %v（归档停止，内存指标不受影响）", r)
+		}
+	}()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -396,7 +472,7 @@ func (w *archiveWriter) run() {
 		case e := <-w.ch:
 			w.writeEvent(e)
 		case out := <-w.purgeCh:
-			out <- w.purgeNow()
+			w.replyPurge(out)
 		case <-ticker.C:
 			w.flush()
 			// prune 节流到 10 分钟一次（bug #20）：它要 os.ReadDir + 每个文件 Stat，
@@ -421,28 +497,117 @@ func (w *archiveWriter) run() {
 	}
 }
 
-func (w *archiveWriter) writeEvent(e Event) {
+// replyPurge 执行清空并**保证**回包（审查 C7-022）。
+//
+// 此前 purgeNow 的任何 panic（marshal/写盘/删文件）都会让写循环退出、调用方
+// `return <-out` 永久阻塞 —— 「清空归档」按钮把 HTTP 连接挂死。这里用一层
+// recover 保证无论发生什么都回一个结果。只能由 run 协程调用。
+func (w *archiveWriter) replyPurge(out chan PurgeResult) {
+	res := PurgeResult{}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				w.setErr(fmt.Errorf("清空归档 panic: %v", r))
+				log.Printf("WARN: [reqlog] 清空归档 panic: %v", r)
+			}
+		}()
+		res = w.purgeNow()
+	}()
+	out <- res
+}
+
+// clipBytes 按字节上限截断，且不切断 UTF-8 多字节序列（日志里不出现乱码）。
+func clipBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut]
+}
+
+// encodeEvent 把事件编码成一行，并对超大事件做硬截断（审查 C7-014 P1）。
+//
+// 返回 nil = 这条事件写不出去（调用方计入 oversized，不落盘）。
+func (w *archiveWriter) encodeEvent(e *Event) []byte {
 	raw, err := json.Marshal(e)
 	if err != nil {
 		w.setErr(err)
+		return nil
+	}
+	if len(raw) <= maxEventBytes {
+		return raw
+	}
+	// 唯一的 MB 级字段是 Context（request_archive_context 打开时的整段会话）；
+	// 换成标记后事件仍然可用：时间/路径/模型/状态/token 都在，只是正文不落盘。
+	if n := len(e.Context); n > 0 {
+		e.Context = json.RawMessage(fmt.Sprintf(`{"truncated":true,"bytes":%d}`, n))
+		if raw, err = json.Marshal(e); err != nil {
+			w.setErr(err)
+			return nil
+		}
+		if len(raw) <= maxEventBytes {
+			w.truncated.Add(1)
+			return raw
+		}
+	}
+	// 极端形态：其它字段被塞满（模型名 / UA 里塞几 MB）。丢掉 Context 并截短
+	// 客户端可控的长字符串，保证一定落得下去。
+	e.Context = nil
+	e.Path = clipBytes(e.Path, 256)
+	e.Model = clipBytes(e.Model, 128)
+	e.ModelEff = clipBytes(e.ModelEff, 128)
+	e.Account = clipBytes(e.Account, 128)
+	e.ClientIP = clipBytes(e.ClientIP, 64)
+	e.UserAgent = clipBytes(e.UserAgent, 256)
+	if raw, err = json.Marshal(e); err != nil {
+		w.setErr(err)
+		return nil
+	}
+	if len(raw) > maxEventBytes {
+		w.oversized.Add(1)
+		w.setErr(fmt.Errorf("归档事件超过 %d 字节且无法截断，已丢弃", maxEventBytes))
+		return nil
+	}
+	w.truncated.Add(1)
+	return raw
+}
+
+func (w *archiveWriter) writeEvent(e Event) {
+	raw := w.encodeEvent(&e)
+	if raw == nil {
 		return
 	}
-	now := e.Time
-	if now.IsZero() {
-		now = time.Now()
-	}
-	day := now.Format("2006-01-02")
+	// 分桶按**写入时刻**的本地日（审查 C7-020 / C7-016）：
+	//   - 按事件时间分桶时，跨零点的迟到/乱序事件会让 day 反复切换，每来一条就
+	//     closeFile + ReadDir + OpenFile 一次（写放大）；
+	//   - prune 的 cutoff 用 time.Now()（进程本地时区），文件名却来自事件自带时区
+	//     （容器里常是 UTC），边界日整天的归档会被多删或少删一天。
+	// 两者统一到「写入时刻 + 本地时区」后，文件名、排序、cutoff 是同一把尺子。
+	day := time.Now().Format("2006-01-02")
 	if w.file == nil || w.day != day {
-		if err := w.openFile(now, false); err != nil {
+		if err := w.openFile(day, false); err != nil {
 			w.setErr(err)
 			return
 		}
 	}
-	if w.size > 0 && w.size+int64(len(raw))+1 > w.cfg.FileMaxBytes {
-		if err := w.openFile(now, true); err != nil {
+	// 轮转判据只看「当前文件是否已经到达上限」（审查 C7-014）：此前用
+	// size+len(raw) > FileMaxBytes，一条超大事件会让**每条**事件都轮转、每条一个
+	// 新文件，文件数无界。现在单条事件先被截到 maxEventBytes，且只在文件已有内容
+	// 且到上限时才换文件 —— 单文件最多超出一条事件的长度，文件数重新被
+	// MaxBytes / FileMaxBytes 夹住。
+	if w.size > 0 && w.size >= w.cfg.FileMaxBytes {
+		if err := w.openFile(day, true); err != nil {
 			w.setErr(err)
 			return
 		}
+		// 每次滚动顺手清理超出保留期/大小上限的文件（审查 C7-017 + 任务要求）：
+		// 滚动是天然的低频触发点（每 FileMaxBytes 一次），长期不重启的部署也不必
+		// 等 ticker 的 10 分钟节流。
+		w.lastPrune = time.Now()
+		w.prune()
 	}
 	if _, err := w.buf.Write(raw); err != nil {
 		w.setErr(err)
@@ -455,15 +620,14 @@ func (w *archiveWriter) writeEvent(e Event) {
 	w.size += int64(len(raw)) + 1
 }
 
-func (w *archiveWriter) openFile(now time.Time, rotate bool) error {
+func (w *archiveWriter) openFile(day string, rotate bool) error {
 	w.closeFile()
-	day := now.Format("2006-01-02")
 	if err := os.MkdirAll(w.cfg.Dir, 0o700); err != nil {
 		return err
 	}
 	path := filepath.Join(w.cfg.Dir, "requests-"+day+".jsonl")
 	if rotate {
-		path = nextArchivePath(w.cfg.Dir, day)
+		path = w.nextPath(day)
 	} else if latest := latestArchiveForDay(w.cfg.Dir, day); latest != "" {
 		path = filepath.Join(w.cfg.Dir, latest)
 	}
@@ -481,7 +645,52 @@ func (w *archiveWriter) openFile(now time.Time, rotate bool) error {
 	w.path = path
 	w.day = day
 	w.size = info.Size()
+	// 文件数变了：统计缓存立刻作废（字节数的 5 秒滞后无所谓，文件数会让
+	// 面板的「N 个文件」看起来卡住）。
+	w.invalidateStats()
 	return nil
+}
+
+// nextPath 返回该日期的下一个轮转文件路径（审查 C7-015）。
+//
+// 序号由内存自增维护：换日或首次轮转时用一次 ReadDir 求出该日已有的最大序号，
+// 之后每次只 stat 一个候选路径。此前是「从 i=1 逐个 os.Stat」，一天轮转 N 个文件
+// 就是 O(N²) 次 stat，Android 共享存储上能把写循环卡到秒级。
+func (w *archiveWriter) nextPath(day string) string {
+	if w.idxDay != day {
+		w.idxDay = day
+		w.nextIdx = latestIndexForDay(w.cfg.Dir, day) + 1
+	}
+	base := filepath.Join(w.cfg.Dir, "requests-"+day)
+	for {
+		path := fmt.Sprintf("%s.%d.jsonl", base, w.nextIdx)
+		w.nextIdx++
+		if !fileExists(path) {
+			return path
+		}
+	}
+}
+
+// latestIndexForDay 该日期已存在的最大轮转序号（只有基准文件或没有文件时 = 0）。
+func latestIndexForDay(dir, day string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	best := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		if d, idx := archiveNameKey(name); d == day && idx > best {
+			best = idx
+		}
+	}
+	return best
 }
 
 func latestArchiveForDay(dir, day string) string {
@@ -489,7 +698,6 @@ func latestArchiveForDay(dir, day string) string {
 	if err != nil {
 		return ""
 	}
-	prefix := "requests-" + day
 	best := ""
 	bestIndex := -1
 	for _, entry := range entries {
@@ -497,36 +705,14 @@ func latestArchiveForDay(dir, day string) string {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".jsonl") {
+		if !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".jsonl") {
 			continue
 		}
-		idx := 0
-		if name[len(prefix):len(name)-len(".jsonl")] != "" {
-			part := strings.TrimSuffix(strings.TrimPrefix(name[len(prefix):], "."), ".jsonl")
-			n, err := strconv.Atoi(part)
-			if err != nil {
-				continue
-			}
-			idx = n
+		if d, idx := archiveNameKey(name); d == day && idx > bestIndex {
+			bestIndex, best = idx, name
 		}
-		if idx > bestIndex {
-			bestIndex = idx
-			best = name
-		}
-	}
-	if best == "" {
-		return ""
 	}
 	return best
-}
-
-func nextArchivePath(dir, day string) string {
-	base := filepath.Join(dir, "requests-"+day)
-	path := base + ".jsonl"
-	for i := 1; fileExists(path); i++ {
-		path = fmt.Sprintf("%s.%d.jsonl", base, i)
-	}
-	return path
 }
 
 func fileExists(path string) bool {
@@ -564,7 +750,14 @@ func (w *archiveWriter) purge() (PurgeResult, error) {
 	case <-w.done:
 		return PurgeResult{}, errors.New("请求归档已停止，无法清理")
 	}
-	return <-out, nil
+	// 回包与「写循环已退出」二选一（审查 C7-022）：run 的 recover 兜住 panic 后
+	// done 会关闭，这里必须也能退出，否则 HTTP handler 永久挂住。
+	select {
+	case res := <-out:
+		return res, nil
+	case <-w.done:
+		return PurgeResult{}, errors.New("请求归档已停止，无法清理")
+	}
 }
 
 // purgeNow 在写循环内清空归档：先落盘关文件（否则删掉的 inode 还在被 buf 写），
@@ -594,6 +787,11 @@ func (w *archiveWriter) purgeNow() PurgeResult {
 			}
 		}
 	}
+	// 目录被清空：轮转序号必须重新算，否则下一条事件会写到 requests-<day>.N.jsonl
+	// 而不是基准文件（读侧仍能读，但序号无意义地一路涨）。
+	w.idxDay = ""
+	w.nextIdx = 0
+	w.invalidateStats()
 	return out
 }
 
@@ -636,6 +834,11 @@ func (w *archiveWriter) prune() {
 	if !w.enabled() {
 		return
 	}
+	// 保留天数兜底（审查 C7-017）：<=0 会让 cutoff 落在今天，把当天归档一起删光。
+	days := w.cfg.RetentionDays
+	if days <= 0 {
+		days = defaultRetentionDays
+	}
 	entries, err := os.ReadDir(w.cfg.Dir)
 	if err != nil {
 		w.setErr(err)
@@ -651,7 +854,10 @@ func (w *archiveWriter) prune() {
 	}
 	items := make([]item, 0, len(entries))
 	var total int64
-	cutoff := time.Now().AddDate(0, 0, -w.cfg.RetentionDays)
+	// cutoff 与写盘分桶必须同一把尺子（审查 C7-016）：writeEvent 现在按
+	// 「写入时刻 + 进程本地时区」生成文件名，这里也用 time.Now() 的本地日，
+	// 于是 UTC 容器 / 跨时区主机上不会再出现「边界日整天的归档被多删或少删」。
+	cutoff := time.Now().AddDate(0, 0, -days)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "requests-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
@@ -691,6 +897,7 @@ func (w *archiveWriter) prune() {
 		return a.mtime.Before(b.mtime)
 	})
 	cutoffDay := cutoff.Format("2006-01-02")
+	removed, removedBytes := 0, int64(0)
 	for _, it := range items {
 		if it.path == w.path {
 			continue
@@ -702,8 +909,15 @@ func (w *archiveWriter) prune() {
 		if expired || total > w.cfg.MaxBytes {
 			if err := os.Remove(it.path); err == nil {
 				total -= it.size
+				removed++
+				removedBytes += it.size
 			}
 		}
+	}
+	if removed > 0 {
+		log.Printf("[reqlog] 归档清理：删除 %d 个文件（%d 字节），保留 %d 天 / 上限 %d MiB",
+			removed, removedBytes, days, w.cfg.MaxBytes>>20)
+		w.invalidateStats()
 	}
 }
 
@@ -758,12 +972,25 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 		return ii > ij
 	})
 	var out []Event
+	// 扫描预算（审查 C7-018）：窄 filter（按 IP/UA 搜）命中稀疏时，此前会从最新
+	// 文件一路回溯到读完整目录（默认 100MiB，每块都做 JSON 解析）—— 手机端一次
+	// 搜索就能把 CPU/IO 打满。超预算即返回已读到的部分（面板本来就只展示 limit 条）。
+	scannedFiles := 0
+	scannedBytes := int64(0)
+	readErrs := 0
 	for _, name := range names {
+		if scannedFiles >= readScanFileBudget || scannedBytes >= readScanByteBudget {
+			break
+		}
 		// 单文件读失败只跳过（bug #7）：并发 prune 刚把它删掉、目录被手工清理、
 		// 单个文件权限丢失，这些都不该让整个「运行日志」页 500 ——
 		// 少几条记录远好过整页打不开（目录级读失败在更上面已经上抛了）。
-		rows, rerr := readFileTail(filepath.Join(w.cfg.Dir, name), filter, limit-len(out))
+		// 但要计数（审查 C7-026）：否则「面板少数据」永远查不出原因。
+		rows, nbytes, rerr := readFileTailScan(filepath.Join(w.cfg.Dir, name), filter, limit-len(out))
+		scannedFiles++
+		scannedBytes += nbytes
 		if rerr != nil {
+			readErrs++
 			continue
 		}
 		out = append(out, rows...)
@@ -771,6 +998,9 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 		if len(out) >= limit {
 			break
 		}
+	}
+	if readErrs > 0 {
+		w.readErrs.Add(uint64(readErrs))
 	}
 	// 契约：按事件时间倒序返回最近 limit 条（同一时刻用 Stable 保留落盘先后）。
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
@@ -798,22 +1028,35 @@ func archiveNameKey(name string) (day string, idx int) {
 // 整个文件（单文件上限 16MB ≈ 10 万行）逐行 Unmarshal 一遍，面板每刷一次
 // 就是一次十万行 JSON 解析；注释写的"凑够 limit 即停"只在文件之间生效。
 // 返回顺序是旧→新，调用方仍会按事件时间统一排序。
+//
+// readFileTail 兼容入口（既有回归用例 readback 用它当「尾部读」的 oracle）。
 func readFileTail(path string, filter Filter, limit int) ([]Event, error) {
+	rows, _, err := readFileTailScan(path, filter, limit)
+	return rows, err
+}
+
+// readFileTailScan 同 readFileTail，额外返回本文件被读过的字节数（审查 C7-018 的扫描预算用）。
+func readFileTailScan(path string, filter Filter, limit int) ([]Event, int64, error) {
 	if limit <= 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	const chunk = 64 << 10
-	var carry []byte   // 更靠后那块留下的不完整首行
+	// pending 更靠后那块留下的不完整首行（审查 C7-019）。
+	// 此前是 `data := append(buf, carry...)`：每块都把整条 carry 重新复制一遍，
+	// 单行 8MB 时 128 块 × 平均 4MB ≈ 512MB 临时分配。现在只把 pending 拼到
+	// 本块**最后一行**上，复制量按行算而不是按块算。
+	var pending []byte
 	var newest []Event // 收集到的匹配事件（新→旧）
+	scanned := int64(0)
 	offset := st.Size()
 	for offset > 0 && len(newest) < limit {
 		n := int64(chunk)
@@ -823,19 +1066,28 @@ func readFileTail(path string, filter Filter, limit int) ([]Event, error) {
 		offset -= n
 		buf := make([]byte, n)
 		if _, rerr := f.ReadAt(buf, offset); rerr != nil && !errors.Is(rerr, io.EOF) {
-			return nil, rerr
+			return nil, scanned, rerr
 		}
-		data := append(buf, carry...)
-		lines := bytes.Split(data, []byte("\n"))
+		scanned += n
+		lines := bytes.Split(buf, []byte("\n"))
+		if len(pending) > 0 && len(lines) > 0 {
+			lines[len(lines)-1] = append(lines[len(lines)-1], pending...)
+			pending = nil
+		}
 		if offset > 0 {
 			// 本块首行可能被块边界切断：留给更靠前的那块拼接
-			carry = append([]byte(nil), lines[0]...)
+			pending = append([]byte(nil), lines[0]...)
 			lines = lines[1:]
 		} else {
-			carry = nil
+			pending = nil
 		}
 		for i := len(lines) - 1; i >= 0 && len(newest) < limit; i-- {
 			if len(lines[i]) == 0 {
+				continue
+			}
+			// 超过单条事件上限的行不可能是我们写出的合法事件（写侧已截断到
+			// maxEventBytes，审查 C7-014）：直接跳过，省掉一次超大 JSON 解析。
+			if len(lines[i]) > maxEventBytes {
 				continue
 			}
 			var e Event
@@ -849,9 +1101,13 @@ func readFileTail(path string, filter Filter, limit int) ([]Event, error) {
 	for i, e := range newest {
 		out[len(newest)-1-i] = e
 	}
-	return out, nil
+	return out, scanned, nil
 }
 
+// readFile 全量逐行读（只给回归用例当「全量读」oracle 用，生产路径走 readFileTailScan）。
+//
+// 审查 C7-024 把它记为死代码，实测不成立：regression_20261021_test.go:28 用它作为
+// 「尾部读结果必须与全量读一致」的对照。保留，并在注释里标明用途，避免下一个人再删一次。
 func readFile(path string, filter Filter) ([]Event, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -908,27 +1164,74 @@ func containsFold(haystack, needle string) bool {
 func (w *archiveWriter) stats() ArchiveStats {
 	// Enabled 报的是「配置上是否启用」，不是「当前还能不能写」：Close 之后
 	// Snapshot 仍应如实反映归档已启用（否则运维看到 Enabled 变 false 会以为配置错了）。
-	s := ArchiveStats{Enabled: w.configured(), Dir: w.cfg.Dir, LastError: w.errString()}
+	s := ArchiveStats{
+		Enabled:         w.configured(),
+		Dir:             w.cfg.Dir,
+		LastError:       w.errString(),
+		TruncatedWrites: w.truncated.Load(),
+		OversizedWrites: w.oversized.Load(),
+		ReadErrors:      w.readErrs.Load(),
+	}
 	if !s.Enabled {
 		// 未启用：不报 dropped（那是"没开"造成的，不是"丢了"，bug #6）
 		return s
 	}
 	s.DroppedWrites = w.dropped.Load()
+	files, bytes, ok := w.cachedStats()
+	if !ok {
+		files, bytes = w.scanStats()
+		if files < 0 {
+			s.LastError = w.errString()
+			return s
+		}
+		w.storeStats(files, bytes)
+	}
+	s.Files, s.Bytes = files, bytes
+	return s
+}
+
+// scanStats 真正扫一遍归档目录；返回 files<0 表示目录读失败。
+func (w *archiveWriter) scanStats() (int, int64) {
 	entries, err := os.ReadDir(w.cfg.Dir)
 	if err != nil {
-		s.LastError = err.Error()
-		return s
+		w.setErr(err)
+		return -1, 0
 	}
+	files := 0
+	var bytes int64
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "requests-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
 		if info, err := entry.Info(); err == nil {
-			s.Files++
-			s.Bytes += info.Size()
+			files++
+			bytes += info.Size()
 		}
 	}
-	return s
+	return files, bytes
+}
+
+// cachedStats 5 秒内的目录统计（审查 C7-023）：面板每 2s 轮询一次 Snapshot，
+// 每次 ReadDir + 全量 Stat 在文件上千时是持续的无谓 IO，还与 prune 争同一目录。
+func (w *archiveWriter) cachedStats() (int, int64, bool) {
+	w.statsMu.Lock()
+	defer w.statsMu.Unlock()
+	if !w.statsCached || time.Since(w.statsAt) > statsCacheTTL {
+		return 0, 0, false
+	}
+	return w.statsFiles, w.statsBytes, true
+}
+
+func (w *archiveWriter) storeStats(files int, bytes int64) {
+	w.statsMu.Lock()
+	w.statsFiles, w.statsBytes, w.statsAt, w.statsCached = files, bytes, time.Now(), true
+	w.statsMu.Unlock()
+}
+
+func (w *archiveWriter) invalidateStats() {
+	w.statsMu.Lock()
+	w.statsCached = false
+	w.statsMu.Unlock()
 }
 
 func (w *archiveWriter) close() {
@@ -941,7 +1244,14 @@ func (w *archiveWriter) close() {
 		w.closed.Store(true)
 		close(w.stop)
 		w.enqMu.Unlock()
-		<-w.done
+		// 有上限地等待落盘（审查 C7-021）：写循环卡在磁盘 IO（存储满 / 慢卡）时
+		// 无限等 `<-w.done` 会把进程退出一起拖住，最终被 run.sh 的停机预算强杀，
+		// 反而丢得更多。超时只记一行 WARN。
+		select {
+		case <-w.done:
+		case <-time.After(closeFlushTimeout):
+			log.Printf("WARN: [reqlog] 归档写循环 %s 内未退出，放弃等待（最后一批事件可能未落盘）", closeFlushTimeout)
+		}
 	})
 }
 

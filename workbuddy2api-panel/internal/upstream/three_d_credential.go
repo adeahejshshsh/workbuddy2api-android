@@ -161,6 +161,27 @@ func (s *AutoThreeDCredentials) Invalidate(uid string) {
 	s.mu.Unlock()
 }
 
+// autoKeyCacheSoftCap 自动签发缓存的软上限：超过它才做一次过期扫描。
+const autoKeyCacheSoftCap = 64
+
+// pruneCacheLocked 摊销清理已过期条目（调用方必须持有 s.mu）。
+//
+// 为什么需要（审查 W4-U2-067）：cache 只按 UID 累加，唯一的删除点是 Invalidate
+// （上游 401/403 时删单个键）—— 账号池长期运行、账号被替换/轮换时，过期条目
+// 永远留在 map 里，只增不减。每条只有几十字节，但这是「无界增长」的典型形态：
+// 进程生命周期内没有回收点。过期条目本来就命中不了（命中判据看 expiresAt），
+// 删掉纯收益。只在规模超软上限时扫一遍，摊销 O(1)，不给热路径添开销。
+func (s *AutoThreeDCredentials) pruneCacheLocked(now time.Time) {
+	if len(s.cache) <= autoKeyCacheSoftCap {
+		return
+	}
+	for uid, e := range s.cache {
+		if !now.Before(e.expiresAt) {
+			delete(s.cache, uid)
+		}
+	}
+}
+
 func (s *AutoThreeDCredentials) TempToken(ctx context.Context, a *auth.Auth) (string, error) {
 	if s == nil || s.fetch == nil || a == nil {
 		return "", ErrThreeDNoCredential
@@ -203,6 +224,7 @@ func (s *AutoThreeDCredentials) TempToken(ctx context.Context, a *auth.Auth) (st
 			delete(s.flights, uid)
 			if f.err == nil {
 				s.cache[uid] = autoKeyEntry{key: f.key, expiresAt: f.exp}
+				s.pruneCacheLocked(time.Now())
 			}
 			s.mu.Unlock()
 			close(f.done)

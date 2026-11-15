@@ -51,9 +51,25 @@ func (c *Client) dumpUpstream(rc io.ReadCloser, prepared []byte, a *auth.Auth) i
 	if len(head) > reqMax {
 		head = head[:reqMax]
 	}
-	f.Write([]byte("=== request ===\n"))
-	f.Write(head)
-	f.Write([]byte("\n=== response ===\n"))
+	// 写失败必须知道（审查 A1-22）：此前三处 f.Write 的返回值全部丢弃，磁盘满/
+	// 配额耗尽时会得到一个**看起来完整、实际被截断**的 dump 文件 —— 排障时按它
+	// 判断「上游发过什么」直接得出错误结论。这里一有写错误就放弃落盘并回退成
+	// 纯透传（绝不因为诊断功能影响请求本身）。
+	if _, werr := f.Write([]byte("=== request ===\n")); werr != nil {
+		log.Printf("WARN: [upstream] dump write header: %v（放弃落盘，继续透传）", werr)
+		_ = f.Close()
+		return rc
+	}
+	if _, werr := f.Write(head); werr != nil {
+		log.Printf("WARN: [upstream] dump write request body: %v（放弃落盘，继续透传）", werr)
+		_ = f.Close()
+		return rc
+	}
+	if _, werr := f.Write([]byte("\n=== response ===\n")); werr != nil {
+		log.Printf("WARN: [upstream] dump write separator: %v（放弃落盘，继续透传）", werr)
+		_ = f.Close()
+		return rc
+	}
 	return &dumpReader{rc: rc, f: f, left: dumpLimit - int64(len(head))}
 }
 
@@ -78,6 +94,9 @@ type dumpReader struct {
 	f    *os.File
 	left int64
 	once sync.Once
+	// warnOnce 写盘失败只告警一次（审查 A1-22）：ENOSPC 之后每次 Read 都会失败，
+	// 逐次打日志会把 stderr 刷爆，反而盖住真正的问题。失败后不再尝试写盘。
+	warnOnce sync.Once
 }
 
 func (d *dumpReader) Read(p []byte) (int, error) {
@@ -87,8 +106,15 @@ func (d *dumpReader) Read(p []byte) (int, error) {
 		if int64(len(w)) > d.left {
 			w = w[:d.left]
 		}
-		d.f.Write(w)
-		d.left -= int64(len(w))
+		if _, werr := d.f.Write(w); werr != nil {
+			// 磁盘满/配额耗尽：停写并只告警一次（透传不受影响）。
+			d.left = 0
+			d.warnOnce.Do(func() {
+				log.Printf("WARN: [upstream] dump write: %v（dump 文件不完整，后续只透传）", werr)
+			})
+		} else {
+			d.left -= int64(len(w))
+		}
 	}
 	return n, err
 }

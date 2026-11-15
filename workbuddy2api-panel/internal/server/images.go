@@ -17,6 +17,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -249,6 +250,17 @@ func (h *Handler) imageModel(model string) (string, string, error) {
 // 本身的统计对象，归 chatCompletions）。客户端断连后不再起新的出图尝试；已经发出去的
 // 那次不取消——上游多半照扣，取消只会让回执丢失、账本少记。
 func (h *Handler) imageGenerate(ctx context.Context, req map[string]any) ([]byte, error) {
+	// 预算闸（审查 W3C8-16）：托管 image_generation 工具走这条路径，而此前**只有 HTTP 入口
+	// 有闸**（images() 开头的 admitBudget）。预算是唯一的成本止损线，工具侧不判 = 打穿后
+	// 仍可继续出图扣费。这里没有 w/r（回不了协议形状的错误响应），所以直接问 budget.admit()，
+	// 拒绝时把原因返回给工具层折成 response.failed / 429（与 imagetool 的前置闸同一句文案）。
+	if ok, why := h.budget.admit(); !ok {
+		msg := "daily credit budget exhausted (resets at 00:00 CST); see /status for details"
+		if why != "" {
+			msg = why
+		}
+		return nil, fmt.Errorf("budget gate rejected image generation: %s", msg)
+	}
 	realm, bare, err := h.imageModel(asString(req["model"]))
 	if err != nil {
 		return nil, err
@@ -417,8 +429,13 @@ func imageRequest(r *http.Request, raw []byte, edit bool) (map[string]any, error
 // multipartToImageJSON multipart 表单 → 上游 JSON：文件字段转 data URL（image[] / mask），
 // 其余字段按字符串收（n 转数字）。
 func multipartToImageJSON(raw []byte, ct string) (map[string]any, error) {
-	br := multipart.NewReader(strings.NewReader(string(raw)), boundaryOf(ct))
-	form, err := br.ReadForm(int64(len(raw)) + 1024)
+	// 免复制 + 显式内存上限（审查 W1A4-27）：此前 `strings.NewReader(string(raw))` 先把整段
+	// body 复制成一个 string，再把 ReadForm 的上限设成 len(raw)+1024（等于不设限）——
+	// 单请求峰值约 2×body（默认上限 32MiB → 64MiB+），并发上传就是 OOM 放大器。
+	// bytes.NewReader 不复制；超过 multipartMemoryLimit 的 part 落临时文件（fileToDataURL
+	// 照样能读，函数返回前 RemoveAll 清掉）。
+	br := multipart.NewReader(bytes.NewReader(raw), boundaryOf(ct))
+	form, err := br.ReadForm(multipartMemoryLimit)
 	if err != nil {
 		return nil, fmt.Errorf("解析 multipart 失败: %w", err)
 	}
@@ -479,11 +496,44 @@ func fileToDataURL(fh *multipart.FileHeader) (string, error) {
 	if len(b) > maxUpload {
 		return "", fmt.Errorf("上传文件超过 %d MiB（上游对超大 base64 会拒）：请先压缩或缩小尺寸", maxUpload>>20)
 	}
-	ct := fh.Header.Get("Content-Type")
-	if ct == "" {
-		ct = "image/png"
+	// MIME 收口（审查 W3C8-13）：此前把客户端声明的 Content-Type 原样拼进
+	// `data:<ct>;base64,`，于是 text/html、image/svg+xml 这类非位图负载也能被投给上游
+	// （行为取决于上游怎么处理，但网关没有理由替它传这种内容）。只放行位图四类；
+	// 未声明或 octet-stream（OpenAI SDK / Go 的 CreateFormFile 就是这样）按 magic bytes
+	// 判，猜不出位图就按 png 兜底 —— 这两条都是为了不误伤正常上传。
+	ct, err := normalizeImageMime(fh.Header.Get("Content-Type"), b)
+	if err != nil {
+		return "", err
 	}
 	return "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(b), nil
+}
+
+// multipartMemoryLimit ReadForm 的内存阈值：超过它的 part 落临时文件（随后 RemoveAll 清理）。
+const multipartMemoryLimit = 8 << 20
+
+// normalizeImageMime 上传文件的 MIME 白名单（见 fileToDataURL）。
+//
+// 允许：image/png、image/jpeg、image/webp、image/gif。
+// 缺省/octet-stream：按 magic bytes 猜（http.DetectContentType），猜不出位图按 png 兜底。
+// 其余（text/html、image/svg+xml、application/json…）：直接拒，文案点明只收位图。
+func normalizeImageMime(raw string, b []byte) (string, error) {
+	mt := strings.ToLower(strings.TrimSpace(raw))
+	if i := strings.IndexByte(mt, ';'); i >= 0 {
+		mt = strings.TrimSpace(mt[:i])
+	}
+	switch mt {
+	case "image/png", "image/jpeg", "image/webp", "image/gif":
+		return mt, nil
+	case "", "application/octet-stream":
+		if sniffed := strings.ToLower(http.DetectContentType(b)); strings.HasPrefix(sniffed, "image/") {
+			if i := strings.IndexByte(sniffed, ';'); i >= 0 {
+				sniffed = strings.TrimSpace(sniffed[:i])
+			}
+			return sniffed, nil
+		}
+		return "image/png", nil
+	}
+	return "", fmt.Errorf("不支持的图片类型 %q：只收 image/png、image/jpeg、image/webp、image/gif", mt)
 }
 
 // b64JSONImages 把 data[].url 换成 data[].b64_json（OpenAI images 的 response_format）。

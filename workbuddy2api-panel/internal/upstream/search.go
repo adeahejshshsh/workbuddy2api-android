@@ -19,8 +19,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -93,8 +93,15 @@ func (c *Client) agentTool(ctx context.Context, a *auth.Auth, path string, body 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// 截断必须显式报错（审查 W4-U2-104 / A1-15）：此前 1 MiB 封顶后照样把 raw 当
+	// json.RawMessage 返回，webfetch 的 markdown 正文一超限就变成**半截字符串**——
+	// 客户端 json 解析直接失败，错误信息指向「JSON 语法错误」，而真因是网关砍的，
+	// 排障方向被彻底带偏。半截 JSON 无论如何都不可用，所以这里直接报错（带上限值）。
+	raw, err := readAllLimitedStrict(resp.Body, 1<<20)
 	if err != nil {
+		if errors.Is(err, ErrResponseTooLarge) {
+			return nil, fmt.Errorf("search/fetch 响应超过 1MiB 上限被网关截断（非上游错误）: %w", err)
+		}
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
@@ -102,7 +109,8 @@ func (c *Client) agentTool(ctx context.Context, a *auth.Auth, path string, body 
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		// HTTPStatus 也填（审查 A1-11）：与 doJSONRaw 统一口径。
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, HTTPStatus: resp.StatusCode, Msg: truncate(string(raw), 200)}
 	}
 	// 200 也可以是业务错误（信封外确有 code 字段：15003/15013 实测走 400，
 	// 但服务端若改用 200 返 code，这里必须拦住，否则把错误当结果透传）。

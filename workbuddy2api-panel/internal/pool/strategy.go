@@ -55,9 +55,13 @@ func (p *Pool) SetStrategy(raw string) {
 }
 
 // Strategy 当前生效策略（面板展示用）。
+//
+// 纯读用 RLock（审查 C5-73）：此前是写锁，面板每刷新一次就抢一次选号用的同一把
+// 写锁 —— 与 pick 串行化，高频轮询时表现为选号延迟尖峰。本函数只读 p.strategy，
+// 与 SetStrategy（写锁）天然互斥，不需要排他。
 func (p *Pool) Strategy() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	if p.strategy == "" {
 		return StrategyWeighted
 	}
@@ -87,7 +91,7 @@ func strategyOrder(cands []*entry) []*entry {
 
 // pickRoundRobinLocked 轮询：取环上游标的下一个。
 // 游标不存在或已不在候选里（冷却/禁用/被 tried 排除）时，从环头重新开始。
-func (p *Pool) pickRoundRobinLocked(order []*entry, key string) *entry {
+func (p *Pool) pickRoundRobinLocked(order []*entry, key string, now time.Time) *entry {
 	if len(order) == 0 {
 		return nil
 	}
@@ -105,7 +109,7 @@ func (p *Pool) pickRoundRobinLocked(order []*entry, key string) *entry {
 		}
 	}
 	selected := order[next]
-	p.scheduling[key] = scheduleCursor{Strategy: StrategyRoundRobin, UID: selected.a.UID}
+	p.touchScheduleLocked(key, scheduleCursor{Strategy: StrategyRoundRobin, UID: selected.a.UID}, now)
 	return selected
 }
 
@@ -114,7 +118,7 @@ func (p *Pool) pickRoundRobinLocked(order []*entry, key string) *entry {
 // 「还能用」由调用方保证：传进来的 order 已经是**本次可接单**的候选集
 // （健康/在途/积分/分层都已过滤），所以当前号出现在 order 里就等于它还能接。
 // 这也是它与轮询的唯一差别——轮询无条件推进，耗尽不推进。
-func (p *Pool) pickSequentialLocked(order []*entry, key string) *entry {
+func (p *Pool) pickSequentialLocked(order []*entry, key string, now time.Time) *entry {
 	if len(order) == 0 {
 		return nil
 	}
@@ -125,7 +129,7 @@ func (p *Pool) pickSequentialLocked(order []*entry, key string) *entry {
 	// 当前游标仍在候选里 → 继续用它（这是「耗尽」语义的核心）。
 	for _, e := range order {
 		if cur.UID != "" && e.a.UID == cur.UID {
-			p.scheduling[key] = scheduleCursor{Strategy: StrategySequentialExhaust, UID: cur.UID}
+			p.touchScheduleLocked(key, scheduleCursor{Strategy: StrategySequentialExhaust, UID: cur.UID}, now)
 			return e
 		}
 	}
@@ -138,7 +142,7 @@ func (p *Pool) pickSequentialLocked(order []*entry, key string) *entry {
 			break
 		}
 	}
-	p.scheduling[key] = scheduleCursor{Strategy: StrategySequentialExhaust, UID: selected.a.UID}
+	p.touchScheduleLocked(key, scheduleCursor{Strategy: StrategySequentialExhaust, UID: selected.a.UID}, now)
 	return selected
 }
 
@@ -155,9 +159,9 @@ func (p *Pool) pickByStrategyLocked(cands []*entry, reqModel, realm string, now 
 	var selected *entry
 	switch p.strategy {
 	case StrategyRoundRobin:
-		selected = p.pickRoundRobinLocked(order, key)
+		selected = p.pickRoundRobinLocked(order, key, now)
 	case StrategySequentialExhaust:
-		selected = p.pickSequentialLocked(order, key)
+		selected = p.pickSequentialLocked(order, key, now)
 	default:
 		return nil
 	}
@@ -168,6 +172,13 @@ func (p *Pool) pickByStrategyLocked(cands []*entry, reqModel, realm string, now 
 	// 在剩余候选里按同一策略再取一次。轮询本身就会打散，这里只兜住「并发同一
 	// 瞬间全部命中同一个号」的窄窗口。
 	if selected.lastUsed.IsZero() || now.Sub(selected.lastUsed) >= minPickGap {
+		return selected
+	}
+	// 顺序耗尽**不做**这个兜底（审查 C5-74）：耗尽语义是「当前号还能接就一直用它」，
+	// 而 order 里出现的号本身就已经是「本次可接单」的集合 —— 借一个别的号来接单，
+	// 等于把「正在烧的那个号」跳过，语义直接退化成轮询，还会顺带推进那个号
+	// 的 usedSeq 把 LRU 带偏。防撞号是轮询才需要的（轮询是「换号」语义）。
+	if p.strategy == StrategySequentialExhaust {
 		return selected
 	}
 	for _, e := range order {
@@ -192,4 +203,43 @@ func (p *Pool) pickByStrategyLocked(cands []*entry, reqModel, realm string, now 
 type scheduleCursor struct {
 	Strategy string
 	UID      string
+	// At 该游标最后一次被写入的时刻（审查 C5-72）。运行态、不持久化。
+	// 键是 realm+"\x1f"+model，而 model 来自**客户端请求**（任意字符串都会进 pick
+	// 一次）—— round_robin/sequential 模式下没有它就无法判定「哪个游标该淘汰」，
+	// map 会被任意模型名顶到无界，且常驻进程。
+	At time.Time
+}
+
+// maxScheduleCursors p.scheduling 的硬上限（审查 C5-72）。1024 个 (域, 模型) 组合
+// 已远超真实部署（模型目录通常几十个），超出即视为「客户端在刷任意模型名」。
+const maxScheduleCursors = 1024
+
+// scheduleCursorTTL 游标空闲多久可回收（审查 C5-72）。
+const scheduleCursorTTL = time.Hour
+
+// touchScheduleLocked 写入策略游标并做有界化清理（审查 C5-72）。调用方须持 p.mu 写锁。
+//
+// 清理是**低频**的：只在超过硬上限时扫描一次，正常部署（几十个模型）永不触发，
+// 不影响 pick 热路径。先按 TTL 摘掉空闲游标；仍超限则任意丢弃（跳过刚写入的这个），
+// 保证 map 长度有界 —— 被丢的游标下次 pick 会重建，代价只是「环从头部重来一次」。
+func (p *Pool) touchScheduleLocked(key string, cur scheduleCursor, now time.Time) {
+	cur.At = now
+	p.scheduling[key] = cur
+	if len(p.scheduling) <= maxScheduleCursors {
+		return
+	}
+	for k, c := range p.scheduling {
+		if now.Sub(c.At) > scheduleCursorTTL {
+			delete(p.scheduling, k)
+		}
+	}
+	for k := range p.scheduling {
+		if len(p.scheduling) <= maxScheduleCursors {
+			break
+		}
+		if k == key {
+			continue // 本次刚写入的游标必须留下，否则本次推进白做
+		}
+		delete(p.scheduling, k)
+	}
 }

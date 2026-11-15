@@ -113,7 +113,11 @@ func normalizeEmbeddingsResponse(raw []byte, want int) ([]byte, error) {
 		seen[index] = true
 		it["object"] = "embedding"
 		it["index"] = index
-		out[i] = it
+		// 按 index 落位，不按数组位置（审查 W1A4-19 / W3C8-26）：此前 out[i]=it，上游乱序
+		// 返回时客户端按数组顺序取向量就会与输入错位 —— 正是本函数注释里说要避免的
+		// 「错位配对比报错更难查」。seen 已保证 index 两两不同且落在 [0,want)，
+		// 而 len(items)==want，所以这是一一映射，不会留空位。
+		out[index] = it
 	}
 	data, err := json.Marshal(out)
 	if err != nil {
@@ -175,6 +179,14 @@ func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
 	if realm != "global" {
 		realm = "cn"
 	}
+	// 部署没开 global 域时，客户端仍可用 realm=global 指名去打 global 池（审查 W3C8-28）：
+	// global 池非空就绕过了「只开 cn」的部署意图，池空则换一个 503 的误导性错误。
+	// 这里直接拒，与 fetch 同一口径。
+	if realm == "global" && !h.cfg.GlobalEnabled {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+			"realm=global 未启用：本网关只开了 cn 域（config.features.global_enabled=false）")
+		return
+	}
 	if bare == "" {
 		bare = model
 	}
@@ -186,12 +198,19 @@ func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 	for attempt := 0; attempt < embeddingsAttempts; attempt++ {
-		a := h.cfg.Pool.PickExcludingForRealm(tried, "", realm)
+		// 选号与在途占位同一把锁内（审查 W1A4-03 的最后一个漏点）：images/videos/3D 在
+		// #152 之后都改用 PickAcquireExcludingForRealm，只有 embeddings 还在用不占位的
+		// PickExcludingForRealm —— max_in_flight 对嵌入端点完全失效，单号并发可无限突破，
+		// 面板「在途」指标也看不见这些调用。占位用 defer 释放（失败换号时先释放再重选）。
+		a := h.cfg.Pool.PickAcquireExcludingForRealm(tried, bare, realm)
 		if a == nil {
 			break
 		}
 		tried[a.UID] = true
-		data, err := h.cfg.Upstream.Embeddings(r.Context(), a, bare, inputs)
+		data, err := func() ([]byte, error) {
+			defer h.cfg.Pool.Release(a.UID) // 在途名额只覆盖上游调用本身
+			return h.cfg.Upstream.Embeddings(r.Context(), a, bare, inputs)
+		}()
 		if err == nil {
 			out, nerr := normalizeEmbeddingsResponse(data, len(inputs))
 			if nerr != nil {
