@@ -176,20 +176,45 @@ func DecorateAuthURL(raw string, s Site, nonce, sessionID string) string {
 	if err != nil {
 		return raw
 	}
+	// 审查 W2-LS2-01：只认 https。上游回包（或被劫持的链路）给出 javascript: /
+	// data: / http: 时，面板会把这条链接交给「在浏览器打开」（window.open）——
+	// 非 https 的 scheme 就是一次脚本执行或明文降级。host 白名单**刻意没加**：
+	// 真机只能确认授权页在 Origin 域，而 API 在另一域（copilot.tencent.com），
+	// 白名单写窄了会让正常登录拿不到链接，那种「安全但不可用」比这条理论风险更糟。
+	if u.Scheme != "https" || u.Host == "" {
+		return ""
+	}
+	// 只在**已有参数之后追加**，不把整条 query 解出来再 Encode（审查 W2-C6-01 的
+	// 同款口径）：q.Encode() 会按字典序重排参数、重新编码已有值，还会把解析失败
+	// 的畸形参数**静默丢弃** —— 授权页把这条链接原样转给 risk-context，参数顺序
+	// 与编码形态都属于出站指纹，改写它等于自造一个「非官方客户端」的特征。
 	q := u.Query()
+	var add [][2]string
 	if s.Version != "" && q.Get("version") == "" {
-		q.Set("version", s.Version)
+		add = append(add, [2]string{"version", s.Version})
 	}
 	// loginSessionId 与 nonce 同一道闸：官方 appendHostLoginJourneyParams 只对
 	// platform=workbuddy 追加（GL 的真机链接里没有它）。
 	if s.Platform == "workbuddy" && sessionID != "" && q.Get("loginSessionId") == "" {
-		q.Set("loginSessionId", sessionID)
+		add = append(add, [2]string{"loginSessionId", sessionID})
 	}
 	if s.Platform == "workbuddy" && nonce != "" && q.Get("ww_device_nonce") == "" {
-		q.Set("ww_device_nonce", nonce)
+		add = append(add, [2]string{"ww_device_nonce", nonce})
 	}
-	u.RawQuery = q.Encode()
+	u.RawQuery = appendRawQuery(u.RawQuery, add)
 	return u.String()
+}
+
+// appendRawQuery 在原始 query 串末尾追加参数，**不动**已有参数（顺序、编码、
+// 畸形参数一律原样保留）。
+func appendRawQuery(rawQuery string, add [][2]string) string {
+	for _, kv := range add {
+		if rawQuery != "" {
+			rawQuery += "&"
+		}
+		rawQuery += url.QueryEscape(kv[0]) + "=" + url.QueryEscape(kv[1])
+	}
+	return rawQuery
 }
 
 // NewLoginSessionID 生成 uuid v4 形态的登录会话标识。

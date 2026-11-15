@@ -99,17 +99,28 @@ func backfillReasoningContent(obj map[string]any) {
 		}
 	}
 	// hasTrace 半边：检测是否有任何 reasoning 痕迹（非空 reasoning 或已有 reasoning_content）。
+	// 审查 W4-U1-22（P2）：扫描口径必须与下面的「补位」口径一致 —— **只看
+	// assistant 轮，且值必须非空**。
+	//
+	// 缺陷：原来不区分角色（user/tool 消息只要带 reasoning_content 键就置真），
+	// 也不看值（空串也算痕迹）。后果：客户端发 thinking.type=disabled 且历史里
+	// 有一条 `reasoning_content: ""` 的 user 消息时，本函数被误判成「有思考痕迹」
+	// 而给**每一条** assistant 消息补上 " " 占位 —— 与文件头「disabled + 无痕迹
+	// → 零改动」的官方口径直接相反，放大 W4-U1-21 的改写面（凭空往上下文里塞内容）。
 	hasTrace := false
 	for _, mm := range msgs {
 		msg, ok := mm.(map[string]any)
 		if !ok {
 			continue
 		}
+		if role, _ := msg["role"].(string); role != "assistant" {
+			continue
+		}
 		if r, ok := msg["reasoning"].(string); ok && r != "" {
 			hasTrace = true
 			break
 		}
-		if _, ok := msg["reasoning_content"]; ok {
+		if rc, ok := msg["reasoning_content"].(string); ok && rc != "" {
 			hasTrace = true
 			break
 		}

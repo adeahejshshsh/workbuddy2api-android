@@ -14,6 +14,7 @@
 package pool
 
 import (
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -36,13 +37,23 @@ const (
 // 下划线必须保留——round_robin 的规范写法本身就带下划线（此前手写的 lower 顺手
 // 去掉了 "_"，导致 "round_robin" 归一成 "roundrobin" 落到 default 分支，
 // 策略静默失效为加权随机：切了配置却完全没生效，而且没有任何报错）。
+//
+// 连字符别名补齐（审查 C5-76）：round-robin 早就接受，sequential-exhaust 却不接受 ——
+// 同一个 config 里两种写法一个生效一个静默回落 weighted，运维看不出差别。
+// 未识别的非空值统一打一条 WARN（含归一结果），把「配了但没生效」变成可见事件。
 func NormalizeStrategy(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
+	key := strings.ToLower(strings.TrimSpace(raw))
+	switch key {
 	case StrategyRoundRobin, "rr", "round-robin", "roundrobin":
 		return StrategyRoundRobin
-	case StrategySequentialExhaust, "sequential_exhaust", "seq", "exhaust", "sequentialexhaust":
+	case StrategySequentialExhaust, "sequential_exhaust", "seq", "exhaust", "sequentialexhaust",
+		"sequential-exhaust":
 		return StrategySequentialExhaust
+	case "", StrategyWeighted, "weight", "weighted-random":
+		return StrategyWeighted
 	default:
+		log.Printf("WARN: [pool] 未识别的 selection_strategy=%q，已回落 weighted（可选值：%s / %s / %s）",
+			raw, StrategyWeighted, StrategyRoundRobin, StrategySequentialExhaust)
 		return StrategyWeighted
 	}
 }

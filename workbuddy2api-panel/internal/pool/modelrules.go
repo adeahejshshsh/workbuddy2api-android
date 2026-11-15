@@ -28,7 +28,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,11 +53,23 @@ type ModelRule struct {
 func newRuleID() string {
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// 随机源不可用时退回时间戳，宁可碰撞也不 panic（规则 id 只用于引用）。
-		return "r" + time.Now().Format("150405.000000")
+		return fallbackRuleID()
 	}
 	return hex.EncodeToString(b[:])
 }
+
+// fallbackRuleID 随机源不可用时的退化 id（审查 C5-61）。
+//
+// 退回时间戳，宁可碰撞也不 panic（规则 id 只用于引用）。但纯时间戳在同微秒内连续
+// 创建两条规则时会生成同一个 id，后者在 p.rules[r.ID] = r 里**静默覆盖**前者 ——
+// 所以再拼一个进程内自增序号。抽成独立函数是为了能被用例直接钉住（rand 失败
+// 无法在测试里构造）。
+func fallbackRuleID() string {
+	return "r" + time.Now().Format("150405.000000") + "-" + strconv.FormatUint(ruleIDSeq.Add(1), 36)
+}
+
+// ruleIDSeq 随机源不可用时的进程内自增序号（审查 C5-61），只用于退化路径的唯一性。
+var ruleIDSeq atomic.Uint64
 
 // normalizeRuleModel 归一化模型名：去空白、小写；**保留 realm 前缀**。
 //
@@ -168,9 +182,11 @@ func (p *Pool) UpsertRule(in ModelRule) (ModelRule, error) {
 	}
 	if r.ID == "" {
 		r.ID = newRuleID()
-	} else if old, ok := p.rules[r.ID]; ok {
+	} else {
+		// 更新既有规则（审查 C5-60）：此前这里还有一个 `else if old, ok := ...` 分支，
+		// 两支做的是同一件事（只 TrimSpace 名字），`_ = old` 是遗留占位 —— 删掉避免
+		// 后来者以为「更新」与「新建」有语义差别。名字归一化在 normalizeRule 里已做。
 		r.Name = strings.TrimSpace(r.Name)
-		_ = old
 	}
 	p.rules[r.ID] = r
 	// 规则内容变了 → 所有挂了它的账号重新展开。
@@ -180,6 +196,14 @@ func (p *Pool) UpsertRule(in ModelRule) (ModelRule, error) {
 }
 
 // DeleteRule 删除规则，并从所有账号上摘掉引用。
+//
+// 摘引用用「新建切片」而不是 `e.ruleIDs[:0]` 原地压缩（审查 C5-58）：原地压缩会把
+// 同一底层数组改写，任何在别处持有旧切片视图的代码（快照、面板读取、将来的增量
+// 下发）都会看到被"凭空改掉"的内容 —— 目前恰好没人持有，但这是隐藏地雷。
+// 规则数量是个位数，重新分配的开销可以忽略。
+//
+// 暂存号（parked）也要摘（审查 C5-59）：它们不在 byUID 里，但规则 id 会随
+// parked_accounts 落盘，文件回来时又带着一个已被删除的 id 复活。
 func (p *Pool) DeleteRule(id string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -187,28 +211,55 @@ func (p *Pool) DeleteRule(id string) bool {
 		return false
 	}
 	delete(p.rules, id)
-	for _, e := range p.byUID {
+	drop := func(e *entry) {
 		if len(e.ruleIDs) == 0 {
-			continue
+			return
 		}
-		kept := e.ruleIDs[:0]
+		kept := make([]string, 0, len(e.ruleIDs))
 		for _, rid := range e.ruleIDs {
 			if rid != id {
 				kept = append(kept, rid)
 			}
 		}
+		if len(kept) == 0 {
+			e.ruleIDs = nil
+			return
+		}
 		e.ruleIDs = kept
+	}
+	for _, e := range p.byUID {
+		drop(e)
+	}
+	for _, e := range p.parked {
+		drop(e)
 	}
 	p.recomputeRulesLocked()
 	p.dirty.Store(true)
 	return true
 }
 
+// entryByUIDLocked 按 uid 找条目：池内优先，其次暂存区（审查 C5-59）。
+// 调用方须持 p.mu。
+//
+// 为什么暂存号也要能操作：热重载把「文件暂时不见了」的号移进 parked（最多 4096 个），
+// 这段时间里面板下的批量规则操作如果只查 byUID，就会静默不生效（AssignRules 还会
+// 报「账号不存在」）；文件回来后账号带着**旧规则**复活，运维却以为已经改过。
+func (p *Pool) entryByUIDLocked(uid string) (*entry, bool) {
+	if e, ok := p.byUID[uid]; ok {
+		return e, true
+	}
+	if e, ok := p.parked[uid]; ok {
+		return e, true
+	}
+	return nil, false
+}
+
 // AssignRules 设置某账号挂的规则集合（整体替换）。返回落库后的 id 列表。
+// 暂存号（parked）同样可操作（审查 C5-59），否则热重载窗口期的配置会静默丢失。
 func (p *Pool) AssignRules(uid string, ids []string) ([]string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	e, ok := p.byUID[uid]
+	e, ok := p.entryByUIDLocked(uid)
 	if !ok {
 		return nil, errors.New("账号不存在")
 	}
@@ -240,6 +291,7 @@ func (p *Pool) AssignRules(uid string, ids []string) ([]string, error) {
 // 只增删**这一条**规则的引用，账号原有的其它规则原样保留——规则卡片上的「应用」
 // 走这条路：账号多的池子里，逐个账号「配置」太慢（19 个账号就要点 19 次弹窗）。
 // 返回真正发生变化的账号数；规则 id 不存在时报错，避免把野 id 写进账号。
+// 暂存号（parked）也计入（审查 C5-59）：否则热重载窗口期的批量操作对它们静默失效。
 func (p *Pool) ApplyRule(id string, uids []string, assigned bool) (int, error) {
 	id = strings.TrimSpace(id)
 	p.mu.Lock()
@@ -249,7 +301,7 @@ func (p *Pool) ApplyRule(id string, uids []string, assigned bool) (int, error) {
 	}
 	changed := 0
 	for _, uid := range uids {
-		e, ok := p.byUID[uid]
+		e, ok := p.entryByUIDLocked(uid)
 		if !ok {
 			continue
 		}
@@ -284,10 +336,11 @@ func (p *Pool) ApplyRule(id string, uids []string, assigned bool) (int, error) {
 }
 
 // RuleIDsOf 返回某账号挂的规则 id（复数拷贝，调用方可安全持有）。
+// 暂存号也查（审查 C5-59），与 AssignRules/ApplyRule 的操作面保持一致。
 func (p *Pool) RuleIDsOf(uid string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	e, ok := p.byUID[uid]
+	e, ok := p.entryByUIDLocked(uid)
 	if !ok {
 		return nil
 	}

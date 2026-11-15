@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -23,8 +24,20 @@ func prepareKimiTools(body []byte, realm string) []byte {
 	if !strings.HasPrefix(strings.TrimPrefix(model, "cn:"), "kimi") {
 		return body
 	}
+	// 审查 F-07 / W4-U1-33（P2）：**必须 UseNumber**。
+	//
+	// 缺陷：这里把 tools 解成 map[string]any，encoding/json 默认把所有数字落成
+	// float64 —— 于是 schema 里 >2^53 的整数（`minimum`/`enum`/客户端 metadata/
+	// seed）在重新 Marshal 时被改写成近似值（1234567890123456789 →
+	// 1234567890123456800）。这条路径发生在 prepareBodyOptFull **之前**
+	// （client.go 先 prepareKimiTools 再进主管线），主管线刻意用 UseNumber 保住的
+	// 原文根本回填不了。
+	// UseNumber 后数字以 json.Number（原始字面量）穿过 inlineKimiSchemaBudget 的
+	// default 分支，Marshal 时逐字节写回。
 	var tools []map[string]any
-	if json.Unmarshal(obj["tools"], &tools) != nil || len(tools) == 0 {
+	dec := json.NewDecoder(bytes.NewReader(obj["tools"]))
+	dec.UseNumber()
+	if derr := dec.Decode(&tools); derr != nil || len(tools) == 0 {
 		return body
 	}
 	kept := make([]map[string]any, 0, len(tools))
@@ -45,12 +58,15 @@ func prepareKimiTools(body []byte, realm string) []byte {
 		}
 		kept = append(kept, tool)
 	}
-	encoded, err := json.Marshal(kept)
+	// 审查 W4-U1-33（P2）：改用 marshalNoEscape —— json.Marshal 会把 `<`/`>`/`&`
+	// 转成 \u003c 等，出站字节与客户端原文成片不同（正是 payload.go 明确要避免的
+	// 「指纹面」，两条纪律相反）。
+	encoded, err := marshalNoEscape(kept)
 	if err != nil {
 		return body
 	}
 	obj["tools"] = encoded
-	out, err := json.Marshal(obj)
+	out, err := marshalNoEscape(obj)
 	if err != nil {
 		return body
 	}

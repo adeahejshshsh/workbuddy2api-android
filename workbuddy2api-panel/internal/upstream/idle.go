@@ -64,11 +64,22 @@ func (b *idleMonitoringBody) close() error {
 	t := time.NewTimer(tailDrainWait)
 	select {
 	case <-drained:
+		t.Stop()
+		b.cancel()
+		return b.rc.Close()
 	case <-t.C:
+		// 审查 A1-09（P2）：超时分支**先 Close 底流、再 cancel**（旧实现反了）。
+		//
+		// 为什么顺序重要：读尾 goroutine 阻塞在 b.rc.Read 上，而 cancel 只作用于
+		// HTTP 请求的 context —— 它能让 Transport 自己的 readLoop 返回，却打不断
+		// 包在中间的任意 io.ReadCloser（dumpReader / 续写读取器 / 测试 fake / 第三方
+		// 包装体都不感知 ctx）。唯一能打断阻塞 Read 的动作是 Close。旧顺序下
+		// 「先 cancel」等于让那个 goroutine 继续挂在 Read 上，直到某天底流被别的路径
+		// 关掉；长期运行就是 goroutine 与 fd 的缓慢累积。
+		cerr := b.rc.Close()
+		b.cancel()
+		return cerr
 	}
-	t.Stop()
-	b.cancel()
-	return b.rc.Close()
 }
 
 func (b *idleMonitoringBody) idleFor() time.Duration {

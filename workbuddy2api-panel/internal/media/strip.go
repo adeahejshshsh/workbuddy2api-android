@@ -14,9 +14,11 @@ package media
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/jpeg"
 	"image/png"
@@ -31,12 +33,23 @@ const (
 	DefaultWhiteLum = 248.0
 	// DefaultJPEGQuality opts.Quality 为 0 时的 JPEG 质量。
 	DefaultJPEGQuality = 92
-	// MaxPixels 单张图的像素上限，防解码炸内存（1 亿像素解码后约 400MB）。
-	MaxPixels = 100_000_000
+	// MaxPixels 单张图的像素上限，防解码炸内存。
+	//
+	// 审查 W2-ME-01：原值 1 亿（解码后约 400MB）在 Android 设备上必然被 OOM
+	// killer 直接杀掉（Go 的 OOM 不可 recover）。按部署形态下调到 2500 万：
+	// 解码缓冲约 75~100MB，且裁切不再额外复制整幅缓冲（见 cropImage）。
+	MaxPixels = 25_000_000
 	// rowStdThreshold 判「这一行有内容」的行标准差阈值（0-255 亮度）。
 	// 实测纯白留白区的行标准差 0.1~0.7，画面内容行普遍 > 2。
 	rowStdThreshold = 2.0
 )
+
+// stripSlots 同时处理的图片数上限（审查 W2-ME-01）。
+//
+// 像素上限只挡单张，挡不住「并发多张同时解码」——N 张 25M 像素图并发就是 N 倍
+// 内存。图像后处理是 CPU/内存双密集型，2 个并发在手机/小内存容器上是安全水位；
+// 单张亚秒级，排队的请求等一会儿即可，不会饿死。
+var stripSlots = make(chan struct{}, 2)
 
 // ErrNotImage 输入不是本包能解的图片（只支持 PNG / JPEG）。
 var ErrNotImage = errors.New("不支持的图片格式：只认 PNG / JPEG")
@@ -91,6 +104,10 @@ type Result struct {
 // 返回的 Result 无论 err 是否为 nil 都带实测数字；err 为 *NoBlankError 时说明底部
 // 留白不够（此时 Result.Data 为空，调用方应让用户先补白边再裁）。
 func Strip(raw []byte, opts Options) (Result, error) {
+	// 并发闸（审查 W2-ME-01）：见 stripSlots 注释。
+	stripSlots <- struct{}{}
+	defer func() { <-stripSlots }()
+
 	if opts.MinBlank <= 0 {
 		opts.MinBlank = DefaultMinBlank
 	}
@@ -214,6 +231,34 @@ func rowStats(img image.Image) []rowStat {
 			out[y] = statsRGB(m.Pix[off : off+w*4])
 		}
 		return out
+	case *image.Paletted:
+		// 审查 W2-ME-02：调色板图（PNG-8 / GIF）此前落到通用路径，每像素一次
+		// img.At() 接口调用 + 16bit 转换。查表即可，成本降到约 1/10。
+		for y := 0; y < h; y++ {
+			off := (y+b.Min.Y-m.Rect.Min.Y)*m.Stride + (b.Min.X - m.Rect.Min.X)
+			out[y] = statsPaletted(m.Pix[off:off+w], m.Palette)
+		}
+		return out
+	case *image.Gray16:
+		for y := 0; y < h; y++ {
+			off := (y+b.Min.Y-m.Rect.Min.Y)*m.Stride + (b.Min.X-m.Rect.Min.X)*2
+			out[y] = statsGray16(m.Pix[off : off+w*2])
+		}
+		return out
+	case *image.RGBA64:
+		// 预乘 alpha：与通用路径 img.At().RGBA() 同口径。
+		for y := 0; y < h; y++ {
+			off := (y+b.Min.Y-m.Rect.Min.Y)*m.Stride + (b.Min.X-m.Rect.Min.X)*8
+			out[y] = statsRGB16(m.Pix[off:off+w*8], false)
+		}
+		return out
+	case *image.NRGBA64:
+		// 非预乘 alpha：statsRGB16 内部按 alpha 预乘，口径与 RGBA() 一致。
+		for y := 0; y < h; y++ {
+			off := (y+b.Min.Y-m.Rect.Min.Y)*m.Stride + (b.Min.X-m.Rect.Min.X)*8
+			out[y] = statsRGB16(m.Pix[off:off+w*8], true)
+		}
+		return out
 	}
 
 	// 通用路径：逐像素取灰度（慢，但不是主路径）。
@@ -253,6 +298,56 @@ func statsRGB(pix []byte) rowStat {
 	return finishRow(sum, sumSq, n)
 }
 
+// statsPaletted 调色板图（1 字节/像素索引）行的统计。
+func statsPaletted(pix []byte, pal color.Palette) rowStat {
+	var sum, sumSq float64
+	for _, idx := range pix {
+		var r, g, b uint8
+		if int(idx) < len(pal) {
+			cr, cg, cb, _ := pal[idx].RGBA()
+			r, g, b = uint8(cr>>8), uint8(cg>>8), uint8(cb>>8)
+		}
+		lum := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)
+		sum += lum
+		sumSq += lum * lum
+	}
+	return finishRow(sum, sumSq, len(pix))
+}
+
+// statsGray16 16 位灰度图（2 字节/像素，大端）行的统计，折算到 0-255。
+func statsGray16(pix []byte) rowStat {
+	var sum, sumSq float64
+	n := len(pix) / 2
+	for i := 0; i < n; i++ {
+		lum := float64(binary.BigEndian.Uint16(pix[i*2:])) / 257.0
+		sum += lum
+		sumSq += lum * lum
+	}
+	return finishRow(sum, sumSq, n)
+}
+
+// statsRGB16 16 位 RGBA（8 字节/像素，大端）行的统计，折算到 0-255。
+// premult=true 表示源是非预乘（NRGBA64），按 alpha 预乘以对齐 img.At().RGBA() 口径。
+func statsRGB16(pix []byte, premult bool) rowStat {
+	var sum, sumSq float64
+	n := len(pix) / 8
+	for i := 0; i < n; i++ {
+		j := i * 8
+		r := float64(binary.BigEndian.Uint16(pix[j:]))
+		g := float64(binary.BigEndian.Uint16(pix[j+2:]))
+		b := float64(binary.BigEndian.Uint16(pix[j+4:]))
+		if premult {
+			if a := float64(binary.BigEndian.Uint16(pix[j+6:])); a < 65535 {
+				r, g, b = r*a/65535, g*a/65535, b*a/65535
+			}
+		}
+		lum := (0.299*r + 0.587*g + 0.114*b) / 257.0
+		sum += lum
+		sumSq += lum * lum
+	}
+	return finishRow(sum, sumSq, n)
+}
+
 func finishRow(sum, sumSq float64, n int) rowStat {
 	if n <= 0 {
 		return rowStat{}
@@ -282,8 +377,20 @@ func meanLumOverStats(rows []rowStat) float64 {
 	return sum / float64(len(rows))
 }
 
-// cropImage 裁出 r 区域（统一到 RGBA，保证编码器走的都是快路径）。
+// cropImage 裁出 r 区域。
+//
+// 审查 W2-ME-01：此前无条件 image.NewRGBA + draw.Draw —— 裁切后仍是整幅宽度，
+// 等于在解码缓冲之外再分配一份 4 字节/像素的整图（2500 万像素就是 100MB），
+// 手机上足以被 OOM killer 杀掉。stdlib 的每个图像类型都实现了 SubImage，它只是
+// 换 Bounds 的零分配视图，jpeg/png 编码器都能直接吃（JPEG 还能走 YCbCr 快路径，
+// 少一次 RGB 往返）。
 func cropImage(img image.Image, r image.Rectangle) image.Image {
+	if sub, ok := img.(interface {
+		SubImage(image.Rectangle) image.Image
+	}); ok {
+		return sub.SubImage(r)
+	}
+	// 非 stdlib 的自定义 Image 实现：退回复制路径（保持旧行为）。
 	dst := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
 	draw.Draw(dst, dst.Bounds(), img, r.Min, draw.Src)
 	return dst

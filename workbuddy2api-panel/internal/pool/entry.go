@@ -16,8 +16,17 @@ const degradeReason = "consecutive failures"
 type CoolKind int
 
 const (
-	CoolHard CoolKind = iota // 余额不足 → 冷却到次日 04:00（等签到恢复）
-	CoolSoft                 // 429 → 短冷却
+	// CoolHard 余额不足 → 冷却到次日 04:00（等签到恢复）。
+	//
+	// 审查 C5-89：CoolKind 的 0 值同时表示「未设置/无冷却」，与 CoolHard 不可区分 ——
+	// 唯一的判据是 until.IsZero()（所有读路径都先看 until，再读 coolKind 做文案）。
+	// 不能靠「加一个 CoolNone 常量」来修：coolKind 是 state.json 里的**持久化数值**，
+	// 重新编号会让旧文件里的 0 变成另一种语义（需要数据迁移），风险大于收益。
+	// 约定固化在此：**判「是否在冷却」一律看 until/breakerUntil/degradeUntil，
+	// coolKind 只用于展示与 reviveCoolingLocked 的 CoolHard 判定**。
+	CoolHard CoolKind = iota
+	// CoolSoft 429 → 短冷却。
+	CoolSoft
 )
 
 func (k CoolKind) String() string {
@@ -100,7 +109,7 @@ type Status struct {
 	// EnterpriseOverride 人工覆盖值（"" / enterprise / personal）；面板据此显示
 	// 「自动判定 / 强制企业 / 强制个人」，避免用户看不出当前是哪种。
 	EnterpriseOverride string `json:"enterprise_override,omitempty"`
-	Disabled   bool `json:"disabled"`
+	Disabled           bool   `json:"disabled"`
 	// SessionDeadFails 连续 12153 / 网关 401（ErrSessionDead）计数，即「离禁用还差
 	// 几次」的进度。运维据此判断某号是刚踩一次抖动还是真在往禁用走。
 	SessionDeadFails int `json:"session_dead_fails,omitempty"`
@@ -229,6 +238,17 @@ type entry struct {
 	a            *auth.Auth
 	credits      int64
 	creditsTotal int64 // 积分总额度（UserResource 聚合；0 = 未知）
+	// creditsKnown 余额是否**曾经被权威接口确认过**（审查 C5-10）。
+	//
+	// reserveBlocked 原先用 `creditsTotal > 0` 当「余额已知」的代理判据，于是
+	// creditsTotal == 0 的两类号永远不保底：①免费号（total 真的为 0）；
+	// ②余额接口长期失败/从未成功、credits 停在 0 的号 —— 它们的 credits <= 阈值
+	// 恒成立，但判据第一项就把整条规则短路了，保留积分形同虚设，可以被打穿。
+	//
+	// 现在把「已知」与「total 的数值」解耦：任何权威余额写入（SetCreditsDetailed /
+	// ReenableIfCredits）都置 true，即使 total == 0。旧 state.json 没有该字段时
+	// 恢复为 false，reserveBlocked 仍按 total > 0 兜底 → 与旧行为逐字节一致（零回归）。
+	creditsKnown bool
 	// creditsExpiring 配置窗口内即将过期的可用积分子集，是 credits 的一部分。
 	// creditsEarliestExpiry / creditsEarliestRemaining 是全部未来到期批次中的最早一批；
 	// 两者均由签到/余额刷新更新，供 earliest-expiry 路由和状态观测使用。
@@ -436,13 +456,16 @@ func (e *entry) healthy(now time.Time) bool {
 }
 
 // modelExempt 报告账号是否处于「6004 模型级软冷却」形态：存在任一有效的 6004
-//
-// 注意（BUG-11）：生产代码里**没有任何调用点**（可服务性只看 healthy()），
-// 现在只有单测在用它做语义断言。别按注释推断「豁免号在探活里算可服务」。
-// 模型级冷却（modelCooldowns 非空），且尚未禁用、未熔断。
+// 模型级冷却（modelCooldowns 非空），且尚未禁用、未熔断、未降权。
 // 此形态下账号仅对限流中的模型不可用，对其他模型仍可选（issue #31）。
-// healthyForModel 与 ServableNow 共用本谓词，保证 chat 选号与探活口径一致。
 // 调用方负责 now 与冷却有效性的判断（本方法只看形态，不看冷却是否已过期）。
+//
+// 审查 C5-33：生产代码里**没有任何调用点**（可服务性只看 healthy()，见
+// ServableForRealm 的注释），现在只有单测拿它做语义断言。三处注释互相解释一个
+// 不存在于生产路径的分支，读起来像是探活真的用了它 —— 保留函数（单测在用）但
+// 明确标注「仅测试/语义探针」，避免后来者据此推断探活口径。
+//
+//nolint:unused // 仅由单测调用，保留为语义探针（见上）
 func (e *entry) modelExempt() bool {
 	if e.disabled || e.paused || !e.until.IsZero() || !e.degradeUntil.IsZero() || !e.breakerUntil.IsZero() {
 		return false
@@ -596,12 +619,15 @@ func (e *entry) fallbackKind(now time.Time) string {
 
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
-	Credits      int64     `json:"credits"`
-	CreditsTotal int64     `json:"credits_total,omitempty"`
-	Remark       string    `json:"remark,omitempty"` // 运维备注（上游 PR #178）
-	Group        string    `json:"group,omitempty"`  // 运维分组标签（issue #159）
+	Credits      int64 `json:"credits"`
+	CreditsTotal int64 `json:"credits_total,omitempty"`
+	// CreditsKnown 余额是否曾被权威接口确认过（审查 C5-10）。omitempty + 恢复侧
+	// 「false 时回落 credits_total > 0」保证旧 state.json 逐字节兼容。
+	CreditsKnown bool   `json:"credits_known,omitempty"`
+	Remark       string `json:"remark,omitempty"` // 运维备注（上游 PR #178）
+	Group        string `json:"group,omitempty"`  // 运维分组标签（issue #159）
 	// ModelRules 该账号挂的模型规则 id（持久化；规则本体在 stateFile.ModelRules）。
-	ModelRules []string `json:"model_rules,omitempty"`
+	ModelRules   []string  `json:"model_rules,omitempty"`
 	Disabled     bool      `json:"disabled"`
 	Paused       bool      `json:"paused,omitempty"`
 	Reason       string    `json:"reason,omitempty"`

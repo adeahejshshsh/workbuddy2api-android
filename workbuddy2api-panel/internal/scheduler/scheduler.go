@@ -145,6 +145,27 @@ type Scheduler struct {
 	// webLeg 网页通道每日活跃的当日去重表（仅国际版，见 webactivity.go）。
 	// 放 Scheduler 上而不是包级变量：多实例/测试各自独立，互不污染。
 	webLeg webLegDay
+
+	// probeStarted/probeLoops 窗口探针循环的启动幂等（审查 C7-041）。
+	// probeLoops 只增不减：用例据它断言「重复装配没有起第二个循环」。
+	probeStarted atomic.Bool
+	probeLoops   atomic.Int32
+	// sweepStarted 补领清扫循环的启动幂等（审查 C7-075），语义同上。
+	sweepStarted atomic.Bool
+	sweepLoops   atomic.Int32
+	// balanceStarted 余额刷新循环的启动幂等（审查 C7-007）：此前每次
+	// StartBalanceRefresh 都新起一个 goroutine，配置重载/重复装配会让多个余额循环
+	// 并存，同一周期把全池余额查询扇出多遍（每遍都是一次真实上游调用）。
+	balanceStarted atomic.Bool
+	balanceLoops   atomic.Int32
+
+	// batchWG 在飞的排程批次（审查 C7-006/P-08）：此前到点批次是裸 go func，
+	// 进程退出前无人等待，停机窗口内批次被硬杀在写上游的中途。
+	batchWG sync.WaitGroup
+	// taskRunning 各任务族「当前正在执行」的计数（审查 C7-003）。
+	// TaskRunning 此前用 TryLock 探测，会真的把锁抢走一瞬——正好与排程的
+	// TryBeginTask 撞车时，那一族整轮被跳过（且当天不重试）。
+	taskRunning sync.Map // key: string → *atomic.Int32
 }
 
 // New 构建。
@@ -390,27 +411,35 @@ func (s *Scheduler) TryBeginTask(key string) bool {
 		return true
 	}
 	m, _ := s.taskLocks.LoadOrStore(key, &sync.Mutex{})
-	return m.(*sync.Mutex).TryLock()
+	if !m.(*sync.Mutex).TryLock() {
+		return false
+	}
+	// 占锁成功后同步计数：TaskRunning 只读这个计数，不再 TryLock 探测（审查 C7-003）。
+	s.runningCounter(key).Add(1)
+	return true
+}
+
+// runningCounter 取某任务族的「正在执行」计数器（懒建）。
+func (s *Scheduler) runningCounter(key string) *atomic.Int32 {
+	v, _ := s.taskRunning.LoadOrStore(key, &atomic.Int32{})
+	return v.(*atomic.Int32)
 }
 
 // TaskRunning 报告某任务族当前是否在跑（**不**占锁）。
 //
-// 实现是「试着 TryLock 再立刻释放」：拿得到 = 没人在跑；拿不到 = 有人在跑。
-// 只用于状态展示（面板「余额刷新中」），不做任何调度决策，所以这点竞态无害。
+// 实现是读计数，不再是「试着 TryLock 再立刻释放」（审查 C7-003）：TryLock 探测
+// 在「锁恰好空着」的瞬间会**真的把锁抢走**，与同一毫秒里排程的 TryBeginTask 撞车
+// 时后者返回 false → 该族整轮被跳过，只留一行 log，当天不重试（missedToday 认为
+// 已跑过）。面板每 2s 轮询一次，命中窗口虽小但后果是整天漏跑。
 func (s *Scheduler) TaskRunning(key string) bool {
 	if key == "" || s == nil {
 		return false
 	}
-	v, ok := s.taskLocks.Load(key)
+	v, ok := s.taskRunning.Load(key)
 	if !ok {
 		return false
 	}
-	mu := v.(*sync.Mutex)
-	if mu.TryLock() {
-		mu.Unlock()
-		return false
-	}
-	return true
+	return v.(*atomic.Int32).Load() > 0
 }
 
 // EndTask 释放 TryBeginTask 占用的任务族锁。
@@ -420,6 +449,16 @@ func (s *Scheduler) EndTask(key string) {
 	}
 	if m, ok := s.taskLocks.Load(key); ok {
 		m.(*sync.Mutex).Unlock()
+		// 计数下限夹 0：EndTask 与 TryBeginTask 的配对由调用方保证（panel 恒为
+		// 「Try 成功才 defer End」），但少一次 Begin 不该把计数打成负数让
+		// TaskRunning 永久误报「在跑」。
+		for {
+			c := s.runningCounter(key)
+			cur := c.Load()
+			if cur <= 0 || c.CompareAndSwap(cur, cur-1) {
+				break
+			}
+		}
 	}
 }
 
@@ -585,6 +624,10 @@ func (s *Scheduler) waitSlot(ctx context.Context, next time.Time, step time.Dura
 // Run 主循环，阻塞直到 ctx 取消。
 // Reconfigure 触发 rearmSchedule 时提前唤醒重算（新时点/开关立即生效）。
 func (s *Scheduler) Run(ctx context.Context) {
+	// 停机要等在飞批次收尾（审查 C7-006/P-08）：到点批次是后台 goroutine，此前
+	// Run 返回时它们仍在写上游，进程被硬杀在「签到到一半 / 保活轮换 RT 到一半」，
+	// runstamps 标记也可能写一半。这里限时等待——上游慢时不能把停机窗口拖成无限。
+	defer s.waitBatches(batchShutdownWait)
 	// 启动补跑：进程停机（部署 / 重启 / 崩溃）跨过今天的时点，迟到唤醒补跑救不了
 	// ——它只管进程活着时 timer 被睡眠冻结。这里补一轮：各任务按天幂等，
 	// 窗口类（夜猫子）自带守卫，重复一轮不会打出无意义请求。
@@ -639,7 +682,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 			// 正常排程也要写补跑标记（review #20）：此前 markRan 只在启动补跑
 			// 分支调用，当天 09:00 正常跑完后重启，missedToday 仍认为「时点已过且
 			// 未补跑」→ 再对全池打一轮。现在每批跑完即记账，一天重启多次不再翻倍。
+			s.batchWG.Add(1) // 先 Add 再 go：避免 Run 侧的 Wait 与派发交错（审查 C7-006）
 			go func(kinds []taskKind) {
+				defer s.batchWG.Done()
 				// 只标记**真正跑完**的族（见 runBatch 返回值的语义）：此前无论跳过
 				// 还是被取消都记「今天已跑」，一次重启窗口就能吃掉当天一整轮签到/保活。
 				if done := s.runBatch(ctx, kinds); len(done) > 0 {
@@ -647,6 +692,30 @@ func (s *Scheduler) Run(ctx context.Context) {
 				}
 			}(kinds)
 		}
+	}
+}
+
+// batchShutdownWait 停机时等在飞排程批次的上限（审查 C7-006/P-08）。
+// 取 5s：run.sh 的停机预算只有 8s，等满也不能把它吃掉；上游慢的批次本来就该被
+// 放弃（各族幂等，下次排程/重启补跑会重来）。
+const batchShutdownWait = 5 * time.Second
+
+// waitBatches 限时等待在飞排程批次收尾（审查 C7-006/P-08）。
+//
+// 超时后放弃等待并记 WARN：调用方（Run）此时已经在返回路径上，进程即将退出，
+// 唯一正确的事是让日志说清楚「哪些批次被强杀」，而不是无限期拖住停机。
+func (s *Scheduler) waitBatches(d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.batchWG.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		log.Printf("WARN: scheduler: 停机等待 %s 后仍有排程批次在跑，放弃等待（各族幂等，下次补跑）", d)
 	}
 }
 
@@ -785,14 +854,22 @@ func (s *Scheduler) RunCheckinNowCtx(ctx context.Context, spread bool) {
 		// 未配置状态（active=false），盲发写请求只会每天撞一次 10001、白多一次风控面。
 		// 故国际版走「先查 status，仅 active 且当日未签才 claim」（见 checkin_global.go）。
 		if a.IsGlobal() {
-			s.checkinGlobal(a)
-			continue
-		}
-		// 企业版无签到体系：上游对 POST /v2/billing/meter/daily-checkin 直接
-		// 400 code 10001「企业账号不支持该操作」。跳过签到，但**不 continue**——
-		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
-		// credit_floor 判定与面板额度展示的唯一数据源）。
-		if a.SupportsPersonalEndpoints() {
+			// 国际版签到（审查 C7-085：改为带 ctx 与返回值，瞬时失败也进补签队列）。
+			done, err := s.checkinGlobal(ctx, a)
+			if !done && err != nil && upstream.IsTransientBilling(err) {
+				pending = append(pending, st.UID)
+			}
+			// **不 continue**（审查 C7-002 / 10.13 P-07）：global 号的权威余额只由
+			// 5 分钟余额刷新覆盖，签到轮次跳过余额查询 → credit_floor 与面板额度在
+			// 「余额循环被关停 / 被族锁跳过」时长期陈旧，而且与下面 CN 分支的语义不
+			// 对称（企业号明确写了「不 continue」的理由）。余额口径按 realm 分流
+			// （upstream.UserResourceDetailedWithExpiryCtx 的 globalOn 分支走
+			// summary 三件套），不会拿 CN 的 Accounts 树去解析国际号。
+		} else if a.SupportsPersonalEndpoints() {
+			// 企业版无签到体系：上游对 POST /v2/billing/meter/daily-checkin 直接
+			// 400 code 10001「企业账号不支持该操作」。跳过签到，但**不 continue**——
+			// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
+			// credit_floor 判定与面板额度展示的唯一数据源）。
 			done, err := s.checkinOne(ctx, a, st.UID)
 			// 瞬时失败（上游 500 + 「请稍后重试」）收进补签队列：2s/4s 的内联重试
 			// 覆盖不了分钟级沉降，而错过后要等 12 小时后的下一次排程。
@@ -838,6 +915,11 @@ func (s *Scheduler) RunActivityNow() {
 // runActivity 活跃上报遍历，随 ctx 取消立即退出。
 func (s *Scheduler) runActivity(ctx context.Context, spread bool) {
 	includeDisabled := s.includeDisabledInTasks()
+	// 网页腿的整批预算（审查 C7-070）：单号 180s 串行，46 号最坏 2.7 小时，
+	// TaskActivity 族锁被长期占用。截止时刻在循环开头算一次，超出后本批不再跑腿，
+	// 但**活跃上报照旧**（两条腿在上游各自独立，缺一条不该连带丢掉另一条）。
+	webDeadline := s.webActivityBatchDeadline(cst.Now())
+	webBudgetLogged := false
 	plan := s.spreadPlan(taskActivity, spread, cst.Now())
 	for _, st := range plan.order(s.cfg.Pool.List()) {
 		if st.Disabled && !includeDisabled {
@@ -881,7 +963,14 @@ func (s *Scheduler) runActivity(ctx context.Context, spread bool) {
 		// 积分（两条腿在上游是各自独立的判据）。国内版在 runWebActivityLeg 内部按
 		// IsGlobal 直接返回，零上游调用。
 		if !s.webActivityDisabled() {
-			s.runWebActivityLeg(ctx, a)
+			if !webDeadline.IsZero() && !time.Now().Before(webDeadline) {
+				if !webBudgetLogged {
+					log.Printf("INFO: activity: 网页通道腿本批预算 %s 已用完，剩余账号本批跳过（下一个时点再跑）", webActivityBatchBudget)
+					webBudgetLogged = true
+				}
+			} else {
+				s.runWebActivityLegWithin(ctx, a, webDeadline)
+			}
 		}
 	}
 }
@@ -1098,7 +1187,10 @@ dispatch:
 		// 「同一秒全池同动作」的时间指纹。窗口 = frac×interval（抖动关闭时为 0，
 		// 行为与旧版逐字一致）。在抢 sem **之前**等：抢到再睡会占着并发槽空转。
 		if stagger > 0 {
-			if wait := time.Until(roundStart.Add(spreadStaggerDelay(stagger, st.UID))); wait > 0 {
+			// key 里带轮次（审查 C7-083，见 humanize.go 的 balanceStaggerKey）：
+			// 此前 key 只有 "bal|"+uid，每轮同一账号的偏移完全相同，上游看到的仍是
+			// 「同 IP 上 N 个号以完全相同的顺序与间隔刷新」。
+			if wait := time.Until(roundStart.Add(spreadStaggerDelay(stagger, balanceStaggerKey(st.UID, roundStart)))); wait > 0 {
 				if !sleepCtx(ctx, wait) {
 					break dispatch // 取消：剩余账号下一轮再刷
 				}
@@ -1155,6 +1247,16 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 	if interval < 0 {
 		interval = 0
 	}
+	// 启动幂等（审查 C7-007）：此前每次调用都无条件 `go func`，配置重载或重复
+	// 装配会让多个余额循环并存 —— 同一周期把全池余额查询扇出多遍，每遍都是真实
+	// 上游调用（46 号 × N 个循环）。二次调用只更新间隔。
+	if !s.balanceStarted.CompareAndSwap(false, true) {
+		log.Printf("scheduler: 余额刷新循环已启动，仅更新间隔")
+		s.balanceInterval.Store(int64(interval))
+		poke(s.rearmBalance)
+		return
+	}
+	s.balanceLoops.Add(1)
 	s.balanceInterval.Store(int64(interval))
 	go func() {
 		// 用哨兵初值而不是 0（报告 #12）：启动时就暂停（interval=0）时

@@ -10,6 +10,7 @@ package session
 import (
 	cryptorand "crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,26 @@ import (
 	"strings"
 	"time"
 )
+
+// validConversationID 校验透传出站头的 conversationId：`[A-Za-z0-9._:-]{1,128}`。
+//
+// 这个值会原样写进 X-Conversation-ID（审查 I6）：含 CR/LF 会让 Header 写入失败或请求
+// 被拒（表现为 500 而不是 400），超长值同样。白名单外一律**丢弃**（返回空 = 不发这个头），
+// 不透传也不报错——它是可选头，丢掉只是少一个聚合维度。
+func validConversationID(v string) bool {
+	if len(v) == 0 || len(v) > 128 {
+		return false
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == ':' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // ResolveConversationID 从请求体提取会话头族的 conversationId（snake/camel 双形态，
 // 复用 ExtractKey 的识别顺序：metadata 优先、snake 优先于 camel）。
@@ -33,16 +54,24 @@ func ResolveConversationID(body []byte) string {
 	}
 	if meta, ok := obj["metadata"].(map[string]any); ok {
 		if v := strOrEmpty(meta["conversation_id"]); v != "" {
-			return v
+			return filterConversationID(v)
 		}
 		if v := strOrEmpty(meta["conversationId"]); v != "" {
-			return v
+			return filterConversationID(v)
 		}
 	}
 	if v := strOrEmpty(obj["conversation_id"]); v != "" {
+		return filterConversationID(v)
+	}
+	return filterConversationID(strOrEmpty(obj["conversationId"]))
+}
+
+// filterConversationID 白名单外的值丢弃（见 validConversationID）。
+func filterConversationID(v string) string {
+	if validConversationID(v) {
 		return v
 	}
-	return strOrEmpty(obj["conversationId"])
+	return ""
 }
 
 // NewMessageID 生成消息级 ID：32 位 hex（UUID v4 去横线的长度形态），对齐官方
@@ -58,7 +87,12 @@ func NewMessageID() string {
 		// 排序变乱 —— 标识形态本身就是指纹。
 		return fmt.Sprintf("%012x%s", ms, hex.EncodeToString(b))
 	}
-	// 熵源故障的极端兜底：仍保证 32 hex、仍带时间位（fallbackID 不 panic、不空串）。
+	// 熵源故障：先重试一次 crypto/rand（瞬时 EAGAIN/ENOSYS 很常见），仍失败才退
+	// math/rand/v2（审查 I4）。此前一次失败就直接降级到 PRNG —— 那是可预测的，
+	// 而请求 ID 会作为 X-Request-ID 出站，可预测性本身就是指纹。
+	if _, err := cryptorand.Read(b); err == nil {
+		return fmt.Sprintf("%012x%s", ms, hex.EncodeToString(b))
+	}
 	return fmt.Sprintf("%012x%020x", ms, uint64(rand.Uint64())|1)
 }
 
@@ -70,7 +104,12 @@ func NewMessageID() string {
 func NewConversationID() string {
 	var u [16]byte
 	if _, err := cryptorand.Read(u[:]); err != nil {
-		return NewMessageID() // 熵源故障：退让成 32 hex，仍是合法 ID
+		// 熵源故障的兜底**也要保持 UUID 形态**（审查 I3）：此前退让成 32 hex 无横线，
+		// 而本函数的文档承诺是「36 字符带横线 UUID」。依赖 UUID 形态的上游校验/后台
+		// 聚合会拒绝或归类错误 —— 静默降级比直接报错更难查。
+		var a, b uint64 = rand.Uint64(), rand.Uint64()
+		binary.LittleEndian.PutUint64(u[0:8], a)
+		binary.LittleEndian.PutUint64(u[8:16], b)
 	}
 	u[6] = (u[6] & 0x0f) | 0x40 // version 4
 	u[8] = (u[8] & 0x3f) | 0x80 // variant RFC 4122
@@ -95,7 +134,11 @@ func RequestIDForKey(key string) string {
 	if key == "" {
 		return NewMessageID()
 	}
-	sum := sha256.Sum256([]byte(deriveSalt + "|" + key))
+	// 域前缀 `sess`（审查 I1）：会话级与轮级聚合 ID 此前用**同一构造**（同盐同分隔符），
+	// 客户端只要把 conversationId 取成轮键形态（`u0:xxx`），会话聚合 ID 就会与某一轮
+	// 聚合 ID 逐字节相同 —— 上游后台把「一个对话」与「一个轮」并成同一 aggregate，
+	// 用量与明细错并。加域前缀后两类 ID 不可能相撞。
+	sum := sha256.Sum256([]byte(deriveSalt + "|sess|" + key))
 	return hex.EncodeToString(sum[:16])
 }
 
@@ -245,6 +288,6 @@ func TurnRequestID(turnKey string) string {
 	if turnKey == "" {
 		return NewMessageID()
 	}
-	sum := sha256.Sum256([]byte(deriveSalt + "|" + turnKey))
+	sum := sha256.Sum256([]byte(deriveSalt + "|turn|" + turnKey))
 	return hex.EncodeToString(sum[:16])
 }

@@ -24,6 +24,9 @@ func (p *Pool) SetCredits(uid string, credits, total int64) {
 		e.credits = credits
 		e.creditFrac = 0 // 权威余额到达：内插余数归零（bug-11）
 		e.creditsTotal = total
+		// 权威余额到达 = 「余额已知」，与 total 的数值解耦（审查 C5-10）：
+		// 免费号 total == 0 也必须让 reserveBlocked 生效，否则该号永不保底。
+		e.creditsKnown = true
 		p.dirty.Store(true)
 	}
 }
@@ -124,6 +127,9 @@ func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, ea
 		e.credits = credits
 		e.creditFrac = 0 // 权威余额到达：内插余数归零（bug-11）
 		e.creditsTotal = total
+		// 权威余额到达 = 「余额已知」，与 total 的数值解耦（审查 C5-10）：
+		// 免费号 total == 0 也必须让 reserveBlocked 生效，否则该号永不保底。
+		e.creditsKnown = true
 		e.creditsExpiring = expiring
 		e.creditsEarliestExpiry = earliestAt
 		e.creditsEarliestRemaining = earliestRemaining

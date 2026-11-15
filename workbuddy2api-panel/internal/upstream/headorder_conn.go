@@ -67,9 +67,13 @@ func (c *headOrderConn) Write(p []byte) (int, error) {
 			out := c.pending
 			c.pending = nil
 			c.phase = phaseInBody
-			_, err := c.Conn.Write(out)
-			if err != nil {
-				return 0, err
+			// 审查 A1-08（P2）：底层写失败时**不能**返回 0。
+			// p 已经被 append 进 c.pending 并交给了底层连接（可能已写出一部分），
+			// 按 io.Writer 契约此时返回 0 等于告诉调用方「这次一个字节都没消费」，
+			// transport 会据此认为可以重发整块 —— 结果是把已经写出的头再写一遍，
+			// 连接当场错位（比原始错误更难查）。已消费语义：返回 len(p)。
+			if _, werr := c.Conn.Write(out); werr != nil {
+				return len(p), werr
 			}
 		}
 		return len(p), nil
@@ -80,12 +84,13 @@ func (c *headOrderConn) Write(p []byte) (int, error) {
 		c.phase = phaseInBody
 
 		out := reorderHeadBlock(head)
-		if _, err := c.Conn.Write(out); err != nil {
-			return 0, err
+		// 审查 A1-08（P2）：同上 —— p 已消费，写失败也返回 len(p)。
+		if _, werr := c.Conn.Write(out); werr != nil {
+			return len(p), werr
 		}
 		if len(rest) > 0 {
-			if _, err := c.Conn.Write(rest); err != nil {
-				return 0, err
+			if _, werr := c.Conn.Write(rest); werr != nil {
+				return len(p), werr
 			}
 		}
 		return len(p), nil

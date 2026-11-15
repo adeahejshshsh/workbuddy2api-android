@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
 var flushInterval = 5 * time.Second
@@ -43,11 +44,17 @@ type StoreSnapshotter interface {
 // 每种情形都打一条对应的恢复来源日志，便于对账。必须在 SyncToDir 之前调用
 // （SyncToDir 只增删不入值：值只能来自本地 load 或本函数采用快照）。
 func (p *Pool) RestoreFromSnapshot() {
+	// 读 store / stateFp 也要持锁（审查 C5-49）：SetStore 在写锁内替换 p.store，
+	// 这里无锁读就是数据竞争（-race 可复现），而且可能读到「store 已换、stateFp 未读」
+	// 的撕裂组合，选错恢复源。两个字段一起在 RLock 内快照。
+	p.mu.RLock()
 	store := p.store
-	if store == nil || p.stateFp == "" {
+	stateFp := p.stateFp
+	p.mu.RUnlock()
+	if store == nil || stateFp == "" {
 		return
 	}
-	localInfo, localErr := os.Stat(p.stateFp)
+	localInfo, localErr := os.Stat(stateFp)
 	raw, ok := store.LoadState()
 	if !ok {
 		if localErr == nil {
@@ -88,8 +95,17 @@ func (p *Pool) startFlusher() {
 	stopCh := make(chan struct{})
 	// 在启动 goroutine 前同步写入（避免与测试对 flushInterval 的恢复写竞争）；
 	// stopCh 同步登记，Close 才能可靠停止（New 与 startFlusher 之间无并发窗口）。
+	// 写入持锁（审查 C5-41）：Close 在同一把锁内读，二者不再构成数据竞争。
+	p.mu.Lock()
 	p.stopCh = stopCh
-	interval := flushInterval
+	// 周期在 New 里一次性落到 Pool 字段（审查 C5-54）：flushInterval 是包级 var，
+	// goroutine 每轮读它、测试并发改它就是数据竞争（-race 会报）。现在 goroutine
+	// 只读自己的字段，包级 var 退化为「构造期缺省值」，测试仍可在 New 之前改它。
+	interval := p.flushEvery
+	if interval <= 0 {
+		interval = flushInterval
+	}
+	p.mu.Unlock()
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -99,6 +115,10 @@ func (p *Pool) startFlusher() {
 				// 锁内只取快照，IO 在锁外（审查 C5-37）：失败时 flushNow 会把 dirty 放回去，
 				// 下一轮 tick / 退出前还会再试（bug #1 的语义不变）。
 				p.flushNow()
+				// 顺带清理窗口表（审查 C5-67）：pruneWindowsLocked 原先只挂在
+				// ScheduleModelWindow 里，不再出现 429 的部署里窗口表只增不减
+				// （内存，落盘侧有过滤）。挂到 flusher tick 上零新增 goroutine。
+				p.pruneWindowsTick()
 			case <-stopCh:
 				return
 			}
@@ -110,7 +130,15 @@ func (p *Pool) startFlusher() {
 func (p *Pool) Flush() { p.flushNow() }
 
 // load 读取 state.json 到 p.byUID（文件不存在/损坏时静默从空状态开始）。
+//
+// 审查 C5-51：本函数调用 applyAccountsLocked / loadParkedLocked / loadWindowsLocked /
+// applyRulesLocked 四个 **Locked 变体**，它们的注释都要求「调用方必须持 p.mu」，
+// 而 load 自身此前不持锁 —— 目前只靠「New 单线程」成立，一旦 load 被复用于热重载
+// 就是整池 map 并发写（fatal error: concurrent map writes）。这里显式加锁：
+// New 期间无竞争，代价为零；契约也从「隐式单线程」变成「自带锁」。
 func (p *Pool) load() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	raw, err := os.ReadFile(p.stateFp)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -166,7 +194,14 @@ func (p *Pool) loadParkedLocked(parked map[string]stateAccount) {
 	restored := p.byUID
 	p.byUID = live
 	for uid, e := range restored {
-		if _, inPool := live[uid]; inPool || len(p.parked) >= maxParked {
+		if _, inPool := live[uid]; inPool {
+			continue
+		}
+		if len(p.parked) >= maxParked {
+			// 审查 C5-55：此前静默丢弃剩余条目，重启后大批暂存号的禁用/分组/冷却
+			// 状态凭空消失且无任何痕迹。至少留一条可对账的 WARN（每条只打一次，
+			// 循环里用 continue 继续跑完，不影响其它条目）。
+			log.Printf("WARN: [pool] 暂存区已满（%d 条），丢弃恢复条目 uid=%s（状态不再保留）", maxParked, logfmt.UID8(uid))
 			continue
 		}
 		if p.parked == nil {
@@ -207,13 +242,16 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			errTotal = int64(s.ErrCount)
 		}
 		e := &entry{
-			a:                        &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
-			needAuth:                 true,                 // 标记占位（bug P1-3）：拿到真实凭证前不参与路由
-			remark:                   s.Remark,
-			group:                    s.Group,
-			ruleIDs:                  append([]string(nil), s.ModelRules...),
-			credits:                  s.Credits,
-			creditsTotal:             s.CreditsTotal,
+			a:            &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			needAuth:     true,                 // 标记占位（bug P1-3）：拿到真实凭证前不参与路由
+			remark:       s.Remark,
+			group:        s.Group,
+			ruleIDs:      append([]string(nil), s.ModelRules...),
+			credits:      s.Credits,
+			creditsTotal: s.CreditsTotal,
+			// 余额已知标记（审查 C5-10）：旧文件没有该字段 → false，
+			// reserveBlocked 回落 credits_total > 0 口径，与旧行为一致。
+			creditsKnown:             s.CreditsKnown,
 			creditsExpiring:          s.CreditsExpiring,
 			creditsEarliestExpiry:    s.CreditsEarliestExpiry,
 			creditsEarliestRemaining: s.CreditsEarliestRemaining,
@@ -279,10 +317,24 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		}
 		// 手动关闭 (账号, 模型)：**无过期过滤**——它是永久语义，
 		// 与冷却（过期即弃）不同，不得被惰性清理顺手删掉。
+		// 键在恢复时归一化（审查 C5-90）：旧文件里可能是 "GPT-4o" 或带 realm 前缀的
+		// 形态，而读侧一律按 modelOffKey 查 —— 不迁移就等于把旧开关全部作废。
+		// 归一后可能撞键（"GPT-4o" 与 "gpt-4o" 并存），保留 Since 更早的那条更符合
+		// 「运维第一次关掉它」的语义。
 		if len(s.ModelOff) > 0 {
 			e.modelOff = map[string]modelOff{}
 			for m, o := range s.ModelOff {
-				e.modelOff[m] = modelOff{Since: o.Since, Note: o.Note}
+				key := modelOffKey(m)
+				if key == "" {
+					continue
+				}
+				if prev, dup := e.modelOff[key]; dup && prev.Since.Before(o.Since) {
+					continue
+				}
+				e.modelOff[key] = modelOff{Since: o.Since, Note: o.Note}
+			}
+			if len(e.modelOff) == 0 {
+				e.modelOff = nil
 			}
 		}
 		// 成本账本：惰性过滤过期（modelCostTTL 外不恢复）+ 剔除结构破损条目
@@ -302,7 +354,6 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 	}
 }
 
-// applySnapshotLocked 用 Redis 快照覆盖内存状态（已在择新判定后采用）。调用方必须已持有 p.mu。
 // adoptSnapshot 采用 Redis 快照为当前池状态，并置 dirty 让下一次落盘把它物化回本地
 // state.json（否则快照只在内存生效，下次崩溃恢复又回到旧本地文件）。
 func (p *Pool) adoptSnapshot(s snapshot) {
@@ -311,29 +362,46 @@ func (p *Pool) adoptSnapshot(s snapshot) {
 	p.mu.Unlock()
 	p.dirty.Store(true)
 }
+
+// applySnapshotLocked 用 Redis 快照覆盖内存状态（已在择新判定后采用）。调用方必须已持有 p.mu。
+//
+// 运行态保留（审查 C5-50）：重建 byUID 会把 inFlight / lastUsed / usedSeq 一起丢掉。
+// 快照恢复发生在进程已开始接单之后时（例如 SetStore 晚于 SyncToDir 的装配顺序、
+// 或运行期手动恢复），在途计数被清零 → 并发上限瞬间失效；随后在途请求的 Release
+// 会把别人的名额扣掉（Release 的钳 0 只是掩盖，不是修复）。
+// 因此对同名账号把三项运行态**从旧条目搬过来**：它们是本进程内的观测值，
+// 快照里本来就没有，也没有比"当前内存"更权威的来源。
 func (p *Pool) applySnapshotLocked(s snapshot) {
+	prev := p.byUID
 	p.byUID = map[string]*entry{}
 	p.parked = nil
 	p.applyAccountsLocked(s.Accounts)
+	for uid, e := range p.byUID {
+		if old, ok := prev[uid]; ok && old != nil {
+			e.inFlight.Store(old.inFlight.Load())
+			e.lastUsed = old.lastUsed
+			e.usedSeq = old.usedSeq
+		}
+	}
 	p.loadParkedLocked(s.Parked)
 	p.loadWindowsLocked(s.Windows, time.Now())
 	p.applyRulesLocked(s.ModelRules)
 }
 
-// saveLocked 落盘 state.json，返回失败原因（调用方据此回置 dirty 以便重试）。
-// 返回 nil 表示成功（或未配置 stateFp，视为无事可做）。
-// snapshotLocked 生成一份 state.json 字节（**只做内存操作**，不做任何磁盘 IO）。
-// 调用方必须已持有 p.mu；返回的字节可以安全地在锁外落盘。
+// snapshotBytes 把一份**已在锁内取好的** stateFile 序列化成 state.json 字节
+// （纯内存操作，不碰磁盘、不持锁）。
 //
-// 为什么要拆开（审查 C5-37）：此前 saveLocked 在**写锁内**做四次 IO —— MkdirAll、
+// 为什么接收 sf 而不是自己再取一次（审查 C5-53）：此前 flushNowErr 先调
+// stateOverviewLocked 拿镜像用的 sf，再调 snapshotLocked —— 后者内部又调一遍
+// stateOverviewLocked，于是**写锁内把全池账号的 Status/成本账本/冷却账本构建两遍**。
+// 账号多、模型冷却条目多时这是可见的 CPU 尖峰，而这段时间 pick/status/healthz 全部
+// 排队。现在一次取态、两处复用。
+//
+// 为什么要拆开（审查 C5-37）：落盘 IO 必须在锁外做 —— MkdirAll、
 // ReadFile(.bak 前置读)、ReplaceAtomic(.bak)、ReplaceAtomic(state.json)，每个都带
 // fsync。磁盘慢或 bind mount 时单次可达几十毫秒，期间整个账号池被堵死：选号、冷却、
 // 在途释放全部排队，表现为面板「偶发整秒卡顿」与请求尖刺。
-func (p *Pool) snapshotLocked() ([]byte, error) {
-	if p.stateFp == "" {
-		return nil, nil
-	}
-	sf := p.stateOverviewLocked()
+func (p *Pool) snapshotBytes(sf stateFile) ([]byte, error) {
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
 		return nil, err
@@ -406,13 +474,20 @@ func (p *Pool) flushNow() {
 func (p *Pool) flushNowErr() error {
 	p.mu.Lock()
 	p.dirty.Store(false)
-	sf := p.stateOverviewLocked() // 与 raw 同一份口径（snapshotLocked 内部再取一次）
-	raw, err := p.snapshotLocked()
+	// 一次取态，两处复用（审查 C5-53）：sf 同时供落盘序列化与 Redis 镜像，
+	// 不再各取一遍（原实现写锁内构建两次全池状态）。
+	sf := p.stateOverviewLocked()
+	needDisk := p.stateFp != ""
 	p.mu.Unlock()
-	if err != nil {
-		p.notePersistFail(err)
-		p.dirty.Store(true)
-		return err
+	var raw []byte
+	if needDisk {
+		b, err := p.snapshotBytes(sf)
+		if err != nil {
+			p.notePersistFail(err)
+			p.dirty.Store(true)
+			return err
+		}
+		raw = b
 	}
 	if werr := p.writeSnapshot(raw); werr != nil {
 		p.dirty.Store(true)
@@ -476,6 +551,7 @@ func stateOf(e *entry, now time.Time) stateAccount {
 		ModelRules:               append([]string(nil), e.ruleIDs...),
 		Credits:                  e.credits,
 		CreditsTotal:             e.creditsTotal,
+		CreditsKnown:             e.creditsKnown, // 审查 C5-10：保底判据要跨重启保留
 		Disabled:                 e.disabled,
 		Paused:                   e.paused,
 		SuccessCount:             e.successCount,

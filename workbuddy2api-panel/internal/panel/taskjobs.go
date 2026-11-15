@@ -255,6 +255,20 @@ func (p *Panel) jobItem(uid, jobID, code, status, msg string) {
 	if j == nil || j.JobID != jobID {
 		return
 	}
+	// 已终结的作业不再接受迟到回调（W2C4-29）：jobEnd 之后 j.Status 已定格，
+	// 此前 jobItem 无守卫，会在事后追加结果行并 ++Completed/Failed/Skipped，
+	// 让「done」的作业凭空长出失败行，历史不可信。
+	if j.Status != "running" {
+		return
+	}
+	// "running" 只是进度标记（W2C4-28）：它不该进 Results、也不该抬高 Total ——
+	// 否则每条任务在历史里出现两行（running + 终态），3 项任务显示 Total=6。
+	if status == "running" {
+		j.CurrentTask = code
+		j.UpdatedAt = now
+		s.dirty = true
+		return
+	}
 	if len(j.Results) < maxTaskJobResults {
 		j.Results = append(j.Results, TaskJobResult{Code: code, Status: status, Message: msg, At: now})
 	}
@@ -328,6 +342,12 @@ func (p *Panel) jobSkip(uid, reason string) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 不许覆盖同账号**正在运行**的作业（W2C4-27）：队列 A 持锁跑该账号时，队列 B
+	// 撞锁走 jobSkip，此前会直接把 A 的作业记录换成 skipped —— A 后续的 jobItem/
+	// jobEnd 因 JobID 不匹配全部静默丢弃，面板显示「跳过」而实际跑了一半。
+	if cur, ok := s.jobs[uid]; ok && cur.Status == "running" {
+		return
+	}
 	s.jobs[uid] = &TaskJob{
 		JobID: newJobID(now), UID: uid, Kind: "growth", Status: "skipped",
 		StartedAt: now, UpdatedAt: now, FinishedAt: now, Message: reason,
@@ -336,12 +356,16 @@ func (p *Panel) jobSkip(uid, reason string) {
 }
 
 // snapshot 返回按更新时间倒序的作业副本。
+//
+// Results 必须深拷贝（W2C4-26）：此前 `out = append(out, *j)` 只复制切片头，
+// 锁外 json.Marshal 与执行体的 `append(j.Results, …)` 并发写同一底层数组 ——
+// 这是真实 data race（-race 可复现），可能序列化出半写入的结果行。
 func (s *jobStore) snapshot() []TaskJob {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]TaskJob, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		out = append(out, *j)
+		out = append(out, cloneTaskJob(j))
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].UpdatedAt.After(out[b].UpdatedAt) })
 	return out
@@ -354,7 +378,19 @@ func (s *jobStore) get(uid string) (TaskJob, bool) {
 	if !ok {
 		return TaskJob{}, false
 	}
-	return *j, true
+	return cloneTaskJob(j), true
+}
+
+// cloneTaskJob 作业的深拷贝（Results 切片单独分配，见 W2C4-26）。
+func cloneTaskJob(j *TaskJob) TaskJob {
+	if j == nil {
+		return TaskJob{}
+	}
+	out := *j
+	if len(j.Results) > 0 {
+		out.Results = append([]TaskJobResult(nil), j.Results...)
+	}
+	return out
 }
 
 // taskJobsList GET /panel/api/tasks/jobs：最近一轮全账号作业（按更新时间倒序）。

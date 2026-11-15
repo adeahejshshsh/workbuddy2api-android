@@ -82,8 +82,11 @@ func decryptWBEncrypted(raw []byte) (out []byte, sealed map[string]uint32, doc m
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if err := dec.Decode(&doc); err != nil {
-		// 交给调用方按原路径报 storage_parse_error，这里不抢错误。
-		return raw, nil, nil, nil
+		// 明确报「加密文件本身坏了」（审查 W2-C2-37）：此前返回 (raw,nil,nil,nil)
+		// 把错误甩给后续 Parse，运维看到的是笼统的 storage_parse_error ——
+		// 而真正的原因是「含 $wbEncrypted 的文件不是合法 JSON」，与「普通 auth 文件
+		// 写坏了」是两种完全不同的处置（前者通常是桌面端写盘中断/被截断）。
+		return raw, nil, nil, fmt.Errorf("at_rest_decode_failed: %w", err)
 	}
 	key := sha256.Sum256([]byte(wbAtRestSecretKey))
 	sealed = map[string]uint32{}

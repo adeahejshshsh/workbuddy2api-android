@@ -9,6 +9,7 @@ package upstream
 
 import (
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -75,6 +76,20 @@ func (c *Client) VerifySessionByRefresh(a *auth.Auth) VerifyVerdict {
 	}
 	err := c.RefreshToken(a)
 	if err == nil {
+		// 审查 W4-U2-093（P2）：**自己落盘**，不再把责任留给调用方。
+		//
+		// 缺陷：RefreshToken 会轮换 RT，但只把新值写进内存（refreshTokenOnce 的成功
+		// 路径不落盘），而本函数原来的注释把落盘声明成「调用方职责」。任何一个新调用点
+		// 漏掉落盘，就等于把一个健康账号的 RT 换成只存在于内存里的值 —— 进程重启后
+		// 读回的是**已被上游作废的旧 RT**，账号彻底刷新不了（比不刷新更糟），而且这种
+		// 事故在返回值上完全看不出来（本次判词还是 VerifyAlive）。
+		// 函数名与签名都不提示这件事，所以把落盘收进函数内部：写盘失败只告警不上抛
+		// （会话确实是活的，判词不该被磁盘问题改写）。
+		if a.FilePath != "" {
+			if serr := a.SaveAtomic(); serr != nil {
+				log.Printf("WARN: [upstream] verify: refresh 成功但落盘失败（重启后会读回已作废的旧 RT）: %v", serr)
+			}
+		}
 		return VerifyAlive
 	}
 	var re *Error

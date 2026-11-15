@@ -19,7 +19,10 @@
 // proxypool 在每次请求时决定），拿一次经代理的成功去清直连阶梯是错的。
 package pool
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
 // egressWindow 距上次失败超过这么久，连续计数视为新的一轮（而不是接着上一次翻倍）。
 //
@@ -41,16 +44,21 @@ type egressStat struct {
 // NoteEgressFailure 记一次出口级瞬时失败，返回**含本次**的连续次数。
 //
 // streak 从 1 开始；调用方据此查退避阶梯并在达到上限时快速失败。now 由调用方传入
-//（测试要能走时间，不想真睡）。
+// （测试要能走时间，不想真睡）。
 //
 // 空 key 一律忽略并返回 0：调用方拿不到出口身份时不该悄悄记到某个共享桶里——
 // 那等于把本来要治的「张冠李戴」换个地方重演。
+//
+// 独立锁（审查 C5-94）：此前取的是 p.mu（与 pick 同一把写锁）—— 大面积网络抖动时
+// 每个传输层失败都要抢选号写锁，正好与本模块要处理的场景叠加，把「出口抖动」
+// 放大成「选号排队」。本表与池状态无关（不持久化、不被选号读取），用独立互斥锁，
+// 两把锁从不嵌套（本函数内不碰 p.mu）。
 func (p *Pool) NoteEgressFailure(key string, now time.Time) int {
 	if key == "" {
 		return 0
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.egressMu.Lock()
+	defer p.egressMu.Unlock()
 	if p.egress == nil {
 		p.egress = make(map[string]egressStat)
 	}
@@ -62,6 +70,9 @@ func (p *Pool) NoteEgressFailure(key string, now time.Time) int {
 	st.last = now
 	if len(p.egress) > maxEgressKeys {
 		if _, exists := p.egress[key]; !exists {
+			// 清空时留一条日志（审查 C5-93）：此前是**静默**重置，运维只会看到
+			// 「退避突然从 1s 重来」，无从判断是抖动结束还是计数表被清。
+			log.Printf("WARN: [pool] 出口计数表超过上限 %d，整体重置（本次失败 key=%q 重新起算）", maxEgressKeys, key)
 			p.egress = make(map[string]egressStat, 1)
 		}
 	}
@@ -74,8 +85,8 @@ func (p *Pool) EgressStreak(key string, now time.Time) int {
 	if key == "" {
 		return 0
 	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.egressMu.Lock()
+	defer p.egressMu.Unlock()
 	st, ok := p.egress[key]
 	if !ok || st.last.IsZero() || now.Sub(st.last) > egressWindow {
 		return 0

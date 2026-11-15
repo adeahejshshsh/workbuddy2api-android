@@ -58,6 +58,10 @@ func classifyLine(line string) string {
 // storeQueueMax 待落盘队列上限：磁盘卡住时内存不无界增长，超出的行只留在环里。
 const storeQueueMax = 10000
 
+// ringMaxLineBytes 单条日志入环/入队前的截断长度（W2C4-45）。
+// 8KB 足够放下一行含堆栈前缀的日志；超出的部分对排障无价值，却能把内存放大几十倍。
+const ringMaxLineBytes = 8 << 10
+
 // Ring 日志环形缓冲。
 //
 // 落盘**不在 Write 里做**：Ring 是 log 的输出，Write 运行时调用方还持着 logger 的锁，
@@ -83,12 +87,22 @@ type Ring struct {
 //
 // 回填来源是 store：内存环每频道只有 500 条、重启归零，而「昨天下午那波 429 从
 // 几点开始」正是要靠文件回答的问题。回填只灌内存环（有上限），不重建全部历史。
+//
+// 幂等（W2C4-46）：重复调用不再二次回填 —— 此前第二次 SetLogStore 会把同一批
+// 历史行再灌一遍，环里出现重复行并挤掉真正的近期日志。
 func (r *Ring) SetLogStore(store *LogStore) error {
 	r.mu.Lock()
+	if r.store != nil && r.store != store {
+		// 已经挂过存储：换一个没有意义（后台 goroutine 已在消费旧队列），
+		// 直接保持原状，避免出现「两份历史 + 两套队列」。
+		r.mu.Unlock()
+		return nil
+	}
+	first := r.store == nil
 	r.store = store
 	r.loop.Do(func() { go r.persistLoop() })
 	r.mu.Unlock()
-	if store == nil {
+	if store == nil || !first {
 		return nil
 	}
 	back := store.Backfill(0)
@@ -134,6 +148,14 @@ func (r *Ring) Write(p []byte) (int, error) {
 			continue
 		}
 		text := tsPrefixRe.ReplaceAllString(line, "")
+		// 单行截断（W2C4-45）：队列上限只管条数，单条长度此前无上限 —— 磁盘卡住时
+		// 内存可以按「10000 × 单行长度」增长（一行几 MB 的堆栈/导出日志就够呛）。
+		if len(text) > ringMaxLineBytes {
+			text = truncateRunes(text, ringMaxLineBytes) + "…(truncated)"
+		}
+		// strings.Clone（W2C4-44）：text 是 string(p) 的子串切片，共享同一底层数组；
+		// 环里只要留一条，整块写入缓冲（可能上百 KB）都不被回收。入环前拷一份。
+		text = strings.Clone(text)
 		// 真环写（bug 13）：此前是 `append` 再 `entries[overflow:]` —— 每写一行
 		// 容量少 1，容量耗尽时整块重分配并拷贝 cap 条，等于「每 cap 行日志一次
 		// 500 元素的拷贝 + 一次分配」，白白给 GC 加压力（聊天流水在高 QPS 下
@@ -181,6 +203,17 @@ func (r *Ring) Flush() {
 	for _, e := range q {
 		store.Append(e)
 	}
+}
+
+// StoreDropped 因落盘队列满而丢弃的行数（面板可展示）。
+//
+// 为什么不在这里打 WARN（W2C4-45 的「首次丢弃打一条 WARN」）：Write 的调用方
+// 就是 log 包的输出，本环也是 log 的输出目标 —— 在 Write 内打日志会重入本函数
+// （而 r.mu 已持有）直接死锁。丢弃计数由面板侧读取展示，不在日志路径上做任何输出。
+func (r *Ring) StoreDropped() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.storeDropped
 }
 
 // persistLoop 后台落盘：信号容量为 1，多行变更自然合成一次写。

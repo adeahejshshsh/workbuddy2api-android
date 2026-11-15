@@ -1461,6 +1461,11 @@ func (c *Client) refreshTokenOnce(a *auth.Auth) error {
 	rtSnapshot := a.RefreshToken
 	atBefore := a.AccessToken
 	a.Unlock()
+	// 审查 A1-02：realm 标识必须在**锁外**单独取一次（RealmStored 内部走 RLock，
+	// 上面持写锁时调它会自锁）。取的是「持久化的 realm 字符串」而不是 Realm()：
+	// Realm() 在逃生门（SetGlobalEnabled(false)）下会降级成 cn，把降级值写进快照
+	// 等于把 refresh 头也一起降级 —— 与 auth.BackfillRealm 注释里的同一条理由。
+	realmStored := a.RealmStored()
 	if strings.TrimSpace(rtSnapshot) == "" {
 		return fmt.Errorf("no refreshToken")
 	}
@@ -1486,6 +1491,26 @@ func (c *Client) refreshTokenOnce(a *auth.Auth) error {
 		DeviceToken:  a.DeviceToken,
 	}
 	a.Unlock()
+	// 审查 A1-02（P1）：把 realm 标识补进快照。
+	//
+	// 为什么必须补：auth.Auth.realm 是**包内 unexported 字段**，上面这种「显式逐字段
+	// 拷贝」构造不出它（赋值语句在 auth 包外根本编译不过）。于是快照的 realm 恒为空，
+	// 而 CommonHeaders 的一整套头都按 Realm() 分支：originRefererFor（Origin/Referer）、
+	// rpcUAFor→uaBrandFor（UA 第二段 workbuddy-ai vs WorkBuddy）、
+	// clientVersionFor（5.9.4 vs 5.8.3）、acceptLanguageFor（en-US vs zh-CN）。
+	// Realm() 在 realm 为空时只能按 Domain 后缀推断 —— **Domain 为空的 realm=global
+	// 账号**（面板登录时显式落 realm=global、上游没回 domain 的形态）就整体退化成 CN
+	// 指纹：refresh 打到 global base，却带着 codebuddy.cn 的 Origin + 中文 Accept-Language。
+	// 上游若按来源域校验，refresh 被拒 → token 无法续期，账号在人工重登前不可用。
+	//
+	// 修法：用包外唯一能写 realm 的入口 auth.BackfillRealmFor 把持久化值原样写进快照。
+	// 只接受 cn/global 两个合法值（BackfillRealmFor 自身会校验）；realm 为空（未
+	// backfill 的旧文件）时保持为空 —— 那时快照与原对象的推断口径完全一致，不会更差。
+	if realmStored == "cn" || realmStored == "global" {
+		if _, rerr := auth.BackfillRealmFor(&hdrSnapshot, realmStored); rerr != nil {
+			log.Printf("WARN: [upstream] refresh 头快照写 realm=%q 失败（按 domain 推断降级）: %v", realmStored, rerr)
+		}
+	}
 	c.RefreshHeaders(req, &hdrSnapshot)
 
 	// 网络 I/O（锁外，30s 上限）。

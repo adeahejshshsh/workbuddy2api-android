@@ -66,6 +66,21 @@ const (
 	// 醒来（见 Run 循环），这个值只在完全空闲时用于兜底——比如面板手工登记、
 	// 或另一个进程写了 state.json。
 	windowProbeIdle = 30 * time.Second
+	// windowProbeMinWait 巡检等待的**下限**（审查 C7-040）。
+	//
+	// NextModelWindowDue 与 DueModelWindows 是两个独立判据：前者按「最早到点时刻」
+	// 返回，后者按「已到点」过滤。两者口径一旦出现偏差（例如 DueModelWindows 还
+	// 要过 attempts 推后、或 pool 侧状态被并发改），NextModelWindowDue 就可能返回
+	// 一个**已经过去**的时刻 —— 原来的 `if wait < 0 { wait = 0 }` 会把它压成 0，
+	// 于是循环「查一次 → 立即重查」变成 100% CPU 空转，且每轮都扫一遍全池窗口。
+	// 500ms 的代价在秒级事件上无感，却把最坏情况从「忙等」压成 2 次/秒。
+	windowProbeMinWait = 500 * time.Millisecond
+	// windowProbeManualBudget 「立即探针」无 ctx 入口的总预算（审查 C7-039）。
+	//
+	// 无 ctx 的旧入口此前传 context.Background()：一次点击最长挂 8×60s ≈ 8 分钟，
+	// 客户端/反代早就超时了，而停机时也没人能打断它。保留该入口（调用方零改动）
+	// 但给它一个**硬预算**：超过就收摊，剩余窗口留给下一轮巡检。
+	windowProbeManualBudget = 5 * time.Minute
 )
 
 // windowProbeBody 构造探针请求体。
@@ -87,10 +102,19 @@ func windowProbeBody(model string) ([]byte, error) {
 //
 // 与 StartBalanceRefresh 同构：独立于 Run 的小时制排程——窗口到点是秒级事件，
 // 不值得为它扩展 nextFire 的粒度。
+//
+// 启动幂等（审查 C7-041）：此前每次调用都 `go func()`，重复装配（main 里装配一次、
+// 面板热重载再装一次）会让两个循环同时跑同一批窗口 —— 每次探针都是真实计费请求，
+// 而 probeWindow 的族锁只能让其中一个「失败返回」，等于白扫一轮全池窗口。
 func (s *Scheduler) StartModelWindowProbe(ctx context.Context) {
 	if s.cfg.Pool == nil || s.cfg.Upstream == nil {
 		return
 	}
+	if !s.probeStarted.CompareAndSwap(false, true) {
+		log.Printf("scheduler: 窗口探针循环已启动，忽略重复装配")
+		return
+	}
+	s.probeLoops.Add(1)
 	go func() {
 		for {
 			due := s.cfg.Pool.DueModelWindows(time.Now())
@@ -102,16 +126,10 @@ func (s *Scheduler) StartModelWindowProbe(ctx context.Context) {
 				// 一轮处理完立刻回到循环顶重判（可能还有待处理窗口）。
 				continue
 			}
-			wait := windowProbeIdle
-			if next, ok := s.cfg.Pool.NextModelWindowDue(); ok {
-				if d := time.Until(next); d < wait {
-					wait = d
-				}
-			}
-			if wait < 0 {
-				wait = 0
-			}
-			timer := time.NewTimer(wait)
+			next, ok := s.cfg.Pool.NextModelWindowDue()
+			// 等待时长统一走 windowProbeWait：把「下限」与「空闲兜底」收在一处，
+			// 免得下次改动又漏掉其中一条（审查 C7-040）。
+			timer := time.NewTimer(windowProbeWait(time.Now(), ok, next))
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -122,13 +140,46 @@ func (s *Scheduler) StartModelWindowProbe(ctx context.Context) {
 	}()
 }
 
+// windowProbeWait 空闲期该睡多久：最近的到点时刻与空闲兜底取小，再夹一个下限。
+//
+// 单列成函数是为了能直接被用例钉住（审查 C7-040）：真正的坑不是「算出多少」，
+// 而是「算出一个 <= 0 的值」——那会让巡检循环退化成忙等。
+func windowProbeWait(now time.Time, hasNext bool, next time.Time) time.Duration {
+	wait := windowProbeIdle
+	if hasNext {
+		if d := next.Sub(now); d < wait {
+			wait = d
+		}
+	}
+	if wait < windowProbeMinWait {
+		// 到点时刻已过去（或近到不值得再睡）：睡一个下限，下一轮立刻会命中
+		// DueModelWindows，不会漏探；也不会空转。
+		wait = windowProbeMinWait
+	}
+	return wait
+}
+
 // RunModelWindowProbeNow 立即处理一轮到点的窗口，返回实际发出的探针数。
-// 面板「立即探针」与测试用；正常路径由 StartModelWindowProbe 驱动。
+//
+// 无 ctx 的历史入口（面板/外部脚本可能直接调）：语义上等价于「一次点击」，
+// 所以内部给一个 windowProbeManualBudget 的硬预算，不再用 Background 无限挂
+// （审查 C7-039）。需要随请求生命周期取消的调用方用 RunModelWindowProbeNowCtx。
 func (s *Scheduler) RunModelWindowProbeNow() int {
+	ctx, cancel := context.WithTimeout(context.Background(), windowProbeManualBudget)
+	defer cancel()
+	return s.RunModelWindowProbeNowCtx(ctx)
+}
+
+// RunModelWindowProbeNowCtx 带 ctx 的「立即探针」：面板 handler 传 r.Context()，
+// 客户端断开或反代超时即取消；停机时传 Scheduler 的 ctx（审查 C7-039）。
+func (s *Scheduler) RunModelWindowProbeNowCtx(ctx context.Context) int {
 	if s.cfg.Pool == nil || s.cfg.Upstream == nil {
 		return 0
 	}
-	return s.runWindowProbes(context.Background(), s.cfg.Pool.DueModelWindows(time.Now()))
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.runWindowProbes(ctx, s.cfg.Pool.DueModelWindows(time.Now()))
 }
 
 // runWindowProbes 逐条处理窗口。返回实际发出的探针数（不含被跳过的）。
@@ -143,10 +194,14 @@ func (s *Scheduler) runWindowProbes(ctx context.Context, due []pool.ModelWindow)
 		}
 		if i > 0 {
 			// 可取消的错开等待：ctx 取消（停机）时不必等满。
+			// 用 NewTimer 而不是 time.After（审查 C7-044）：ctx 先完成时 time.After
+			// 的 timer 会挂到触发为止才回收，一次巡检白留 400ms 级定时器。
+			gap := time.NewTimer(windowProbeGap)
 			select {
 			case <-ctx.Done():
+				gap.Stop()
 				return sent
-			case <-time.After(windowProbeGap):
+			case <-gap.C:
 			}
 		}
 		if s.probeWindow(ctx, w) {
@@ -285,14 +340,55 @@ func scanProbeStream(r io.Reader) (opened, limited bool, resetAt time.Time, deta
 			reset, ok := upstream.ParseRateReset(payload)
 			return false, ok || upstream.IsModelRateLimit(payload), reset, clip(msg)
 		}
-		if _, has := obj["choices"]; has {
-			return true, false, time.Time{}, ""
+		// 「已开窗」的判据必须是**有内容**（审查 C7-043）：此前只要帧里有 choices 就
+		// 判开窗，而上游的保活/心跳帧正是 `{"choices":[{"delta":{}}]}`（空 delta）。
+		// 那种帧被当成开窗 → 清掉 6004 冷却 + 删窗口记录，可额度其实没回来，下一条
+		// 真实请求继续 429，且这次不再有人盯着那条窗口了。要求 delta.content 非空或
+		// finish_reason 出现：role-only 首帧（OpenAI 兼容流常见）会继续往下读，
+		// 紧跟的内容帧照样能判开窗。
+		if ch, has := obj["choices"]; has {
+			if probeFrameHasContent(ch) {
+				return true, false, time.Time{}, ""
+			}
+			continue
 		}
 	}
 	if err := sc.Err(); err != nil {
+		// 单帧超限 ≠ 探针失败（审查 C7-042）：Scanner 的 1MB 上限被超长帧撞到时，
+		// 此前按「其它错误」处理 → 直接删窗口记录，该窗口当天不再尝试。这里归到
+		// 「仍未知」这一档（limited=true + 空 resetAt），走 probeWindow 的 15s 重试
+		// 分支：既不清冷却、也不丢窗口，等下一帧正常了再判。
+		if errors.Is(err, bufio.ErrTooLong) {
+			return false, true, time.Time{}, "响应帧超过 1MB，无法判定（按未重置重试）"
+		}
 		return false, false, time.Time{}, clip(err.Error())
 	}
 	return false, false, time.Time{}, "流结束前没有有效帧"
+}
+
+// probeFrameHasContent 判断一帧 choices 是否代表「模型真的开始产出」（审查 C7-043）。
+func probeFrameHasContent(v any) bool {
+	arr, ok := v.([]any)
+	if !ok || len(arr) == 0 {
+		return false
+	}
+	for _, it := range arr {
+		choice, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+			return true
+		}
+		delta, ok := choice["delta"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if s, ok := delta["content"].(string); ok && s != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // shortUID 日志里的账号称呼：前 8 位，不落完整 UID（同 dump.go 口径）。

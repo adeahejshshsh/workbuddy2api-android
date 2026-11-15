@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/safefile"
@@ -35,6 +38,20 @@ type Error struct {
 
 func (e *Error) Error() string { return "proxy route: " + e.Reason }
 func (e *Error) Unwrap() error { return e.cause }
+
+// Format 让 %v / %+v / %s 一律只输出脱敏后的 Reason（审查 W2-C6-18）。
+//
+// 为什么需要：Error() 已经不含 URL，但上层若用 %+v 或直接打印 Unwrap 出来的
+// cause（典型是 *url.Error，其 Error() 里带完整 URL —— 代理凭据就在
+// user:pass@host 段），凭据就进了日志。Unwrap 本身必须保留（errors.Is/As 要用），
+// 所以这里用 fmt.Formatter 把**所有格式动词**都收口到脱敏文本：
+//
+//	fmt.Printf("%v", err)  /  "%+v"  /  "%s"  →  "proxy route: <reason>"
+//
+// 需要底层错误时走 errors.Unwrap(err) 显式取，那是「我知道自己在做什么」的写法。
+func (e *Error) Format(st fmt.State, verb rune) {
+	_, _ = io.WriteString(st, e.Error())
+}
 
 func IsError(err error) bool {
 	var e *Error
@@ -221,6 +238,36 @@ type Manager struct {
 	exit map[string]ExitInfo
 	// exitLookupOn 是否在健康探测时查出口画像；缺省关闭（见 SetExitLookup）。
 	exitLookupOn bool
+	// directFallbacks 「随机/realm 模式下没有任何启用节点 → 静默直连」的次数
+	// （审查 W2-C6-17）。直连语义保持不变（issue #150 的既有约定：停用即关闭，
+	// 与「一条代理都没配」同义），但必须**可观测**：运维以为流量走代理、实际
+	// 直连时，本机 IP 就直接暴露给上游，与多账号隔离目标冲突。
+	// 面板/监控可据此计数告警；日志侧按 directWarnEvery 节流提示。
+	directFallbacks atomic.Int64
+	lastDirectWarn  atomic.Int64 // 上次告警的 unix 秒（节流）
+}
+
+// directWarnEvery 直连回落告警的最小间隔（审查 W2-C6-17）。
+// 10 分钟：既不会在每请求直连时刷屏，也不至于让「配错代理」长期无声。
+const directWarnEvery = 600
+
+// DirectFallbacks 返回「无启用节点 → 直连」的累计次数（审查 W2-C6-17）。
+// 调用方（面板/监控）据此判断「代理池是否实际没在用」。
+func (m *Manager) DirectFallbacks() int64 { return m.directFallbacks.Load() }
+
+// noteDirectFallback 记一次直连回落并节流告警（审查 W2-C6-17）。调用方持 m.mu。
+func (m *Manager) noteDirectFallback(uid, realm string) {
+	m.directFallbacks.Add(1)
+	now := time.Now().Unix()
+	last := m.lastDirectWarn.Load()
+	if now-last < directWarnEvery {
+		return
+	}
+	if !m.lastDirectWarn.CompareAndSwap(last, now) {
+		return // 另一个请求刚打过
+	}
+	log.Printf("WARN: [proxypool] 无启用中的代理节点，本次请求直连（本机 IP 将暴露给上游）uid=%s realm=%s 累计=%d",
+		uid, realmKey(realm), m.directFallbacks.Load())
 }
 
 func New(path string, base *http.Transport, dialer *net.Dialer) (*Manager, error) {
@@ -299,9 +346,39 @@ func parseURL(raw string) (*url.URL, error) {
 	if err != nil || n < 1 || n > 65535 {
 		return nil, errors.New("proxy port must be 1-65535")
 	}
-	u.Host = net.JoinHostPort(strings.ToLower(u.Hostname()), strconv.Itoa(n))
+	host := strings.ToLower(u.Hostname())
+	if !validProxyHost(host) {
+		return nil, errors.New("proxy host must be an IP literal or [a-z0-9._-] hostname")
+	}
+	u.Host = net.JoinHostPort(host, strconv.Itoa(n))
 	u.Path, u.RawPath = "", ""
 	return u, nil
+}
+
+// validProxyHost 代理主机段策略（审查 W2-C6-19）。
+//
+// 此前只校验「非空」：host 里出现 @ / % / 反斜杠 / 空白 / 非 ASCII（IDN）时照样入库，
+// 而 host 会被拼进拨号地址与 CONNECT 请求行 —— 这是「面板展示的 host 与实际拨号目标
+// 可以不一致」的土壤（钓鱼式误导运维），也是 IDN 同形字攻击面。
+// 只接受两类：IP 字面量（v4/v6，net.ParseIP 判定），或纯 ASCII 的主机名
+// （字母数字 + . - _）。IDN 请先用 punycode 写好再导入。
+func validProxyHost(h string) bool {
+	if h == "" {
+		return false
+	}
+	if net.ParseIP(h) != nil {
+		return true
+	}
+	for _, r := range h {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Manager) copyLocked() disk {
@@ -491,7 +568,12 @@ func (m *Manager) Update(id string, in Input) error {
 		if n.ID != id {
 			continue
 		}
-		u, _ := parseURL(n.URL)
+		// 存量 URL 解析失败时不能带着 nil 往下走（审查 W2-C6-12 同类）：
+		// 下面 u.User 会直接解引用 —— 配置被外部改坏就是一次面板接口 panic。
+		u, perr := parseURL(n.URL)
+		if perr != nil {
+			u = nil
+		}
 		if in.URL != "" {
 			var err error
 			u, err = parseURL(in.URL)
@@ -509,6 +591,9 @@ func (m *Manager) Update(id string, in Input) error {
 			}
 		}
 		if in.Password != "" {
+			if u == nil {
+				return errors.New("invalid stored proxy URL")
+			}
 			if u.User == nil {
 				return errors.New("password requires a username in the proxy URL")
 			}
@@ -709,6 +794,8 @@ func (m *Manager) selectLocked(uid, realm string) (node, bool, error) {
 			}
 		}
 		if !anyEnabled {
+			// 直连语义保留（issue #150），但计数 + 节流告警（审查 W2-C6-17）。
+			m.noteDirectFallback(uid, realm)
 			return node{}, false, nil
 		}
 	}

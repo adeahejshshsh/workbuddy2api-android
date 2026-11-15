@@ -91,7 +91,7 @@ func (s *Scheduler) checkinRetryLoop(ctx context.Context, pending []string) {
 		prev = checkinRetryDelays[round]
 
 		var still []string
-		for _, uid := range pending {
+		for i, uid := range pending {
 			if ctx.Err() != nil {
 				return
 			}
@@ -99,13 +99,27 @@ func (s *Scheduler) checkinRetryLoop(ctx context.Context, pending []string) {
 			if s.cfg.Pool.CheckinDoneToday(uid) {
 				continue
 			}
+
 			a := s.cfg.Pool.AuthByUID(uid)
-			if a == nil || a.IsGlobal() || !a.SupportsPersonalEndpoints() {
+			if a == nil {
+				continue
+			}
+			// 国际版也有签到（活动开启时），补签同样要覆盖它（审查 C7-085）；
+			// 企业版无签到体系（上游 400 10001），跳过。
+			if !a.IsGlobal() && !a.SupportsPersonalEndpoints() {
 				continue
 			}
 			// 与主循环同一条禁用规则：禁用只关选号、不停保号，但要看开关。
 			if st, ok := s.cfg.Pool.Status(uid); ok && st.Disabled && !s.includeDisabledInTasks() {
 				continue
+			}
+			// 账号间节流（审查 C7-062 / 10.13 P-24）：补签此前是**零节流**背靠背
+			// 连发 —— 一轮失败越多，重试风暴越大，正是本文件自己写的那条 WAF 频控
+			// 形态。与主循环同口径复用 checkinAccountDelay（测试把它置 0）。
+			if i > 0 {
+				if !sleepCtx(ctx, s.accountDelay(checkinAccountDelay)) {
+					return // 停机/取消：不再把剩余账号的节流全睡完
+				}
 			}
 			// 账号级族锁（审查 E4）：此前补签不抢 TaskCheckin，与 21:00 那一轮是
 			// check-then-act —— 两边都看到「今天没签」，然后各签一次。
@@ -113,7 +127,13 @@ func (s *Scheduler) checkinRetryLoop(ctx context.Context, pending []string) {
 				still = append(still, uid) // 该号正在别的路径签：下一轮再看
 				continue
 			}
-			done, err := s.checkinOne(ctx, a, uid)
+			var done bool
+			var err error
+			if a.IsGlobal() {
+				done, err = s.checkinGlobal(ctx, a)
+			} else {
+				done, err = s.checkinOne(ctx, a, uid)
+			}
 			s.EndAccountTask(uid, TaskCheckin)
 			switch {
 			case done:

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
@@ -17,8 +18,21 @@ import (
 )
 
 // accountSpread 本轮各账号的执行时刻（绝对时间，计划生成时刻为起点）。
+//
+// drift 是本轮已累积的「实际落后量」（审查 C7-065）：计划时刻以**本轮开始**为锚点
+// 一次算死，但本轮自身耗时（每号 0.8s 节流 + 上游慢）会把后面的号全部推晚。一旦
+// 落后量超过窗口，剩余账号的计划时刻全成了过去 → 每个 wait 都立即放行 → 后半批
+// 在**同一秒**连发，摊开在最需要它的时候恰好失效。
+//
+// 兜底做法：每个号等到位之后，把「实际时刻 - 计划时刻」的滞后量记下来，整体顺延给
+// 后面的号。这样相对间距（哈希给的随机形状）保持不变，只是整段平移 —— 比「按
+// minGap 重新排队」更保守：不引入新的节拍参数，未配置 minGap 时也照样生效。
+// drift 只增不减：绝不把任何账号提前。
 type accountSpread struct {
 	at map[string]time.Time
+
+	mu    sync.Mutex
+	drift time.Duration
 }
 
 // newAccountSpread 生成计划：偏移 = hash(任务|uid|日) % 窗口，冲突（间距 < minGap）
@@ -69,6 +83,8 @@ func newAccountSpread(kind taskKind, uids []string, window, minGap time.Duration
 
 // wait 等到该账号的偏移时刻；计划为 nil（未启用）或账号不在计划里时立即放行。
 // false = ctx 取消（优雅停机不等睡满）。
+//
+// 目标时刻 = 计划时刻 + 本轮已累积的滞后量（审查 C7-065，见 accountSpread 的注释）。
 func (a *accountSpread) wait(ctx context.Context, uid string) bool {
 	if a == nil {
 		return true
@@ -77,7 +93,22 @@ func (a *accountSpread) wait(ctx context.Context, uid string) bool {
 	if !ok {
 		return true
 	}
-	return sleepCtx(ctx, time.Until(at))
+	a.mu.Lock()
+	target := at.Add(a.drift)
+	a.mu.Unlock()
+	if !sleepCtx(ctx, time.Until(target)) {
+		return false
+	}
+	// 滞后量只增不减：本号若是「计划时刻早已过去」才轮到的（说明本轮已经落后），
+	// 后面的号整体顺延同样的量；若本号按计划准时，滞后量保持不变。
+	if late := time.Since(target); late > 0 {
+		a.mu.Lock()
+		if late > a.drift {
+			a.drift = late
+		}
+		a.mu.Unlock()
+	}
+	return true
 }
 
 // order 按计划时刻升序返回账号列表；计划为 nil（未启用/手动触发）时原样返回。

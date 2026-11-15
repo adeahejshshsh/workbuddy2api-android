@@ -41,28 +41,51 @@ func readDeviceTokenFile(path string) string {
 	if path == "" {
 		return ""
 	}
-	// 快路径：缓存命中且未过期，直接返回缓存值。注意全程持锁（defer Unlock）——
-	// 含 5 分钟一次的过期重读（锁内读文件）。调用频率极低（每 5min 最多一次
-	// 文件 IO，文件上限 1KB），锁内 IO 可接受；若未来出现 NFS 挂载 + 高并发的
-	// 部署形态，再上 singleflight 包住重读段（YAGNI，现在不做）。
+	// 快路径：缓存命中且未过期，直接返回缓存值。
 	dtFileCache.mu.Lock()
-	defer dtFileCache.mu.Unlock()
 	if path == dtFileCache.path && time.Since(dtFileCache.readAt) < deviceTokenFileTTL {
-		return dtFileCache.token
+		tok := dtFileCache.token
+		dtFileCache.mu.Unlock()
+		return tok
 	}
-	// 缓存未命中或过期：重新读文件。
-	dtFileCache.path = path
+	dtFileCache.mu.Unlock()
+
+	// 审查 A1-06（P2）：**文件 IO 必须在锁外**。
+	//
+	// 缺陷：原实现 `defer Unlock()` 把整段（含 os.Stat + os.ReadFile）罩在互斥锁里，
+	// 而这是每个出站请求都会走的 injectDeviceToken → resolveDeviceToken 路径。
+	// 宿主把 token 文件放在慢盘/NFS 上时，一次 stat+read 卡顿会阻塞**全部** chat/billing
+	// 出站（所有账号、所有请求），表现为整站请求一起变慢，且从日志上完全看不出
+	// 「卡在一个 1KB 的文件读上」。
+	//
+	// 改成双检：锁内只判缓存，锁外做 IO，回来再锁一次写回。重复 IO 的上限是
+	// 「同一瞬间有 N 个 goroutine 同时错过缓存」—— 1KB 本地读，可接受；
+	// 真出现 NFS 场景再上 singleflight。
 	tok, err := readTrimmedFile(path, deviceTokenFileMaxLen)
+
+	dtFileCache.mu.Lock()
+	// 双检：我们做 IO 的这段时间里，别的 goroutine 可能已经把同一 path 刷成了更新鲜
+	// 的结果（甚至是不同的 path）。以缓存里那份为准 —— 否则一个慢 IO 的结果会把
+	// 更新鲜的值覆盖回去，TTL 也跟着被重置，缓存语义就乱了。
+	if path == dtFileCache.path && time.Since(dtFileCache.readAt) < deviceTokenFileTTL {
+		cached := dtFileCache.token
+		dtFileCache.mu.Unlock()
+		return cached
+	}
+	dtFileCache.path = path
 	if err != nil {
 		// 读失败：清空缓存 token，避免注入过期/错误的值。
 		dtFileCache.token = ""
 		dtFileCache.lastErr = err
-		dtFileCache.readAt = time.Now()
+	} else {
+		dtFileCache.token = tok
+		dtFileCache.lastErr = nil
+	}
+	dtFileCache.readAt = time.Now()
+	dtFileCache.mu.Unlock()
+	if err != nil {
 		return ""
 	}
-	dtFileCache.token = tok
-	dtFileCache.lastErr = nil
-	dtFileCache.readAt = time.Now()
 	return tok
 }
 

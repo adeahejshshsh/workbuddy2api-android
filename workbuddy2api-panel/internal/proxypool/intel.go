@@ -50,8 +50,13 @@ type ExitInfo struct {
 }
 
 // fresh 报告这份画像是否还在缓存期内。
+//
+// 时钟回拨守卫（审查 W2-C6-44）：now 早于 At 时 now.Sub(At) 为负，恒 < TTL，
+// 于是画像被永久判为「新鲜」——NTP 校时/手工改时间后运维会按旧出口画像下
+// 「该换机房了」的错误结论。负差值一律视为过期。
 func (e ExitInfo) fresh(now time.Time) bool {
-	return !e.At.IsZero() && now.Sub(e.At) < intelTTL
+	d := now.Sub(e.At)
+	return !e.At.IsZero() && d >= 0 && d < intelTTL
 }
 
 // classifyExit 把一次 ip-api 回包转成出口画像。
@@ -111,7 +116,15 @@ func fetchExitInfo(ctx context.Context, tr http.RoundTripper) ExitInfo {
 	if err != nil {
 		return ExitInfo{At: now}
 	}
-	client := &http.Client{Transport: tr}
+	// 不跟随重定向（审查 W2-C6-42）：目标 URL 固定是 ip-api，但**回包由待测代理转发**，
+	// 恶意代理可以回 302 把出站目标指到任意地址（内网管理口、元数据端点，只要该代理
+	// 可达）。3xx 直接当失败处理，让「由外部决定出站目标」这件事不再成立。
+	client := &http.Client{
+		Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return ExitInfo{At: now}

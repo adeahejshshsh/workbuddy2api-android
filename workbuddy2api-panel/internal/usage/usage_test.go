@@ -54,7 +54,11 @@ func TestAddAndTotals(t *testing.T) {
 // 窗口口径：24h 窗口不含 100 天前的日桶；hours=0（全部历史）才含日点。
 func TestRollupIdempotent(t *testing.T) {
 	r := New("")
-	old := time.Now().AddDate(0, 0, -100) // 100 天前，超出 90 天小时保留
+	// 30 天前：超出 7 天小时保留（折叠成日桶），但在 90 天日桶保留期内。
+	// 原先这里写 -100 天 —— 那个值在「日桶也保留 90 天」的新契约下会被清理掉
+	// （审查 U3：小时 7 天 + 日桶 90 天，长期保留由日桶承担且**有界**）。
+	// 无限期保留不可持续：日桶每天一个/维度，永不删除就是另一个无界增长。
+	old := time.Now().AddDate(0, 0, -30)
 	r.Add(old, "cn", "u", "m", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
 	r.Add(old, "cn", "u", "m", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
 	r.Add(time.Now(), "cn", "u", "m", Delta{PromptTokens: 1, HasPromptTokens: true}, true)

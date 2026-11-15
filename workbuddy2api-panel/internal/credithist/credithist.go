@@ -60,6 +60,9 @@ type Ledger struct {
 	max      int
 	snapshot map[string]int64
 	entries  []Entry // 时间升序
+	// seq 落盘序号（审查 W2-CH-02）：落盘挪到锁外之后，必须保证「旧内容不会
+	// 盖住新内容」—— 只有序号等于当前值的那次写才允许 rename。
+	seq uint64
 }
 
 // New 创建账本；path 非空且文件存在时加载既有快照与流水。加载失败只记日志、
@@ -87,7 +90,15 @@ func (l *Ledger) load() {
 	}
 	var f diskFile
 	if err := json.Unmarshal(raw, &f); err != nil {
-		log.Printf("[credithist] 解析 %s 失败（从空账本开始）: %v", l.path, err)
+		// 审查 W2-CH-01：此前只打一行日志就从空账本开始，下一次 Observe 会用
+		// 「空 snapshot + 新流水」把原文件**原地覆盖**，历史再也拿不回来。
+		// 先改名备份保留现场（*.corrupt.<unix>），再按空账本启动。
+		if backup := l.backupCorrupt(); backup != "" {
+			log.Printf("[credithist] 解析 %s 失败（从空账本开始）: %v；原文件已备份为 %s",
+				l.path, err, filepath.Base(backup))
+		} else {
+			log.Printf("[credithist] 解析 %s 失败（从空账本开始）: %v", l.path, err)
+		}
 		return
 	}
 	if f.Snapshot != nil {
@@ -99,6 +110,19 @@ func (l *Ledger) load() {
 	}
 	log.Printf("[credithist] 已恢复 %d 条积分流水 / %d 个余额基线（%s）",
 		len(l.entries), len(l.snapshot), l.path)
+}
+
+// backupCorrupt 把损坏的账本文件改名备份，返回备份路径（失败返回空串）。
+// 审查 W2-CH-01：备份而不是删除 —— 手工修复或事后取证都还要用。
+func (l *Ledger) backupCorrupt() string {
+	if l.path == "" {
+		return ""
+	}
+	backup := fmt.Sprintf("%s.corrupt.%d", l.path, time.Now().Unix())
+	if err := os.Rename(l.path, backup); err != nil {
+		return ""
+	}
+	return backup
 }
 
 // Observe 记录一次真实查到的余额（uid + 余额绝对值）。
@@ -149,11 +173,15 @@ func (l *Ledger) Observe(uid string, credits int64) {
 		log.Printf("[credithist] 序列化失败: %v", err)
 		return
 	}
-	// 落盘仍在锁内：多个账号并发刷新余额时，"快照+流水"必须按同一顺序写盘，
-	// 否则慢的那次会把新的文件内容覆盖成旧的（内存正确、重启后少一条）。
-	// 留痕频率是分钟级且仅在余额变化时触发，锁内小文件原子写无性能顾虑。
-	l.write(raw)
+	// 序号在锁内递增：它标记「这份 raw 对应第几次变更」。
+	l.seq++
+	seq := l.seq
 	l.mu.Unlock()
+
+	// 落盘挪到锁外（审查 W2-CH-02）：此前持 l.mu 做整份文件序列化 + 写盘，
+	// 池内几十号并发刷新余额时全部串行在这条链上，磁盘一慢就把刷新调度拖住。
+	// 顺序由 seq 保证（见 write）。
+	l.write(raw, seq)
 }
 
 // Read 返回最近 limit 条流水（新的在前）；limit <= 0 = 全部。
@@ -176,7 +204,11 @@ func (l *Ledger) Read(limit int) []Entry {
 
 // write 原子写盘（临时文件 + rename，与 usage.Recorder 同口径）。失败只记日志：
 // 留痕是旁路观测，不能反过来影响余额刷新主流程。
-func (l *Ledger) write(raw []byte) {
+//
+// 审查 W2-CH-02：写盘已挪到锁外，因此 rename 前必须确认「自己仍是最新那次变更」
+// （seq == l.seq，判断与 rename 在同一把锁内完成）—— 否则并发下慢的那次会把
+// 新内容覆盖成旧的，表现为「内存正确、重启后少一条」。
+func (l *Ledger) write(raw []byte, seq uint64) {
 	if l.path == "" {
 		return
 	}
@@ -195,7 +227,20 @@ func (l *Ledger) write(raw []byte) {
 		log.Printf("[credithist] 写临时文件失败: %v", err)
 		return
 	}
-	if err := os.Rename(tmp, l.path); err != nil {
-		log.Printf("[credithist] 原子替换失败: %v", err)
+	l.mu.Lock()
+	newest := seq == l.seq
+	var renameErr error
+	if newest {
+		renameErr = os.Rename(tmp, l.path)
+	}
+	l.mu.Unlock()
+	if !newest {
+		// 已有更新的变更在写：本次内容已被覆盖，删掉临时文件（里面是明文账本）。
+		_ = os.Remove(tmp)
+		return
+	}
+	if renameErr != nil {
+		log.Printf("[credithist] 原子替换失败: %v", renameErr)
+		_ = os.Remove(tmp) // 不留明文临时文件（审查 W2-C2-23 同款口径）
 	}
 }

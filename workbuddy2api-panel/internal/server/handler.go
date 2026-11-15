@@ -362,6 +362,30 @@ func panelRootRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
+// traceFinalStatus 请求出口的记账状态码（W1A3-05）。
+//
+// obsStatus 是已写出的 HTTP 状态（0 = 一个字节都没写）。两种「未写响应」必须分开：
+//   - 调用方先走了（CDN 回源超时、用户点停止）：handler 侧已显式置
+//     outcome=interrupted 并 return，这不是网关的错 → 499 + 不打 WARN；
+//   - 真的 panic / 漏写响应 → 500 + WARN。
+//
+// 此前一律记 500，把中断率统计成 5xx、把排障引向「漏写/panic」。
+// 返回 (status, 是否要打 WARN)。
+func traceFinalStatus(obsStatus int, trace *requestTrace, ctxErr error) (int, bool) {
+	if obsStatus != 0 {
+		return obsStatus, false
+	}
+	if trace != nil && trace.stat != nil && trace.stat.outcome == reqlog.OutcomeInterrupted {
+		return 499, false // nginx 口径：client closed request
+	}
+	// stat 还没建、或没走到那个分支就被掐断（如预算闸之前的读体阶段）：
+	// 请求上下文已取消同样说明是调用方断开。
+	if ctxErr != nil {
+		return 499, false
+	}
+	return http.StatusInternalServerError, true
+}
+
 // isChatEntry 入站协议路径：/v1/responses 与 /v1/messages（含 /messages 别名）经
 // r.Clone 转进 chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套
 // 行日志/归档/来源采集/X-Request-Id——四者一视同仁，别再按单路径放行（Codex 走
@@ -373,7 +397,11 @@ func isChatEntry(path string) bool {
 		"/v1/images/generations", "/v1/images/edits",
 		// 出视频也是「会真扣积分」的入站写操作：不纳入归档的话面板里看不到谁在打、
 		// 扣了多少（videos.go 自己记账，但 requestTrace 要在这一层才有）。
-		"/v1/videos/generations", "/v1/videos/tasks", "/v1/3d/generations", "/v1/3d/tasks":
+		// W1A3-03：OpenAI Videos 资源的标准路径 POST /v1/videos 与 /generations、
+		// /tasks 注册的是同一个 h.videos（真扣积分），此前漏在白名单外 —— 该路径
+		// 没有 X-Request-Id、不进 reqlog 归档、也没有 stdout 流水行。
+		"/v1/videos", "/v1/videos/generations", "/v1/videos/tasks",
+		"/v1/3d/generations", "/v1/3d/tasks":
 		return true
 	}
 	return false
@@ -420,13 +448,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Request-Id", trace.id)
 		h.cfg.RequestLog.Begin()
 		defer func() {
-			status := obs.status
-			if status == 0 {
-				// 一个字节都没写就返回了（handler panic / 漏写响应）：这不是 200。
-				// 此前记成 200，面板「请求记录」里显示成功，而客户端什么都没收到 ——
-				// 真出问题的时候这条记录反而误导排查。记 500 并留一条 WARN，
-				// 让「静默空响应」在日志里看得见。
-				status = http.StatusInternalServerError
+			status, warn := traceFinalStatus(obs.status, trace, r.Context().Err())
+			if warn {
 				log.Printf("WARN: [server] %s 未写任何响应即返回（panic 或漏写），按 500 记账 request_id=%s",
 					r.URL.Path, trace.id)
 			}
@@ -2348,7 +2371,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					note = "本轮无工具调用，正常收尾"
 				}
 				log.Printf("%s: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (content=%dB tool_choice=%q; %s)",
-					level, logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools),
+					// 昵称走加锁读取器（W1A3-02）：面板同步昵称会在 a.mu 内改写该字段，
+					// 裸读昵称字段与写锁竞争（-race 必报），此前这里是包内唯一的无锁读点。
+					level, logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, len(declaredTools),
 					stats.ContentBytes(), clientToolChoice, note)
 			}
 			// 工具面观测量（issue #44）：归档里能按模型/账号聚合出「零工具收尾」的
@@ -2519,7 +2544,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		ud := usageDeltaFromResponse(resp)
 		if billUsage != nil {
-			ud, credit, _, hasCredit = billedDelta(billUsage)
+			// total 一并取合计（W1A3-04）：此前丢掉了 billedDelta 的 total，下面
+			// NoteModelCost 仍用末次响应的 total → 台账记下 (Σcredit, total₂)，
+			// per-1k 最多高估 2×；而 costTier 是选号硬过滤（账本是唯一事实来源），
+			// 后续请求会被错误地压到或避开这个号。
+			ud, credit, total, hasCredit = billedDelta(billUsage)
 		}
 		recordAttempt(acct.UID, ud, credit, hasCredit, attemptStarted, 0)
 		if st.hasCache {
@@ -2556,7 +2585,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.outcome = reqlog.OutcomeHTTPError
 			return
 		}
-		st.toks = completionTokens(resp)
+		// tok 列与 credit 同源（W1A3-14）：救援重发时 resp 已被 resp2 覆盖，只看
+		// resp 会把首个聚合体的 completion_tokens 丢掉，流水行的 tok 与同一行的
+		// credit（Σ）口径不一致。
+		if billUsage != nil {
+			st.toks = completionTokens(map[string]any{"usage": billUsage})
+		} else {
+			st.toks = completionTokens(resp)
+		}
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)

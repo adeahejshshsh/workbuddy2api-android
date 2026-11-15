@@ -512,6 +512,16 @@ func Parse(raw []byte) (*Auth, error) {
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
+	// 凭据形态校验（审查 W2-C2-29）：只拦**控制字符**与超长值，不做白名单正则 ——
+	// 上游既有 JWT（含 . - _），也有 ck_/pt_ 前缀的静态 Key，收紧字符集只会误杀。
+	// 必须拦的理由：值会被下游拼进 HTTP 头，含 \r\n 即构成头注入原语（Go 的
+	// Header.Set 会拒绝非法值，但手写报文/代理层转发不一定）。
+	if err := validateCredentialString("accessToken", a.AccessToken); err != nil {
+		return nil, err
+	}
+	if err := validateCredentialString("refreshToken", a.RefreshToken); err != nil {
+		return nil, err
+	}
 	// 归一在两条解析分支**汇合之后**（嵌套形/扁平形都要覆盖）：只归一其中一条，
 	// 另一种形态的凭据照样会把到期时间推到公元 58800 年。
 	a.ExpiresAt = normalizeExpiresAt(a.ExpiresAt)
@@ -519,6 +529,31 @@ func Parse(raw []byte) (*Auth, error) {
 		a.wbSealed, a.wbDoc, a.expiresAtMillis = wbSealed, wbDoc, expiresMillis
 	}
 	return &a, nil
+}
+
+// maxCredentialLen 凭据字符串长度上限（审查 W2-C2-29）。
+// 真实 JWT 在 1-2KB 量级，8KB 留足余量；超长值几乎必然是脏数据/注入尝试，
+// 让它进内存只会被原样拼进请求头。
+const maxCredentialLen = 8192
+
+// validateCredentialString 校验凭据字段不含控制字符且长度合理（审查 W2-C2-29）。
+//
+// 只做这两件事：控制字符（\r \n \t \x00 等）会被下游拼进 HTTP 头形成头注入，
+// 长度上限挡住把整份文件塞进 token 的脏数据。字符集保持开放（JWT 的 .-_、
+// 静态 Key 的 ck_/pt_ 前缀都能过）。
+func validateCredentialString(field, v string) error {
+	if v == "" {
+		return nil
+	}
+	if len(v) > maxCredentialLen {
+		return fmt.Errorf("parse_error: %s too long (%d bytes)", field, len(v))
+	}
+	for i := 0; i < len(v); i++ {
+		if c := v[i]; c < 0x20 || c == 0x7f {
+			return fmt.Errorf("parse_error: %s contains control character 0x%02x at %d", field, c, i)
+		}
+	}
+	return nil
 }
 
 // expiresAtMillisThreshold 区分「秒」与「毫秒」时间戳的分界（1e11）。

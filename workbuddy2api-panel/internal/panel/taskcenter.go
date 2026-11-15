@@ -329,6 +329,9 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 		Concurrency int   `json:"concurrency"`
 		Growth      *bool `json:"growth"`
 	}
+	// 请求体收紧到 1MB（W2C4-15）：与同包其它 JSON handler 同口径，避免 32MB
+	// 全局上限被单请求拿去放大内存。
+	limitJSONBody(w, r)
 	// 解析失败必须回 400（bug A3）：以前 `_ = ...Decode(...)` 把错误丢掉，
 	// 畸形/空 JSON 也照样按默认值（concurrency=1, growth=true）真的启动一轮扫描与执行，
 	// 前端只看到"已启动"，参数为什么不生效完全查不到，运维也丢掉 400 这条诊断线索。
@@ -603,13 +606,18 @@ func (p *Panel) runQueueItems(ctx context.Context, accts []queueAccount, items [
 	q := p.queue()
 	defer func() {
 		q.mu.Lock()
-		q.running = false
-		// startedAt 也要清（BUG-17）：只在「无可执行待办」分支清的话，正常跑完后
-		// /panel/api/queue 会长期返回 started:true, running:false。
-		q.startedAt = time.Time{}
-		// 未执行的条目不许永远停在 pending（BUG-16）：断连/中止时把剩余项标成
-		// skipped，否则前端轮询会一直看到它们 pending。seq 守卫防写脏新一轮。
+		// 整块收尾都要 seq 守卫（W2C4-13）：此前 running/startedAt 的复位在守卫
+		// **外面**，只要出现「上一轮 defer 晚于下一轮 startGrowthQueue」的时序
+		// （stop/panic 后重入），新一轮就会被标成未运行 —— 前端轮询提前结束、
+		// 调度器同轮再启动一轮 → 同账号并发两轮。同函数内 pending→skipped 那段
+		// 一直有守卫，前后口径必须一致。
 		if q.seq == seq {
+			q.running = false
+			// startedAt 也要清（BUG-17）：只在「无可执行待办」分支清的话，正常跑完后
+			// /panel/api/queue 会长期返回 started:true, running:false。
+			q.startedAt = time.Time{}
+			// 未执行的条目不许永远停在 pending（BUG-16）：断连/中止时把剩余项标成
+			// skipped，否则前端轮询会一直看到它们 pending。
 			for i := range q.items {
 				if q.items[i].Status == "pending" {
 					q.items[i].Status = "skipped"
@@ -646,6 +654,12 @@ dispatchQueue:
 				if r := recover(); r != nil {
 					log.Printf("ERR: [panel] queue account=%s panic: %v", one.a.UID, r)
 					p.queueSet(q, seq, one.a.UID, func(it *queueItem) {
+						// 只改还没跑完的条目（W2C4-12）：此前无条件全改 error，
+						// 账号级 panic（第 N 项）会把前 N-1 项的 done 抹成 error，
+						// 队列视图与实际执行不符 —— 运维据此会重复执行已成功的动作。
+						if it.Status != "pending" && it.Status != "running" {
+							return
+						}
 						it.Status = "error"
 						it.Message = fmt.Sprintf("内部错误：%v", r)
 					})
@@ -656,6 +670,10 @@ dispatchQueue:
 			// per-account 互斥：与单任务/一键完成共用一把锁。
 			if !p.tryLockAccount(one.a.UID) {
 				p.queueSet(q, seq, one.a.UID, func(it *queueItem) {
+					// 同上（W2C4-12）：跳过只影响还没跑完的条目。
+					if it.Status != "pending" && it.Status != "running" {
+						return
+					}
 					it.Status, it.Message = "skipped", "该账号有其它任务动作在执行，跳过"
 				})
 				p.jobSkip(one.a.UID, "该账号有其它任务动作在执行，跳过")
@@ -1086,7 +1104,10 @@ func (p *Panel) claimSweep(w http.ResponseWriter, r *http.Request) {
 		}
 		defer p.cfg.Scheduler.EndTask(sweepKey)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// ctx 从请求派生（W2C4-14）：此前用 context.Background()，客户端关掉页面后
+	// 清扫仍会跑满 10 分钟并一直占着 sweepKey（期间所有补领入口 409），停机时
+	// 也只能被硬切。派生自 r.Context() 后断连即中止，与「用户能看到结果」的语义一致。
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	accounts, claimed, failed := p.ClaimSweepOnce(ctx)
 	writeJSON(w, http.StatusOK, map[string]any{

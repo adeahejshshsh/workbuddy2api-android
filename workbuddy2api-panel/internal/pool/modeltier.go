@@ -13,6 +13,7 @@ package pool
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -55,7 +56,16 @@ func (p *Pool) loadTierLocked() {
 	}
 	var t tierFacts
 	if json.Unmarshal(raw, &t) != nil {
-		return // 损坏文件：当空处理，不阻断（与 taskgate 同口径）
+		// 损坏文件必须留档 + 告警（审查 C5-69）：此前静默当空处理，而紧接着的
+		// NoteModelTierDenied 会用新事实**覆盖**该文件 —— 学到的等级/否定事实
+		// 无声清零，且没有任何痕迹可比对（与 state.json 的 .corrupt 处理口径不一致）。
+		bak := fmt.Sprintf("%s.corrupt-%d", p.tierFile, time.Now().Unix())
+		if rerr := os.Rename(p.tierFile, bak); rerr != nil {
+			log.Printf("WARN: [pool] model_tier.json 解析失败且另存失败（%v），本次按空事实启动（原文件保留）", rerr)
+		} else {
+			log.Printf("WARN: [pool] model_tier.json 解析失败，已另存 %s（本次按空事实启动）", bak)
+		}
+		return
 	}
 	if t.Deny == nil {
 		t.Deny = map[string]map[string]bool{}
@@ -66,14 +76,27 @@ func (p *Pool) loadTierLocked() {
 	p.tier = &t
 }
 
-// saveTierLocked 原子落盘（tmp + rename）；失败只记日志，不影响主流程。
-func (p *Pool) saveTierLocked() {
+// marshalTierLocked 把等级事实序列化（纯内存，不碰磁盘）。调用方持 p.mu。
+//
+// 拆出这一步是为了把 fsync 挪出锁（审查 C5-68）：saveTierLocked 走
+// auth.ReplaceAtomic（写 + fsync + rename），在 /sdcard 上是十毫秒量级，而
+// NoteModelTierDenied 是**持池写锁**执行的 —— 首轮扫模型/账号期间每个新事实都会让
+// pick / /status / /healthz 一起排队。现在锁内只 marshal，写盘在锁外做。
+func (p *Pool) marshalTierLocked() []byte {
 	if p.tierFile == "" || p.tier == nil {
-		return
+		return nil
 	}
 	p.tier.Updated = time.Now()
 	raw, err := json.Marshal(p.tier)
 	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// writeTier 把 marshalTierLocked 的结果落盘（**不加 p.mu**：纯 IO）。
+func (p *Pool) writeTier(raw []byte) {
+	if p.tierFile == "" || raw == nil {
 		return
 	}
 	// 唯一临时名 + 原子替换（bug D4）：固定 `p.tierFile+".tmp"` 时，同目录两个写入方
@@ -85,34 +108,91 @@ func (p *Pool) saveTierLocked() {
 	}
 }
 
+// saveTierLocked 原子落盘（tmp + rename）；失败只记日志，不影响主流程。
+// 保留给「调用方已持锁且不介意锁内 IO」的少数路径；新代码请走
+// marshalTierLocked + writeTier（审查 C5-68）。
+func (p *Pool) saveTierLocked() {
+	p.writeTier(p.marshalTierLocked())
+}
+
 // NoteModelTierDenied 记录一条等级事实：账号 uid（等级 userType）明确不能用 model。
+//
+// 落盘在锁外（审查 C5-68）：锁内只判断「有没有新事实」+ marshal，fsync 交给
+// writeTier。语义不变（返回即已落盘），但 pick / /status 不再被磁盘 IO 阻塞。
 func (p *Pool) NoteModelTierDenied(uid, userType, model string) {
 	if model == "" {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.loadTierLocked()
 	// **只在事实新增时落盘**：saveTierLocked 走 auth.ReplaceAtomic（写 + fsync +
-	// rename），在 /sdcard 上是十毫秒量级，而这里是**持池写锁**执行的 —— 客户端反复
-	// 请求该等级用不了的模型时，每个请求都会让 pick / /status / /healthz 一起排队。
-	// 同一个 (userType, model) 第二次起就没有新信息，跳过写盘即可。
+	// rename），而这里是**持池写锁**执行的 —— 客户端反复请求该等级用不了的模型时，
+	// 每个请求都会让 pick / /status / /healthz 一起排队。同一个 (userType, model)
+	// 第二次起就没有新信息，跳过写盘即可。
 	changed := false
 	if userType != "" {
 		if p.tier.Deny[userType] == nil {
 			p.tier.Deny[userType] = map[string]bool{}
 		}
 		if !p.tier.Deny[userType][model] {
-			p.tier.Deny[userType][model] = true
-			changed = true
+			// 条数上限（审查 C5-70）：Deny 随模型目录增长且只增不减，长期运行 +
+			// 模型改名（带日期后缀）会让 model_tier.json 单调变大。到顶后不再记新模型，
+			// 只打一条提示 —— 已学到的事实全部保留，判定方向仍是「保守拦截」。
+			if len(p.tier.Deny[userType]) < maxTierDenyModels {
+				p.tier.Deny[userType][model] = true
+				changed = true
+			} else {
+				log.Printf("WARN: [pool] model_tier 等级 %s 的否定事实已达上限 %d，忽略新模型 %s",
+					userType, maxTierDenyModels, model)
+			}
 		}
 		if uid != "" && p.tier.UIDType[uid] != userType {
 			p.tier.UIDType[uid] = userType
 			changed = true
 		}
 	}
+	var raw []byte
 	if changed {
-		p.saveTierLocked()
+		raw = p.marshalTierLocked()
+	}
+	p.mu.Unlock()
+	if raw != nil {
+		p.writeTier(raw)
+	}
+}
+
+// maxTierDenyModels 单个等级最多记多少个「不能用」的模型（审查 C5-70）。
+// 512 远大于真实目录规模（当前 ~44 个模型），只用于挡住模型名高基数增长。
+const maxTierDenyModels = 512
+
+// dropTierUID 从等级事实表里摘掉一个已删除账号（审查 C5-70）。
+// 只在 tier 已加载时动手（不为了清理而触发一次文件读取）；调用方**不要**持锁。
+//
+// 此前 UIDType[uid] 永久残留：账号删了又换一批（轮换导入）时 model_tier.json
+// 单调变大，且旧 uid 的等级判定永远留在文件里。
+func (p *Pool) dropTierUID(uids ...string) {
+	if len(uids) == 0 {
+		return
+	}
+	p.mu.Lock()
+	if p.tier == nil || len(p.tier.UIDType) == 0 {
+		p.mu.Unlock()
+		return
+	}
+	changed := false
+	for _, uid := range uids {
+		if _, ok := p.tier.UIDType[uid]; ok {
+			delete(p.tier.UIDType, uid)
+			changed = true
+		}
+	}
+	var raw []byte
+	if changed {
+		raw = p.marshalTierLocked()
+	}
+	p.mu.Unlock()
+	if raw != nil {
+		p.writeTier(raw)
 	}
 }
 

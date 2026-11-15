@@ -172,6 +172,18 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	epState, _, _, _ := loginEndpointsFn(realm)
+	// 会话表上限（W2-LG-01）：每个 state 都要打一次上游 auth/state，而条目只在
+	// 下一次 start 或 poll 命中时才清 —— 反复 POST 就是内存与上游请求的无界放大器。
+	// 先判容量再打上游：满的时候连请求都不发（限流点在最前面才有意义）。
+	p.loginMu.Lock()
+	p.pruneLoginsLocked()
+	full := len(p.logins) >= loginMaxSessions
+	p.loginMu.Unlock()
+	if full {
+		writeErr(w, http.StatusTooManyRequests,
+			fmt.Sprintf("进行中的登录会话已达上限 %d，请先完成或等待过期（%s）后再试", loginMaxSessions, loginTTL))
+		return
+	}
 	site := loginsite.ForRealm(realm)
 	data, status, err := doJSON(http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), site.HeadersForState(loginDeviceNonce()))
 	if err != nil {
@@ -188,11 +200,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	p.loginMu.Lock()
 	// 顺手回收过期会话，防"开弹窗走开"的 state 滞留。
-	for s, sess := range p.logins {
-		if time.Since(sess.created) > loginTTL {
-			delete(p.logins, s)
-		}
-	}
+	p.pruneLoginsLocked()
 	p.logins[st.State] = &loginSession{created: time.Now(), realm: realm}
 	p.loginMu.Unlock()
 	// 授权链接补官方参数（version，以及部署侧给了 nonce 时的 ww_device_nonce）：
@@ -200,6 +208,15 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	authURL := loginsite.DecorateAuthURL(st.AuthURL, loginsite.ForRealm(realm), loginDeviceNonce(), loginsite.NewLoginSessionID())
 	log.Printf("panel: 发起 OAuth 添加账号 realm=%s（state=%s...）", realm, st.State[:min(8, len(st.State))])
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": authURL, "state": st.State, "realm": realm})
+}
+
+// pruneLoginsLocked 回收超过 TTL 的登录会话。调用方持 p.loginMu。
+func (p *Panel) pruneLoginsLocked() {
+	for s, sess := range p.logins {
+		if time.Since(sess.created) > loginTTL {
+			delete(p.logins, s)
+		}
+	}
 }
 
 // loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。

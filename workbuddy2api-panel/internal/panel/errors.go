@@ -225,6 +225,12 @@ func AggregateErrors(lines []LogLine) []ErrStat {
 			order = append(order, k)
 		}
 		st.Count++
+		// 同类错误后续行才带出 code 时补上（W2-ER-01）：聚合行的 Code 此前只在
+		// 首次创建时写入，首行无 code、后续有 code 的同类错误在汇总表里 code 列恒空，
+		// 按码检索失效。
+		if st.Code == "" && code != "" {
+			st.Code = code
+		}
 		if until != "" {
 			st.Until = until // 后写的覆盖：更接近当前状态
 		}

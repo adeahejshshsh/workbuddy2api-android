@@ -48,7 +48,11 @@ func (s *Scheduler) markRan(kinds []taskKind, now time.Time) {
 	}
 	raw, err := json.Marshal(st)
 	if err == nil {
-		err = safefile.Write(s.cfg.RunStampFile, raw, 0o600)
+		// WriteKeep 而不是 Write（审查 C7-093）：loadStamps 的损坏回退依赖
+		// safefile.Read 的 .bak —— 用 Write 就永远没有 .bak 可回退，标记文件
+		// 一旦掉电变全 0，读成空表就是「重启再多补一整轮」。包注释承诺的
+		// 「.bak 是唯一退路」在这个调用点上原本不成立。
+		err = safefile.WriteKeep(s.cfg.RunStampFile, raw, 0o600)
 	}
 	if err != nil {
 		log.Printf("scheduler: 补跑标记落盘失败（下次重启会再补一轮）: %v", err)

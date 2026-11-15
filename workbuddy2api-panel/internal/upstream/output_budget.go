@@ -189,12 +189,15 @@ func maxTokensValue(obj map[string]any) (int64, bool) {
 	return 0, false
 }
 
-// setMaxTokensValue 写回同一个键（客户端用哪个键就改哪个，不擅自换字段名）。
+// setMaxTokensValue 把抬过的输出额度写到**上游真正读的那个键**上。
+//
+// 审查 W4-U1-25（P2）：此前是「客户端用哪个键就改哪个」，只有
+// max_completion_tokens 时把额度写到别名上 —— 而上游只认 max_tokens，
+// 抬额 100% 静默失效：正文照样被思考吃光、断在半句，日志里却已经打印过
+// 「max_tokens x → y」的成功行（比不抬更误导）。
+// 现在统一落 max_tokens 并删掉别名：别名还在说明 translateMaxCompletionTokens
+// 没翻成功（字符串/畸形值），留着只会让上游报 11101 参数错。
 func setMaxTokensValue(obj map[string]any, v int64) {
-	lit := json.Number(strconv.FormatInt(v, 10))
-	if _, has := obj["max_tokens"]; has {
-		obj["max_tokens"] = lit
-		return
-	}
-	obj["max_completion_tokens"] = lit
+	obj["max_tokens"] = json.Number(strconv.FormatInt(v, 10))
+	delete(obj, "max_completion_tokens")
 }

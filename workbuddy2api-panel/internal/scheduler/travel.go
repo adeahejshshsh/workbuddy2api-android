@@ -56,9 +56,13 @@ func (s *Scheduler) RunTravelNowCtx(ctx context.Context, spread bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 禁用号是否参与：与签到/活跃/保活/余额同口径（审查 C7-048）。此前旅行恒跳过
+	// 禁用号，打开 schedule.include_disabled_in_tasks 后其余四族都覆盖、只有旅行不
+	// 覆盖 —— 而「领养 +300 积分」是一次性收益，漏掉就是永久少拿。
+	includeDisabled := s.includeDisabledInTasks()
 	plan := s.spreadPlan(taskTravel, spread, cst.Now())
 	for _, st := range plan.order(s.cfg.Pool.List()) {
-		if st.Disabled {
+		if st.Disabled && !includeDisabled {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)

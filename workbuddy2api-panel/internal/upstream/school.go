@@ -12,6 +12,7 @@ package upstream
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
@@ -69,22 +70,38 @@ const schoolOpenDayActivityID = "school_open_day_2026"
 func mpEventBase(a *auth.Auth) map[string]any {
 	nick := a.NicknameValue() // 一次请求取一次快照（bug #11）
 	return map[string]any{
-		"timestamp":    time.Now().UnixMilli(),
-		"ideType":      "WorkBuddy_MP",
-		"ideVersion":   "2.4.0",
-		"extName":      "workbuddy-mp",
-		"extVersion":   "2.4.0",
-		"product":      "SaaS",
-		"ideName":      "wx_app_cloud",
-		"platform":     "mini_program",
-		"os":           "windows",
-		"osVersion":    "11",
-		"arch":         "x64",
-		"machineId":    "0655736a-607f-4d9d-b430-58176ee9a090",
+		"timestamp":  time.Now().UnixMilli(),
+		"ideType":    "WorkBuddy_MP",
+		"ideVersion": "2.4.0",
+		"extName":    "workbuddy-mp",
+		"extVersion": "2.4.0",
+		"product":    "SaaS",
+		"ideName":    "wx_app_cloud",
+		"platform":   "mini_program",
+		"os":         "windows",
+		"osVersion":  "11",
+		"arch":       "x64",
+		// 审查 W4-U2-082（P2）：machineId 由 UID 派生，不再是全池共用的硬编码常量。
+		// 缺陷：常量意味着整池账号向同一活动上报「同一台设备」（一个 device 几十个账号
+		// 领同一活动），这正是上游按设备维度做关联分析、批量封号的典型特征。
+		// 派生规则：同账号恒同（幂等，重放一致）、跨账号不同（不串味）。
+		"machineId":    machineIDFor(a.UID),
 		"timezone":     "Asia/Shanghai",
 		"userId":       a.UID,
 		"userNickname": nick,
 	}
+}
+
+// machineIDFor 按 UID 派生稳定的「设备」标识（审查 W4-U2-082）。
+//
+// 输出保持 UUID 形状（8-4-4-4-12 的十六进制），因为上游把它当 UUID 解析；
+// 值本身是 sha256(uid) 的前 16 字节，不承载任何真实设备信息。
+// 为什么不能继续用固定常量：整池账号共用一个 machineId，等于告诉上游「这几十个
+// 账号是同一台机器」，是批量封号的典型特征；而每个账号随机一个又不满足幂等
+// （同账号两次上报不一致，同样是异常信号）。
+func machineIDFor(uid string) string {
+	sum := sha256.Sum256([]byte("workbuddy-mp-machine:" + uid))
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }
 
 // ReportMPEvent 以小程序指纹向 www.codebuddy.cn/v2/report 批量上报事件。

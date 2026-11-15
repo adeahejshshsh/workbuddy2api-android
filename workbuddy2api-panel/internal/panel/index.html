@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- 禁收录（与 setSecurityHeaders 的 X-Robots-Tag 同一条意图）：响应头挡抓取，
      这条挡的是被缓存/另存后的页面快照。 -->
 <meta name="robots" content="noindex, nofollow">
@@ -19,7 +19,7 @@
 :root {
   --bg: #0c0e14; --surface: #14171f; --surface-2: #1a1e28; --raise: #202531;
   --line: #262c3a; --line-soft: #1e232e;
-  --ink: #e8ebf2; --ink-2: #a8b0c2; --ink-3: #6b7488;
+  --ink: #e8ebf2; --ink-2: #a8b0c2; --ink-3: #7b8599;
   --accent: #5b7cfa; --accent-ink: #ffffff; --accent-soft: rgba(91,124,250,.13);
   --ok: #3ddc97; --ok-soft: rgba(61,220,151,.12);
   --warn: #f5b544; --warn-soft: rgba(245,181,68,.12);
@@ -31,7 +31,7 @@
 [data-theme="light"] {
   --bg: #f4f5f8; --surface: #ffffff; --surface-2: #f8f9fb; --raise: #ffffff;
   --line: #e2e5ec; --line-soft: #eceef3;
-  --ink: #14171f; --ink-2: #545c6e; --ink-3: #8b93a5;
+  --ink: #14171f; --ink-2: #545c6e; --ink-3: #666e80;
   --accent: #3d5fe0; --accent-ink: #ffffff; --accent-soft: rgba(61,95,224,.09);
   --ok: #0f9d63; --ok-soft: rgba(15,157,99,.1);
   --warn: #b47611; --warn-soft: rgba(180,118,17,.11);
@@ -148,9 +148,12 @@ textarea::placeholder, input::placeholder { color: var(--ink-3); }
 input.invalid { border-color: var(--bad); background: var(--bad-soft); }
 input.invalid:focus { border-color: var(--bad); }
 input[type=checkbox] { width: auto; accent-color: var(--accent); }
-label.fld { display: block; margin-bottom: 14px; }
-label.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
-label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
+/* .fld 既用于 <label class="fld">（单控件字段）也用于 <div class="fld">（内含
+   checkbox 的字段）：label 里不能再嵌 label（HTML 非法，读屏会把两层可访问名
+   拼在一起、点说明文字还会触发两次激活）。故选择器不再限定 label。 */
+.fld { display: block; margin-bottom: 14px; }
+.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
+.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
 /* 导入页：选文件/导入按钮并排，窄屏自动换行；已选列表用等宽字体便于核对文件名 */
 .imp-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .imp-row button { flex: 0 0 auto; }
@@ -892,7 +895,7 @@ body.veil-open { overflow: hidden; }
         运行日志</a></li>
     </ul>
     <div class="sig">
-      <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
+      <div class="row" role="status" aria-live="polite"><span class="pulse" id="navPulse" aria-hidden="true"></span><span id="navState">连接中</span></div>
       <div class="row" style="margin-top:5px"><span id="navVer">v-</span> · <span id="navRedis">-</span></div>
     </div>
   </nav>
@@ -1055,7 +1058,7 @@ body.veil-open { overflow: hidden; }
           <span class="grow"></span>
           <span class="seg" id="bhRealmSeg"></span>
           <span class="note" id="bhNote">—</span>
-          <select id="bhWindow" class="xs">
+          <select id="bhWindow" class="xs" aria-label="余额趋势时间窗口">
             <option value="1">近 24 小时</option>
             <option value="7">近 7 天</option>
             <option value="30" selected>近 30 天</option>
@@ -1119,7 +1122,7 @@ body.veil-open { overflow: hidden; }
           <h3>账号对比</h3>
           <span class="grow"></span>
           <span class="note" id="pkNote">—</span>
-          <select id="pkSort" class="xs" title="逐包明细的排序规则">
+          <select id="pkSort" class="xs" title="逐包明细的排序规则" aria-label="排序方式">
             <option value="end_asc" selected>按到期时间</option>
             <option value="size_desc">按面额大小</option>
           </select>
@@ -1285,7 +1288,7 @@ body.veil-open { overflow: hidden; }
                 <input name="listen" placeholder=":7863">
                 <span class="hint">改动需重启进程</span></label>
               <label class="fld"><span class="lb">API 密钥</span>
-                <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 保持原密钥不变">
+                <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 保持原密钥不变" autocomplete="new-password" spellcheck="false">
                 <button type="button" class="xs" id="btnEye">显示</button></div>
                 <span class="hint">立即生效（含面板自身）</span></label>
             </div>
@@ -1429,8 +1432,8 @@ body.veil-open { overflow: hidden; }
             </div>
             <div class="sec"><h3>思考档位</h3>
               <div class="grid3">
-                <label class="fld"><span class="lb">启用网关档位策略</span>
-                  <label class="chk"><input type="checkbox" name="thinking_enabled"> 缺档时补默认档；关闭则完全不碰档位</label></label>
+                <div class="fld"><span class="lb" id="lbThinkingEnabled">启用网关档位策略</span>
+                  <label class="chk"><input type="checkbox" name="thinking_enabled" aria-labelledby="lbThinkingEnabled"> 缺档时补默认档；关闭则完全不碰档位</label></div>
                 <label class="fld"><span class="lb">网关目标档</span>
                   <select name="thinking_default_effort">
                     <option value="max">max（模型支持的最高档）</option>
@@ -1439,8 +1442,8 @@ body.veil-open { overflow: hidden; }
                     <option value="medium">medium</option>
                     <option value="low">low</option>
                   </select><span class="hint" id="effortDowngradeNote" style="color:var(--warn)"></span></label>
-                <label class="fld"><span class="lb">档位优先级</span>
-                  <label class="chk"><input type="checkbox" name="thinking_client_priority"> 客户端优先（不勾 = 网关优先改写客户端档位）</label></label>
+                <div class="fld"><span class="lb" id="lbThinkingClientPriority">档位优先级</span>
+                  <label class="chk"><input type="checkbox" name="thinking_client_priority" aria-labelledby="lbThinkingClientPriority"> 客户端优先（不勾 = 网关优先改写客户端档位）</label></div>
                 <label class="fld"><span class="lb">网关优先作用域</span>
                   <select name="thinking_override_scope">
                     <option value="level">只覆盖档位（尊重客户端「关闭思考」）</option>
@@ -1710,7 +1713,7 @@ body.veil-open { overflow: hidden; }
             <button class="xs chip" data-ch="sys">系统</button>
           </span>
           <span class="note" id="logNote">最近 500 行</span>
-          <select class="xs" id="logExportDays" title="导出区间（落盘文件按天切分）">
+          <select class="xs" id="logExportDays" title="导出区间（落盘文件按天切分）" aria-label="导出区间">
             <option value="1">近 1 天</option>
             <option value="3" selected>近 3 天</option>
             <option value="7">近 7 天</option>
@@ -1718,7 +1721,7 @@ body.veil-open { overflow: hidden; }
           <button class="xs" id="btnLogExport" title="把落盘日志按区间打包成 ZIP 下载">导出 ZIP</button>
           <button class="xs" id="btnLogPin">自动滚动：开</button>
         </header>
-        <pre id="logBox"></pre>
+        <pre id="logBox" aria-live="polite" aria-relevant="additions"></pre>
       </div>
     </section>
   </div>
@@ -1830,7 +1833,7 @@ body.veil-open { overflow: hidden; }
       <div class="hint">该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。</div>
     </header>
     <div class="body">
-      <form style="display:contents" id="keyForm"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off"></form>
+      <form style="display:contents" id="keyForm"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off" aria-label="访问密钥 api_key"></form>
       <div class="state err" id="keyErr" hidden style="margin-top:10px">密钥不正确，请重试。</div>
     </div>
     <footer>
@@ -1885,8 +1888,8 @@ body.veil-open { overflow: hidden; }
     </header>
     <div class="body">
       <div class="rbar">
-        <input id="ruleName" placeholder="规则名，例如「便宜模型」" maxlength="40">
-        <select id="ruleMode">
+        <input id="ruleName" placeholder="规则名，例如「便宜模型」" maxlength="40" aria-label="规则名">
+        <select id="ruleMode" aria-label="规则模式">
           <option value="deny">黑名单（禁用勾选的）</option>
           <option value="allow">白名单（只允许勾选的）</option>
         </select>

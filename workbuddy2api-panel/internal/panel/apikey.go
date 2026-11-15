@@ -8,6 +8,8 @@
 package panel
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -21,6 +23,10 @@ import (
 
 // apiKeyUIDMaxLen 派生/显式 uid 的长度上限（与 validImportUID 同口径：拼文件名的兜底）。
 const apiKeyUIDMaxLen = 64
+
+// apiKeyMaxLen 静态 API Key 的长度上限（W2-SM-05）：上游签发的 key 都是几十字节，
+// 这里只是挡住「几十 MB 的字符串进日志/探测请求」。
+const apiKeyMaxLen = 512
 
 // apiKeyPrefixes 静态 API Key 前缀集合，用于派生 uid 时剥前缀。
 // 前缀合法性判定走 auth.IsAPIKey()（单一判据来源），此处仅作字符串裁剪。
@@ -43,11 +49,18 @@ func (p *Panel) addAPIKey(w http.ResponseWriter, r *http.Request) {
 		Nickname    string `json:"nickname"`
 		UID         string `json:"uid"`
 	}
+	// 请求体收紧（W2-SM-05）：此前只受 32MB 全局上限，key 字符串可达数十 MB
+	// 并进入日志与探测请求。
+	limitJSONBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 	key := strings.TrimSpace(body.AccessToken)
+	if len(key) > apiKeyMaxLen {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("access_token 过长（上限 %d 字节）", apiKeyMaxLen))
+		return
+	}
 	// 前缀判据复用 auth：构造一个只带 token 的临时 Auth 走 IsAPIKey，避免前缀
 	// 集合在 panel 与 auth 两处各写一遍（漂移会让「能加进去」与「能正常用」脱节）。
 	if !(&auth.Auth{AccessToken: key}).IsAPIKey() {
@@ -62,7 +75,9 @@ func (p *Panel) addAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	// 探测 key 是否有效：静态 Key 的额度只能走企业口径端点（个人 get-user-resource
 	// 对它恒返回空 Accounts）。探测失败（无效 Key / 上游报错）即 400，不落盘。
-	probe := &auth.Auth{AccessToken: key}
+	// 探测带派生 uid（W2-SM-07）：UID 为空时上游侧日志/限流键是空串，多个 key
+	// 共用同一匿名桶，错误信息里也无法区分是哪个 key 探的。
+	probe := &auth.Auth{AccessToken: key, UID: uid}
 	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(probe, p.expiringSoonWindow())
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "API Key 无效或额度查询失败："+err.Error())
@@ -113,7 +128,19 @@ func resolveAPIKeyUID(explicit, key string) (string, error) {
 	}
 	uid := "apikey-" + id
 	if len(uid) > apiKeyUIDMaxLen {
-		uid = uid[:apiKeyUIDMaxLen]
+		// 截断必须带 key 的短哈希（W2-SM-01）：此前直接截断，两个 id 前缀相同的
+		// key 会映射到同一个 auths 文件与同一个 pool uid —— 第二个 key 静默覆盖
+		// 第一个的凭据，前一个号凭空消失且没有任何提示。
+		sum := sha256.Sum256([]byte(key))
+		suffix := "-" + hex.EncodeToString(sum[:4])
+		keep := apiKeyUIDMaxLen - len(suffix)
+		if keep < 0 {
+			keep = 0
+		}
+		if keep > len(uid) {
+			keep = len(uid)
+		}
+		uid = uid[:keep] + suffix
 	}
 	return uid, nil
 }

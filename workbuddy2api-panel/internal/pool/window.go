@@ -65,6 +65,28 @@ type stateModelWindow struct {
 // 换了一轮，再探也是白打上游。
 const windowMaxAge = 7 * 24 * time.Hour
 
+// windowPruneInterval ScheduleModelWindow 内联 prune 的最小间隔（审查 C5-64）。
+// prune 的判据是 windowMaxAge（7 天），1 分钟粒度足够，且把「限流风暴下每 429 一次
+// 全表扫描」从选号写锁里挪走。
+const windowPruneInterval = time.Minute
+
+// pruneWindowsTick flusher tick 触发的窗口表清理（审查 C5-67）。
+//
+// 此前 pruneWindowsLocked 只挂在 ScheduleModelWindow 里：不再出现 429 的部署
+// （或窗口都已登记完的稳态）里，窗口表只增不减 —— 被删账号的窗口记录、换过一轮
+// 的额度线都会一直留在内存里（落盘侧有 windowMaxAge 过滤，所以 state.json 不膨胀，
+// 只有内存）。挂到已有的 flusher tick 上，零新增 goroutine。
+func (p *Pool) pruneWindowsTick() {
+	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.windows) == 0 {
+		return
+	}
+	p.pruneWindowsLocked(now)
+	p.lastWindowPrune = now
+}
+
 // ScheduleModelWindow 登记一个额度窗口，返回是否新增/更新了记录。
 //
 // resetAt 必须在未来：已经过去的重置时刻说明窗口已经开始了（或者这是我们自己在
@@ -83,7 +105,15 @@ func (p *Pool) ScheduleModelWindow(uid, model string, resetAt time.Time, quota b
 	}
 	// 顺手清掉过期太久的条目：窗口只在 429 时新增，长期运行的部署里被删除的账号
 	// 会留下永不触发的记录，没有清理就会一直跟着 state.json 落盘。
-	p.pruneWindowsLocked(now)
+	//
+	// 节流（审查 C5-64）：此前**每次登记**都全表遍历一次 prune —— 限流风暴时
+	// 全池 429 会让「O(窗口数) × O(429 数)」全部发生在选号写锁内，pick 被串行阻塞。
+	// prune 只是回收 7 天前的死条目，1 分钟一次完全够用；首次（lastWindowPrune 零值）
+	// 立即清一次，保证刚恢复的池子状态干净。
+	if p.lastWindowPrune.IsZero() || now.Sub(p.lastWindowPrune) >= windowPruneInterval {
+		p.pruneWindowsLocked(now)
+		p.lastWindowPrune = now
+	}
 	key := windowKey(uid, model)
 	if w, ok := p.windows[key]; ok && w.ResetAt.Equal(resetAt) {
 		if quota && !w.Quota {
@@ -247,6 +277,13 @@ func (p *Pool) ClearQuotaCooldown(uid, model string, at time.Time) bool {
 // 探针是一次真实的对话请求，会扣积分、在上游留下记录，所以与选号同一套人工与积分闸门：
 // 停用、暂停的号不自动唤醒；余额触及保留积分或积分保底、模型收费时不花这笔钱；
 // 已知免费号不碰订阅专属模型。冷却不在此列：到点时冷却正该过期，探针本身就是在问上游。
+//
+// 锁内回调（审查 C5-63）：本函数持 **RLock** 调用 floorBlockedForRealmModel /
+// exclusiveBlockedForRealmModel，二者会触发注入回调（modelRateOf / exclusiveModelOf /
+// exclusivePaidOf）。契约同 C5-12：**注入回调禁止反向调用 Pool、禁止做 IO** ——
+// 这里是读锁，回调若写池状态就是同 goroutine 自死锁（RLock 升写锁），且巡检线程
+// 一挂就不再有任何窗口探针。当前实现只读自己的 map（已交叉验证），不构成实际风险，
+// 本注释即契约固化点。
 func (p *Pool) WindowProbeBlocked(uid, model string) string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

@@ -309,8 +309,135 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			mergeToolCallsChunk(tcs)
 		}
 	}
+	// 审查 F-04 / W4-U1-03（P2）：非流式路径也必须支持**多行 data 拼帧**。
+	//
+	// 缺陷：Aggregate 把每个 `data:` 行当独立帧解析。SSE 规范允许一个事件的多行
+	// data: 用 \n 拼成一条消息（JSON 美化输出 / 长行折行时上游会这么发），而流式路径
+	// （StreamHint 的 dataPending）早就支持了 —— 同一条上游流，流式客户端拿到完整
+	// 内容，非流式客户端每条碎片都解析失败、静默丢弃，最后 validEvents==0 →
+	// errEmptyStream → handler 记 502 upstream_parse。同一件事两套纪律。
+	//
+	// 累积规则与 StreamHint 对齐（先试整行，不成就攒，攒够上限刷出），差别只在
+	// 「刷不出来时」：Aggregate 没有下游可透传，只能丢弃并记 WARN（静默丢弃正是本条要治的）。
+	var dataPending []string
+	// aggregateDataPendingMax 多行 data 累积行数上限（与 StreamHint 的 dataPendingMax 同值）。
+	const aggregateDataPendingMax = 64
+	// looksLikeJSONValueStart 只有「看起来是 JSON 值的开头」才进多行累积。
+	// 否则一条垃圾行（HTML 错误页、上游日志）会与后续正常帧拼在一起，把后面
+	// 整段 data 全拖进 pending —— 把一个上游问题放大成「内容全丢」。
+	looksLikeJSONValueStart := func(s string) bool {
+		t := strings.TrimLeft(s, " \t")
+		return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
+	}
+
+	// mergeChunk 把一条已解析的 chunk 并入聚合状态。
+	mergeChunk := func(chunk map[string]any, payload string) error {
+		// 上游「200 + error 帧」是真实形态（6004 限流、内容审核、11158 等级
+		// 拒绝）。流式路径一直专门处理它（StreamHint 的 error-passthrough），
+		// 非流式此前把它当普通事件吃掉：error 帧没有 choices → 不并入内容，
+		// 但 validEvents 已自增、不触发 errEmptyStream → 合成
+		// content="" + finish_reason:"stop" 的假 200 成功，调用方还会
+		// NoteSuccess 把正在限流的号洗成健康号、粘性把会话钉死在它身上。
+		// 这里一律升级成 ErrorFrame 交回调用方走既有的错误策略。
+		// 必须「键存在且值非 nil」（bug B3）：OpenAI 兼容实现常在正常
+		// chunk 里带 "error":null，只判键存在会把它当错误帧 → FrameKind
+		// 判 ErrNone → handler default 只换号 → 每个号失败一次 → 503。
+		if e, hasErr := chunk["error"]; hasErr && e != nil {
+			return &ErrorFrame{Payload: payload}
+		}
+		// 同类的第二种形态：HTTP 200 内嵌 {code,msg}（无 choices 无 error），
+		// 上游在账号被判风控（11140）或渠道排队满（6021）时这么报。
+		// 不认它 → 没有 choices 所以不并入内容，但 validEvents 已自增 →
+		// 不触发 errEmptyStream → 合成 content="" + finish_reason:"length"
+		// 的假 200，handler 还会 NoteSuccess 把被封号洗成健康号。
+		// 流式路径已由 writeFrame 识别（StreamErrorFrame）；非流式这条是
+		// 同一口径的补齐，否则「同一件事两套纪律」。
+		if code, msg, ok := StreamErrorFrame(chunk); ok {
+			log.Printf("WARN: [upstream] 流内失败帧（HTTP 200 内嵌，非流式）code=%d msg=%q", code, msg)
+			return &ErrorFrame{Payload: streamErrorPayload(code, msg, payload)}
+		}
+		// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
+		validEvents++
+		if v, ok := chunk["id"].(string); ok && id == "" {
+			id = v
+		}
+		if v, ok := chunk["model"].(string); ok && model == "" {
+			model = v
+		}
+		if v, ok := chunk["created"].(float64); ok && created == 0 {
+			created = v
+		}
+		// usage 只接受**非空**对象（审查 F-13 / W4-U1-40）：此前无条件覆盖，
+		// 上游先发带数值的 usage、末帧再发一个空 `usage:{}` 时，真实用量被
+		// 抹成空 map → 非流式响应丢 usage → 计费/观测记 0。
+		// 仍保留「后到覆盖先到」语义：上游分帧补报时最后一份才是最终口径
+		// （改成按键求和会把同一份用量重复计一次，那是更大的错）。
+		if u, ok := chunk["usage"].(map[string]any); ok && len(u) > 0 {
+			usage = u
+		}
+		if ch, ok := chunk["choices"].([]any); ok {
+			for _, ci := range ch {
+				c, _ := ci.(map[string]any)
+				if c == nil {
+					continue
+				}
+				if fr, ok := c["finish_reason"].(string); ok && fr != "" {
+					finishReason = fr
+					sawFinish = true
+				}
+				if delta, ok := c["delta"].(map[string]any); ok {
+					if r2, ok := delta["role"].(string); ok && r2 != "" {
+						role = r2
+					}
+					if txt, ok := delta["content"].(string); ok {
+						appendContent(txt)
+					}
+					if rc, ok := delta["reasoning_content"].(string); ok {
+						reasoning.WriteString(rc)
+					}
+					if tcs, ok := delta["tool_calls"].([]any); ok {
+						mergeToolCallsChunk(tcs)
+					}
+				}
+				// 有的上游把完整消息放在 message 里（非 delta）：整条并入。
+				// delta 已取过正文（gotAnyContent）时只跳过**正文**——tool_calls
+				// 与 reasoning 仍要并进来，否则末帧才带工具调用的上游会被静默
+				// 丢掉整轮工具（见 mergeMessageFields 注释）。
+				if msg, ok := c["message"].(map[string]any); ok {
+					mergeMessageFields(msg, !gotAnyContent)
+				}
+			}
+		}
+		return nil
+	}
+
+	// handlePayload 解析一个 data payload（单帧 / 粘帧 / 多行拼出来的帧）。
+	// 返回 handled=false 表示「这份 payload 里没有任何可解析的 JSON」。
+	handlePayload := func(payload string) (bool, error) {
+		var whole map[string]any
+		if json.Unmarshal([]byte(payload), &whole) == nil {
+			return true, mergeChunk(whole, payload)
+		}
+		// 粘帧（issue #197）：一个 data 行里首尾相接两个以上 JSON 对象时整行解析失败，
+		// 原先两份内容都被静默丢掉；拆开后逐份并入聚合。
+		handled := false
+		for _, part := range SplitConcatenatedJSON(payload) {
+			var c map[string]any
+			if json.Unmarshal([]byte(part), &c) == nil {
+				handled = true
+				if herr := mergeChunk(c, payload); herr != nil {
+					return true, herr
+				}
+			}
+		}
+		return handled, nil
+	}
+
 	for {
-		line, err := br.ReadString('\n')
+		// 审查 W4-U1-02 / F-11：行长必须有硬上限。bufio 的 64KB 只约束内部读块，
+		// ReadString 对**返回的行**没有任何上限 —— 一条无换行的超长行就能把单请求
+		// 内存吃满。readLineLimited 在 MaxSSELineBytes 处截停（见 sse_line.go）。
+		line, err := readLineLimited(br, MaxSSELineBytes)
 		if err != nil && err != io.EOF {
 			// 包装成 errUpstreamRead（bug #3）：非流式路径靠 IsUpstreamReadError 判
 			// 「上游中途断流」回 502 stream_error，与流式路径同码；此前 Aggregate
@@ -325,107 +452,48 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		// "data: " 会让这种上游变成「零有效事件」→ 误报 502 upstream_parse。
 		if strings.HasPrefix(line, "data:") {
 			payload := strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
-			if payload == "[DONE]" {
+			if strings.TrimSpace(payload) == "[DONE]" {
 				// 上游显式结束：停止读取，DONE 之后的任何数据一律忽略。
+				// 判定口径与流式路径统一（审查 F-23）：此前这里是 payload == "[DONE]"
+				// 的精确比较，`data:  [DONE]`（多一个空格）在流式路径正常收尾、在非流式
+				// 路径却被当无效 JSON 丢弃 → sawDone=false → 聚合结果被标成
+				// finish_reason=length 的假截断。
 				sawDone = true
 				break
-			} else {
-				// 粘帧（issue #197）：一个 data 行里首尾相接两个以上 JSON 对象时整行解析失败，
-				// 原先两份内容都被静默丢掉；拆开后逐份并入聚合。
-				var chunks []map[string]any
-				var whole map[string]any
-				if json.Unmarshal([]byte(payload), &whole) == nil {
-					chunks = []map[string]any{whole}
-				} else {
-					for _, part := range SplitConcatenatedJSON(payload) {
-						var c map[string]any
-						if json.Unmarshal([]byte(part), &c) == nil {
-							chunks = append(chunks, c)
-						}
-					}
-				}
-				for _, chunk := range chunks {
-					// 上游「200 + error 帧」是真实形态（6004 限流、内容审核、11158 等级
-					// 拒绝）。流式路径一直专门处理它（StreamHint 的 error-passthrough），
-					// 非流式此前把它当普通事件吃掉：error 帧没有 choices → 不并入内容，
-					// 但 validEvents 已自增、不触发 errEmptyStream → 合成
-					// content="" + finish_reason:"stop" 的假 200 成功，调用方还会
-					// NoteSuccess 把正在限流的号洗成健康号、粘性把会话钉死在它身上。
-					// 这里一律升级成 ErrorFrame 交回调用方走既有的错误策略。
-					// 必须「键存在且值非 nil」（bug B3）：OpenAI 兼容实现常在正常
-					// chunk 里带 "error":null，只判键存在会把它当错误帧 → FrameKind
-					// 判 ErrNone → handler default 只换号 → 每个号失败一次 → 503。
-					if e, hasErr := chunk["error"]; hasErr && e != nil {
-						return nil, &ErrorFrame{Payload: payload}
-					}
-					// 同类的第二种形态：HTTP 200 内嵌 {code,msg}（无 choices 无 error），
-					// 上游在账号被判风控（11140）或渠道排队满（6021）时这么报。
-					// 不认它 → 没有 choices 所以不并入内容，但 validEvents 已自增 →
-					// 不触发 errEmptyStream → 合成 content="" + finish_reason:"length"
-					// 的假 200，handler 还会 NoteSuccess 把被封号洗成健康号。
-					// 流式路径已由 writeFrame 识别（StreamErrorFrame）；非流式这条是
-					// 同一口径的补齐，否则「同一件事两套纪律」。
-					if code, msg, ok := StreamErrorFrame(chunk); ok {
-						log.Printf("WARN: [upstream] 流内失败帧（HTTP 200 内嵌，非流式）code=%d msg=%q", code, msg)
-						return nil, &ErrorFrame{Payload: streamErrorPayload(code, msg, payload)}
-					}
-					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
-					validEvents++
-					if v, ok := chunk["id"].(string); ok && id == "" {
-						id = v
-					}
-					if v, ok := chunk["model"].(string); ok && model == "" {
-						model = v
-					}
-					if v, ok := chunk["created"].(float64); ok && created == 0 {
-						created = v
-					}
-					// usage 只接受**非空**对象（审查 F-13 / W4-U1-40）：此前无条件覆盖，
-					// 上游先发带数值的 usage、末帧再发一个空 `usage:{}` 时，真实用量被
-					// 抹成空 map → 非流式响应丢 usage → 计费/观测记 0。
-					// 仍保留「后到覆盖先到」语义：上游分帧补报时最后一份才是最终口径
-					// （改成按键求和会把同一份用量重复计一次，那是更大的错）。
-					if u, ok := chunk["usage"].(map[string]any); ok && len(u) > 0 {
-						usage = u
-					}
-					if ch, ok := chunk["choices"].([]any); ok {
-						for _, ci := range ch {
-							c, _ := ci.(map[string]any)
-							if c == nil {
-								continue
-							}
-							if fr, ok := c["finish_reason"].(string); ok && fr != "" {
-								finishReason = fr
-								sawFinish = true
-							}
-							if delta, ok := c["delta"].(map[string]any); ok {
-								if r2, ok := delta["role"].(string); ok && r2 != "" {
-									role = r2
-								}
-								if txt, ok := delta["content"].(string); ok {
-									appendContent(txt)
-								}
-								if rc, ok := delta["reasoning_content"].(string); ok {
-									reasoning.WriteString(rc)
-								}
-								if tcs, ok := delta["tool_calls"].([]any); ok {
-									mergeToolCallsChunk(tcs)
-								}
-							}
-							// 有的上游把完整消息放在 message 里（非 delta）：整条并入。
-							// delta 已取过正文（gotAnyContent）时只跳过**正文**——tool_calls
-							// 与 reasoning 仍要并进来，否则末帧才带工具调用的上游会被静默
-							// 丢掉整轮工具（见 mergeMessageFields 注释）。
-							if msg, ok := c["message"].(map[string]any); ok {
-								mergeMessageFields(msg, !gotAnyContent)
-							}
-						}
-					}
-				}
 			}
+			if len(dataPending) > 0 {
+				// 正在攒多行 data：拼上继续等，拼成合法 JSON 就整体解析。
+				dataPending = append(dataPending, payload)
+				if json.Valid([]byte(strings.Join(dataPending, "\n"))) || len(dataPending) >= aggregateDataPendingMax {
+					joined := strings.Join(dataPending, "\n")
+					dataPending = dataPending[:0]
+					if _, herr := handlePayload(joined); herr != nil {
+						return nil, herr
+					}
+				}
+			} else if handled, herr := handlePayload(payload); herr != nil {
+				return nil, herr
+			} else if !handled && looksLikeJSONValueStart(payload) {
+				// 不是完整 JSON，但看起来是 JSON 的开头：可能是多行 data 的第一段。
+				dataPending = append(dataPending, payload)
+			}
+			// 其余情况（纯垃圾行 / 非 JSON 的 data 行）沿用旧行为：静默跳过。
 		}
 		if err == io.EOF {
 			break
+		}
+	}
+	// 流结束时还攒着没拼成合法 JSON 的多行 data：不再有后续行可拼，最后再解析
+	// 一次（能解析出部分就并进去）；解析不出就丢弃并记 WARN —— 「静默丢弃」
+	// 正是 F-04 / W4-U1-03 要治的问题，不能再无声无息。
+	if len(dataPending) > 0 {
+		joined := strings.Join(dataPending, "\n")
+		n := len(dataPending)
+		dataPending = dataPending[:0]
+		if handled, herr := handlePayload(joined); herr != nil {
+			return nil, herr
+		} else if !handled {
+			log.Printf("WARN: [upstream] 非流式：多行 data 拼合后仍不是合法 JSON（%d 行 / %d 字节），已丢弃", n, len(joined))
 		}
 	}
 	if validEvents == 0 {
@@ -1330,7 +1398,12 @@ readLoop:
 		if hb != nil && headOpen {
 			line, err = hb.readLine(heartbeat)
 		} else {
-			line, err = br.ReadString('\n')
+			// 审查 W4-U1-02 / F-11：同 Aggregate —— 流式路径的 ReadString 同样
+			// 没有行长上限，一条无换行超长行可吃满内存。超限时返回
+			// errSSELineTooLong，落到下方 readErr 分支：补 error 帧 + [DONE]
+			// 收尾并包成 errUpstreamRead，客户端能明确看到「上游发了畸形帧」，
+			// 而不是拿到一条被静默截断的流。
+			line, err = readLineLimited(br, MaxSSELineBytes)
 		}
 		trimmed := strings.TrimRight(line, "\r\n")
 		switch {
@@ -1420,6 +1493,20 @@ readLoop:
 			break
 		}
 	}
+	// 审查 F-05 / W4-U1-04（P2）：**先刷出攒着的多行 data，再写任何终态/错误帧**。
+	//
+	// 缺陷：flushDataLines 原来在流尾最后（紧挨 [DONE]），而「补截断终态」与
+	// 「empty upstream stream」错误帧都在它之前写。上游在一条多行 data 中途 EOF 时，
+	// 客户端先收到 finish_reason=length（或 error 帧），**随后**又收到正文帧 ——
+	// 「回合结束后还有内容」，严格客户端会直接丢弃后半段；validFrames==0 时更糟：
+	// 空流错误帧先出、正文后出，等于自证「空流」又说有内容。
+	// 终态帧必须永远是最后一帧，所以把这次刷新提到最前面。
+	//
+	// 顺带把「空流判定」也放到刷新之后：此前 validFrames==0 是在 pending 还没刷出时
+	// 判的，一条合法的多行 data 会被误判成空流（502 upstream_parse）。
+	if werr := flushDataLines(); werr != nil {
+		return werr
+	}
 	// DeferredToolCall 参数修复的尾部收尾：上游只发 [DONE]/EOF、没给 finish_reason
 	// 时，把已缓存的参数补成一帧再写 [DONE]/截断终态。已经发过 finish 的流不再补
 	// ——补在终态之后会变成「回合结束后的工具参数」，客户端直接丢弃。
@@ -1506,10 +1593,7 @@ readLoop:
 	if hold && !meaningful && !wroteAny && readErr == nil && validFrames > 0 {
 		return errSilentEmptyTurn
 	}
-	// 先把「攒着还没拼成 JSON 的多行 data」原样刷出（绝不吞字节），再走扣帧兜底。
-	if werr := flushDataLines(); werr != nil {
-		return werr
-	}
+	// 多行 data 已在流尾最前面刷出（审查 F-05 / W4-U1-04），此处不再重复刷新。
 	// 兜底：走到这里说明「扣住的帧要保留」（静默判定没命中，例如客户端已收到心跳行
 	// 导致 wroteAny=true）。必须先把 pending 刷出去，否则 role/finish 帧会被 [DONE]
 	// 顶掉，客户端拿到一条没有 role、没有 finish_reason 的残流。

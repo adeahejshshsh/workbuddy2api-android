@@ -65,14 +65,33 @@ func TestEnsureMinOutputBudgetLeavesAlone(t *testing.T) {
 }
 
 // max_completion_tokens 路径也要抬，且不擅自换成 max_tokens。
+// TestEnsureMinOutputBudgetKeepsFieldName 抬额度必须落到**上游真正读的键**上。
+//
+// 审查 W4-U1-25（P2）：这条用例的**旧期望是错的**，已改写。
+// 旧期望是「不该自造 max_tokens 键，抬额要写回客户端用的那个键
+// （max_completion_tokens）」，理由是「不擅自换字段名」。但上游只认 max_tokens：
+// 额度写在别名上等于没写 —— 抬额 100% 静默失效，正文照样被思考吃光、断在半句，
+// 而日志里已经打印过一行「max_tokens 2048 → 8192」的成功记录（比不抬更误导人）。
+//
+// 而且这个分支在真实管线里**只可能出现在翻译失败时**：prepareBodyOptFull 先跑
+// translateMaxCompletionTokens，数值型别名早就被改名成 max_tokens 了；能走到这里的
+// 只剩「别名是字符串/畸形值」这种 translate 拒绝处理的情形 —— 那种情形下写回别名
+// 更是纯粹的无效动作。故改为统一落 max_tokens 并删别名。
 func TestEnsureMinOutputBudgetKeepsFieldName(t *testing.T) {
 	obj := map[string]any{"model": "m", "reasoning_effort": "high", "max_completion_tokens": json.Number("2048")}
 	ensureMinOutputBudget(obj, map[string]int64{"m": 131072})
-	if _, has := obj["max_tokens"]; has {
-		t.Fatal("不该自造 max_tokens 键")
+	lit, has := obj["max_tokens"]
+	if !has {
+		t.Fatal("抬额必须落 max_tokens（上游只认这个键），不能只改 max_completion_tokens 别名")
+	}
+	if got := lit.(json.Number).String(); got != "8192" {
+		t.Fatalf("max_tokens 没被抬到 floor：%s", got)
+	}
+	if _, has := obj["max_completion_tokens"]; has {
+		t.Fatal("别名必须删掉：上游不读它，留着只会让参数校验报 11101")
 	}
 	if got, _ := maxTokensValue(obj); got != 8192 {
-		t.Fatalf("max_completion_tokens 没被抬：%d", got)
+		t.Fatalf("maxTokensValue 读到的额度不对：%d", got)
 	}
 }
 

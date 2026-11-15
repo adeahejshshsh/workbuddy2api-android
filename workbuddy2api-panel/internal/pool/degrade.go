@@ -24,14 +24,15 @@ import (
 // 再喂连败是重复计罚（任务书纪律：两机制并存取更长者，不叠加）。
 func (p *Pool) NoteFailures(uid string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
+		p.mu.Unlock()
 		return
 	}
 	e.consecutiveFails++
 	if e.consecutiveFails < p.degradeThreshold {
 		p.dirty.Store(true)
+		p.mu.Unlock()
 		return
 	}
 	e.consecutiveFails = 0
@@ -39,12 +40,19 @@ func (p *Pool) NoteFailures(uid string) {
 		// 降权期内的连败达阈：不延长（取更长者语义由 healthy 或门保证）。计数
 		// 已清零——到期放行后需重新连败满阈值才再降。
 		p.dirty.Store(true)
+		p.mu.Unlock()
 		return
 	}
 	e.degradeUntil = time.Now().Add(p.degradeDurationLocked())
 	p.dirty.Store(true)
+	// 日志在锁外打（审查 C5-98）：log.Printf 是同步 IO（stderr 可能是慢盘/被管道
+	// 背压），在 pool 写锁里打日志等于让一次 stderr 卡顿阻塞整个选号。锁内只取
+	// 打日志所需的快照。
+	label := logfmt.Label(e.a.UID, e.a.NicknameValue())
+	until := e.degradeUntil
+	p.mu.Unlock()
 	log.Printf("WARN: [pool] 连败降权触发 acct=%s until=%s（连续失败达阈，临时出池）",
-		logfmt.Label(e.a.UID, e.a.NicknameValue()), e.degradeUntil.Format(time.RFC3339))
+		label, until.Format(time.RFC3339))
 }
 
 // degradeDurationLocked 返回降权时长（当前实现为固定 degradeCooldown，钳到
