@@ -1,6 +1,8 @@
 package com.workbuddy.api;
 
+import android.app.Activity;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -27,26 +29,147 @@ import android.widget.TextView;
  */
 final class Theme {
 
-    // ── 颜色 ───────────────────────────────────────────────────────────────
-    static final int BG = 0xFF0F172A;
-    static final int BG_TOP = 0xFF141E36;
-    static final int CARD = 0xF21B2336;      // 卡片略透明，叠在渐变上像磨砂
-    static final int CARD_SOLID = 0xFF1B2336;
-    static final int MUTED = 0xFF272F42;
-    static final int INK = 0xFFF8FAFC;
-    static final int INK2 = 0xFFA9B4C7;
-    static final int INK3 = 0xFF94A3B8;
-    static final int LINE = 0x66475569;
-    static final int ACCENT = 0xFF22C55E;
-    static final int ON_ACCENT = 0xFF07240F;
-    static final int INFO = 0xFF38BDF8;
-    static final int WARN = 0xFFF59E0B;
-    static final int BAD = 0xFFEF4444;
-    static final int ON_BAD = 0xFFFFFFFF;
-    /** 已完成（已经到手的绿，比强调色淡一档：亮绿=可操作，这种绿=已收下）。 */
-    static final int MINT = 0xFF34D399;
-    /** 置灰 / 不可用 / 未解锁。 */
-    static final int SLATE = 0xFF64748B;
+    // ── 颜色（按主题切换） ─────────────────────────────────────────────────
+    //
+    // 为什么是**可变的 static** 而不是「按 uiMode 返回调色板」的方法：全仓有 700+ 处
+    // Theme.XXX 引用（13 个文件），改成方法要动每一处；改成非 final static 只需要在
+    // setDark() 里换一套赋值，调用点一行都不用改。
+    //
+    // 代价有两条，都得守住：
+    //   ① 必须在 Activity.onCreate 里、**建视图之前**调 apply(ctx)，否则拿到的是上一次
+    //      的调色板（进程刚起来时是深色默认值）；
+    //   ② 谁要是把颜色复制成自己的 static final（MainActivity/ConfigActivity 就这么干过），
+    //      切换主题时那份副本不会跟着变 —— 见 refreshThemeAliases()。
+    static int BG, BG_TOP, CARD, CARD_SOLID, MUTED, INK, INK2, INK3, LINE,
+            ACCENT, ON_ACCENT, INFO, WARN, BAD, ON_BAD, MINT, SLATE,
+            NAVBAR, OVERLAY, OVERLAY_SOFT, RIPPLE, RIPPLE_ACCENT, TRACK;
+
+    /** 主题模式：auto（跟随系统）/ dark / light。与设置页、SharedPreferences 同口径。 */
+    static final String PREF_THEME = "ui_theme";
+    static final String MODE_AUTO = "auto", MODE_DARK = "dark", MODE_LIGHT = "light";
+    static String mode = MODE_AUTO;
+
+    /**
+     * 按当前模式装载调色板。**必须在建任何视图之前调用**。
+     *
+     * 读 SharedPreferences 失败（极少见）时退回跟随系统：宁可跟系统，也不要卡在一个
+     * 用户改不动的状态里。
+     */
+    static void apply(Context c) {
+        String m = MODE_AUTO;
+        try {
+            m = c.getSharedPreferences(GatewayService.PREF, Context.MODE_PRIVATE)
+                    .getString(PREF_THEME, MODE_AUTO);
+        } catch (Throwable ignored) {}
+        if (!MODE_DARK.equals(m) && !MODE_LIGHT.equals(m)) m = MODE_AUTO;
+        mode = m;
+        setDark(MODE_DARK.equals(m) || (MODE_AUTO.equals(m) && isSystemDark(c)));
+    }
+
+    /** 系统是否处于深色模式（auto 模式下用它）。 */
+    static boolean isSystemDark(Context c) {
+        try {
+            int ui = c.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+            return ui == Configuration.UI_MODE_NIGHT_YES;
+        } catch (Throwable t) {
+            return true;   // 读不到就按深色（本 App 的原始观感）
+        }
+    }
+
+    /**
+     * 换一套调色板。
+     *
+     * 浅色不是深色的简单反色：玻璃卡（半透明 + 1px 冷色描边 + 径向高光）在浅底上会发灰，
+     * 所以浅色的卡片用**半透明白**、描边与叠加层改成低透明度**黑**，强调绿也压深一档
+     * （#22C55E 在白底上对比度只有 2.3:1，做前景字读不清）。
+     */
+    static void setDark(boolean dark) {
+        if (dark) {
+            BG = 0xFF0F172A;
+            BG_TOP = 0xFF141E36;
+            CARD = 0xF21B2336;          // 卡片略透明，叠在渐变上像磨砂
+            CARD_SOLID = 0xFF1B2336;
+            MUTED = 0xFF272F42;
+            INK = 0xFFF8FAFC;
+            INK2 = 0xFFA9B4C7;
+            INK3 = 0xFF94A3B8;
+            LINE = 0x66475569;
+            ACCENT = 0xFF22C55E;
+            ON_ACCENT = 0xFF07240F;
+            INFO = 0xFF38BDF8;
+            WARN = 0xFFF59E0B;
+            BAD = 0xFFEF4444;
+            ON_BAD = 0xFFFFFFFF;
+            MINT = 0xFF34D399;          // 已完成（比强调色淡一档：亮绿=可操作，这种绿=已收下）
+            SLATE = 0xFF64748B;         // 置灰 / 不可用 / 未解锁
+            NAVBAR = 0xF20B1220;
+            OVERLAY = 0x14FFFFFF;       // 卡片内浅色叠加（图标底、次级块）
+            OVERLAY_SOFT = 0x0DFFFFFF;  // 更淡一档（未选中的胶囊）
+            RIPPLE = 0x1FFFFFFF;
+            RIPPLE_ACCENT = 0x3322C55E;
+            TRACK = 0x1FFFFFFF;         // 开关滑轨底
+        } else {
+            BG = 0xFFF2F5FA;
+            BG_TOP = 0xFFFFFFFF;
+            CARD = 0xF2FFFFFF;
+            CARD_SOLID = 0xFFFFFFFF;
+            MUTED = 0xFFE7ECF4;
+            INK = 0xFF0F172A;
+            INK2 = 0xFF3D4A5C;
+            INK3 = 0xFF5B6B80;
+            LINE = 0x33475569;
+            ACCENT = 0xFF15A34A;        // 压深一档：#22C55E 在白底上做前景只有 2.3:1
+            ON_ACCENT = 0xFFFFFFFF;
+            INFO = 0xFF0369A1;
+            WARN = 0xFFB45309;
+            BAD = 0xFFD92D20;
+            ON_BAD = 0xFFFFFFFF;
+            MINT = 0xFF0F9D63;
+            SLATE = 0xFF8A97A8;
+            NAVBAR = 0xF2FFFFFF;
+            OVERLAY = 0x0F000000;
+            OVERLAY_SOFT = 0x0A000000;
+            RIPPLE = 0x1F000000;
+            RIPPLE_ACCENT = 0x3315A34A;
+            TRACK = 0x14000000;
+        }
+    }
+
+    /** 主题模式的中文名（设置页展示用）。 */
+    static String modeLabel(String m) {
+        if (MODE_DARK.equals(m)) return "深色";
+        if (MODE_LIGHT.equals(m)) return "浅色";
+        return "跟随系统";
+    }
+
+    /** 保存模式并立即装载（调用方负责重建界面）。 */
+    static void saveMode(Context c, String m) {
+        if (!MODE_DARK.equals(m) && !MODE_LIGHT.equals(m)) m = MODE_AUTO;
+        try {
+            c.getSharedPreferences(GatewayService.PREF, Context.MODE_PRIVATE)
+                    .edit().putString(PREF_THEME, m).apply();
+        } catch (Throwable ignored) {}
+        mode = m;
+        setDark(MODE_DARK.equals(m) || (MODE_AUTO.equals(m) && isSystemDark(c)));
+    }
+
+    /**
+     * 给 Activity 选窗口主题（在 super.onCreate 之前调）。
+     *
+     * 手动覆盖必须走 setTheme：资源里的 AppTheme 由 values-night 决定，用户选了「浅色」
+     * 而系统是深色时，光改我们的调色板会让系统绘制的部分（对话框、Toast、滚动条）还是
+     * 深色，看起来像坏了一半。
+     */
+    static void applyActivityTheme(Activity a) {
+        String m = MODE_AUTO;
+        try {
+            m = a.getSharedPreferences(GatewayService.PREF, Context.MODE_PRIVATE)
+                    .getString(PREF_THEME, MODE_AUTO);
+        } catch (Throwable ignored) {}
+        if (MODE_DARK.equals(m)) a.setTheme(R.style.AppTheme_Dark);
+        else if (MODE_LIGHT.equals(m)) a.setTheme(R.style.AppTheme_Light);
+        // auto：不调 setTheme，让清单里的 AppTheme 跟着 values-night 走
+    }
 
     // ── 尺度 ───────────────────────────────────────────────────────────────
     static final int R_CARD = 18, R_CTRL = 14, R_PILL = 999;
@@ -190,7 +313,7 @@ final class Theme {
     static TextView primaryButton(Context c, String label) {
         TextView b = text(c, label, 13.5f, ON_ACCENT, 2);
         b.setGravity(Gravity.CENTER);
-        b.setBackground(ripple(c, round(c, ACCENT, R_CTRL), 0x3322C55E));
+        b.setBackground(ripple(c, round(c, ACCENT, R_CTRL), RIPPLE_ACCENT));
         b.setMinHeight(dp(c, 48));
         b.setPadding(dp(c, S4), dp(c, 12), dp(c, S4), dp(c, 12));
         b.setClickable(true);
@@ -202,7 +325,7 @@ final class Theme {
     static TextView ghostButton(Context c, String label) {
         TextView b = text(c, label, 13f, INK, 1);
         b.setGravity(Gravity.CENTER);
-        b.setBackground(ripple(c, outlined(c, 0x14FFFFFF, R_CTRL, LINE, 1), 0x1FFFFFFF));
+        b.setBackground(ripple(c, outlined(c, OVERLAY, R_CTRL, LINE, 1), RIPPLE));
         b.setMinHeight(dp(c, 48));
         b.setPadding(dp(c, S4), dp(c, 12), dp(c, S4), dp(c, 12));
         b.setClickable(true);
@@ -215,7 +338,7 @@ final class Theme {
         TextView b = text(c, label, 12f, on ? ON_ACCENT : INK2, 1);
         b.setGravity(Gravity.CENTER);
         b.setBackground(on ? round(c, ACCENT, R_PILL)
-                : ripple(c, outlined(c, 0x0DFFFFFF, R_PILL, LINE, 1), 0x1FFFFFFF));
+                : ripple(c, outlined(c, OVERLAY_SOFT, R_PILL, LINE, 1), RIPPLE));
         // 视觉高度 40dp，靠上下 padding 把命中区撑到 ~48dp
         b.setMinHeight(dp(c, 40));
         b.setPadding(dp(c, S3), dp(c, 9), dp(c, S3), dp(c, 9));
@@ -233,7 +356,7 @@ final class Theme {
         iv.setImageResource(drawableRes);
         iv.setColorFilter(tint);
         iv.setContentDescription(contentDesc);
-        iv.setBackground(ripple(c, round(c, 0x14FFFFFF, R_CTRL), 0x1FFFFFFF));
+        iv.setBackground(ripple(c, round(c, OVERLAY, R_CTRL), RIPPLE));
         int pad = dp(c, 11);
         iv.setPadding(pad, pad, pad, pad);
         iv.setLayoutParams(new LinearLayout.LayoutParams(dp(c, 44), dp(c, 44)));
@@ -316,7 +439,7 @@ final class Theme {
     static LinearLayout progress(Context c, int cur, int target, int color) {
         LinearLayout track = new LinearLayout(c);
         track.setOrientation(LinearLayout.HORIZONTAL);
-        track.setBackground(round(c, 0x1FFFFFFF, R_PILL));
+        track.setBackground(round(c, TRACK, R_PILL));
         int total = target > 0 ? target : 1;
         int done = Math.max(0, Math.min(cur, total));
         if (done > 0) {

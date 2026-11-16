@@ -108,8 +108,104 @@ final class ScreenUsage {
         totals.addView(Theme.kvRow(a, "平均延迟", String.format(java.util.Locale.US, "%.0f ms", u.avgLatencyMs)));
         totals.addView(Theme.kvRow(a, "平均吐字", String.format(java.util.Locale.US, "%.1f tok/s", u.avgTps)));
         list.addView(totals, Theme.cardLp(a, Theme.S3));
+        usageChart(list, u);
         usageSection(list, "按账号", u.byAccount);
         usageSection(list, "按模型", u.byModel);
+    }
+
+    // ── 时间分布柱状图（issue #167 第 2 条） ────────────────────────────────
+    //
+    // 数据源是 /panel/api/usage 的 series（后端早就在返回，日桶 + 小时桶拼成一条）。
+    // 两个必须遵守的细节：
+    //   ① 24H 只取 scope=hour、其余只取 scope=day —— 混着画会把同一段画两遍；
+    //   ② 小时桶只保留 7 天（审查 U3），所以 30D 区间里本来就没有小时点，正好是
+    //      「24H→小时、其余→天」这个期望，不需要额外兜底。
+    private int chartMetric = 0;                                   // 0 请求 / 1 TOKENS / 2 积分
+    private static final String[] CHART_METRICS = {"请求", "TOKENS", "积分"};
+
+    private void usageChart(final LinearLayout list, final PanelService.Usage u) {
+        LinearLayout card = Theme.card(a);
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(Theme.label(a, "时间分布"),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        final LinearLayout seg = new LinearLayout(a);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        head.addView(seg);
+        card.addView(head);
+
+        final BarChart chart = new BarChart(a);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Theme.dp(a, 96));
+        clp.topMargin = Theme.dp(a, Theme.S2);
+        card.addView(chart, clp);
+
+        final TextView note = Theme.text(a, "", 11.5f, Theme.INK3, 0);
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nlp.topMargin = Theme.dp(a, Theme.S2);
+        card.addView(note, nlp);
+
+        fillChartPills(seg, chart, note, u);
+        applyChart(chart, note, u);
+        list.addView(card, Theme.cardLp(a, Theme.S3));
+    }
+
+    /** 指标切换（请求 / TOKENS / 积分）。重建这一行是为了让选中态跟着走，不整页重绘。 */
+    private void fillChartPills(final LinearLayout seg, final BarChart chart,
+                                final TextView note, final PanelService.Usage u) {
+        seg.removeAllViews();
+        for (int i = 0; i < CHART_METRICS.length; i++) {
+            final int idx = i;
+            TextView p = Theme.pill(a, CHART_METRICS[i], i == chartMetric);
+            p.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    if (idx == chartMetric) return;
+                    chartMetric = idx;
+                    fillChartPills(seg, chart, note, u);
+                    applyChart(chart, note, u);
+                }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (i < CHART_METRICS.length - 1) lp.rightMargin = Theme.dp(a, Theme.S1);
+            seg.addView(p, lp);
+        }
+    }
+
+    private void applyChart(BarChart chart, TextView note, PanelService.Usage u) {
+        boolean wantHour = usageHours <= 24;
+        java.util.List<PanelService.Usage.Point> pts = new java.util.ArrayList<PanelService.Usage.Point>();
+        for (PanelService.Usage.Point p : u.series) {
+            if (wantHour ? "hour".equals(p.scope) : "day".equals(p.scope)) pts.add(p);
+        }
+        float[] v = new float[pts.size()];
+        String[] lb = new String[pts.size()];
+        for (int i = 0; i < pts.size(); i++) {
+            PanelService.Usage.Point p = pts.get(i);
+            v[i] = chartMetric == 0 ? p.requests
+                    : chartMetric == 1 ? p.tokens
+                    : (float) p.credits;
+            lb[i] = shortLabel(p.t, wantHour);
+        }
+        chart.setData(v, lb, chartMetric == 0 ? "" : chartMetric == 1 ? "tok" : "");
+        if (pts.isEmpty()) {
+            note.setText("该区间没有时间点（小时桶只保留 7 天，更早的区间按天统计）");
+        } else {
+            note.setText("共 " + pts.size() + " 个" + (wantHour ? "小时" : "天") + " · "
+                    + (wantHour ? "粒度 1 小时" : "粒度 1 天"));
+        }
+    }
+
+    /** "2026-11-16T13" → "13时"；"2026-11-16" → "11-16"。 */
+    private static String shortLabel(String t, boolean hour) {
+        if (t == null) return "";
+        if (hour) {
+            int i = t.indexOf('T');
+            return i >= 0 && i + 1 < t.length() ? t.substring(i + 1) + "时" : t;
+        }
+        return t.length() >= 10 ? t.substring(5) : t;
     }
 
     private String fmtTokens(long n) {

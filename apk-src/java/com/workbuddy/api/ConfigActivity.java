@@ -45,10 +45,21 @@ import java.util.List;
  */
 public class ConfigActivity extends Activity {
 
-    // 与 Theme 同一套令牌（glass 深色数据台）
-    private static final int BG = Theme.BG, SURFACE = Theme.CARD_SOLID, SURFACE2 = Theme.MUTED;
-    private static final int LINE = Theme.LINE, INK = Theme.INK, INK2 = Theme.INK2, INK3 = Theme.INK3;
-    private static final int ACCENT = Theme.ACCENT, BAD = Theme.BAD;
+    // 与 Theme 同一套令牌。**可变**：Theme 的调色板随深浅色切换，复制成 final 会把
+    // 颜色钉死在类初始化那一刻（issue #167 第 1 条）。每次 onCreate 前 refresh 一次。
+    private static int BG, SURFACE, SURFACE2, LINE, INK, INK2, INK3, ACCENT, BAD;
+
+    private static void refreshThemeAliases() {
+        BG = Theme.BG;
+        SURFACE = Theme.CARD_SOLID;
+        SURFACE2 = Theme.MUTED;
+        LINE = Theme.LINE;
+        INK = Theme.INK;
+        INK2 = Theme.INK2;
+        INK3 = Theme.INK3;
+        ACCENT = Theme.ACCENT;
+        BAD = Theme.BAD;
+    }
 
     private JSONObject cfg;
     private LinearLayout content;
@@ -56,7 +67,10 @@ public class ConfigActivity extends Activity {
     private PanelService svc;
 
     @Override protected void onCreate(Bundle b) {
+        Theme.applyActivityTheme(this);
         super.onCreate(b);
+        Theme.apply(this);
+        refreshThemeAliases();
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(BG);

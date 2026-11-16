@@ -228,17 +228,24 @@ public class MainActivity extends Activity {
 
     // ── 设计令牌（= 面板 :root / [data-theme="dark"]）
     // 统一到 Theme（glass 深色数据台），避免壳与原生控制台两套配色
-    static final int BG       = Theme.BG;
-    static final int SURFACE  = Theme.CARD_SOLID;
-    static final int SURFACE2 = Theme.MUTED;
-    static final int LINE     = Theme.LINE;
-    static final int INK      = Theme.INK;
-    static final int INK2     = Theme.INK2;
-    static final int INK3     = Theme.INK3;
-    static final int ACCENT   = Theme.ACCENT;
-    static final int OK       = Theme.ACCENT;
-    static final int WARN     = Theme.WARN;
-    static final int BAD      = Theme.BAD;
+    // 注意这些是**可变**的别名而不是 static final：Theme 的调色板会随深浅色切换，
+    // 类初始化时把颜色复制成 final 就等于把它钉死在启动那一刻（issue #167 第 1 条）。
+    // 每次 onCreate / 配置变化后由 refreshThemeAliases() 重新同步一次。
+    static int BG, SURFACE, SURFACE2, LINE, INK, INK2, INK3, ACCENT, OK, WARN, BAD;
+
+    static void refreshThemeAliases() {
+        BG = Theme.BG;
+        SURFACE = Theme.CARD_SOLID;
+        SURFACE2 = Theme.MUTED;
+        LINE = Theme.LINE;
+        INK = Theme.INK;
+        INK2 = Theme.INK2;
+        INK3 = Theme.INK3;
+        ACCENT = Theme.ACCENT;
+        OK = Theme.ACCENT;
+        WARN = Theme.WARN;
+        BAD = Theme.BAD;
+    }
 
     WebView web;
     /**
@@ -258,7 +265,12 @@ public class MainActivity extends Activity {
     boolean injected = false;
 
     @Override protected void onCreate(Bundle b) {
+        // 窗口主题必须在 super.onCreate 之前定（手动覆盖时走 setTheme，auto 走清单里的
+        // AppTheme + values-night）；调色板必须在建任何视图之前装载。
+        Theme.applyActivityTheme(this);
         super.onCreate(b);
+        Theme.apply(this);
+        refreshThemeAliases();
         askNotifPermission();
         if (Build.VERSION.SDK_INT >= 21) {          // 系统栏与壳同色，别露一条黑边
             getWindow().setStatusBarColor(SURFACE);

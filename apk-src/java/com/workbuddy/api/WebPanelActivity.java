@@ -27,9 +27,11 @@ public class WebPanelActivity extends Activity {
     private WebView web;
 
     @Override protected void onCreate(Bundle b) {
+        Theme.applyActivityTheme(this);
         super.onCreate(b);
-        // 整体背景：与原生控制台同一套暗色，切换时不闪白。
-        getWindow().getDecorView().setBackgroundColor(0xFF0F1115);
+        Theme.apply(this);
+        // 整体背景：与原生控制台同一套底色，切换时不闪白（深浅色各自取自己的 BG）。
+        getWindow().getDecorView().setBackgroundColor(Theme.BG);
 
         // 顶部返回条：网页面板里没有「回原生面板」的天然入口（网页自己不知道宿主是
         // App），硬件返回键又容易被网页的 history 吃掉。给一条明确的返回栏。
