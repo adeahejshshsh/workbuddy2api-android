@@ -14,12 +14,23 @@ import (
 
 const (
 	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
-	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.5.4）。
+	// 白名单头组的 X-IDE-Version），CN 档。
+	//
+	// 数字从哪来：拆 CN 分发包 5.11.3.43806934，package.json version 与
+	// cli/product.json genieVersion、resources/install-manifest.json appVersion 三处
+	// 一致；Homebrew workbuddy-cn cask 也是 5.11.3.43806934。旧值 5.5.4 是
+	// 2026-09 那一批抓包时的包版本，与现在的安装包差一个大版本。
 	// config upstream.client_version 可覆盖（空 = 内置默认）。
-	defaultClientVersion = "5.9.3"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.137.1）。
+	defaultClientVersion = "5.11.3"
+	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本，CN 档：取该分发包自带的
+	// @genie/agent-cli（cli/package.json），5.11.3 包带 2.176.0。
+	//
+	// **随包走，不是一个全局值**：国际分发包最新仍停在 5.9.4（2026-11 Homebrew
+	// workbuddy-ai cask 仍是 5.9.4.42593613，带 2.165.0）。若用一个全局值把 CN 的
+	// 2.176.0 套到 GL 上，UA 会拼成「workbuddy-ai/5.9.4 + CLI/2.176.0」——官方从来
+	// 不发这种组合，等于自造指纹。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.165.0"
+	defaultCliVersion = "2.176.0"
 
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -63,11 +74,17 @@ func (c *Client) cliVersion() string {
 }
 
 // defaultClientVersionGlobal / defaultCliVersionGlobal 国际版（global realm）版本段。
-// CN 与 intl 是两条独立发版线：2026-10 实测 CN WorkBuddy 5.8.3（内嵌 CLI 2.161.0）、
-// intl 5.8.4（同属 CLI 2.161.0 系列），故按账号 realm 分档。
+// CN 与 intl 是两条独立发版线（CN 5.11.3 / intl 5.9.4，内嵌 CLI 也不同档），故按账号
+// realm 分档 —— 单值会让一侧的 UA 与真实安装包不符。
 const (
 	defaultClientVersionGlobal = "5.9.4"
-	defaultCliVersionGlobal    = "2.161.0"
+	// 国际分发包 5.9.4.42593613 自带的 @genie/agent-cli 是 **2.165.0**（上游 2fa6876
+	// 的依据：Homebrew workbuddy-ai cask 仍停在 5.9.4.42593613 + 真机 /v3/config UA
+	// 实测 `WorkBuddy/5.9.4 CLI/2.165.0`）。本仓此前是更早抓包的 2.161.0，已对齐。
+	//
+	// 注意别拿 CN 档的 2.176.0 顶上：那会拼出官方不存在的「5.9.4 + CLI/2.176.0」组合，
+	// 比版本旧更显眼。
+	defaultCliVersionGlobal = "2.165.0"
 )
 
 // X-Agent-Type 的原始取值。真机 resolveModelCallAgentType 的主/次分支：
@@ -128,7 +145,8 @@ func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
 	// 国际版 productName 虽为 "WorkBuddy AI"、applicationName="workbuddy-ai"，出站 UA
 	// 第二段仍是 `WorkBuddy`。此前我们按 realm 切成 `WorkBuddy AI` 的结论是错的
 	// （依据是第三方逆向笔记，不是安装包本体）—— 送错平台段正是 11140 风控的诱因之一。
-	// 版本段按 realm 分档（CN 5.8.3 / intl 5.8.4）。
+	// 版本段按 realm 分档（CN 5.11.3 / intl 5.9.4），CLI 段同样按 realm 取
+	// （见 cliVersionFor：CN 包与 GL 包自带的 @genie/agent-cli 不同档）。
 	// 2026-10-30 双版本抓包：chat 族 = `WorkBuddy/<ver> <brand>/<ver> CLI/<cli>`，
 	// 首段恒驼峰 WorkBuddy（SDK buildUserAgent），第二段才是品牌 slug。
 	// 此前两段都写死驼峰：CN 恰好对，**global 少了 workbuddy-ai 那段**。
@@ -163,7 +181,7 @@ func (c *Client) userAgent(a *auth.Auth) string {
 // 覆盖 /v2/report、/v2/chat/busy、/console/as/*、auth/token/refresh、scheduler/tasks、
 // user-asset、portal：
 //
-//	CN 5.9.3     → WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+//	CN 5.11.3    → WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0
 //	global 5.9.4 → workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
 //
 // CN 下与 userAgent() 同值（品牌段本来就驼峰），只有 global 分叉 —— 此前 global 的

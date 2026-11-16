@@ -779,15 +779,18 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 每模型一行（modelCooldowns 内未到期的条目），多模型同时限流全部展示。
 		// 到期判据 = 该模型的独立冷却 until 未过；条件满足才输出，随到期自然消失，
 		// 普通软冷却（无模型级表）/硬冷却不产生台账（零回归）。
-		RateLimitedModels:        p.rateLimitedModelsLocked(e, now),
-		Realm:                    e.a.Realm(),
-		Enterprise:               e.a.IsEnterprise(),
-		EnterpriseOverride:       e.a.EnterpriseOverride,
-		Remark:                   e.remark,
-		Group:                    e.group,
-		Nickname:                 e.a.NicknameValue(),
-		Credits:                  e.credits,
-		CreditsTotal:             e.creditsTotal,
+		RateLimitedModels:  p.rateLimitedModelsLocked(e, now),
+		Realm:              e.a.Realm(),
+		Enterprise:         e.a.IsEnterprise(),
+		EnterpriseOverride: e.a.EnterpriseOverride,
+		Remark:             e.remark,
+		Group:              e.group,
+		Nickname:           e.a.NicknameValue(),
+		// 积分语义分离（20261116，移植上游 eca5f30）：Credits/CreditsTotal 报**可用量**，
+		// CreditsRaw 留原始快照。口径见 activeCredits 的注释。
+		Credits:                  activeCredits(e.credits, e.disabled),
+		CreditsTotal:             activeCredits(e.creditsTotal, e.disabled),
+		CreditsRaw:               e.credits,
 		ReserveBlocked:           p.reserveBlocked(e, p.modelFreeOf(e, "")),
 		Priority:                 p.priorityOf(uid),
 		Share:                    p.shareOf(uid),
@@ -893,6 +896,43 @@ func disabledAtRFC3339(e *entry) string {
 		return ""
 	}
 	return e.disabledAt.Format(time.RFC3339)
+}
+
+// activeCredits 返回对外报告的积分量：**禁用账号一律为 0**，其余状态原样透出。
+//
+// 为什么（20261116 实测，移植上游 eca5f30）：/status 的 credits 语义是「当前可用量」，
+// 而账号被封后余额是最后一次成功刷新时的**冻结快照** —— 实测有账号封禁三周仍显示
+// 4,552，其中 2,700 的积分包早已过期。把快照当可用量会让「总额 / 积分保底 / 路由排序 /
+// 面板积分合计」全部基于死数据，而且这种错误不报错，只是给出看似合理的数字。
+// 真实值不丢：留在 Status.CreditsRaw（禁用号的 credits_raw）里，供轮换判断与面板
+// tooltip 使用 —— 所以这个函数只影响对外报告，**不动** entry.credits 本身
+// （落盘走 stateOf，读的是 entry.credits，不经过这里）。
+//
+// 本仓比上游多几层状态，「可用量」逐条定口径（扣什么、什么时候扣）：
+//
+//   - 禁用（disabled）：扣光 → 0。禁用是授权/session 终态（需人工 revive），
+//     余额是封号前的冻结快照、可能整包过期，它不是「能用的钱」。
+//   - 暂停（paused）：**不扣**。运维临时让位，号本身健康、签到/余额刷新照常跑，
+//     积分是真的，只是暂不接流量（与禁用正交，见 Status.Paused 注释）。
+//   - 冷却（until / breakerUntil / degradeUntil）：**不扣**。限流是「暂时不能下单」，
+//     不是「钱没了」；到期自动恢复，扣了会让面板合计在限流高峰凭空缩水。
+//   - 占位（needAuth，快照恢复出只有 UID 没有凭证）：**不扣**。号在上游是活的、余额是
+//     真的，补回凭证即恢复；它选不到是因为没凭证，不是因为没额度。
+//   - 在途（in_flight）：**不扣**。在途请求的消耗还没计费 —— NoteModelCost 在响应
+//     回来后才按 usage.credit 下账，提前按单价预测扣减会与真实扣费重复计数；
+//     而 entry.credits 本身已是「签到权威值 + 两次签到之间的内插扣减」的估算量。
+//   - 保留积分（reserveCredits / credit_floor 阈值）：**不扣**。那是运维策略下限
+//     （余额低于阈值就不接单），不是已花掉/已冻结的钱；扣掉会让面板合计与上游余额
+//     对不上，且调阈值会凭空改变总额。该状态已由 ReserveBlocked 单独透出。
+//
+// 结论：只有「确定拿不回来」的禁用号扣成 0，其余状态都报真实余额。
+// CreditsTotal 同样过这个函数：总额度与余额来自同一份快照，禁用号一并归 0
+// （含企业版 -1「不限量」哨兵 —— 不限量是套餐属性，禁用号没有可用量可言）。
+func activeCredits(v int64, disabled bool) int64 {
+	if disabled {
+		return 0
+	}
+	return v
 }
 
 // modelCostsStatusLocked 收集账号的有效成本台账行（P1-anti-monopoly 可观测性）。

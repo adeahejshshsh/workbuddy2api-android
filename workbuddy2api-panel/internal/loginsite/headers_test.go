@@ -31,8 +31,8 @@ func TestHeadersForState(t *testing.T) {
 	if h["X-Product"] != "SaaS" {
 		t.Errorf("X-Product=%q want SaaS", h["X-Product"])
 	}
-	if !strings.HasPrefix(h["User-Agent"], "WorkBuddy/5.9.3") {
-		t.Errorf("CN UA=%q 应以 WorkBuddy/5.9.3 开头", h["User-Agent"])
+	if !strings.HasPrefix(h["User-Agent"], "WorkBuddy/5.11.3") {
+		t.Errorf("CN UA=%q 应以 WorkBuddy/5.11.3 开头", h["User-Agent"])
 	}
 	if !isHex32(h["X-Request-ID"]) {
 		t.Errorf("X-Request-ID=%q 应为 32 位 hex", h["X-Request-ID"])

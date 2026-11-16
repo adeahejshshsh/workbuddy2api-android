@@ -74,8 +74,9 @@ func TestEndpoints(t *testing.T) {
 
 func TestDecorateAuthURLAddsVersion(t *testing.T) {
 	got := DecorateAuthURL("https://example.test/login?state=abc", ForRealm("cn"), "", "")
-	// 授权链接里的 version 是**裸版本号**（真机 CN 5.9.3 / GL 5.9.4），不是 UA 那串
-	// "WorkBuddy/5.9.3"——授权页把它原样转给 risk-context，多一层前缀就是错的指纹。
+	// 授权链接里的 version 是**裸版本号**（真机 CN 5.11.3 / GL 5.9.4，随分发包上调），
+	// 不是 UA 那串 "WorkBuddy/5.11.3"——授权页把它原样转给 risk-context，多一层前缀
+	// 就是错的指纹。
 	if !strings.Contains(got, "version="+strings.TrimPrefix(ClientVersionWorkBuddyCN, "WorkBuddy/")) {
 		t.Fatalf("缺 version: %s", got)
 	}

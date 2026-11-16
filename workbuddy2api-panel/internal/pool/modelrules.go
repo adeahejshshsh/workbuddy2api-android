@@ -394,16 +394,28 @@ func (p *Pool) recomputeRulesLocked() {
 				continue
 			}
 			if r.Mode == RuleModeAllow {
-				e.ruleHasAllow = true
-				if e.ruleAllow == nil {
-					e.ruleAllow = map[string]struct{}{}
-				}
+				// 先按域收一遍：一条 allow 规则若在本账号所属域**一个模型都没命中**
+				// （典型是 global 号挂了纯 cn: 的白名单），视作这条规则没挂——否则
+				// ruleHasAllow 会把这个号对所有模型封死，而面板上它只是「挂了一条
+				// 白名单」，看起来毫无异常。跨域写错规则的意图几乎必然是「这个号
+				// 只用这几个模型」，不是「这个号什么都不能用」。
+				matched := make(map[string]struct{}, len(r.Models))
 				for _, m := range r.Models {
 					rm, bare := splitRealmModel(m)
 					if rm != "" && realm != "" && rm != realm {
 						continue // 别的域的规则与本账号无关（cn:hy4std ≠ global:hy4std）
 					}
-					e.ruleAllow[bare] = struct{}{}
+					matched[bare] = struct{}{}
+				}
+				if len(matched) == 0 {
+					continue
+				}
+				e.ruleHasAllow = true
+				if e.ruleAllow == nil {
+					e.ruleAllow = map[string]struct{}{}
+				}
+				for m := range matched {
+					e.ruleAllow[m] = struct{}{}
 				}
 				continue
 			}
@@ -450,4 +462,40 @@ func (p *Pool) RuleBlocked(uid, model string) bool {
 		return false
 	}
 	return e.blockedByRules(normalizeRuleModel(model))
+}
+
+// RulesBlockedForRealm 统计本域内「本来可选、却被模型规则拦住」的账号数，
+// 以及本域参与选号的账号总数（禁用 / 暂停 / 占位号不计，与 ModelBlockedForRealm 同口径）。
+//
+// 用途：选号失败时区分「号都挂着但还是不行」。冷却会自愈、规则不会——两者都落
+// no_healthy_account（503）时客户端只会当上游抖动重试，所以调用方拿到
+// blocked == eligible 时应当回一个可辨识的 4xx（model_not_allowed）。
+//
+// 纯只读聚合，用**读锁**：它在每次选号失败（no_healthy_account 503）的出口被调用，
+// 拿写锁会和选号互斥，失败越多越慢（与 ModelBlockedForRealm 的 bug 6 同一个理由）。
+// 函数体内无写、无回调、不重入 pool 的其它加锁方法。
+func (p *Pool) RulesBlockedForRealm(model, realm string) (blocked, eligible int) {
+	if model == "" {
+		return 0, 0
+	}
+	// 规则集合里存的是裸名（recomputeRulesLocked 已按账号域过滤并剥前缀），这里
+	// 同样剥一遍：面板/排查链路可能带 cn:/global: 前缀传进来。
+	_, bare := splitRealmModel(normalizeRuleModel(model))
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, e := range p.byUID {
+		// 禁用/暂停号不参与（它们的不可用与模型无关）；needAuth 占位号同理：
+		// 它永远选不到，却会拉大分母，让「本域全被规则挡住」判不出来。
+		if e.disabled || e.paused || e.needAuth {
+			continue
+		}
+		if realm != "" && e.a != nil && e.a.Realm() != realm {
+			continue // 别的域的号不能给"本域可选"作证
+		}
+		eligible++
+		if e.blockedByRules(bare) {
+			blocked++
+		}
+	}
+	return blocked, eligible
 }

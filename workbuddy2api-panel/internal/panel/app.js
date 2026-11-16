@@ -814,6 +814,10 @@ function renderAccounts(list) {
       credTip = (s.enterprise ? '企业版剩余额度 ' : '剩余 ')
         + s.credits + ' / ' + (s.enterprise ? '分配 ' : '总额 ') + s.credits_total + '（' + pct + '%）';
     } else credTip = '积分（相对池内最高）';
+    // 禁用号的 credits 是「当前可用量」= 0（见 pool.activeCredits），真实冻结快照在
+    // credits_raw。行内仍显示 0（可用），但把快照放进 tooltip：否则运维看不到死号里
+    // 还压着多少积分，误以为余额被清空了（移植上游 f5d08c0，不改口径）。
+    if (s.disabled && s.credits_raw > 0) credTip += '\n已禁用：可用 0，冻结快照 ' + s.credits_raw;
     const costs = (s.model_costs || []).filter(c => c.model);
     if (costs.length) {
       credTip += '\n实测单价（credits/1K）：\n' + costs.map(c =>

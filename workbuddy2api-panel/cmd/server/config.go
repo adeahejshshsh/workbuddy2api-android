@@ -315,18 +315,20 @@ type Config struct {
 		// 默认值已对齐官方 WorkBuddy 桌面形态（三段式），用户仍可配完全自定义值改写。
 		UserAgent string `json:"user_agent"`
 		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
-		// X-IDE-Version）。空 = 内置默认（对齐官方 5.5.4 分发包）。
+		// X-IDE-Version）。空 = 内置默认（对齐官方 CN 5.11.3 / GL 5.9.4 分发包）。
 		ClientVersion string `json:"client_version"`
-		// ClientVersionGlobal global realm 专用版本段（空 = 内置默认 5.8.4）。
+		// ClientVersionGlobal global realm 专用版本段（空 = 内置默认 5.9.4）。
 		// CN 与 intl 是两条独立发版线，单值会让一侧 UA 与真实安装包不符。
 		// TLSFingerprint 出站 TLS ClientHello 指纹档位："node"（默认，复刻官方
 		// Node/OpenSSL 的 JA3/JA4）/ "go"（crypto/tls 原生，排障与回滚用）。
 		// 头部做到 100% 一致也只到 HTTP 层 —— TLS 在 HTTP 之前就握手完了。
 		TLSFingerprint      string `json:"tls_fingerprint"`
 		ClientVersionGlobal string `json:"client_version_global"`
-		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（CN 包内置 CLI
+		// 2.176.0；GL 档见 cli_version_global）。两版分发包自带的 @genie/agent-cli
+		// 不同档，用一个全局值会把一侧的 UA 拼成官方不存在的组合。
 		CliVersion string `json:"cli_version"`
-		// CliVersionGlobal global realm 专用 CLI 版本段（空 = 内置默认 2.161.0）。
+		// CliVersionGlobal global realm 专用 CLI 版本段（空 = 内置默认 2.165.0）。
 		CliVersionGlobal string `json:"cli_version_global"`
 		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
@@ -403,7 +405,8 @@ type Config struct {
 		// ToolOnlyRescue 「说一句就收尾」的安全续写（只采纳工具调用），默认**关**。
 		// 判据只能看「末条是工具结果 + 正文短（<2KB）」，而 agent 循环里的正常收尾
 		// 长得一模一样：线上实测把 1608B 的完整回答当成截断，白打一次上游。
-		// 打开后还要过 server.toolIntentTail 的语义闸门（尾部预告动手才救）。
+		// 打开后还要过 toolOnlyLooksFinished 的语义闸门（末句在预告下一步才救，
+		// 见 internal/server/toolonly.go；此前的 server.toolIntentTail 已不存在）。
 		ToolOnlyRescue bool `json:"tool_only_rescue"`
 	} `json:"features"`
 

@@ -21,9 +21,9 @@ func TestChatHeadersMatch593(t *testing.T) {
 	c.ChatHeaders(req, a, "", meta)
 
 	h := req.Header
-	// ① 版本段
-	if ua := h.Get("User-Agent"); !strings.Contains(ua, "/5.9.3") {
-		t.Errorf("客户端版本应为 5.9.3: %q", ua)
+	// ① 版本段（跟着分发包走，见 defaultClientVersion；不写死号码）
+	if ua := h.Get("User-Agent"); !strings.Contains(ua, "/"+defaultClientVersion) {
+		t.Errorf("客户端版本应为 %s: %q", defaultClientVersion, ua)
 	}
 	// ② 桌面端本地 agent
 	if got := h.Get("X-Agent-Runtime"); got != "local-agent" {

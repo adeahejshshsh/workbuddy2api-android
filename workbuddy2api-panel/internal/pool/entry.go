@@ -70,12 +70,22 @@ type TokenUsageDelta struct {
 
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
-	UID          string `json:"uid"`
-	Nickname     string `json:"nickname,omitempty"`
-	Remark       string `json:"remark,omitempty"` // 运维备注（上游 PR #178）
-	Group        string `json:"group,omitempty"`  // 运维分组标签（空 = 未分组，issue #159）
-	Credits      int64  `json:"credits"`
-	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname,omitempty"`
+	Remark   string `json:"remark,omitempty"` // 运维备注（上游 PR #178）
+	Group    string `json:"group,omitempty"`  // 运维分组标签（空 = 未分组，issue #159）
+	// Credits 当前**可用量**（不是余额快照）：禁用号一律 0，其余状态报真实余额。
+	// 口径与「扣什么、什么时候扣」见 state.go 的 activeCredits。
+	Credits      int64 `json:"credits"`
+	CreditsTotal int64 `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）；禁用号同样归 0
+	// CreditsRaw 原始快照（entry.credits 原值，**不是可用量**）：禁用号封号前最后一次
+	// 成功刷新的余额就留在这里。
+	//
+	// 为什么两个字段并存（20261116，移植上游 eca5f30）：Credits 的语义是「当前可用量」，
+	// 禁用号必须报 0 —— 否则面板顶部积分合计会把死钱算进可用额度。但真实值不能丢：
+	// 运维据此判断「下一个该启用/复活谁」，面板 tooltip 也据此说明「死号里还压着多少」
+	// （见 panel/app.js 的额度 tooltip）。两者都要，故分开。
+	CreditsRaw int64 `json:"credits_raw,omitempty"`
 	// ReserveBlocked 是否因「保留积分」停牌（余额已知且 <= 阈值）：账号仍在池中、
 	// 照常签到/旅行，充值后自动恢复。
 	ReserveBlocked bool `json:"reserve_blocked,omitempty"`

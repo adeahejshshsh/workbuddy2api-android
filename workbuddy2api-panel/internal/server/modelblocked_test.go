@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // quotaLockBody 上游 6004「使用量已超出频率限制」的真实形态（带重置墙钟）。
@@ -23,6 +24,51 @@ const quotaLockBody = `{"code":6004,"msg":"您的使用量已超出频率限制�
 
 // quotaLockBody6000 6000 形态：与 6004 同族不同码，靠「切换其他模型」提示区分。
 const quotaLockBody6000 = `{"code":6000,"msg":"您的使用量已超出频率限制，您也可以切换其他模型继续使用","requestId":"rq-quota-6000"}`
+
+// TestChatAllAccountsRuleBlockedReturns400 本域所有可选账号都被模型规则挡住某个模型时回
+// 400 model_not_allowed：规则不会自愈，落 503 no_healthy_account 会被客户端当成上游抖动
+// 反复重试（与上面 6004 配额锁同一个理由）。
+func TestChatAllAccountsRuleBlockedReturns400(t *testing.T) {
+	p := testPoolWith(
+		&auth.Auth{UID: "r1", AccessToken: "at-r1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "r2", AccessToken: "at-r2", ExpiresAt: 9999999999},
+	)
+	rule, err := p.UpsertRule(pool.ModelRule{Name: "贵模型不给这两个号", Mode: pool.RuleModeDeny, Models: []string{"glm-5.2"}})
+	if err != nil {
+		t.Fatalf("UpsertRule: %v", err)
+	}
+	if _, err := p.ApplyRule(rule.ID, []string{"r1", "r2"}, true); err != nil {
+		t.Fatalf("ApplyRule: %v", err)
+	}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		t.Errorf("全池被规则挡住时不应打上游，auth=%q", authz)
+		return 500, "", false
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+
+	if rec.Code != 400 {
+		t.Fatalf("code=%d body=%s (want 400 model_not_allowed)", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Error struct {
+			Code string `json:"code"`
+			Hint string `json:"gateway_hint"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad response JSON: %v body=%s", err, rec.Body)
+	}
+	if resp.Error.Code != "model_not_allowed" {
+		t.Fatalf("error.code=%q want model_not_allowed (body=%s)", resp.Error.Code, rec.Body)
+	}
+	// hint 必须点明是规则干的：503 那条路上看不出成因，运维排查「明明有号却失败」全靠这句。
+	if !strings.Contains(resp.Error.Hint, "model_rules: 2/2") {
+		t.Errorf("gateway_hint=%q 应带 blocked/eligible 计数", resp.Error.Hint)
+	}
+}
 
 func decodeErrCode(t *testing.T, body []byte) (int, string, string) {
 	t.Helper()

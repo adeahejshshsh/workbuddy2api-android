@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,6 +60,17 @@ var transportHeader = map[string]bool{
 	"host": true, "content-length": true,
 	"accept-encoding": true, "content-encoding": true,
 }
+
+// verPat 三段式版本号（5.11.3 / 2.176.0）。
+var verPat = regexp.MustCompile(`\d+\.\d+\.\d+`)
+
+// normVer 抹掉版本号只留形态。
+//
+// 版本段是配置驱动的（config client_version / cli_version），跟着上游分发包走
+// —— 现在是 CN 5.11.3 / GL 5.9.4，而夹具是 5.9.3 真机原文。夹具不能改，那是抓包
+// 事实；按号码硬比等于每跟一次版就得动门禁，那是自己给自己放水。抹掉号码后，
+// UA 少一段、brand 变了、x-ide-version 整个消失这些真回归照样会红。
+func normVer(s string) string { return verPat.ReplaceAllString(s, "<v>") }
 
 func loadFixture(t *testing.T, name string) (order []string, values map[string]string) {
 	t.Helper()
@@ -254,7 +266,7 @@ func TestOfficialParity(t *testing.T) {
 				if !ok {
 					continue
 				}
-				if offVals[orig] != gotVals[g] {
+				if normVer(offVals[orig]) != normVer(gotVals[g]) {
 					valDiff = append(valDiff, k+": 官方="+strconv.Quote(offVals[orig])+" 项目="+strconv.Quote(gotVals[g]))
 				}
 			}

@@ -54,14 +54,18 @@ import (
 func TestLogStoreRotationNeverFallsBackToBaseFile(t *testing.T) {
 	dir := t.TempDir()
 	s := &LogStore{dir: dir, retentionDays: 7, maxBytes: 200}
-	ts := dayTS("2026-11-09", 12)
+	// 日期必须相对当下（与 logstore_test.go 的 dayAgo 同口径）：写死的 2026-11-09 一旦
+	// 越过 retentionDays=7 的清理线，Append 跨天触发的 cleanup 会把这个文件删掉，
+	// 后面的 Glob/Stat 就全部落空（实测 11-18 起必红）。
+	day := dayAgo(2)
+	ts := dayTS(day, 12)
 	const lines = 400
 	for i := 0; i < lines; i++ {
 		s.Append(LogEntry{TS: ts, Ch: ChSys, Text: "0123456789012345678901234567890123456789"})
 	}
 	s.Close()
 
-	all, err := filepath.Glob(filepath.Join(dir, "panel-2026-11-09*.jsonl"))
+	all, err := filepath.Glob(filepath.Join(dir, "panel-"+day+"*.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +73,7 @@ func TestLogStoreRotationNeverFallsBackToBaseFile(t *testing.T) {
 		t.Fatalf("轮转文件数 = %d，want >100（必须越过旧实现 2..99 的临界点才能钉住 W2-LS-01）", len(all))
 	}
 	// ① 基础文件不许突破单文件上限（+1 行的余量）：这是「磁盘无界增长」的直接判据。
-	base := filepath.Join(dir, "panel-2026-11-09.jsonl")
+	base := filepath.Join(dir, "panel-"+day+".jsonl")
 	info, err := os.Stat(base)
 	if err != nil {
 		t.Fatalf("基础文件缺失: %v", err)
@@ -105,7 +109,10 @@ func TestLogStoreDailyCapFreezesAndReports(t *testing.T) {
 	dir := t.TempDir()
 	s := &LogStore{dir: dir, retentionDays: 7, maxBytes: 200, maxDayBytes: 400}
 	defer s.Close()
-	ts := dayTS("2026-11-09", 12)
+	// 同 TestLogStoreRotationNeverFallsBackToBaseFile：日期必须相对当下，
+	// 写死的 2026-11-09 一旦越过 retentionDays=7 的清理线就会被跨天 cleanup 删掉。
+	day := dayAgo(2)
+	ts := dayTS(day, 12)
 	for i := 0; i < 100; i++ {
 		s.Append(LogEntry{TS: ts, Ch: ChSys, Text: "0123456789012345678901234567890123456789"})
 	}
@@ -116,7 +123,7 @@ func TestLogStoreDailyCapFreezesAndReports(t *testing.T) {
 		t.Fatal("单日上限命中后必须置 s.err（面板要能提示「日志已丢弃」）")
 	}
 	var total int64
-	all, _ := filepath.Glob(filepath.Join(dir, "panel-2026-11-09*.jsonl"))
+	all, _ := filepath.Glob(filepath.Join(dir, "panel-"+day+"*.jsonl"))
 	for _, path := range all {
 		if fi, err := os.Stat(path); err == nil {
 			total += fi.Size()
@@ -126,8 +133,9 @@ func TestLogStoreDailyCapFreezesAndReports(t *testing.T) {
 		t.Fatalf("单日写入 %d 字节，超过 maxDayBytes=400（硬闸没生效）", total)
 	}
 	// 换天必须解冻（否则第二天再也不写日志）。
-	s.Append(LogEntry{TS: dayTS("2026-11-10", 1), Ch: ChSys, Text: "next day"})
-	if got := readLogFile(filepath.Join(dir, "panel-2026-11-10.jsonl")); len(got) != 1 {
+	next := dayAgo(1)
+	s.Append(LogEntry{TS: dayTS(next, 1), Ch: ChSys, Text: "next day"})
+	if got := readLogFile(filepath.Join(dir, "panel-"+next+".jsonl")); len(got) != 1 {
 		t.Fatalf("换天后应恢复写入：%+v", got)
 	}
 }

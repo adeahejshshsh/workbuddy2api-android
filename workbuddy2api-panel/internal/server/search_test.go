@@ -372,6 +372,76 @@ func TestSearchCompatCardRewrite(t *testing.T) {
 	if got := rec.Body.String(); got != searchCardBody {
 		t.Fatalf("非 DSH 响应应逐字节透传，得到 %s", got)
 	}
+
+	// ⑤ 同一响应里两张无 url 的卡片：占位链接必须互不相同。客户端（实测
+	// dsh-free-search）按 url 精确去重，两张卡片共用一个链接时后一条被直接丢掉——
+	// 线上「宁德时代 股价 比亚迪 股价」只回 1 张卡片、官方插件回 2 张，而卡片摘要
+	// 就是答案本体（行情指标表），少一条等于少一半答案。只有一张卡片时不加
+	// fragment，见 ①；这里 2 张卡片 + 1 条正常网页。
+	twoCards := `{"query":"宁德时代 股价 比亚迪 股价","results":[` +
+		`{"title":"A股行情指标","url":"","snippet":"a"},` +
+		`{"title":"港股行情指标","url":"","snippet":"b"},` +
+		`{"title":"网页","url":"https://x.example/1","snippet":"c"}],` +
+		`"total_results":3}`
+	rec = postRaw(dshUA, twoCards)
+	var multi struct {
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &multi); err != nil {
+		t.Fatalf("响应不是 JSON: %v (%s)", err, rec.Body.String())
+	}
+	cardBase := cardSearchBase + url.QueryEscape("宁德时代 股价 比亚迪 股价")
+	if len(multi.Results) != 3 {
+		t.Fatalf("条数不应变化: %v", multi.Results)
+	}
+	if got, want := multi.Results[0]["url"], cardBase+"#card-1"; got != want {
+		t.Fatalf("第一张卡片 url 应为 %q，得到 %v", want, got)
+	}
+	if got, want := multi.Results[1]["url"], cardBase+"#card-2"; got != want {
+		t.Fatalf("第二张卡片 url 应为 %q，得到 %v", want, got)
+	}
+	if multi.Results[0]["url"] == multi.Results[1]["url"] {
+		t.Fatalf("两张卡片的占位链接不能相同: %v", multi.Results[0]["url"])
+	}
+	if multi.Results[2]["url"] != "https://x.example/1" {
+		t.Fatalf("正常条目的 url 不应被改: %v", multi.Results[2]["url"])
+	}
+	assertDSHAcceptsResults(t, rec.Body.Bytes())
+
+	// ⑤b 同一份上游原文再跑一遍必须逐字节相同：占位链接取序号而不是随机串/时间戳，
+	// 否则网关侧缓存、响应 diff 与重放全会抖。
+	if again := postRaw(dshUA, twoCards); again.Body.String() != rec.Body.String() {
+		t.Fatalf("同一输入两次改写结果应一致：\n第一次 %s\n第二次 %s",
+			rec.Body.String(), again.Body.String())
+	}
+
+	// ⑤c 没有 query、两张卡片标题又相同时，取词一字不差——唯一性只能靠 fragment，
+	// 这条钉住「计数判据与改写判据同为 cardTerm」：算成 1 张就不加 fragment，两张
+	// 卡片又会重成一条。
+	sameTitle := `{"results":[` +
+		`{"title":"广西-录取分数线","url":"","snippet":"a"},` +
+		`{"title":"广西-录取分数线","url":"","snippet":"b"}]}`
+	rec = postRaw(dshUA, sameTitle)
+	var twins struct {
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &twins); err != nil {
+		t.Fatalf("响应不是 JSON: %v (%s)", err, rec.Body.String())
+	}
+	twinBase := cardSearchBase + url.QueryEscape("广西-录取分数线")
+	if len(twins.Results) != 2 {
+		t.Fatalf("条数不应变化: %v", twins.Results)
+	}
+	if got, want := twins.Results[0]["url"], twinBase+"#card-1"; got != want {
+		t.Fatalf("同标题卡片 1 的 url 应为 %q，得到 %v", want, got)
+	}
+	if got, want := twins.Results[1]["url"], twinBase+"#card-2"; got != want {
+		t.Fatalf("同标题卡片 2 的 url 应为 %q，得到 %v", want, got)
+	}
+	if twins.Results[0]["url"] == twins.Results[1]["url"] {
+		t.Fatalf("同标题卡片的占位链接不能相同: %v", twins.Results[0]["url"])
+	}
+	assertDSHAcceptsResults(t, rec.Body.Bytes())
 }
 
 // assertDSHAcceptsResults 用 DSH 官方插件（@deepseek-ai/dsh-web-deepseek-api）的校验

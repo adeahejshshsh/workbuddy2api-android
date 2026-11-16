@@ -610,7 +610,12 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"global": countsMapFrom(h.cfg.Pool.CountsDetailedForRealm("global")),
 		},
 		"sticky_sessions": sticky,
-		"redis_mode":      redisMode,
+		// credits 顶层积分汇总（20261116，移植上游 eca5f30）：把「可用量」直接摊到接口
+		// 根部，外部集成（面板 / 费用插件 / 报表）不必各自遍历 accounts 再求和 —— 那种
+		// 做法每个消费方都要重复实现一遍，且极易漏掉「禁用号的 credits 已是 0、
+		// credits_raw 才是快照」这个语义差别，于是又算回死钱。零回归只增键。
+		"credits":    h.poolCreditsSummary(),
+		"redis_mode": redisMode,
 		// model_locks 当前有未过期模型级限流的 (域, 模型) 全清单：账号池视图回答
 		// 「哪些号不能用」，本键回答「哪些模型不能用、锁了几个号、还要锁多久」。
 		// 与 ModelBlocked（请求失败时的单模型判定）互补；无锁时为 null。零回归只增键。
@@ -642,6 +647,62 @@ func countsMapFrom(total, healthy, cooling, disabled, inFlightFull int) map[stri
 		"cooling":        cooling,
 		"disabled":       disabled,
 		"in_flight_full": inFlightFull,
+	}
+}
+
+// unlimitedCreditsSentinel 企业版「不限量」在池内的哨兵剩余量，与 pool.sentinelCredits
+// 同值（跨包不可见，故此处复写一份）。1<<40 不是钱，是「不限」的标记：求和时必须排除，
+// 否则 available 会被撑成 1e12 量级的天文数字 —— 面板汇总早就按同一判据过滤（报告 #9）。
+const unlimitedCreditsSentinel int64 = 1 << 40
+
+// poolCreditsSummary 汇总池内积分，供 /status 顶层 credits 键使用（零回归只增键）。
+//
+// 三个数分开写，避免读者猜（逐状态口径见 pool.activeCredits）：
+//
+//	available 健康/冷却/暂停号的可用积分；禁用号已归 0，死钱不计入
+//	snapshot  含禁用号快照的总量（= 把死钱也算进去的旧口径，仅供诊断对照）
+//	quota     可用号的总额度聚合
+//
+// by_realm 按域（cn/global）给出同样三项：双 realm 并存时消费方不必自己分组。
+//
+// 两个排除项都与面板汇总同一判据（报告 #9），否则「一次算对」的目的就落空：
+//   - 企业版不限量以 credits=1<<40、credits_total=-1 透出，既不该进 available（会变天文
+//     数字），也不该进 quota（直接相加会把总额减掉账号个数）；
+//   - credits_total = 0 是「未知（旧 state / 查询失败）」，同样不该进分母。
+func (h *Handler) poolCreditsSummary() map[string]any {
+	var available, snapshot, quota int64
+	byRealm := map[string]map[string]int64{}
+	for _, st := range h.cfg.Pool.List() {
+		// snapshot 保留原样（它就是「诊断对照」：含死钱、含哨兵），其余两项按上面口径清洗。
+		avail := st.Credits
+		if avail >= unlimitedCreditsSentinel {
+			avail = 0
+		}
+		q := int64(0)
+		if st.CreditsTotal > 0 {
+			q = st.CreditsTotal
+		}
+		available += avail
+		snapshot += st.CreditsRaw
+		quota += q
+		realm := st.Realm
+		if realm == "" {
+			realm = "cn" // 无域账号（占位/旧数据）归国内版，与面板 realm 过滤同口径
+		}
+		agg := byRealm[realm]
+		if agg == nil {
+			agg = map[string]int64{}
+			byRealm[realm] = agg
+		}
+		agg["available"] += avail
+		agg["snapshot"] += st.CreditsRaw
+		agg["quota"] += q
+	}
+	return map[string]any{
+		"available": available,
+		"snapshot":  snapshot,
+		"quota":     quota,
+		"by_realm":  byRealm,
 	}
 }
 
@@ -2703,6 +2764,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if realm != "" && h.cfg.Pool != nil && !h.cfg.Pool.ServableForRealm(realm) {
 		hint = fmt.Sprintf("realm %s has no servable account (cn=%v, global=%v); %s",
 			realm, h.cfg.Pool.ServableForRealm("cn"), h.cfg.Pool.ServableForRealm("global"), hint)
+	}
+	// 模型规则兜底（上游 8519ea2）：池里有号、号也健康，但本域所有可选账号都被人工
+	// 规则挡住了这个模型。规则不会自愈（与模型级冷却不同），落到 no_healthy_account
+	// （503）会被客户端当成上游抖动反复重试；这里回 400 + 可辨识 code，让调用方知道
+	// 「换模型才有用」。
+	//
+	// 放在 hint 拼装之后：上面那段 [pool: total=… realm_healthy=…] 讲的是「号都在，
+	// 但都不行」，本分支把它换成规则口径——否则客户端拿到的 hint 会自相矛盾
+	// （healthy=2 却 503），正是这条要治的误导。
+	if code == "no_healthy_account" && h.cfg.Pool != nil {
+		if blocked, eligible := h.cfg.Pool.RulesBlockedForRealm(curModel, realm); eligible > 0 && blocked == eligible {
+			status, code = http.StatusBadRequest, "model_not_allowed"
+			quotaCode = 0
+			msg = "this model is not allowed for any account in this group (model rules); try another model"
+			hint = fmt.Sprintf("model_rules: %d/%d account(s) blocked by model rules", blocked, eligible)
+		}
 	}
 	// upstreamMsgPassed 记录 error.message 是否已被上游原文占据：模型级阻塞分支
 	// 据此决定要不要覆盖 msg（上游原文优先，含 requestId）。
