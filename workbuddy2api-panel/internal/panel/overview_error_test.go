@@ -39,6 +39,9 @@ const ctx = {
   renderAccounts: () => { if (failRender) throw new Error('boom: 渲染炸了'); },
   renderModelLocks: () => {},
   renderExpirySnapshot: () => {},
+  // loadOverview 末尾同步管理员密钥横幅（adminkey.go 的自举入口）；沙箱里给个空实现，
+  // 否则「正常路径」会被记成一次渲染异常。
+  syncAdminKeyBar: () => {},
   lastPackages: null,
   overviewData: null,
 };

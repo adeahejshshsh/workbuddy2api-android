@@ -349,6 +349,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .restart-note { color: var(--warn); font-size: 12.5px; }
 
 /* ── 弹层 ─────────────────────────────────────────────────────────── */
+/* 管理员密钥横幅：只在 admin_key_set=false 时出现（老部署升级上来的形态）。
+   存在的理由见 internal/panel/adminkey.go 的文件头 —— 门锁上、钥匙锁在屋里。 */
+.admk-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 12px; padding: 10px 14px; border-radius: 10px;
+  border: 1px solid var(--warn); background: var(--warn-soft); color: var(--ink);
+  font-size: 13px; line-height: 1.5; }
+.admk-bar[hidden] { display: none; }
+.admk-bar .grow { flex: 1; min-width: 8px; }
+.admk-bar code { padding: 1px 5px; border-radius: 4px; background: rgba(127,127,127,.18); font-size: 12px; }
 .veil { position: fixed; inset: 0; background: rgba(6,8,13,.62); backdrop-filter: blur(2px); display: none; z-index: 60; }
 .veil.on { display: flex; align-items: center; justify-content: center; padding: 20px; }
 /* 弹窗打开时锁住背景滚动（openVeil / restoreFocus 维护）：否则手机上手势会穿透，
@@ -901,6 +910,13 @@ body.veil-open { overflow: hidden; }
   </nav>
 
   <div class="main">
+    <div class="admk-bar" id="adminKeyBar" role="alert" hidden>
+      <span>⚠ 还没配置 <code>admin_api_key</code>：导出凭据 / 读写配置 / 导入 / 登录 / 账号增删停改这些接口会被拒绝
+        （下游客户端手里就有 <code>api_key</code>，不能拿它管面板）。</span>
+      <span class="grow"></span>
+      <button class="primary" id="btnAdminKey">设置管理员密钥</button>
+      <button id="btnAdminKeyLater">稍后</button>
+    </div>
     <div class="topbar">
       <h2 id="ttl">账号池</h2>
       <span class="vtabs" id="accRealmTabs">
@@ -1826,6 +1842,36 @@ body.veil-open { overflow: hidden; }
 </div>
 
 <!-- 密钥 -->
+<div class="veil" id="adminKeyVeil">
+  <div class="dlg" style="width:460px" role="dialog" aria-modal="true" aria-labelledby="adminKeyVeilTitle">
+    <header>
+      <h3 id="adminKeyVeilTitle">设置管理员密钥</h3>
+      <div class="hint">
+        面板的管理接口（导出凭据 / 读写配置 / 导入 / 登录 / 账号增删停改）需要一把<b>与下游 api_key 不同</b>的密钥。
+        它会写进 <code>config.json</code> 的 <code>admin_api_key</code> 并立即生效，不需要重启。
+      </div>
+    </header>
+    <div class="body">
+      <label class="hint" for="admkInput">管理员密钥（至少 16 位，建议直接点「随机生成」）</label>
+      <input type="password" id="admkInput" placeholder="admin_api_key" autocomplete="new-password" aria-label="管理员密钥">
+      <label class="hint" for="admkInput2" style="margin-top:10px">再输一遍</label>
+      <input type="password" id="admkInput2" placeholder="再输一遍" autocomplete="new-password" aria-label="再输一遍管理员密钥">
+      <div class="state err" id="admkErr" hidden style="margin-top:10px"></div>
+      <div class="state" id="admkNote" style="margin-top:10px" hidden></div>
+      <div class="hint" style="margin-top:10px">
+        保存后当前页面会改用这把密钥。<b>请自己留一份</b>：丢了只能改 <code>config.json</code>
+        （或删掉 <code>admin_api_key</code> 后重启，再从这里重设）。
+      </div>
+    </div>
+    <footer>
+      <button id="btnAdmkGen">随机生成</button>
+      <span class="grow"></span>
+      <button id="btnAdmkCancel">取消</button>
+      <button class="primary" id="btnAdmkSave">保存</button>
+    </footer>
+  </div>
+</div>
+
 <div class="veil" id="keyVeil" data-lock="1">
   <div class="dlg" style="width:420px" role="dialog" aria-modal="true" aria-labelledby="keyVeilTitle">
     <header>

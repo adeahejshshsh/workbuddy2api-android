@@ -422,6 +422,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.modelProbes)
 	p.mux.HandleFunc("GET /panel/api/config", p.getConfig)
 	p.mux.HandleFunc("POST /panel/api/config", p.saveConfig)
+	// 管理员密钥自举（adminkey.go）：不在 panelSensitivePath 里 —— 它的用途恰恰是
+	// 让「还没配 admin_api_key」的部署能把钥匙配进去，否则门锁上、钥匙锁在屋里。
+	// 安全性由「只接受回环 + 已配过即关闭」保证，不靠这把门禁。
+	p.mux.HandleFunc("POST /panel/api/admin_key", p.adminKeyBootstrap)
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
@@ -567,13 +571,15 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	// 余额刷新是异步长任务：前端要知道「还在跑」才能正确轮询（报告 #21）。
 	balanceRefreshing := p.cfg.Scheduler != nil && p.cfg.Scheduler.TaskRunning(scheduler.TaskBalance)
 	authKey, panelDedicated := p.apiKey()
-	_ = panelDedicated
 	writeJSON(w, http.StatusOK, map[string]any{
 		"balance_refreshing": balanceRefreshing,
 		"model_fallback":     p.modelFallbackTable(), // 面板标注「已路由至」
 		"version":            p.cfg.Version,
 		"uptime_sec":         int(time.Since(p.started).Seconds()),
 		"auth_required":      authKey != "",
+		// admin_key_set 面板是否已有独立的管理员密钥。前端据此显示「设置管理员密钥」
+		// 横幅（adminkey.go 的自举入口只在 false 时可用）。
+		"admin_key_set": panelDedicated,
 		"redis_mode":         p.cfg.RedisMode,
 		"sticky_sessions":    sticky,
 		"total":              total,
