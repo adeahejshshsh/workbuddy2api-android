@@ -69,15 +69,91 @@ const toolOnlyMinPrompt = 20000
 // 写完的总结通常在 150B 以上。120B 落在两者之间，偏保守地保住了「短预告仍可救」。
 const toolOnlyFinalAnswerBytes = 120
 
-// toolOnlyLooksFinished 报告正文是否已经像「最终答复」：够长 + 以句末标点收尾。
-// 短句（"好的。"）不算——那正是这条救援原本要覆盖的形态。
+// toolOnlyLooksFinished 报告正文是否已经像「最终答复」：够长 + 以句末标点收尾，
+// 且最后一句不是在预告下一步。短句（"好的。"）不算——那正是这条救援原本要覆盖的形态。
 func toolOnlyLooksFinished(text string) bool {
 	s := strings.TrimSpace(text)
 	if s == "" || len(s) < toolOnlyFinalAnswerBytes {
 		return false
 	}
 	// narrationTailSuspends 对句末标点返回 false；冒号/逗号/未闭合代码块返回 true。
-	return !narrationTailSuspends(s)
+	if narrationTailSuspends(s) {
+		return false
+	}
+	// 「够长 + 句号收尾」在这两档里都会出现，靠最后一句的**意图**区分：
+	//   "我继续检查其他被错误替换的内容，例如 UnityManual.html 链接。"  ← 还没动手
+	//   "任务已全部完成，我来总结一下。"                                ← 真收尾（收尾词优先）
+	// 只看最后一句：前半段叙述里有"接下来"不代表结尾在预告下一步。
+	last := toolOnlyLastSentence(s)
+	if last == "" {
+		return true
+	}
+	for _, m := range toolOnlyClosingMarkers {
+		if strings.Contains(last, m) {
+			return true
+		}
+	}
+	low := strings.ToLower(last)
+	for _, m := range toolOnlyIntentMarkers {
+		if strings.Contains(low, m) {
+			return false
+		}
+	}
+	return true
+}
+
+// toolOnlyIntentMarkers 最后一句里出现这些词，说明模型在说「下一步要动手」而不是收尾。
+// 取自线上漏救样本（第 108/109 轮）与同类句式；**不收**"下面""接着"这类泛词——
+// "下面这些文件都已改好。" 是典型收尾，收进来就会误救。
+var toolOnlyIntentMarkers = []string{
+	"我继续", "接下来", "下一步", "我来", "现在开始", "现在修复", "再检查",
+	"next, i'll", "next i'll", "next i will", "let me", "now i'll", "i'll now",
+}
+
+// toolOnlyClosingMarkers 收尾词：最后一句里出现就一律当「已答完」，压过意图词。
+// 这条是意图词判据的对冲——"我来总结一下" 的意图词是"我来"，但整句是收尾。
+var toolOnlyClosingMarkers = []string{
+	"总结", "已完成", "全部完成", "已经完成", "完毕", "收尾", "到这里",
+}
+
+// toolOnlyLastSentence 取最后一个句末标点之后的那一句（去掉尾部标点）。
+// 只按句末标点切（不按逗号）："检查完了，我继续修下一个" 整句都算最后一句，
+// 切成半句反而会把意图词切走。
+//
+// 与上游的一处差异：ASCII 的 "." 只在后面跟空白或已在结尾时才算句末，否则
+// "UnityManual.html" / "check.go" / "v1.5" 会把末句切成半截（"html 链接"），
+// 末句里的意图词就再也找不到了——上游自己那条 108 样本（含 UnityManual.html）
+// 正好撞上这个形态，只是它不足 120B、被长度闸门短路，测试才没暴露。
+func toolOnlyLastSentence(s string) string {
+	rs := []rune(strings.TrimRight(s, " \t\r\n"))
+	isStop := func(i int) bool {
+		switch rs[i] {
+		case '。', '！', '？', '!', '?':
+			return true
+		case '.':
+			if i == len(rs)-1 {
+				return true
+			}
+			return rs[i+1] == ' ' || rs[i+1] == '\t' || rs[i+1] == '\n' || rs[i+1] == '\r'
+		}
+		return false
+	}
+	start, end := 0, len(rs)
+	for i := len(rs) - 1; i >= 0; i-- {
+		if !isStop(i) {
+			continue
+		}
+		if i == end-1 {
+			end = i // 尾部标点本身不算内容，继续往前找分隔点
+			continue
+		}
+		start = i + 1
+		break
+	}
+	if start >= end {
+		return ""
+	}
+	return string(rs[start:end])
 }
 
 // toolOnlyNudge 安全续写的指令。必须点明「别再用文字解释」——否则模型会再写一段
@@ -108,12 +184,12 @@ func lastMessageIsToolResult(body []byte) bool {
 // **缺省关闭**（features.tool_only_rescue）：只有「末条是工具结果 + 正文短」这一条
 // 结构证据，而 agent 循环里正常收尾同样满足它——线上表现为「正常回答被判成截断，
 // 白打一次上游，且续写段只采纳工具调用」。需要这条救援时必须显式打开配置，并且
-// 仍要过 toolIntentTail 的语义闸门。
+// 仍要过 toolOnlyLooksFinished 的意图闸门（够长 + 句号收尾 + 末句在预告下一步）。
 func (r *continueReader) tryToolOnlyRescue() bool {
 	switch {
 	case !r.toolOnlyRescue:
 		return false
-	case r.toolOnlyTried, r.narrationTried, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
+	case r.toolOnlyTried, r.narrationTries > 0, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
 		return false
 	case r.finish != "stop":
 		return false

@@ -23,6 +23,10 @@ func (t uaCaptureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 // chat/refresh 路径 UA=默认 WorkBuddy 三段式；billing 路径（report/travel/balance）
 // 单段 WorkBuddy/<ver>（对齐官方 banner 白名单头组，默认伪造桌面端指纹）；
 // 显式 client_name="SaaS" 才还原"billing 不设 UA"的旧行为。
+//
+// 三段式里的版本段跟着**当前分发包**走（CN 5.11.3 / CLI 2.176.0），断言一律引用
+// defaultClientVersion / defaultCliVersion 常量而不是写死号码：写死的话每次跟版都要
+// 改测试，改的还只是号码，测不出形态回归。
 func TestUserAgentDefaultEmptyKeepsClientUA(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -253,7 +257,7 @@ func TestUserAgentClientVersionOverride(t *testing.T) {
 // `WorkBuddy/<clientVersion>`（不带 CLI 段，对齐官方 banner/check-in 显式头组）。
 func TestBillingUA_WhenClientNameSet(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	// 默认 client_version → WorkBuddy/5.5.4
+	// 默认 client_version → WorkBuddy/<defaultClientVersion>（CN 档现 5.11.3）
 	c := &Client{
 		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
 			if got := r.Header.Get("User-Agent"); got != billingUAWorkBuddy {

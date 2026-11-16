@@ -323,21 +323,44 @@ func (p *Panel) loadTaskMap(a *auth.Auth) (map[string]*upstream.Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	// mp 列表是默认口径的超集（实测含常规任务）：合并去重，失败静默（与
-	// accountTasks 同口径）。
+	// 两份清单**合并**（0a2a55f）：此前注释假设「mp 列表是默认口径的超集」，任务中心
+	// 改版后 mp 口径成了子集，只信一路就会让另一路独有的任务（如 Library_read）被
+	// 判成「该账号没有此任务」，一项都不做（issue #243）。
+	// mp 列表失败静默：单路可用也比赛过没有强（与 accountTasks 同口径）。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
-		seen := make(map[string]bool, len(tasks)+len(mpTasks))
-		for i := range tasks {
-			seen[strings.ToLower(tasks[i].TaskCode)] = true
-		}
-		for _, t := range mpTasks {
-			if k := strings.ToLower(t.TaskCode); !seen[k] {
-				tasks = append(tasks, t)
-				seen[k] = true
-			}
-		}
+		tasks = mergeTaskLists(tasks, mpTasks)
 	}
 	return taskMapByCode(tasks), nil
+}
+
+// mergeTaskLists 合并默认口径与 mp 口径的任务清单：按 task_code（忽略大小写）去重，
+// base 的顺序原样保留，只存在于 extra 的任务按 extra 的原顺序追加到尾部。
+//
+// 为什么需要（0a2a55f）：任务清单来自两处，任何一处独有的任务都不能因为「另一处
+// 没有」被判成「该账号没有此任务」—— 合并后再判定。
+// 去重必须忽略大小写：上游同一任务在两路下发的 code 大小写可能不同，taskMapByCode
+// 也按小写建键，精确比较会在合并结果里留下两条同键项（后者覆盖前者）。
+// 顺序必须确定：面板每次刷新都按这个顺序渲染，用 map 遍历或随机顺序追加会让任务
+// 顺序在两次刷新之间乱跳。空 code 直接丢弃（上游偶发的占位项，建键后会与所有
+// 未知码撞在同一个 "" 上）。
+func mergeTaskLists(base, extra []upstream.Task) []upstream.Task {
+	out := make([]upstream.Task, 0, len(base)+len(extra))
+	seen := make(map[string]bool, len(base)+len(extra))
+	add := func(t upstream.Task) {
+		k := strings.ToLower(strings.TrimSpace(t.TaskCode))
+		if k == "" || seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, t)
+	}
+	for _, t := range base {
+		add(t)
+	}
+	for _, t := range extra {
+		add(t)
+	}
+	return out
 }
 
 // taskMapByCode 建 code（小写）→ *Task 映射。
@@ -406,14 +429,15 @@ var mpTaskCodes = map[string]bool{
 	"Sequential_Tasks_5": true,
 	"Sequential_Tasks_6": true,
 	"Sequential_Tasks_7": true,
+	// 关注「腾讯 WorkBuddy」公众号满 24h（上游 growth 文档归 mp 专属，见
+	// upstream.ListTasksMP 注释）：进度由服务端计时发放，没有可上报的客户端动作，
+	// 只能等它自然达标后领奖；登记在此是为了 accept/claim 走 mp 口径（issue #243）。
+	"wb_wechat_oa_subscribe_task": true,
 }
 
 // isMPTaskCode 报告任务是否小程序口径专属（决定回读/接受/领奖走 mp 变体）。
 func isMPTaskCode(code string) bool { return mpTaskCodes[code] }
 
-// taskByCode 拉取任务列表并定位单个任务；未找到返回 nil（不视为错误）。
-// 双口径：mp 专属任务在默认列表查不到，自动回落 mp 列表（仅对已登记的 mp 码，
-// 未知码不多打一次上游）。
 // taskDone 任务是否「已完成到不必再跑」：已领取奖励，或已达目标但还没领取。
 // 单任务入口与一键全部此前口径不一致 —— 单任务只跳过 Claimed，于是「已达标未领」
 // 时点一键完成会把整条动作链重跑一遍（expert_5 是 5 次真实对话 + 5 组召唤事件），
@@ -465,6 +489,10 @@ func (p *Panel) refreshCreditsAsync(a *auth.Auth) {
 // errTaskAborted 任务被中止（客户端断连 / HTTP 超时）。
 var errTaskAborted = errors.New("task aborted: client gone or request timed out")
 
+// taskByCode 拉取任务列表并定位单个任务；未找到返回 nil（不视为错误）。
+// 双口径（0a2a55f）：默认清单未命中时一律再问 mp 口径 —— 任务中心改版后 mp 口径
+// 不再是默认口径的超集，常规任务也可能只在 mp 清单下发（issue #243 的 Library_read
+// 就是这样），回落前判「没有此任务」等于把存在的任务当成不存在。
 func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 	tasks, err := p.listTasksSoftRate(a, false)
 	if err != nil {
@@ -477,10 +505,9 @@ func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 			return &tasks[i], nil
 		}
 	}
-	if isMPTaskCode(code) {
-		return p.taskByCodeMP(a, code)
-	}
-	return nil, nil
+	// 代价：每次未命中多一次列表调用，只在未命中时发生 —— runAutoAll 走
+	// loadTaskMap 的合并快照，存在的任务在那里就已命中，不会走到这里。
+	return p.taskByCodeMP(a, code)
 }
 
 // claimPollAttempts / claimPollGap 达标回读的有界轮询参数。

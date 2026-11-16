@@ -31,18 +31,25 @@ const ClientVersion = "2.176.0"
 //
 // 2026-10-30 双版本真机抓包：登录三端点发的是**桌面端 RPC 族**，不是 CodeBuddy 家族串：
 //
-//	CN 5.9.3     → WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
+//	CN 5.11.3    → WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0
 //	GL 5.9.4     → workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0
 //
 // 本仓别处注释早就写过「CodeBuddy 家族串在 WorkBuddy 分发包里根本不存在，是最显眼的
 // 非官方指纹」，结果登录链路一直在发它。
-const ClientUA = ClientVersionWorkBuddyCN + " " + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLI
+const ClientUA = ClientVersionWorkBuddyCN + " " + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLICN
 
 // 出站客户端版本段（与 upstream 的 chat/RPC 族同源，三处抓包一致）。
+//
+// 版本号从哪来：拆 CN 分发包 5.11.3.43806934，cli/product.json 的 genieVersion /
+// package.json 的 version / resources/install-manifest.json 的 appVersion 三处一致。
+// CLI 段取**该包自带的** @genie/agent-cli（cli/package.json），所以它是随包走的：
+// CN 5.11.3 带 2.176.0，国际分发包最新仍停在 5.9.4（带 2.165.0）。两档必须分开写
+// —— 用 CN 的 2.176.0 拼 GL 的 5.9.4，会得到一个官方从不发布的 UA。
 const (
-	ClientVersionWorkBuddyCN = "WorkBuddy/5.9.3"
-	ClientVersionWorkBuddyGL = "workbuddy-ai/5.9.4"
-	ClientVersionBuiltinCLI  = "2.165.0"
+	ClientVersionWorkBuddyCN  = "WorkBuddy/5.11.3"
+	ClientVersionWorkBuddyGL  = "workbuddy-ai/5.9.4"
+	ClientVersionBuiltinCLICN = "2.176.0"
+	ClientVersionBuiltinCLIGL = "2.165.0"
 )
 
 // Realm 取值（池内分域标识，与 auth.Realm() 输出一致）。
@@ -61,7 +68,7 @@ type Site struct {
 	// authentication.attributes.platform（**不是**顶层 platform 字段，那是 "CLI"，
 	// 两个同名字段取错层是旧实现的 bug，两版都不符）：
 	//
-	//	CN 5.9.3 → workbuddy     GL 5.9.4 → workbuddy-ai
+	//	CN 5.11.3 → workbuddy    GL 5.9.4 → workbuddy-ai
 	//
 	// 官方只对 platform=workbuddy 追加 ww_device_nonce（桌面端设备绑定）。
 	Platform string
@@ -88,7 +95,7 @@ var (
 		Platform:  "workbuddy",
 		Version:   strings.TrimPrefix(ClientVersionWorkBuddyCN, "WorkBuddy/"),
 		Domain:    "www.workbuddy.cn",
-		UserAgent: ClientVersionWorkBuddyCN + " " + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLI,
+		UserAgent: ClientVersionWorkBuddyCN + " " + ClientVersionWorkBuddyCN + " CLI/" + ClientVersionBuiltinCLICN,
 	}
 	// 旧桌面端国际版：base 与 Origin 同域。
 	siteWorkBuddy = Site{
@@ -97,7 +104,7 @@ var (
 		Platform:  "workbuddy-ai",
 		Version:   strings.TrimPrefix(ClientVersionWorkBuddyGL, "workbuddy-ai/"),
 		Domain:    "www.workbuddy.ai",
-		UserAgent: ClientVersionWorkBuddyGL + " " + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLI,
+		UserAgent: ClientVersionWorkBuddyGL + " " + ClientVersionWorkBuddyGL + " CLI/" + ClientVersionBuiltinCLIGL,
 	}
 )
 
@@ -160,7 +167,7 @@ func CodeFatal(code int) bool {
 //
 // 2026-11-14 两侧真机链接原文（脱敏）：
 //
-//	CN : /login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
+//	CN : /login?platform=workbuddy&state=…&version=5.11.3&loginSessionId=<uuid>
 //	          &traceparent=00-…&login_owner_id=<uuid>&ww_device_nonce=<nonce>
 //	GL : /login/?platform=workbuddy-ai&state=…&version=5.9.4
 //

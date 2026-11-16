@@ -22,6 +22,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -73,7 +74,8 @@ var cardSearchBase = "https://cn.bing.com/search?q="
 //
 // 三件事：
 //  1. 空 url 的条目按上游卡片处理，改写成一次同词检索的链接（见 cardSearchBase）；
-//     query 与 title 皆空、无从取词的才丢弃，并同步修正 total_results。
+//     同一响应里多张卡片的链接必须互不相同（追加 #card-N），否则会被客户端按 url
+//     去重掉；query 与 title 皆空、无从取词的才丢弃，并同步修正 total_results。
 //  2. results[] 里缺 date 时补 `null`。上游（WorkBuddy /agenttool）不返回发布日期，
 //     而 DSH 用 `item.date !== null && typeof item.date !== 'string'` 判定，字段
 //     **缺失**（undefined）会直接抛 invalidResponse（"invalid response body"）。
@@ -94,26 +96,44 @@ func compatDeepSeekSearch(raw []byte) []byte {
 		return raw
 	}
 
-	// 卡片改写的取词：优先本次检索词（上游响应自带 query），空则退回卡片标题。
-	// 用检索词而不是标题：卡片的 title 常是表头（如「港股行情指标(货币-港元) |
-	// A股行情指标(货币-人民币)」），拿去搜没有意义；检索词才是用户真正想找的东西。
+	// 本次检索词：上游响应自带 query，是卡片改写的首选取词（见 cardTerm）。
 	var query string
 	if q, has := obj["query"]; has {
 		_ = json.Unmarshal(q, &query)
 	}
 	query = strings.TrimSpace(query)
 
+	// 多张卡片时给每条占位链接加不同的 fragment：客户端（实测 dsh-free-search）按 url
+	// 去重，两张卡片共用一个「检索链接」会被当成重复条目，后一条直接消失——内容其实
+	// 都在，只是链接相同（实测「宁德时代 股价 比亚迪 股价」只回 1 张，官方插件回 2 张）。
+	// fragment 不改检索词、也不影响点开看到的结果，而客户端的 URL 归一化保留 hash
+	// （dsh-free-search 的 normalizeUrlForDedupe 保留 u.hash），去重因此不再合并它们。
+	// 只有一张卡片时不加，链接保持干净（本仓用例 ① 钉住的就是这个形状）。
+	//
+	// 用序号而不是随机串/时间戳：占位链接必须**可重放**——同一份上游原文跑两次兼容层
+	// 要产出逐字节相同的结果，否则网关侧缓存、响应 diff 与回归用例全会抖。序号只取决于
+	// 卡片在 results 里的次序，天然确定；同次响应内卡片序号必不相同，唯一性也成立。
+	cards := 0
+	for _, it := range items {
+		if strings.TrimSpace(jsonString(it, "url")) == "" && cardTerm(it, query) != "" {
+			cards++
+		}
+	}
+
 	kept := items[:0]
+	cardNo := 0
 	for _, it := range items {
 		if strings.TrimSpace(jsonString(it, "url")) == "" {
-			term := query
-			if term == "" {
-				term = strings.TrimSpace(jsonString(it, "title"))
-			}
+			term := cardTerm(it, query)
 			if term == "" {
 				continue // 无取词可改写：发非法条目比丢掉更糟
 			}
-			patch, err := json.Marshal(cardSearchBase + url.QueryEscape(term))
+			cardNo++
+			target := cardSearchBase + url.QueryEscape(term)
+			if cards > 1 {
+				target += "#card-" + strconv.Itoa(cardNo)
+			}
+			patch, err := json.Marshal(target)
 			if err != nil {
 				continue
 			}
@@ -150,6 +170,19 @@ func compatDeepSeekSearch(raw []byte) []byte {
 		return raw
 	}
 	return out
+}
+
+// cardTerm 卡片改写的取词：优先本次检索词（上游响应自带 query），空则退回卡片标题。
+// 用检索词而不是标题：卡片的 title 常是表头（如「港股行情指标(货币-港元) |
+// A股行情指标(货币-人民币)」），拿去搜没有意义；检索词才是用户真正想找的东西。
+//
+// 取词为空表示这张卡片无从改写、会被丢弃——统计占位链接数量时也按同一判据，
+// 保证「加不加 #card-N」与「实际改写了几张」始终一致。
+func cardTerm(item map[string]json.RawMessage, query string) string {
+	if query != "" {
+		return query
+	}
+	return strings.TrimSpace(jsonString(item, "title"))
 }
 
 // jsonString 取字符串字段；缺失、null 或类型不符一律按空串处理。

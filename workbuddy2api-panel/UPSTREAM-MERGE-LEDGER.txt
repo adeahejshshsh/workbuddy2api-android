@@ -1075,3 +1075,34 @@ commits API、`git fetch upstream` —— 全部返回同一 sha，`cf16478..7dc
 （global 账号任务自动化，draft）：它要删 `autotask/tasks/taskcenter/taskjobs` 里 7 处
 `IsGlobal()` 并新增 `runGlobalChat/Skill/Template/Expert`，而本仓没有它挂靠的执行体，且这是
 消耗额度的功能（本仓口径：这类一律默认关）。等它合进上游 main 再评估。
+
+### 第二十二批（上游 2026-11-16 批次：`7dcae8e` → `09189a5`，17 条 / 13 条非 merge）
+
+按文件归属切成 6 份并发搬，每条都在本仓结构上改写而不是整段覆盖。
+
+| 上游提交 | 处置 | 本仓落点 |
+|---|---|---|
+| `2fa6876` 指纹版本段 5.11.3 / CLI 2.176.0 | 搬 | `upstream/headers.go`、`desktop.go`、`loginsite.go`、`cmd/server/config.go`。GL 档 CLI 顺带从 2.161.0 对齐到 **2.165.0**（上游证据：cask 5.9.4.42593613 + 真机 `/v3/config` UA `WorkBuddy/5.9.4 CLI/2.165.0`） |
+| `e069e65` 官方头对拍门禁按形态比版本 | 搬测试半 | `official_fixture_test.go` 用 `normVer` 归一化后比；本仓无 `binaries.yml`，工作流那半跳过 |
+| `eca5f30` 积分语义分离 | 搬 | `pool/entry.go` 加 `CreditsRaw`；`pool/state.go` 加 `activeCredits`（只有「确定拿不回来」的禁用号归 0，暂停/冷却/占位/在途/保留阈值都不扣）；`server/handler.go` 加顶层 `credits{available,snapshot,quota,by_realm}`。两处有意偏离上游：不限量哨兵 `1<<40` 不进 available、`credits_total<=0` 不进 quota |
+| `f5d08c0` 冻结快照进额度 tooltip | 搬 | `panel/app.js` 4 行 |
+| `89cdfe7` 句号收尾的「我继续」不再算最终答复 | 搬 | `server/toolonly.go` 新增 `toolOnlyIntentMarkers`/`toolOnlyClosingMarkers`/`toolOnlyLastSentence`。**主动偏离上游**：ASCII `.` 只在后接空白或已到结尾时算句末——上游无条件切，`UnityManual.html` 会把末句切成「html 链接」、意图词整段丢失 |
+| `bd59564` 长度闸门只拦标点型悬停 | 搬 | `server/narration.go` 加 `tailHangPunct`/`narrationTailPunctuated` |
+| `09189a5` 按末句判「等回话」+ 承诺句 nudge + 上限两次 | 搬 | `narration.go`（`yieldTailBytes`/`yieldTail`/`narrationPromiseNudge`/`narrationMaxRescues=2`）、`continue.go`、`toolonly.go`。上游 `ChatStreamContext` 多出的参数与 billed/starved 结构本仓没有，未搬 |
+| `d2708ca` `/v1/search` 占位链接唯一 | 搬 | `server/search.go` 用**卡片序号**（`#card-N`）而非随机/时间戳：同一份上游原文跑两次逐字节相同；只有一张卡片时不加 fragment，既有精确断言不受影响 |
+| `0a2a55f` 合并默认+mp 任务列表 | 搬（意图） | `panel/autotask.go` 新增 `mergeTaskLists`、`taskByCode` 去掉 `isMPTaskCode` 卡死、`mpTaskCodes` 补登记。上游的 have/done 快照本仓没有，未硬搬 |
+| `74456c8` 模型规则 review | 搬 | 见下「补上一轮漏搬」 |
+| `452643b` / `1166967` logstore 用例相对日期 | 搬 | `panel/logstore_test.go` 加 `dayAgo`，四条用例改相对当下 |
+| `8519ea2` 模型规则 PR 本体 | 已在 #123 搬过 | 见下 |
+
+**补上一轮漏搬（不是这次上游新增，是 #123 搬运时截断的）**：
+
+- `pool.RulesBlockedForRealm` —— 上一轮把 `modelrules.go` 尾部截断了，函数根本没进来。已补：读锁（它在每次 503 出口被调用，写锁会和选号互斥）、跳过 `needAuth` 占位号（否则拉大分母，判不出「本域全被挡住」）、`e.a != nil` 防 panic。
+- `recomputeRulesLocked` 的跨域 allow 守卫 —— 不补的话「global 号挂了纯 `cn:` 白名单」会 `ruleHasAllow=true` 而 `ruleAllow` 为空，该号对所有模型静默封死，面板上看不出异常。
+- `server/handler.go` 的 400 `model_not_allowed` 分支 —— 此前 `RulesBlockedForRealm` 没有任何调用点，全池被规则挡住仍回 503 `no_healthy_account`（hint 还自相矛盾地写着 `healthy=2`），客户端会当上游抖动一直重试。
+
+**顺手修的本仓 time bomb**（与上游无关，`452643b` 提示下查出）：`panel/audit_round2_test.go` 的 `TestLogStoreDailyCapFreezesAndReports` 与 `TestLogStoreRotationNeverFallsBackToBaseFile` 写死 `2026-11-09`，越过 `retentionDays=7` 的清理线后必红（11-18 起）。两条都改成 `dayAgo(n)`。
+
+**未动的一处语义差异**：`UpsertRule` 对未知 id 本仓建新规则、上游报「规则不存在」。这是审查 C5-60 删死代码时顺带改掉的，影响只是「拼错 id 会静默建出一条没人挂的规则」，不为此再动已冻结的代码路径。
+
+用例：`bash tests/run.sh all` 19 个包全绿；本批新增/改写用例约 60 条（narration 13+7+5、toolonly 13+7+3、search 3、pool 1、server 契约 1、logstore 4）。

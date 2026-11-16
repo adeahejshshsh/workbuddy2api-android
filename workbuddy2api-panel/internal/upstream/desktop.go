@@ -43,7 +43,7 @@ const (
 	desktopReportPath    = "/v2/report"
 	desktopAppearanceSet = "/v2/user-asset/appearance/set"
 	// desktopUA 旧的固定桌面 UA（5.5.6 / CLI 2.137.1）。**已不再用于出站**：
-	// 版本段与平台段改为按 realm 由 defaultWorkBuddyUAFor 生成（CN 5.8.3 / intl 5.8.4）。
+	// 版本段与平台段改为按 realm 由 defaultWorkBuddyUAFor 生成（CN 5.11.3 / intl 5.9.4）。
 	// 保留常量仅供测试与兼容引用。
 	desktopUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
 )
@@ -87,18 +87,28 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 		"username":     nick,
 		"userNickname": nick,
 		"product":      "SaaS",
-		// 5.9.3 真机 /v2/report 重新采集（2026-10-28，commit / releaseDate /
-		// ideVersion / extVersion 逐字取自 7 条上报事件，并与分发包 cli/product.json
-		// 的 commit + date 交叉一致）。旧值 5.5.6 / 5f9692… 与当前客户端差一个大版本。
-		"releaseDate": int64(1793093056315),
-		"commit":      "d46924219e79332f49c37ccebf27292f87001b19",
+		// 三元组是**打包期常量**（commit / releaseDate 无法从版本号推导），只能跟着
+		// 分发包重采。本仓这套指纹不分档（CN / GL 共用一份），取的是 CN 分发包的值：
+		// 2026-11-16 按 5.11.3.43806934 更新，来源同旧值口径 —— cli/product.json 的
+		// genieVersion / commit / date，并与安装包文件名里的短 hash `ecace0f7` 交叉一致：
+		//
+		//	genieVersion = 5.11.3
+		//	commit       = ecace0f7028166695994300182295329b8b95449
+		//	date         = 2026-11-12T16:49:29.764Z → 1794502169764
+		//
+		// 旧值（5.9.3：d4692421… / 1793093056315）来自真机 /v2/report 的 7 条事件，
+		// 与当时的 product.json 交叉一致；新值目前只有静态证据（没抓 5.11.3 真机的
+		// 上报事件），releaseDate 取的是 product.json 的 date 而不是报告事件值 ——
+		// 两者历史上相差约 5s。抓到新版真机事件后按实测覆盖。
+		"releaseDate": int64(1794502169764),
+		"commit":      "ecace0f7028166695994300182295329b8b95449",
 		"ideName":     "WorkBuddy",
 		"ideType":     "WorkBuddy",
-		"ideVersion":  "5.9.3",
+		"ideVersion":  "5.11.3",
 		"machineId":   deriveID(a, "machine"),
 		"sessionId":   deriveID(a, "session"),
 		"extName":     "workbuddy-desktop",
-		"extVersion":  "5.9.3",
+		"extVersion":  "5.11.3",
 		"os":          "win32",
 		"arch":        "x64",
 		"osVersion":   "10.0.26220",

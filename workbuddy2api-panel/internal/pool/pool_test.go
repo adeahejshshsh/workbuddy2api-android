@@ -2007,3 +2007,50 @@ func TestResumeIdempotent(t *testing.T) {
 		t.Errorf("Paused 应仍为 false: %+v", st)
 	}
 }
+
+// TestDisabledAccountReportsZeroCredits 禁用账号的 /status 积分报 0，快照留在 credits_raw。
+//
+// 为什么值得钉（20261116 实测，移植上游 eca5f30）：账号被封后余额是最后一次成功刷新
+// 时的**冻结快照**，实测有账号封禁三周仍显示 4,552（其中 2,700 的包早已过期）。
+// /status 的 credits 语义是「当前可用量」，把快照当可用量会让总额 / 积分保底 /
+// 路由排序全部基于死数据 —— 这类错误不报错，只是给出看似合理的数字。
+//
+// 本仓比上游多几层状态，这里一并钉住「扣什么、什么时候扣」（口径见 activeCredits）：
+// 只有禁用扣成 0；暂停（照常保号、余额仍刷新）与冷却（限流不是没钱）都报真实余额。
+func TestDisabledAccountReportsZeroCredits(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 4552, 4842)
+
+	st, ok := p.Status("u1")
+	if !ok || st.Credits != 4552 || st.CreditsRaw != 4552 {
+		t.Fatalf("禁用前 credits=%d raw=%d want 4552/4552 (ok=%v)", st.Credits, st.CreditsRaw, ok)
+	}
+
+	p.Disable("u1", "test disable")
+	st, ok = p.Status("u1")
+	if !ok {
+		t.Fatal("账号应仍在池中")
+	}
+	// 冻结时两个字段必须不同：可用量 0，快照仍是 4552。
+	if st.Credits != 0 || st.CreditsTotal != 0 {
+		t.Errorf("禁用后应报 0（快照不是可用量），实际 credits=%d total=%d", st.Credits, st.CreditsTotal)
+	}
+	if st.CreditsRaw != 4552 {
+		t.Errorf("禁用号快照 credits_raw=%d want 4552（轮换判断与面板 tooltip 靠它）", st.CreditsRaw)
+	}
+
+	// 暂停号不受影响：积分是真的（照常保号、余额仍刷新），只是暂不接流量。
+	p.ReviveDisabled("u1")
+	p.Pause("u1")
+	if st, _ := p.Status("u1"); st.Credits != 4552 || st.CreditsRaw != 4552 {
+		t.Errorf("暂停号应保留真实积分，实际 credits=%d raw=%d", st.Credits, st.CreditsRaw)
+	}
+
+	// 冷却号同样不受影响：限流是「暂时不能下单」，不是「钱没了」。
+	p.Resume("u1")
+	p.Cooldown("u1", CoolSoft, time.Minute, "test cool")
+	if st, _ := p.Status("u1"); !st.Cooling || st.Credits != 4552 || st.CreditsRaw != 4552 {
+		t.Errorf("冷却号应保留真实积分，实际 cooling=%v credits=%d raw=%d", st.Cooling, st.Credits, st.CreditsRaw)
+	}
+}
