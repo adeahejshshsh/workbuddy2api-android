@@ -31,7 +31,7 @@ const ctx = {
   api: async () => store.payload,
   esc: x => String(x == null ? '' : x),
   setHTML: () => {}, toast: () => {},
-  renderUpdateStatus: () => {}, renderExpirySnapshot: () => {},
+  renderUpdateStatus: () => {}, renderExpirySnapshot: () => {}, syncAdminKeyBar: () => {},
   renderAccounts: () => { calls.accounts++; },
   renderModelLocks: () => { calls.locks++; },
   startPolling: () => {},

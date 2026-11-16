@@ -36,6 +36,13 @@ let logsSeq = 0, modelsSeq = 0, tasksSeq = 0, balanceSeq = 0, packagesSeq = 0;
    多次 —— 重复 openVeil 会反复覆盖 veilOpener（关闭后焦点还原错位），更糟的是密钥
    弹窗已被用户关掉后，后到的 401 又把它弹回来。一轮 401 只弹一次，提交密钥时复位。 */
 let keyPrompting = false;
+/* 403 admin_key_required 单飞：同一次首屏并发里多个敏感接口同时 403 时，别把
+   「设置管理员密钥」弹窗连开多次（与 keyPrompting 同一个理由）。 */
+let admkPrompting = false;
+/* adminKeySet 面板是否已有独立管理员密钥（overview 的 admin_key_set）。403 时要据此
+   分岔：false → 去「设置」；true → 说明当前会话用的是旧客户端 key，去「输入」。
+   不区分就会在已配好的部署上弹出一个只能 409 的设置窗。 */
+let adminKeySet = null;
 
 const $ = id => document.getElementById(id);
 
@@ -110,6 +117,25 @@ async function api(path, opts = {}) {
   }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) {
+    // 403 admin_key_required（adminkey.go）：老部署升级上来的典型形态 —— 没配
+    // admin_api_key，敏感接口全拒。这里把横幅顶出来并弹一次设置窗，否则用户只会
+    // 看到一串看不懂的 403，而面板里没有任何地方能填这个值。
+    if (r.status === 403 && String(d.error || '').includes('admin_key_required')) {
+      const e = new Error(adminKeySet === true
+        ? '该操作需要管理员密钥：请输入 admin_api_key（当前会话用的是下游 api_key）'
+        : '该操作需要管理员密钥：请先在顶部横幅里设置 admin_api_key');
+      e.status = r.status;
+      e.adminKeyRequired = true;
+      if (adminKeySet === true) {
+        // 已配过：缺的是「输入」，不是「设置」——再弹设置窗只会拿到 409。
+        if (!keyPrompting) { keyPrompting = true; openKey(); }
+      } else {
+        const bar = $('adminKeyBar');
+        if (bar) bar.hidden = false;
+        if (!admkPrompting) { admkPrompting = true; openAdminKey(); }
+      }
+      throw e;
+    }
     // 带上状态码（BUG-14）：调用方要区分「state 真失效（4xx）」与「网络抖动/5xx（可重试）」
     const e = new Error(d.error || ('HTTP ' + r.status));
     e.status = r.status;
@@ -488,6 +514,8 @@ const VEIL_CLOSERS = {
   ruleVeil: () => closeRuleDlg(),
   accRuleVeil: () => closeAccRuleDlg(),
   accPickVeil: () => closeAccPickDlg(),
+  // 关窗要解除 403 单飞，否则用户误关一次后，后续 403 不再弹窗（同 keyVeil 的理由）。
+  adminKeyVeil: () => { admkPrompting = false; $('adminKeyVeil').classList.remove('on'); restoreFocus('adminKeyVeil'); },
 };
 const VEIL_ESC_LOCKED = new Set(['keyVeil']);
 const veilOpener = new Map(); // veil id -> 打开它的控件（关闭后焦点还回去）
@@ -566,6 +594,71 @@ $('btnKey').onclick = async () => {
     $('keyErr').hidden = false;
   }
 };
+/* ── 管理员密钥自举（internal/panel/adminkey.go） ────────────────────
+   背景：P0-1 之后，没配 admin_api_key 的部署在敏感接口上一律 403（导出凭据 / 读写
+   配置 / 导入 / 登录 / 账号增删停改），而「配它」本身要写配置 —— 正好也在被拒名单
+   里，等于门锁上、钥匙锁在屋里。后端给了一条只接受回环的引导路径，这里接成
+   横幅 + 弹窗：不接的话老用户升级上来只会看到一串 403，且不知道该去哪填。 */
+const LS_ADMK_DISMISS = 'wb2api.admk.dismissed';
+function syncAdminKeyBar(set) {
+  const bar = $('adminKeyBar');
+  if (!bar) return;
+  // 老服务端没有这个字段（undefined）：不显示，别凭空吓人。
+  const need = set === false && sessionStorage.getItem(LS_ADMK_DISMISS) !== '1';
+  bar.hidden = !need;
+}
+function openAdminKey() {
+  const err = $('admkErr');
+  if (err) err.hidden = true;
+  if ($('admkInput')) $('admkInput').value = '';
+  if ($('admkInput2')) $('admkInput2').value = '';
+  openVeil('adminKeyVeil', '#admkInput');
+}
+function genAdminKey() {
+  const a = new Uint8Array(24);
+  crypto.getRandomValues(a);
+  const s = Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+  $('admkInput').value = s;
+  $('admkInput2').value = s;
+  $('admkErr').hidden = true;
+  $('admkInput').focus();
+}
+async function saveAdminKey() {
+  const k = ($('admkInput').value || '').trim();
+  const k2 = ($('admkInput2').value || '').trim();
+  const err = $('admkErr');
+  err.hidden = true;
+  if (k.length < 16) { err.textContent = '至少 16 位（面板会把它存在浏览器里，太短等于没设）'; err.hidden = false; return; }
+  if (k !== k2) { err.textContent = '两次输入不一致'; err.hidden = false; return; }
+  try {
+    await api('admin_key', { method: 'POST', body: JSON.stringify({ admin_api_key: k }) });
+  } catch (e) {
+    err.textContent = e.message || String(e);
+    err.hidden = false;
+    return;
+  }
+  // 保存成功 → 立刻把当前会话切到这把 key。面板此后按 admin key 鉴权，沿用旧客户端
+  // key 会让每个敏感接口继续 403（用户会以为「没保存成功」）。
+  localStorage.setItem(LS_KEY, k);
+  sessionStorage.removeItem(LS_ADMK_DISMISS);
+  admkPrompting = false;
+  syncAdminKeyBar(true);
+  closeVeil('adminKeyVeil');
+  toast('管理员密钥已保存并生效', 'ok');
+  start();   // 重新拉一轮，确认新 key 可用
+}
+if ($('btnAdminKey')) $('btnAdminKey').onclick = () => openAdminKey();
+if ($('btnAdminKeyLater')) $('btnAdminKeyLater').onclick = () => {
+  sessionStorage.setItem(LS_ADMK_DISMISS, '1');
+  $('adminKeyBar').hidden = true;
+};
+if ($('btnAdmkGen')) $('btnAdmkGen').onclick = genAdminKey;
+if ($('btnAdmkCancel')) $('btnAdmkCancel').onclick = () => closeVeil('adminKeyVeil');
+if ($('btnAdmkSave')) $('btnAdmkSave').onclick = saveAdminKey;
+if ($('admkInput2')) $('admkInput2').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); saveAdminKey(); }
+});
+
 // 表单提交必须显式拦掉（bug #17）：CSP 是 script-src 'self'，HTML 里原来的
 // onsubmit="return false" 内联处理器**不会执行**，回车触发浏览器隐式提交 →
 // 整页 GET 刷新，异步的 api('overview') 被中断，输错密钥时看不到提示。
@@ -958,6 +1051,8 @@ async function loadOverview(quiet) {
     $('navVer').textContent = 'v' + d.version;
     $('navRedis').textContent = d.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存';
     $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
+    adminKeySet = d.admin_key_set;
+    syncAdminKeyBar(d.admin_key_set);
     const p = $('navPulse');
     p.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';

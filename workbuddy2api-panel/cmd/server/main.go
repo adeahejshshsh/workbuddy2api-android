@@ -406,8 +406,9 @@ func main() {
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
 	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
 	if cfg.AdminAPIKey == "" {
-		log.Printf("WARN: 未配置 admin_api_key：面板仍在用下游 api_key 当门禁，敏感接口（导出凭据 / 读写配置 / 导入 / 登录 / 账号增删停改）已拒绝；" +
-			"请在 config.json 设一把独立的管理员密钥后重启")
+		log.Printf("WARN: 未配置 admin_api_key：面板仍在用下游 api_key 当门禁，敏感接口（导出凭据 / 读写配置 / 导入 / 登录 / 账号增删停改）已拒绝。" +
+			"两条出路：① 本机打开面板（http://127.0.0.1:<listen 端口>/panel/），顶部横幅里点「设置管理员密钥」即时生效；" +
+			"② 在 config.json 设 admin_api_key（16 位以上随机串）后重启")
 	}
 
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
