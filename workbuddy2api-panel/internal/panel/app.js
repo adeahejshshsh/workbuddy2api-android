@@ -610,9 +610,33 @@ function syncAdminKeyBar(set) {
 function openAdminKey() {
   const err = $('admkErr');
   if (err) err.hidden = true;
-  if ($('admkInput')) $('admkInput').value = '';
-  if ($('admkInput2')) $('admkInput2').value = '';
+  // 不清空输入框（issue #172）：用户点了「取消」又回来，框里还留着刚生成的串才有救。
+  // 只有「保存成功后的那一次关闭」才需要清（见 resetAdminKeyDialog）。
+  const inp = $('admkInput'), inp2 = $('admkInput2');
+  if (inp) inp.disabled = false;
+  if (inp2) inp2.disabled = false;
+  if ($('btnAdmkSave')) { $('btnAdmkSave').textContent = '保存'; $('btnAdmkSave').onclick = saveAdminKey; }
+  if ($('admkNote')) $('admkNote').hidden = true;
+  if ($('admkCopyTip')) $('admkCopyTip').textContent = '';
+  // 输入框已有内容 → 明文块也留着（那就是用户上次生成、还没抄走的那串）
+  if ($('admkPlainBox') && inp && inp.value) {
+    $('admkPlain').textContent = inp.value;
+    $('admkPlainBox').hidden = false;
+  } else if ($('admkPlainBox')) {
+    $('admkPlainBox').hidden = true;
+  }
   openVeil('adminKeyVeil', '#admkInput');
+}
+
+/** 保存成功、用户点「我已保存」之后复位，下次打开是干净的。 */
+function resetAdminKeyDialog() {
+  if ($('admkInput')) { $('admkInput').value = ''; $('admkInput').disabled = false; }
+  if ($('admkInput2')) { $('admkInput2').value = ''; $('admkInput2').disabled = false; }
+  if ($('admkPlainBox')) $('admkPlainBox').hidden = true;
+  if ($('admkPlain')) $('admkPlain').textContent = '';
+  if ($('admkNote')) $('admkNote').hidden = true;
+  if ($('admkCopyTip')) $('admkCopyTip').textContent = '';
+  if ($('btnAdmkSave')) { $('btnAdmkSave').textContent = '保存'; $('btnAdmkSave').onclick = saveAdminKey; }
 }
 function genAdminKey() {
   const a = new Uint8Array(24);
@@ -621,7 +645,12 @@ function genAdminKey() {
   $('admkInput').value = s;
   $('admkInput2').value = s;
   $('admkErr').hidden = true;
+  // 密码框里那串圆点等于没给（issue #172）：另起一块明文，可全选、可一键复制。
+  $('admkPlain').textContent = s;
+  $('admkPlainBox').hidden = false;
+  $('admkCopyTip').textContent = '';
   $('admkInput').focus();
+  toast('已生成随机密钥：先点「复制」存下来，再保存', 'ok');
 }
 async function saveAdminKey() {
   const k = ($('admkInput').value || '').trim();
@@ -630,8 +659,9 @@ async function saveAdminKey() {
   err.hidden = true;
   if (k.length < 16) { err.textContent = '至少 16 位（面板会把它存在浏览器里，太短等于没设）'; err.hidden = false; return; }
   if (k !== k2) { err.textContent = '两次输入不一致'; err.hidden = false; return; }
+  let saved = null;
   try {
-    await api('admin_key', { method: 'POST', body: JSON.stringify({ admin_api_key: k }) });
+    saved = await api('admin_key', { method: 'POST', body: JSON.stringify({ admin_api_key: k }) });
   } catch (e) {
     err.textContent = e.message || String(e);
     err.hidden = false;
@@ -643,9 +673,19 @@ async function saveAdminKey() {
   sessionStorage.removeItem(LS_ADMK_DISMISS);
   admkPrompting = false;
   syncAdminKeyBar(true);
-  closeVeil('adminKeyVeil');
+  // 不立刻关窗（issue #172）：关掉之后这串就再也取不回来了。留一块明文 + 复制按钮，
+  // 并把后端那句「丢了只能改 config.json」原样显示出来。
+  $('admkPlain').textContent = k;
+  $('admkPlainBox').hidden = false;
+  $('admkInput').disabled = true;
+  $('admkInput2').disabled = true;
+  if (saved && saved.note) {
+    $('admkNote').textContent = saved.note;
+    $('admkNote').hidden = false;
+  }
+  $('btnAdmkSave').textContent = '我已保存';
+  $('btnAdmkSave').onclick = () => { closeVeil('adminKeyVeil'); resetAdminKeyDialog(); start(); };
   toast('管理员密钥已保存并生效', 'ok');
-  start();   // 重新拉一轮，确认新 key 可用
 }
 if ($('btnAdminKey')) $('btnAdminKey').onclick = () => openAdminKey();
 if ($('btnAdminKeyLater')) $('btnAdminKeyLater').onclick = () => {
@@ -655,6 +695,27 @@ if ($('btnAdminKeyLater')) $('btnAdminKeyLater').onclick = () => {
 if ($('btnAdmkGen')) $('btnAdmkGen').onclick = genAdminKey;
 if ($('btnAdmkCancel')) $('btnAdmkCancel').onclick = () => closeVeil('adminKeyVeil');
 if ($('btnAdmkSave')) $('btnAdmkSave').onclick = saveAdminKey;
+// 显示/隐藏（照配置页 btnEye 的写法，但指向管理员密钥这两个框）
+[['btnAdmkEye1', 'admkInput'], ['btnAdmkEye2', 'admkInput2']].forEach(([btn, id]) => {
+  if (!$(btn)) return;
+  $(btn).onclick = () => {
+    const el = $(id);
+    const show = el.type === 'password';
+    el.type = show ? 'text' : 'password';
+    $(btn).textContent = show ? '隐藏' : '显示';
+  };
+});
+if ($('btnAdmkCopy')) $('btnAdmkCopy').onclick = () => {
+  const k = ($('admkPlain').textContent || $('admkInput').value || '').trim();
+  if (!k) return;
+  copyText(k).then(() => {
+    $('admkCopyTip').textContent = '已复制';
+    toast('密钥已复制到剪贴板', 'ok');
+  }).catch(() => {
+    // 复制失败也要给一条出路：明文块本身 user-select:all，长按可全选
+    $('admkCopyTip').textContent = '复制失败，请长按上面那行手动全选';
+  });
+};
 if ($('admkInput2')) $('admkInput2').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); saveAdminKey(); }
 });
