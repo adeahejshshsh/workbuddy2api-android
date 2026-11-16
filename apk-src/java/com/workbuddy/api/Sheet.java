@@ -260,7 +260,7 @@ final class Sheet {
         cancel.setGravity(Gravity.CENTER);
         cancel.setPadding(0, Theme.dp(a, Theme.S3), 0, Theme.dp(a, Theme.S3));
         cancel.setBackground(Theme.ripple(a,
-                Theme.outlined(a, 0x0DFFFFFF, Theme.R_CTRL, Theme.LINE, 1), 0x1FFFFFFF));
+                Theme.outlined(a, Theme.OVERLAY_SOFT, Theme.R_CTRL, Theme.LINE, 1), Theme.RIPPLE));
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         clp.setMargins(Theme.dp(a, Theme.S4), Theme.dp(a, Theme.S1),

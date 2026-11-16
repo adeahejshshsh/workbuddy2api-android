@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  系统深色时覆盖 AppTheme（「跟随系统」就靠这个限定符）。
+  AppTheme.Light / AppTheme.Dark 故意**不**在这里定义：它们是用户手动覆盖用的，
+  必须与系统当前模式无关。
+-->
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0F172A</item>
+        <item name="android:colorBackground">#0F172A</item>
+        <item name="android:statusBarColor">#0F172A</item>
+        <item name="android:navigationBarColor">#0F172A</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

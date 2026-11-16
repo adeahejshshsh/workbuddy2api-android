@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AppTheme —— 原生控制台的窗口主题。
+
+  为什么不用 @android:style/Theme.Material.NoActionBar（issue #167 第 1 条）：
+  那是固定的深色主题，系统切浅色时本 App 的窗口装饰（对话框、Toast、滚动条、
+  文本选择手柄）仍然是深色，和界面里的浅色视图对不上。
+
+  做法：
+    · AppTheme      —— 清单引用它；values/ 是浅色，values-night/ 覆盖成深色，
+                       于是「跟随系统」由资源限定符自然成立。
+    · AppTheme.Light / AppTheme.Dark —— 用户手动覆盖时由 Theme.applyActivityTheme()
+                       在 super.onCreate 之前 setTheme 过去，绕过限定符。
+  颜色与 Theme.java 的调色板一一对应（那边才是唯一真源，这里只管窗口装饰）。
+-->
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#F2F5FA</item>
+        <item name="android:colorBackground">#F2F5FA</item>
+        <item name="android:statusBarColor">#F2F5FA</item>
+        <item name="android:navigationBarColor">#F2F5FA</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+
+    <style name="AppTheme.Light" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#F2F5FA</item>
+        <item name="android:colorBackground">#F2F5FA</item>
+        <item name="android:statusBarColor">#F2F5FA</item>
+        <item name="android:navigationBarColor">#F2F5FA</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+
+    <style name="AppTheme.Dark" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0F172A</item>
+        <item name="android:colorBackground">#0F172A</item>
+        <item name="android:statusBarColor">#0F172A</item>
+        <item name="android:navigationBarColor">#0F172A</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

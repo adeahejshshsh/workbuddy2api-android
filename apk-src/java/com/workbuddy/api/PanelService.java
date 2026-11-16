@@ -41,6 +41,16 @@ final class PanelService {
     static final class Account {
         String uid = "", nickname = "", remark = "", group = "", realm = "", override = "";
         long credits, creditsTotal;
+        /**
+         * 积分到期（issue #167 第 3 条）。后端 pool.Status 已经在 /panel/api/overview 的
+         * accounts[] 里给出这三个键。
+         *
+         * 注意 earliestExpiry **永远有值**：Go 的 time.Time 是 struct，`omitempty` 对它
+         * 无效，无到期时序列化成 0001-01-01T00:00:00Z。所以判定必须看「解析出来的年份
+         * 是否 < 2000」，不能只看字符串空不空（网页端 hasRealTime() 同一个理由）。
+         */
+        String earliestExpiry = "";
+        long earliestRemaining, creditsExpiring;
         int success, errTotal, inFlight;
         boolean cooling, disabled, paused, enterprise, apiKey;
         String disabledReason = "";
@@ -66,6 +76,13 @@ final class PanelService {
         String from = "", to = "";
         static final class Row { String key = "", extra = "", realm = ""; long requests, tokens; double credits; }
         final List<Row> byAccount = new ArrayList<Row>(), byModel = new ArrayList<Row>();
+        /**
+         * 时间序列点（后端 Snapshot.series）。scope = "hour" | "day"，后端把「日桶升序 +
+         * 小时桶升序」拼成一条，**两段混在一起**：24H 只取 hour、更长的区间只取 day，
+         * 否则同一段会被画两遍（issue #167 第 2 条）。
+         */
+        static final class Point { String t = "", scope = ""; long requests, tokens; double credits; }
+        final List<Point> series = new ArrayList<Point>();
     }
 
     static final class ModelInfo {
@@ -212,6 +229,9 @@ final class PanelService {
                     a.realm = s.optString("realm");
                     a.override = s.optString("enterprise_override");
                     a.credits = s.optLong("credits"); a.creditsTotal = s.optLong("credits_total");
+                    a.earliestExpiry = s.optString("credits_earliest_expiry");
+                    a.earliestRemaining = s.optLong("credits_earliest_remaining");
+                    a.creditsExpiring = s.optLong("credits_expiring");
                     a.success = s.optInt("success_count"); a.errTotal = s.optInt("err_total");
                     a.inFlight = s.optInt("in_flight");
                     a.cooling = s.optBoolean("cooling"); a.disabled = s.optBoolean("disabled");
@@ -536,6 +556,17 @@ final class PanelService {
                 }
                 readUsageRows(o.optJSONArray("by_account"), u.byAccount);
                 readUsageRows(o.optJSONArray("by_model"), u.byModel);
+                JSONArray ser = o.optJSONArray("series");
+                for (int i = 0; ser != null && i < ser.length(); i++) {
+                    JSONObject p = ser.optJSONObject(i);
+                    if (p == null) continue;
+                    Usage.Point x = new Usage.Point();
+                    x.t = p.optString("t"); x.scope = p.optString("scope");
+                    x.requests = p.optLong("requests");
+                    x.tokens = p.optLong("total_tokens");
+                    x.credits = p.optDouble("credits", 0);
+                    u.series.add(x);
+                }
                 cb.ok(u);
             }
             public void fail(String msg) { cb.fail(msg); }

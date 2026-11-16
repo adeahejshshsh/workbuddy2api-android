@@ -109,7 +109,7 @@ final class Console {
 
         navBar = new LinearLayout(a);
         navBar.setOrientation(LinearLayout.HORIZONTAL);
-        navBar.setBackgroundColor(0xF20B1220);
+        navBar.setBackgroundColor(Theme.NAVBAR);
         navBar.setPadding(0, Theme.dp(a, 6), 0, Theme.dp(a, 8));
         root.addView(navBar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));

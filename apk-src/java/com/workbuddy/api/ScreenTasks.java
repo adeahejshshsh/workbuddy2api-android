@@ -337,7 +337,7 @@ final class ScreenTasks {
 
         LinearLayout card = Theme.card(a);
         GradientDrawable g = Theme.outlined(a, bg, Theme.R_CARD, border, claimNow ? 1.5f : 1f);
-        card.setBackground(claimNow ? Theme.ripple(a, g, 0x3322C55E) : g);
+        card.setBackground(claimNow ? Theme.ripple(a, g, Theme.RIPPLE_ACCENT) : g);
 
         LinearLayout top = new LinearLayout(a);
         top.setOrientation(LinearLayout.HORIZONTAL);

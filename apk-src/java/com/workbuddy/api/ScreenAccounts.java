@@ -99,6 +99,7 @@ final class ScreenAccounts {
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         hero.addView(row);
         col.addView(hero, Theme.cardLp(a, Theme.S4));
+        expiryCard(col, o.accounts);
 
         if (o.accounts.isEmpty()) {
             col.addView(Theme.empty(a, "还没有账号\n点右上「＋」导入文件或登录添加"));
@@ -106,6 +107,180 @@ final class ScreenAccounts {
             for (PanelService.Account acc : o.accounts) col.addView(accountCard(acc));
         }
         refresh(col);
+    }
+
+    // ── 积分到期提醒（issue #167 第 3 条） ──────────────────────────────────
+    //
+    // 口径照网页端 renderExpirySnapshot()：
+    //   · 按 credits_earliest_expiry 升序；没有真实到期的排最后（这里直接不列，改一行汇总）；
+    //   · 日均需耗 = ceil(该批剩余 / max(1, 距到期天数))，天数是**日历日差**；
+    //   · 色点 ≤3 天红、≤7 天黄、其余绿；
+    //   · 「检查」拉逐包明细，不走系统通知 —— 卡片本身就是提醒（与网页端一致）。
+    //
+    // 为什么天差必须按日历日算（网页端 bug #10）：今天 23:00 到期，用
+    // ceil((ms - now) / 86400000) 会得 1 → 文案变「明天到期」，日均需耗也跟着偏小。
+    private void expiryCard(LinearLayout col, java.util.List<PanelService.Account> accs) {
+        java.util.List<PanelService.Account> soon = new java.util.ArrayList<PanelService.Account>();
+        int rest = 0;
+        for (PanelService.Account x : accs) {
+            if (expiryDayMs(x.earliestExpiry) > 0 && x.earliestRemaining > 0) soon.add(x);
+            else rest++;
+        }
+        if (soon.isEmpty()) return;   // 全都没有到期批次：不占一屏去说「没有」
+
+        java.util.Collections.sort(soon, new java.util.Comparator<PanelService.Account>() {
+            public int compare(PanelService.Account l, PanelService.Account r) {
+                long a1 = expiryDayMs(l.earliestExpiry), b1 = expiryDayMs(r.earliestExpiry);
+                return a1 < b1 ? -1 : (a1 > b1 ? 1 : 0);
+            }
+        });
+
+        LinearLayout card = Theme.card(a);
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(Theme.label(a, "积分到期"),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView chk = Theme.pill(a, "检查", false);
+        chk.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { openExpiryPackages(); }
+        });
+        head.addView(chk);
+        card.addView(head);
+
+        long todayMs = todayMs();
+        int n = Math.min(soon.size(), 8);
+        for (int i = 0; i < n; i++) {
+            PanelService.Account x = soon.get(i);
+            long ms = expiryDayMs(x.earliestExpiry);
+            int days = (int) Math.max(0, Math.round((ms - todayMs) / 86400000.0));
+            long remain = x.earliestRemaining;
+            long daily = (long) Math.ceil(remain / (double) Math.max(1, days));
+            int color = days <= 3 ? Theme.BAD : days <= 7 ? Theme.WARN : Theme.ACCENT;
+
+            LinearLayout line = new LinearLayout(a);
+            line.setOrientation(LinearLayout.HORIZONTAL);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setPadding(0, Theme.dp(a, 6), 0, Theme.dp(a, 6));
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                    Theme.dp(a, 7), Theme.dp(a, 7));
+            dlp.rightMargin = Theme.dp(a, Theme.S2);
+            line.addView(Theme.dot(a, color, 7), dlp);
+            TextView nm = Theme.text(a, TextUtils.isEmpty(x.nickname) ? x.uid : x.nickname,
+                    12.5f, Theme.INK, 1);
+            nm.setSingleLine(true);
+            nm.setEllipsize(TextUtils.TruncateAt.END);
+            line.addView(nm, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            String word = days == 0 ? "今天到期" : days == 1 ? "明天到期" : days + " 天后到期";
+            line.addView(Theme.text(a, ymd(ms) + "（" + word + "）· " + remain + " 积分 · 日均需耗 ≥" + daily,
+                    11.5f, color, 0));
+            card.addView(line);
+            if (i < n - 1) card.addView(Theme.divider(a));
+        }
+        if (soon.size() > n || rest > 0) {
+            String more = "";
+            if (soon.size() > n) more += "另有 " + (soon.size() - n) + " 个账号也有到期批次";
+            if (rest > 0) more += (more.isEmpty() ? "" : "；") + rest + " 个账号无近期到期批次";
+            card.addView(Theme.text(a, more, 11f, Theme.INK3, 0));
+        }
+        card.addView(Theme.text(a, "上游按失效时刻先后自动优先扣减（先到期的先用）",
+                11f, Theme.INK3, 0));
+        col.addView(card, Theme.cardLp(a, Theme.S3));
+    }
+
+    /** 逐包明细（「检查」按钮）：7 天内合计 + 每个包的到期日与剩余。 */
+    private void openExpiryPackages() {
+        svc.packages(new PanelService.Cb<java.util.List<PanelService.PkgAccount>>() {
+            public void ok(java.util.List<PanelService.PkgAccount> list) { showExpirySheet(list); }
+            public void fail(String m) { toast("读取积分包失败：" + m); }
+        });
+    }
+
+    private void showExpirySheet(java.util.List<PanelService.PkgAccount> list) {
+        long today = todayMs();
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(Theme.dp(a, Theme.S4), Theme.dp(a, Theme.S2),
+                Theme.dp(a, Theme.S4), Theme.dp(a, Theme.S2));
+
+        long within7 = 0;
+        int shown = 0;
+        for (PanelService.PkgAccount pa : list) {
+            if (pa.packages.isEmpty()) continue;
+            LinearLayout sec = Theme.card(a);
+            sec.addView(Theme.label(a, TextUtils.isEmpty(pa.nickname) ? pa.uid : pa.nickname));
+            java.util.List<PanelService.Pkg> pkgs = new java.util.ArrayList<PanelService.Pkg>(pa.packages);
+            java.util.Collections.sort(pkgs, new java.util.Comparator<PanelService.Pkg>() {
+                public int compare(PanelService.Pkg l, PanelService.Pkg r) {
+                    long a1 = expiryDayMs(l.endTime), b1 = expiryDayMs(r.endTime);
+                    if (a1 <= 0 && b1 <= 0) return 0;
+                    if (a1 <= 0) return 1;
+                    if (b1 <= 0) return -1;
+                    return a1 < b1 ? -1 : (a1 > b1 ? 1 : 0);
+                }
+            });
+            for (PanelService.Pkg p : pkgs) {
+                long ms = expiryDayMs(p.endTime);
+                String when;
+                if (ms <= 0) {
+                    when = "长期有效";
+                } else {
+                    int days = (int) Math.max(0, Math.round((ms - today) / 86400000.0));
+                    when = ymd(ms) + "（" + (days == 0 ? "今天" : days + " 天后") + "）";
+                    if (days <= 7) within7 += p.remain;
+                }
+                sec.addView(Theme.kvRow(a, p.name + " · " + when, p.remain + " 积分"));
+            }
+            box.addView(sec, Theme.cardLp(a, Theme.S2));
+            shown++;
+            if (shown >= 6) break;   // 弹窗不无限长
+        }
+        if (shown == 0) box.addView(Theme.empty(a, "没有可用的积分包明细"));
+        box.addView(Theme.text(a, "7 天内到期合计：" + within7 + " 积分", 12.5f, Theme.WARN, 1));
+        Sheet.custom(a, "积分到期明细", box, "关闭", null).show();
+    }
+
+    /** 今天 00:00 的毫秒（日历日差的基准）。 */
+    private static long todayMs() {
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0);
+        cal.set(java.util.Calendar.MINUTE, 0);
+        cal.set(java.util.Calendar.SECOND, 0);
+        cal.set(java.util.Calendar.MILLISECOND, 0);
+        return cal.getTimeInMillis();
+    }
+
+    /**
+     * 把 "YYYY-MM-DD..." 解析成当天 00:00 的毫秒；无效或年份 < 2000 返回 -1。
+     *
+     * 年份判断不是可选的：Go 的 time.Time 是 struct，`omitempty` 对它无效，无到期时后端
+     * 会给出 0001-01-01T00:00:00Z —— 只看字符串非空会把它当成一个「两千年前到期」的批次。
+     * 只取前 10 个字符，不解析纳秒与时区（RFC3339Nano 的小数位会让 SimpleDateFormat 失败）。
+     */
+    private static long expiryDayMs(String s) {
+        if (s == null || s.length() < 10) return -1;
+        try {
+            int y = Integer.parseInt(s.substring(0, 4));
+            if (y < 2000) return -1;
+            int mo = Integer.parseInt(s.substring(5, 7));
+            int d = Integer.parseInt(s.substring(8, 10));
+            java.util.Calendar cal = java.util.Calendar.getInstance();
+            cal.set(y, mo - 1, d, 0, 0, 0);
+            cal.set(java.util.Calendar.MILLISECOND, 0);
+            return cal.getTimeInMillis();
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** 毫秒 → "YYYY-MM-DD"（本地时区；不能用 toISOString，那是 UTC，西半球会差一天）。 */
+    private static String ymd(long ms) {
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        cal.setTimeInMillis(ms);
+        return String.format(java.util.Locale.US, "%04d-%02d-%02d",
+                cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH) + 1,
+                cal.get(java.util.Calendar.DAY_OF_MONTH));
     }
 
     private View accountCard(final PanelService.Account s) {
@@ -406,7 +581,7 @@ final class ScreenAccounts {
                         public void ok(String msg) {
                             toggle.setText(next ? "可用" : "已关闭");
                             toggle.setBackground(next ? Theme.round(a, Theme.ACCENT, Theme.R_PILL)
-                                    : Theme.outlined(a, 0x0DFFFFFF, Theme.R_PILL, Theme.LINE, 1));
+                                    : Theme.outlined(a, Theme.OVERLAY_SOFT, Theme.R_PILL, Theme.LINE, 1));
                             toggle.setTextColor(next ? Theme.ON_ACCENT : Theme.INK2);
                         }
                         public void fail(String m) { toast("切换失败：" + m); }

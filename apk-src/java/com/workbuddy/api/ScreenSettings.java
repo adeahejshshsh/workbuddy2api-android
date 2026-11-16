@@ -71,6 +71,35 @@ final class ScreenSettings {
     private void bodySettings(final PanelService.Settings st) {
         LinearLayout col = Theme.column(a);
 
+        // 外观（issue #167 第 1 条）：跟随系统 / 深色 / 浅色。默认跟随系统。
+        //
+        // 改完必须 recreate()：调色板是进程级 static，已经建好的视图不会自己变色；
+        // 重建后 onCreate 会重新 apply + 重挂窗口主题（手动覆盖走 setTheme）。
+        LinearLayout look = Theme.card(a);
+        look.addView(Theme.label(a, "外观"));
+        LinearLayout seg = new LinearLayout(a);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        seg.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+        String[] modes = {Theme.MODE_AUTO, Theme.MODE_DARK, Theme.MODE_LIGHT};
+        for (final String m : modes) {
+            TextView p = Theme.pill(a, Theme.modeLabel(m), m.equals(Theme.mode));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (!m.equals(modes[modes.length - 1])) lp.rightMargin = Theme.dp(a, Theme.S2);
+            p.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    if (m.equals(Theme.mode)) return;
+                    Theme.saveMode(a, m);
+                    a.recreate();
+                }
+            });
+            seg.addView(p, lp);
+        }
+        look.addView(seg);
+        look.addView(Theme.text(a, "浅色是为系统浅色环境调的；深色保持原观感。",
+                11.5f, Theme.INK3, 0));
+        col.addView(look, Theme.cardLp(a, Theme.S3));
+
         LinearLayout sched = Theme.card(a);
         sched.addView(Theme.label(a, "定时任务"));
         sched.addView(toggleRow("每日签到", st.checkin, new BoolSet() {
@@ -135,7 +164,7 @@ final class ScreenSettings {
                 boolean next = !"开".equals(String.valueOf(sw.getText()));
                 sw.setText(next ? "开" : "关");
                 sw.setBackground(next ? Theme.round(a, Theme.ACCENT, Theme.R_PILL)
-                        : Theme.outlined(a, 0x0DFFFFFF, Theme.R_PILL, Theme.LINE, 1));
+                        : Theme.outlined(a, Theme.OVERLAY_SOFT, Theme.R_PILL, Theme.LINE, 1));
                 sw.setTextColor(next ? Theme.ON_ACCENT : Theme.INK2);
                 setter.set(next);
             }
