@@ -48,6 +48,10 @@ final class PanelApi {
     private static final Handler UI = new Handler(Looper.getMainLooper());
     private static final Pattern API_KEY =
             Pattern.compile("\"api_key\"\\s*:\\s*\"([^\"]*)\"");
+    /** 管理员密钥。与 api_key 分开匹配：JSON 里 "admin_api_key" 前面是下划线，API_KEY
+     *  那个模式要求引号紧跟 api_key，不会误命中它。 */
+    private static final Pattern ADMIN_KEY =
+            Pattern.compile("\"admin_api_key\"\\s*:\\s*\"([^\"]*)\"");
 
     private PanelApi() {}
 
@@ -56,7 +60,12 @@ final class PanelApi {
         return "http://127.0.0.1:" + GwConfig.port(c);
     }
 
-    /** 面板 api_key：与网页面板 localStorage 里那份同源（config.json）。 */
+    /**
+     * 面板密钥：优先 admin_api_key，没有才回落 api_key。
+     *
+     * P0-1（1.35.15）之后面板的管理接口只认 admin_api_key；只读 api_key 会让配好管理员
+     * 密钥的部署每次请求都 403（原生控制台的账号列表 / 任务 / 配置全都读不到）。
+     */
     static String key(Context c) {
         File f = new File(GwConfig.gwDir(c), "config.json");
         FileInputStream in = null;
@@ -66,7 +75,13 @@ final class PanelApi {
             byte[] buf = new byte[8192];
             int n;
             while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
-            Matcher m = API_KEY.matcher(bos.toString("UTF-8"));
+            String txt = bos.toString("UTF-8");
+            Matcher m = ADMIN_KEY.matcher(txt);
+            if (m.find()) {
+                String v = m.group(1).trim();
+                if (!v.isEmpty()) return v;
+            }
+            m = API_KEY.matcher(txt);
             return m.find() ? m.group(1) : "";
         } catch (Throwable t) {
             return "";
