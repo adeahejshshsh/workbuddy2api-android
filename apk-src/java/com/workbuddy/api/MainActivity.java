@@ -740,16 +740,20 @@ public class MainActivity extends Activity {
     void injectKey() { injectKey(0); }
 
     void injectKey(final int attempt) {
-        apiKey = readApiKey();
-        if (apiKey.isEmpty()) {
+        // 注入的是**面板**密钥：P0-1（1.35.15）之后面板的管理接口只认 admin_api_key，
+        // 这里此前只读 api_key —— 用户配好管理员密钥后，App 每次加载仍把客户端 key 注入
+        // localStorage，首屏 401、密钥门弹一次，导出/配置/导入/登录还是 403。
+        // 现在优先 admin_api_key，没配的老部署行为不变。
+        final String panelKey = readPanelKey();
+        if (panelKey.isEmpty()) {
             // 读不到就保持 injected=false（bug-04）：下一次 onPageFinished 还会再试，
             // 而不是"弹一次 toast 然后永久放弃"。
             injected = false;
-            toast("读不到 config.json 里的 api_key");
+            toast("读不到 config.json 里的 api_key / admin_api_key");
             return;
         }
         if (web == null) return;
-        final String want = apiKey;
+        final String want = panelKey;
         String js = "try{localStorage.setItem('" + LS_KEY + "'," + quote(want) + ");"
                 + "localStorage.getItem('" + LS_KEY + "');}catch(e){null}";
         web.evaluateJavascript(js, new android.webkit.ValueCallback<String>() {
@@ -764,7 +768,7 @@ public class MainActivity extends Activity {
                 if (attempt >= 2) {
                     // 放弃本轮但保持 false：下一次页面加载仍会自动重试（bug-04）。
                     injected = false;
-                    logLine.setText("自动登录失败：面板拿不到 api_key，请点「重载面板」重试");
+                    logLine.setText("自动登录失败：面板拿不到密钥（admin_api_key / api_key），请点「重载面板」重试");
                     logLine.setTextColor(WARN);
                     return;
                 }
@@ -791,6 +795,26 @@ public class MainActivity extends Activity {
         Matcher m = Pattern.compile("\"api_key\"\\s*:\\s*\"([^\"]*)\"").matcher(txt);
         if (m.find()) return m.group(1);
         return "";
+    }
+
+    /**
+     * 面板密钥：优先 config.json 的 admin_api_key，没有才回落客户端 api_key。
+     *
+     * 为什么（2026-11-16）：面板的管理接口（导出凭据 / 读写配置 / 导入 / 登录 / 账号
+     * 增删停改）只认 admin_api_key。此前注入的是 api_key，配好管理员密钥的部署会陷入
+     * 「每次加载注入旧 key → 401 → 弹密钥门」的循环。
+     *
+     * 注意 api_key 不能一起改：copyApi() 复制给下游客户端的就是它，换掉等于把管理员
+     * 密钥发给所有客户端。
+     */
+    String readPanelKey() {
+        String txt = readAll(new File(getFilesDir(), "gateway/config.json"));
+        Matcher m = Pattern.compile("\"admin_api_key\"\\s*:\\s*\"([^\"]*)\"").matcher(txt);
+        if (m.find()) {
+            String v = m.group(1).trim();
+            if (!v.isEmpty()) return v;
+        }
+        return readApiKey();
     }
 
     static String readAll(File f) {

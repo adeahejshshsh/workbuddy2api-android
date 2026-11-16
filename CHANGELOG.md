@@ -1,5 +1,28 @@
 # 变更记录
 
+## v1.35.17（2026-11-16）
+
+> 补 `1.35.16` 剩下的那一半：**Android App 注入的面板密钥也要跟着换成 admin_api_key**。
+> 服务端能设了，但 App 每次加载仍把客户端 key 注进 localStorage，配好管理员密钥的部署
+> 会陷入「首屏 401 → 弹密钥门 → 敏感操作还是 403」的循环。
+
+### Android App：注入面板密钥时优先 admin_api_key
+
+- `MainActivity.readPanelKey()`（新）：读 `config.json` 的 `admin_api_key`，没有才回落
+  `api_key`；`injectKey()` 改用它。没配管理员密钥的老部署行为完全不变。
+- `PanelApi.key()`：同样优先 `admin_api_key` —— 原生控制台（账号列表 / 任务 / 配置）
+  走的就是这条通道，只读 `api_key` 会每次请求 403。
+- **`copyApi()` 不动**：复制给下游客户端的那份仍是 `api_key`。换成管理员密钥等于把
+  面板管理权发给所有客户端 —— 那正是 P0-1 要修的形态。
+- 文案：注入失败与状态条提示从「拿不到 api_key」改成「拿不到密钥（admin_api_key / api_key）」。
+
+### 构建环境
+
+本机 `aapt2` 此前因缺 `libfmt.so` / `libpng16.so` 等依赖无法启动，打包只能走「复用上一版
+清单 + 就地改 AXML 版本串 + 复用旧 dex」的降级路径（所以 `1.35.16` 之前带不动任何 Java
+改动）。这次补齐依赖后 aapt2 恢复，**本次 APK 的 Java 层是真正重新编译的**
+（javac → d8 → apksigner，含看门狗自检），不再是复用旧 dex。
+
 ## v1.35.16（2026-11-16）
 
 > 一个补丁版本，只修 `1.35.15` 带出来的一个可用性问题：**面板没有设置 `admin_api_key`
