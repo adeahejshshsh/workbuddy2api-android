@@ -737,7 +737,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', models: '模型与档位', config: '配置', logs: '运行日志', modelrules: '模型规则' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', models: '模型与档位', config: '配置', logs: '运行日志', modelrules: '模型规则', tasks: '任务中心' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -753,6 +753,9 @@ function go(v) {
   if (v === 'usage') loadUsage();
   if (v === 'balhist') loadBalance();
   if (v === 'packages') loadPackages();
+  // 实时任务卡只在「进入本页」时启动一次。不能挂在 refreshVisible（5s 全局轮询）里：
+  // 那样用户选的刷新间隔与「关」都会被每 5 秒重置一次，等于失效。
+  if (v === 'tasks') startLiveTasks();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
   // 完整逐包明细由卡片上的「检查」按钮显式触发（loadPackages/loadExpiry）。
@@ -2615,6 +2618,9 @@ let taskUID = null;
    关掉弹窗后循环照样打接口、照样往已隐藏的按钮写文字；此时再开另一个账号的任务
    弹窗，就会有两个循环并行跑。每轮校验代数，不符即退出。 */
 let taskGen = 0;
+/* taskAutoTimer 弹窗开着期间的 30s 静默刷新（上游 38dca39）。关窗/换号必须清掉：
+   gen 能挡住写 DOM，但请求本身还是会白发出去。 */
+let taskAutoTimer = null;
 
 // 可自动完成的任务（与后端 autoActions 表一致）：判据为行为事件、可经网关复现。
 // 其余任务需在官方客户端内交互，面板只展示指引（行 title 提示）。
@@ -2683,15 +2689,26 @@ function openTasks(uid) {
   openVeil('taskVeil', '#btnCloseTask');
   $('btnTaskReload').hidden = false;
   loadTasks();
+  // 弹窗开着期间定时静默刷新：上游任务进度是分钟级聚合，30 秒一轮足够跟上，
+  // 又不会让用户为了看到变化去点「重新加载」。标签页在后台不刷（弹窗忘了关时，
+  // 国内号每轮是一次上游读）；typeof 守卫：前端测试在没有 document 的沙箱里求值这段。
+  if (taskAutoTimer) clearInterval(taskAutoTimer);
+  taskAutoTimer = setInterval(() => {
+    if (taskUID === uid && !(typeof document !== 'undefined' && document.hidden)) loadTasks(true);
+  }, 30000);
 }
 function closeTasks() {
   taskGen++;                  // 关闭即中止该弹窗的一切在途轮询（审查 W4F1-039）
+  if (taskAutoTimer) clearInterval(taskAutoTimer);
+  taskAutoTimer = null;
   $('taskVeil').classList.remove('on');
   taskUID = null;
   restoreFocus('taskVeil');
 }
 $('btnCloseTask').onclick = closeTasks;
-$('btnTaskReload').onclick = loadTasks;
+// 手动点「重新查询」必须是非静默：直接挂 loadTasks 会把点击事件当成 silent 参数，
+// 于是「查询中」不显示、失败也不报错 —— 看起来像按钮没反应。
+$('btnTaskReload').onclick = () => loadTasks();
 
 // 全部接受：把该账号未接受的任务一次性报名（幂等，跳过已接受/已领取）。
 // 清空跳过名单（bug B7）：跳过名单此前只有 API 没有 UI 出口，而 409 文案却让用户
@@ -2770,17 +2787,21 @@ $('btnTaskAutoAll').onclick = async () => {
   finally { btn.disabled = false; btn.textContent = '一键完成可自动任务'; loadTasks(); }
 };
 
-async function loadTasks() {
+async function loadTasks(silent) {
   if (!taskUID) return;
   // 序号 + 弹窗代数（审查 W4F1-043 / 039）：btnTaskReload、行内动作的 finally、
   // 「全部接受」的 finally、清空跳过名单后的刷新都能并发触发本函数 —— 后返回的旧
   // 任务列表会把刚领取的任务又显示成「可领取」。弹窗关闭后落地的那份同样丢弃。
   const seq = ++tasksSeq, gen = taskGen, uid = taskUID;
   const st = $('taskState'), tb = $('taskTable');
-  st.hidden = false;
-  st.className = 'state';
-  st.innerHTML = '<span class="dots">查询中</span>';
-  tb.hidden = true;
+  // silent = 定时静默刷新：不闪「查询中」、失败也不清空表格 —— 轮询抖动不该把
+  // 用户正在看的列表打空。手动刷新（按钮/行内动作的 finally）仍是可见的那一套。
+  if (!silent) {
+    st.hidden = false;
+    st.className = 'state';
+    st.innerHTML = '<span class="dots">查询中</span>';
+    tb.hidden = true;
+  }
   try {
     const d = await api('accounts/' + encodeURIComponent(uid) + '/tasks');
     if (seq !== tasksSeq || gen !== taskGen) return;   // 旧响应 / 弹窗已关：不写 DOM
@@ -2793,8 +2814,12 @@ async function loadTasks() {
     msgEl.textContent = d.message || '';
     msgEl.hidden = !d.message;
     if (!list.length) {
+      // 静默刷新也可能第一次拿到空列表（任务刚领完）：状态行与表格一起换过来，
+      // 否则旧行会留在表格里、和「暂无任务」同时显示。
+      st.hidden = false;
       st.className = 'state';
       st.textContent = d.message || '该账号暂无任务';
+      tb.hidden = true;
       return;
     }
     // 有进度或可领取的排前面，已领取沉底——一眼看到"现在该做什么"。
@@ -2832,6 +2857,7 @@ async function loadTasks() {
     tb.hidden = false;
   } catch (e) {
     if (seq !== tasksSeq || gen !== taskGen) return;   // 旧请求的失败别覆盖最新一次结果
+    if (silent) return;   // 静默刷新失败：保留上一份列表，别把界面打空
     st.className = 'state err';
     st.textContent = e.message;
   }
@@ -2873,6 +2899,165 @@ $('taskBody').addEventListener('click', async ev => {
   } catch (e) { toast(e.message, 'err'); }
   finally { loadTasks(); }
 });
+
+/* ── 实时任务（任务中心）─────────────────────────────────────────────
+   数据源：GET /panel/api/tasks/live（后端按 TTL 缓存，一行一个账号；只有还有事可做
+   的账号才带任务表）。为什么要这块：账号任务弹窗只在打开时拉一次，而本仓 v1.23.0
+   下线了旧的「扫描待办 / 执行队列」界面 —— 面板上根本没有全局任务进度；这里进页面
+   就自动拉、按间隔自动刷。
+
+   轮询只在「本页可见 + 浏览器在前台」时跑：切走就停，避免后台标签页把上游当靶子练。
+   启动只由 go() 在进入本页时调一次 —— 5 秒全局轮询（refreshVisible）只刷账号池 /
+   日志 / 余额，挂在那里会让用户选的间隔与「关」全部失效。 */
+// 一轮 = 每个启用账号一次上游 GET：默认 2 分钟，可选档位都不低于后端缓存 TTL
+// （1 分钟），再密只是读缓存。
+const LIVE_EVERY_CHOICES = [0, 60, 120, 300];
+let liveTimer = null, liveEvery = 120, liveLoading = false, liveRetry = null, liveLastKey = '';
+
+// liveTaskRow 把一条上游任务折成一行：状态徽标 + 标题/任务码 + 进度 + 奖励。
+// 返回对象而不是 HTML：渲染只在 liveRowHTML 里做一次（先渲染成 HTML 再当行对象
+// 喂给渲染函数，整行会变成空白 + "undefined"）。
+function liveTaskRow(t) {
+  const cur = t.current ?? 0, tgt = t.target ?? 0;
+  const prog = tgt > 0 ? cur + '/' + tgt : (cur > 0 ? String(cur) : '');
+  const parts = [];
+  if (t.credit) parts.push('+' + t.credit + ' 分');
+  if (t.energy) parts.push('+' + t.energy + ' 能');
+  if (t.reward_buddy) parts.push('Buddy');
+  const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
+  return {
+    code: t.task_code,
+    title: t.title || t.task_code || '(未命名任务)',
+    prog,
+    reward: parts.join(' '),
+    tip,
+    badge: t.claimed ? ['已领取', 'ok']
+      : t.claimable ? ['可领取', 'warn']
+      : t.locked ? ['未解锁', 'mute']
+      : t.accept_status === 'accepted' ? ['进行中', 'mute']
+      : ['未接受', 'info'],
+  };
+}
+function liveRowHTML(r) {
+  return '<div class="live-row" title="' + esc(r.tip) + '">' +
+    '<span class="tag ' + r.badge[1] + '">' + r.badge[0] + '</span>' +
+    '<span class="t">' + esc(r.title) + '<i class="id">' + esc(r.code) + '</i></span>' +
+    (r.prog ? '<span class="p">' + esc(r.prog) + '</span>' : '') +
+    (r.reward ? '<span class="p">' + esc(r.reward) + '</span>' : '') +
+    '</div>';
+}
+function liveSummary(accts, d) {
+  if (!accts.length) return '';
+  let pending = 0, claimable = 0;
+  accts.forEach(a => { pending += a.pending || 0; claimable += a.claimable || 0; });
+  return accts.length + ' 个账号 · ' + pending + ' 待办 · ' + claimable + ' 可领 · ' +
+    ((d && d.age_sec) ? d.age_sec + ' 秒前' : '刚更新') + (d && d.refreshing ? ' · 更新中' : '');
+}
+function renderLiveTasks(d) {
+  const list = $('liveList'), empty = $('liveEmpty'), note = $('liveNote');
+  const accts = (d && d.accounts) || [];
+  // 数据没变就不重画：账号多时一轮是几百个分组，每个间隔重建一遍 DOM 纯属浪费，
+  // 还会冲掉用户正在选中的文字。age_sec / cached 每次都变，不进比较。
+  const key = JSON.stringify(accts);
+  note.hidden = true;   // 上一轮失败的提示在恢复后要收起，包括「数据没变」的早退分支
+  if (key === liveLastKey && list.innerHTML) {
+    $('liveSummary').textContent = liveSummary(accts, d);
+    return;
+  }
+  liveLastKey = key;
+  const groups = accts.filter(a => (a.tasks || []).length || a.error).map(a => {
+    const nick = a.nickname || String(a.uid).slice(0, 8);
+    const cnt = a.error ? '查询失败'
+      : (a.pending || 0) + ' 待办 · ' + (a.claimable || 0) + ' 可领 · ' + (a.claimed || 0) + ' 已领';
+    const rows = a.error
+      ? '<div class="live-row bad"><span class="tag bad">出错</span><span class="t">' + esc(a.error) + '</span></div>'
+      : (a.tasks || []).map(liveTaskRow).map(liveRowHTML).join('');
+    return '<div class="live-grp"><header><span class="nm">' + esc(nick) + '</span>' +
+      '<span class="cnt">' + esc(cnt) + '</span><span class="grow"></span>' +
+      '<button class="xs" data-live-uid="' + esc(a.uid) + '">打开任务</button></header>' + rows + '</div>';
+  });
+  if (!groups.length) {
+    list.innerHTML = '';
+    empty.hidden = false;
+    // 有账号却没有分组 = 全部领完了（只有待办 / 可领 / 查询失败的号才带任务表或错误）
+    empty.textContent = accts.length ? '任务都领完了：没有待办、可领或查询失败的账号。'
+      : (d && d.refreshing) ? '首轮查询中：账号多时第一轮要一会儿，查完会自动显示。'
+      : '还没有数据：点「立即刷新」拉一次。';
+    $('liveSummary').textContent = liveSummary(accts, d);
+    return;
+  }
+  empty.hidden = true;
+  list.innerHTML = groups.join('');
+  $('liveSummary').textContent = liveSummary(accts, d);
+}
+async function loadLiveTasks(fresh) {
+  if (liveLoading) return;
+  liveLoading = true;
+  const btn = $('btnLiveReload');
+  if (btn) btn.disabled = true;
+  if (liveRetry) { clearTimeout(liveRetry); liveRetry = null; }
+  try {
+    const d = await api('tasks/live' + (fresh ? '?fresh=1' : ''));
+    renderLiveTasks(d);
+    // 后台那一轮还没跑完（返回的是上一份快照，可能是空的）：几秒后再取一次，不等下一个
+    // 轮询间隔，否则卡片总比数据慢一个间隔。这只是读服务端缓存，不产生上游请求；
+    // 一轮结束 refreshing 变 false 就停。
+    if (d && d.refreshing) {
+      liveRetry = setTimeout(() => { liveRetry = null; if (liveVisible()) loadLiveTasks(false); }, 8000);
+    }
+  } catch (e) {
+    const note = $('liveNote');
+    note.hidden = false;
+    note.className = 'state err';
+    note.textContent = '实时任务查询失败：' + e.message;
+  } finally {
+    liveLoading = false;
+    if (btn) btn.disabled = false;
+  }
+}
+// liveVisible 本页在前台才轮询：切走视图、切到别的标签页都算不可见。
+function liveVisible() { return view === 'tasks' && !(typeof document !== 'undefined' && document.hidden); }
+function liveTasksTick() {
+  if (!liveVisible()) return;
+  loadLiveTasks(false);
+}
+let liveVisBound = false;
+function startLiveTasks() {
+  // 可见性监听只绑一次，且放在这里而不是模块顶层：前端测试会把这一段单独切到
+  // 没有 document 的沙箱里求值，顶层绑定会直接 ReferenceError。
+  if (!liveVisBound && typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && view === 'tasks') loadLiveTasks(false);
+    });
+    liveVisBound = true;
+  }
+  loadLiveTasks(false);
+  if (liveTimer) clearInterval(liveTimer);
+  liveTimer = null;
+  if (liveEvery > 0) liveTimer = setInterval(liveTasksTick, liveEvery * 1000);
+}
+if ($('liveEvery')) {
+  $('liveEvery').value = String(liveEvery);
+  $('liveEvery').onchange = ev => {
+    liveEvery = Number(ev.target.value) || 0;
+    try { localStorage.setItem('wb2api.liveEvery', String(liveEvery)); } catch (e) { /* 隐私模式 */ }
+    if (liveTimer) clearInterval(liveTimer);
+    liveTimer = liveEvery > 0 ? setInterval(liveTasksTick, liveEvery * 1000) : null;
+  };
+  // typeof 守卫同上：前端测试会把这一段单独切出来在无 localStorage 的沙箱里求值。
+  const savedRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('wb2api.liveEvery') : null;
+  if (savedRaw !== null && savedRaw !== '') {
+    const saved = Number(savedRaw);
+    if (LIVE_EVERY_CHOICES.includes(saved)) { liveEvery = saved; $('liveEvery').value = String(saved); }
+  }
+}
+if ($('btnLiveReload')) $('btnLiveReload').onclick = () => loadLiveTasks(true);
+if ($('liveList')) {
+  $('liveList').addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-live-uid]');
+    if (b) openTasks(b.dataset.liveUid);
+  });
+}
 
 /* ── 开学季任务单元（账号详情的任务弹窗用）───────────────────────── */
 // 开学季任务单元：✓ 已领（绿）｜◐ x/y 进行中（琥珀）｜○ 未做（灰）

@@ -263,15 +263,18 @@ func TestNarrationShortLeadInStillRescued(t *testing.T) {
 	}
 }
 
-// issue #245 第二道墙：textYieldsToUser 原先对整段正文做 Contains，中段的技术叙述
-// （"是否需要更换钢丝绳"）会把尾部的承诺句一起否掉，正文越长越容易撞上。判据改为只看末句。
-func TestTextYieldsToUserUsesLastSentence(t *testing.T) {
+// issue #245 / #260：两条判据的口径不同，别再混用。
+//
+//   - textYieldsToUser（toolonly）按**整段**认：那条救援会采纳工具调用，正文又短，宁可少救；
+//   - yieldsToUser(text,false)（narration）只认「末句 / 末尾问句 / 措辞后紧跟我-你」三种位置：
+//     长正文里的技术叙述（"是否需要更换"）不该把尾部的承诺句一起否掉。
+func TestTextYieldsToUserWholeText(t *testing.T) {
 	cases := []struct {
 		name string
 		text string
 		want bool
 	}{
-		{"末句承诺、中段含是否需要", "把读数归档，为“是否需要更换”提供量化支撑。\n\n我将开始修改 check.go", false},
+		{"中段含是否需要（toolonly 整段认）", "把读数归档，为“是否需要更换”提供量化支撑。\n\n我将开始修改 check.go", true},
 		{"末句真的在等确认", "改动已过一遍。\n\n请确认后我再动手。", true},
 		{"末句问号", "三处都改完了。要现在发布吗？", true},
 		{"末句英文", "All done. Let me know if you want the diff.", true},
@@ -282,6 +285,10 @@ func TestTextYieldsToUserUsesLastSentence(t *testing.T) {
 		if got := textYieldsToUser(c.text); got != c.want {
 			t.Fatalf("%s: textYieldsToUser(%q)=%v want %v", c.name, c.text, got, c.want)
 		}
+	}
+	// 同一条正文在 narration 口径下是「技术叙述」：尾部承诺句该救。
+	if yieldsToUser("把读数归档，为“是否需要更换”提供量化支撑。\n\n我将开始修改 check.go", false) {
+		t.Fatal("narration 口径不该被中段的技术叙述否掉")
 	}
 }
 
@@ -320,7 +327,7 @@ func TestNarrationMidTextYieldMarkerStillRescued(t *testing.T) {
 	text := "## 三、整改建议\n\n把每一次实测读数归档，使判断不再依赖人而异的经验判断，" +
 		"也使每次检验的数据自动进入趋势库，为“是否需要更换”提供量化支撑。\n\n---\n\n" +
 		"我将开始修改 internal/verify/check.go"
-	if textYieldsToUser(text) {
+	if yieldsToUser(text, false) {
 		t.Fatal("末句是承诺句，不该判为等用户回话")
 	}
 	if narrationTailPunctuated(text) || !narrationTailSuspends(text) {
@@ -351,7 +358,7 @@ func TestNarrationMidTextYieldMarkerStillRescued(t *testing.T) {
 // 措辞落在**末句**里（模型真的在等用户拍板）：仍然不救。这条守着 #209 的事故形态。
 func TestNarrationFinalSentenceYieldStillSkipped(t *testing.T) {
 	text := "我已经把三处改动过了一遍，剩下两处涉及线上配置。\n\n请确认后我再动手："
-	if !textYieldsToUser(text) {
+	if !yieldsToUser(text, false) {
 		t.Fatal("末句含「请确认后」，应判为等用户回话")
 	}
 	raw, _ := json.Marshal(text)
@@ -403,5 +410,171 @@ func TestNarrationCapsAtTwoRescues(t *testing.T) {
 	}
 	if len(*reqs) != 2 {
 		t.Fatalf("每请求最多救两次，实际 %d 次", len(*reqs))
+	}
+}
+
+// ── 等用户拍板的措辞挡住救援；技术叙述里的同类措辞不挡（#209 / #260 / #245）──────
+
+// narrationRescueCount 首段正文为 text、finish=stop 的工具类请求一共发了几次预告句救援。
+func narrationRescueCount(t *testing.T, text string) int {
+	t.Helper()
+	raw, _ := json.Marshal(text)
+	seg := `data: {"id":"y1","choices":[{"index":0,"delta":{"content":` + string(raw) + `}}]}` + "\n\n" +
+		`data: {"id":"y1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":268538,"completion_tokens":80,"total_tokens":268618}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyText })
+	if _, err := io.ReadAll(newNarrateReader(t, up, agentBody, seg)); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	return len(*reqs)
+}
+
+// 等用户拍板的措辞不论在哪一句都不救（#209 的事故形态）：确认请求后面常跟着草稿本身，
+// 只看最后一句（或末尾 200B）会把收件人 / 主题行当成末句、把它判成承诺句救掉，模型就
+// 真把邮件发出去了。这就是 #260 的回归形态。
+func TestNarrationYieldMarkersStillSkipped(t *testing.T) {
+	for _, text := range []string{
+		"邮件已经写好，请确认后我再发送。\n\n收件人：all@example.com\n主题：Q3 计划",
+		"邮件已经写好，确认后我再发送。\n\n收件人：all@example.com\n主题：Q3 计划",
+		"请确认以下操作后我再执行\n- 删除 A\n- 删除 B",
+		"是否需要我现在把邮件发出去？\n\n收件人：all@example.com\n主题：Q3 计划",
+		"要不要现在发送？\n\n收件人：all@example.com\n主题：Q3 计划",
+		"是否需要我先发给你过目。草稿如下\n收件人：all@example.com",
+		"三处改动都过了一遍。是否需要顺便把文档也更新",
+		// 末句里带文件名 / 版本号的半角点：不能把「是否需要」切到前一句去。
+		"三处都改完了。是否需要顺便改 config.go 里的超时",
+		"要不要顺便把 v1.2 的配置也改掉",
+	} {
+		if n := narrationRescueCount(t, text); n != 0 {
+			t.Errorf("正文在等用户拍板，不该续写（%q），实际 %d 次", text, n)
+		}
+	}
+}
+
+// 反方向：技术叙述里的「确认无误 / 确认后 / 请告知 / 可以吗 / 是否需要我们」不是在等用户，
+// 尾部停在承诺句上照样要救（#245）。按整段认这些词会把长回复一条条挡掉。
+func TestNarrationNarrativeYieldWordsStillRescued(t *testing.T) {
+	long := strings.Repeat("我把三处改动逐行过了一遍，其中两点需要单独说明。", 12)
+	for _, mid := range []string{
+		"日志格式确认无误。",
+		"staging 确认后再上线。",
+		"如有问题请告知维护者。",
+		"这个函数的行为可以吗？我查过调用方，结论是可以。",
+		"是否需要我们更换钢丝绳要看趋势数据。",
+	} {
+		text := long + mid + "\n\n我将开始修改 internal/verify/check.go"
+		if n := narrationRescueCount(t, text); n != 1 {
+			t.Errorf("中段是技术叙述（%q）、尾部停在承诺句上，应救一次，实际 %d 次", mid, n)
+		}
+	}
+}
+
+// toolonly 会采纳工具调用：确认请求后面又跟了一句（"草稿放在 draft.md 里。"）时，只看最后
+// 一句就会放行救援、把「发送」这一步替用户执行掉。这条救援按整段认等用户措辞。
+func TestToolOnlySkipsWaitingForUserBeforeLastSentence(t *testing.T) {
+	seg := `data: {"id":"t9","choices":[{"index":0,"delta":{"content":"邮件已写好，请确认后我再发送。草稿放在 draft.md 里。"}}]}` + "\n\n" +
+		`data: {"id":"t9","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":40,"total_tokens":106547}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, segToolOnlyToolCall })
+	if _, err := io.ReadAll(newToolOnlyReader(t, up, toolLoopBody, seg)); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("模型在等用户确认，不该续写，实际 %d 次", len(*reqs))
+	}
+}
+
+// ── 无标点长正文只救预告下一步动作的末句（#264）──────────────────────────────
+
+// 写完的长总结最后一行常常没有句号（列表项、表格行、「全部测试通过 ✅」、文件路径），
+// 放开长度闸门后它们会被续写一段（还被告知「承诺的动作没执行」），每次都是整段上下文
+// 重发的计费请求。
+func TestNarrationLongFinishedTailNotRescued(t *testing.T) {
+	long := strings.Repeat("这一轮我把三处改动逐条过了一遍，结论如下。", 30) + "\n\n"
+	for _, tail := range []string{
+		"## 改动清单\n- 修复续写闸门\n- 新增回归测试",
+		"| 文件 | 改动 |\n|---|---|\n| continue.go | 续写闸门 |",
+		"全部测试通过 ✅",
+		"任务已全部完成",
+		"改动见 internal/server/continue.go",
+		"接下来你可以运行 go test ./... 验证",
+		"对我来说这次改动已经足够",
+		"Testing: all 42 cases passed",
+	} {
+		text := long + tail
+		if !narrationTailSuspends(text) || len(text) <= narrationMaxBytes {
+			t.Fatalf("前提失败：%q 应是超长的无标点收尾", tail)
+		}
+		if n := narrationRescueCount(t, text); n != 0 {
+			t.Errorf("长总结以 %q 收尾不该续写，实际 %d 次", tail, n)
+		}
+	}
+}
+
+// 反方向：长正文停在各种说法的预告句上（#245 的形态）都要救——只认「我将 / 我会」会把
+// 「我需要先读取…」「Let's fix…」「正在修改…」这类同样被掐断的句子漏掉。
+func TestNarrationLongPromiseTailStillRescued(t *testing.T) {
+	long := strings.Repeat("这一轮我把三处改动逐条过了一遍，结论如下。", 30) + "\n\n"
+	for _, tail := range []string{
+		"我需要先读取 internal/server/foo.go",
+		"我打算先改续写闸门",
+		"我开始修改 continue.go",
+		"接下来开始修改 narration.go",
+		"现在开始修改测试",
+		"下一步我再补回归用例",
+		"我们接着改 toolonly.go",
+		"正在修改 foo.go",
+		"Now I need to update the gate",
+		"I need to update the tests",
+		"Let's fix the gate first",
+		"Reading failfirst.sh mutation script",
+	} {
+		if n := narrationRescueCount(t, long+tail); n != 1 {
+			t.Errorf("长正文停在预告句 %q 上应救一次，实际 %d 次", tail, n)
+		}
+	}
+}
+
+// 截断的调用标记、未闭合代码块也没有标点，但不是承诺句：仍用「停在预告上、把剩下的写完」
+// 那条指令（说成「你承诺的动作没执行」是答非所问）。
+func TestNarrationStructurallyOpenTailKeepsLeadInNudge(t *testing.T) {
+	for _, text := range []string{
+		"我先跑一下：\n<｜｜DSML｜｜ invoke name=\"bash\">\n<｜｜DSML｜｜ parameter name=\"cmd\">go test ./... 2>&1</｜｜DSML｜｜ parameter>",
+		"先写一个最小复现：\n```go\nfunc main() {",
+	} {
+		raw, _ := json.Marshal(text)
+		seg := `data: {"id":"o1","choices":[{"index":0,"delta":{"content":` + string(raw) + `}}]}` + "\n\n" +
+			`data: {"id":"o1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":268538,"completion_tokens":80,"total_tokens":268618}}` + "\n\n" +
+			"data: [DONE]\n\n"
+		up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyText })
+		if _, err := io.ReadAll(newNarrateReader(t, up, agentBody, seg)); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if len(*reqs) != 1 {
+			t.Fatalf("结构未闭合应救一次（%q），实际 %d 次", text, len(*reqs))
+		}
+		msgs, _ := reqBody(t, (*reqs)[0])["messages"].([]any)
+		last, _ := msgs[len(msgs)-1].(map[string]any)
+		if got, _ := last["content"].(string); got != narrationNudge {
+			t.Errorf("结构未闭合（%q）应带 narrationNudge，实际 %q", text, got)
+		}
+	}
+}
+
+// 救援段一个字都没写出来（只给了 finish=stop）：不发第二次——请求体与第一次一字不差，
+// 再发只是再付一次整段上下文的钱。
+func TestNarrationNoSecondRescueWithoutProgress(t *testing.T) {
+	empty := `data: {"id":"e1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":268600,"completion_tokens":3,"total_tokens":268603}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, empty })
+	out, err := io.ReadAll(newNarrateReader(t, up, agentBody, segNarrateLeadIn))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("救援段没写出新正文时不该再救，实际 %d 次", len(*reqs))
+	}
+	if n := strings.Count(string(out), `"finish_reason":`); n != 1 {
+		t.Fatalf("终态必须恰好一个，实际 %d 个", n)
 	}
 }

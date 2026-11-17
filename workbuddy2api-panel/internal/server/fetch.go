@@ -214,6 +214,7 @@ func fetchDomainRejected(err error) bool {
 //   - 做 DNS 再校验需要真的联网解析，会把一个纯本地校验变成可能阻塞/失败的调用，
 //     而且解析结果与实际连接时的解析结果可以不同（DNS rebinding 照样绕过）；
 //   - 真正的收口位置是上游 webfetch 的出口策略（本网关只是转发方，拿不到它的 socket）。
+//
 // 所以这里的目标是：把「一眼就是内网/元数据」的目标在本地拦掉，让误用与低级探测失败在
 // 网关侧、而不是变成一次上游调用。域名形态的内网地址（如 intranet.corp）不在拦截范围内。
 func fetchURLGuard(target string) error {

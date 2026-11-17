@@ -107,8 +107,8 @@ func TestCampaignTaskReady(t *testing.T) {
 		{2, 3, "", "", false},
 		{0, 1, "", "", false},
 		{1, 1, "done", "", true},
-		{5, 0, "", "", false},         // target 缺失（上游没下发）不算达标
-		{3, 3, "claimed", "", false},  // 已领过：不再 viewed + claim 一遍
+		{5, 0, "", "", false},                              // target 缺失（上游没下发）不算达标
+		{3, 3, "claimed", "", false},                       // 已领过：不再 viewed + claim 一遍
 		{3, 3, "done", "2026-11-12T09:05:00+08:00", false}, // claimed_at 优先于 status
 	}
 	for _, c := range cases {

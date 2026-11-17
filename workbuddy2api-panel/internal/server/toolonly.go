@@ -31,6 +31,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"log"
 	"strings"
 
@@ -231,26 +232,22 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 	r.toolOnlyTried = true
 	// 首段的终态帧先存起来：续写段如果只给正文，要原样回放这一份。
 	r.origFinish, r.origTail = r.finish, r.tail
-	rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta)
-	if terr != nil || status >= 400 || rc == nil {
-		if rc != nil {
-			rc.Close()
-		}
+	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
+	return r.openSegmentAsync(switchToolOnly, body, func(rc io.ReadCloser) {
+		r.seg++
+		r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
+		r.finish, r.tail = "", nil
+		r.toolOnly = true
+		r.toolOnlyFailed = false
+		r.toolCallBuf, r.toolCallNames, r.toolCallArgs = nil, nil, nil
+		r.segCompletion, r.segThink = 0, 0
+		log.Printf("[toolonly] acct=%s model=%s seg=%d 正文 %dB 且尾部预告动手 → 试续一次，只采纳工具调用",
+			r.label(), bareModelOf(r.body), r.seg, r.text.Len())
+	}, func(status int, terr error) {
 		r.origFinish, r.origTail = "", nil
 		log.Printf("WARN: [toolonly] acct=%s seg=%d 续写请求失败（status=%d err=%v）→ 按原样收尾",
 			r.label(), r.seg+1, status, terr)
-		return false
-	}
-	r.seg++
-	r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
-	r.finish, r.tail = "", nil
-	r.toolOnly = true
-	r.toolOnlyFailed = false
-	r.toolCallBuf, r.toolCallNames, r.toolCallArgs = nil, nil, nil
-	r.segCompletion, r.segThink = 0, 0
-	log.Printf("[toolonly] acct=%s model=%s seg=%d 正文 %dB 且尾部预告动手 → 试续一次，只采纳工具调用",
-		r.label(), bareModelOf(r.body), r.seg, r.text.Len())
-	return true
+	})
 }
 
 // settleToolOnly 续写段结束时的裁决：拿到完整的工具调用就采纳，否则整段回滚到首段终态。

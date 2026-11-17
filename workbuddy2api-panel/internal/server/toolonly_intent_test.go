@@ -70,6 +70,9 @@ func TestToolOnlyLastSentence(t *testing.T) {
 		{"结尾多个标点……ok。", "结尾多个标点……ok"},
 		// 文件名里的 "." 不是句末：切成 "html 链接" 会把意图词整段切走（108 样本的形态）。
 		{"改完了。我继续检查 UnityManual.html 链接。", "我继续检查 UnityManual.html 链接"},
+		// 半角点后面不是空白（文件名、版本号）不算句末（上游 #261 的提交 1，本仓早已这么切）。
+		{"写完了。我将开始修改 internal/verify/check.go", "我将开始修改 internal/verify/check.go"},
+		{"已确认。升到 v1.2 再看", "升到 v1.2 再看"},
 		{"", ""},
 		{"。。。", ""},
 	}

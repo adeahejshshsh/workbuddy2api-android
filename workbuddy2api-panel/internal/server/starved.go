@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"log"
 	"strings"
 
@@ -195,27 +196,23 @@ func (r *continueReader) tryStarvedRetry() bool {
 		return false
 	}
 	r.starvedTried = true
-	rc, status, _, err := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta)
-	if err != nil || status >= 400 || rc == nil {
-		if rc != nil {
-			rc.Close()
-		}
-		log.Printf("WARN: [starved] acct=%s seg=%d 关思考重发失败（status=%d err=%v）→ 降级为截断终态",
-			r.label(), r.seg+1, status, err)
-		return false
-	}
 	// 成因要在重置 r.finish 之前抓：下面马上把它清空给新段用。
 	cause := "预算被思考吃光"
 	if r.finish != "length" {
 		cause = "思考完直接收尾"
 	}
-	r.seg++
-	r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
-	r.finish, r.tail = "", nil
-	// 上一段外泄给客户端的思考（正文尚未开始，见 frame() 的接缝策略）已经发出去、
-	// 收不回来；救援段关思考，把本地累积清掉，免得续写前缀里混进两轮思考。
-	r.reason.Reset()
-	log.Printf("[starved] acct=%s model=%s seg=%d %s（正文 0B）→ 同额度关思考重发",
-		r.label(), bareModelOf(r.body), r.seg, cause)
-	return true
+	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
+	return r.openSegmentAsync(switchStarved, body, func(rc io.ReadCloser) {
+		r.seg++
+		r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
+		r.finish, r.tail = "", nil
+		// 上一段外泄给客户端的思考（正文尚未开始，见 frame() 的接缝策略）已经发出去、
+		// 收不回来；救援段关思考，把本地累积清掉，免得续写前缀里混进两轮思考。
+		r.reason.Reset()
+		log.Printf("[starved] acct=%s model=%s seg=%d %s（正文 0B）→ 同额度关思考重发",
+			r.label(), bareModelOf(r.body), r.seg, cause)
+	}, func(status int, err error) {
+		log.Printf("WARN: [starved] acct=%s seg=%d 关思考重发失败（status=%d err=%v）→ 接着判下一条（续写或按截断收尾）",
+			r.label(), r.seg+1, status, err)
+	})
 }
