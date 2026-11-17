@@ -542,3 +542,199 @@ func TestCleanupOrphanToolCallsEmptyName(t *testing.T) {
 		assertSummary(t, summarize(out), []string{"assistant(c1,c2)", "tool(c1)", "tool(c2)"})
 	})
 }
+
+// summarizeWithOutput 同 summarize，但 tool 条目额外带上结果正文（"tool(id:正文)"）。
+// id 跨轮复用时，只有正文能证明「第一轮的结果仍然留在第一轮」。
+func summarizeWithOutput(messages []any) []string {
+	out := summarize(messages)
+	for i, raw := range messages {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role != "tool" {
+			continue
+		}
+		content, _ := msg["content"].(string)
+		out[i] += ":" + content
+	}
+	return out
+}
+
+// TestReorderEarlyToolResults 「结果早于调用」的倒置必须在出站前重排回「调用在前、
+// 结果在后」，否则上游判 11148（tool_call_sequence_broken）顶死整条会话。
+//
+// 形态来源：Codex 经 cc-switch 类本地代理转发 /v1/responses 时，input 里
+// function_call_output 排在对应 function_call 之前；responses 适配器按原始顺序拼接，
+// 出站就是 tool(c0) 在前、assistant(tool_calls c0) 在后。既有两步都盖不住这种倒置：
+// repackToolResultBlocks 只从 role==assistant 开头处理（前面那条 tool 当普通消息直通），
+// cleanupOrphanToolCalls 又因两侧 id 都在而判「配对完整」放行。
+//
+// 后三条钉的是 id 跨轮复用：上游没给 id 时网关自己按轮内下标补 call_0 / toolu_0
+// （responses.go 的 acc.id = "call_" + idx），同一会话里每轮都可能有一个 call_0。
+// 「同 id 跟最后一次声明走」的口径会把顺序本来正确的第一轮结果搬到最后一轮之后，
+// 第一轮的调用落空——比不修更糟。正确口径是「归后面最近的一次声明」。
+func TestReorderEarlyToolResults(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		want   []string
+		change bool
+	}{
+		{
+			name:   "单个早到结果",
+			in:     `[{"role":"user","content":"run"},{"role":"tool","tool_call_id":"c0","content":"ok"},{"role":"assistant","content":"","tool_calls":[{"id":"c0"}]},{"role":"user","content":"next"}]`,
+			want:   []string{"user(-)", "assistant(c0)", "tool(c0):ok", "user(-)"},
+			change: true,
+		},
+		{
+			name:   "顺序本就正确（零改动）",
+			in:     `[{"role":"user","content":"run"},{"role":"assistant","content":"","tool_calls":[{"id":"c0"}]},{"role":"tool","tool_call_id":"c0","content":"ok"}]`,
+			want:   []string{"user(-)", "assistant(c0)", "tool(c0):ok"},
+			change: false,
+		},
+		{
+			name:   "同批两条早到，保持原相对顺序",
+			in:     `[{"role":"tool","tool_call_id":"c0","content":"a"},{"role":"tool","tool_call_id":"c1","content":"b"},{"role":"assistant","content":"","tool_calls":[{"id":"c0"},{"id":"c1"}]}]`,
+			want:   []string{"assistant(c0,c1)", "tool(c0):a", "tool(c1):b"},
+			change: true,
+		},
+		{
+			name:   "正常结果先出、早到结果补在同批之后",
+			in:     `[{"role":"user","content":"run"},{"role":"tool","tool_call_id":"c1","content":"early"},{"role":"assistant","content":"","tool_calls":[{"id":"c0"},{"id":"c1"}]},{"role":"tool","tool_call_id":"c0","content":"late"},{"role":"user","content":"next"}]`,
+			want:   []string{"user(-)", "assistant(c0,c1)", "tool(c0):late", "tool(c1):early", "user(-)"},
+			change: true,
+		},
+		{
+			name:   "孤儿结果不动（交给 cleanup 删）",
+			in:     `[{"role":"user","content":"run"},{"role":"tool","tool_call_id":"zz","content":"orphan"}]`,
+			want:   []string{"user(-)", "tool(zz):orphan"},
+			change: false,
+		},
+		{
+			name:   "声称者是最后一条消息：循环结束时仍要补上",
+			in:     `[{"role":"user","content":"run"},{"role":"tool","tool_call_id":"c0","content":"ok"},{"role":"assistant","content":"","tool_calls":[{"id":"c0"}]}]`,
+			want:   []string{"user(-)", "assistant(c0)", "tool(c0):ok"},
+			change: true,
+		},
+		{
+			name: "跨轮复用同一 id、顺序本就正确（零改动）",
+			in: `[{"role":"user","content":"a"},{"role":"assistant","content":"","tool_calls":[{"id":"call_0"}]},{"role":"tool","tool_call_id":"call_0","content":"r1"},
+				{"role":"user","content":"b"},{"role":"assistant","content":"","tool_calls":[{"id":"call_0"}]},{"role":"tool","tool_call_id":"call_0","content":"r2"},
+				{"role":"user","content":"c"}]`,
+			want:   []string{"user(-)", "assistant(call_0)", "tool(call_0):r1", "user(-)", "assistant(call_0)", "tool(call_0):r2", "user(-)"},
+			change: false,
+		},
+		{
+			name: "跨轮复用同一 id、第二轮结果早到：只挪第二轮",
+			in: `[{"role":"user","content":"a"},{"role":"assistant","content":"","tool_calls":[{"id":"call_0"}]},{"role":"tool","tool_call_id":"call_0","content":"r1"},
+				{"role":"user","content":"b"},{"role":"tool","tool_call_id":"call_0","content":"r2"},{"role":"assistant","content":"","tool_calls":[{"id":"call_0"}]},
+				{"role":"user","content":"c"}]`,
+			want:   []string{"user(-)", "assistant(call_0)", "tool(call_0):r1", "user(-)", "assistant(call_0)", "tool(call_0):r2", "user(-)"},
+			change: true,
+		},
+		{
+			name: "两轮都早到：各归各的最近声明",
+			in: `[{"role":"tool","tool_call_id":"call_0","content":"r1"},{"role":"assistant","content":"","tool_calls":[{"id":"call_0"}]},{"role":"user","content":"b"},
+				{"role":"tool","tool_call_id":"call_0","content":"r2"},{"role":"assistant","content":"","tool_calls":[{"id":"call_0"}]}]`,
+			want:   []string{"assistant(call_0)", "tool(call_0):r1", "user(-)", "assistant(call_0)", "tool(call_0):r2"},
+			change: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, changed := reorderEarlyToolResults(msgs(t, tc.in))
+			if changed != tc.change {
+				t.Fatalf("changed=%v want=%v（原序: %v）", changed, tc.change, summarizeWithOutput(out))
+			}
+			assertSummary(t, summarizeWithOutput(out), tc.want)
+		})
+	}
+}
+
+// TestPrepareBodyReordersEarlyToolResults 全链路：早到结果走完整出站管线后必须落在
+// 它自己的 assistant 之后，且两侧 id 都在、不能被 cleanupOrphanToolCalls 误删。
+func TestPrepareBodyReordersEarlyToolResults(t *testing.T) {
+	body := `{"model":"deepseek-v4.1-flash","messages":[
+		{"role":"user","content":"run"},
+		{"role":"tool","tool_call_id":"c0","content":"ok"},
+		{"role":"assistant","content":"","tool_calls":[{"id":"c0","type":"function","function":{"name":"shell","arguments":"{}"}}]},
+		{"role":"user","content":"next"}
+	]}`
+	out := PrepareBodyOpt([]byte(body), false)
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("unmarshal 出站 body: %v\n%s", err, out)
+	}
+	messages, _ := obj["messages"].([]any)
+	got := summarizeWithOutput(messages)
+	if !containsSubseq(got, []string{"assistant(c0)", "tool(c0):ok"}) {
+		t.Fatalf("早到结果没有落到 assistant 之后，实际顺序: %v", got)
+	}
+	if len(got) < 4 {
+		t.Fatalf("结果被误删（cleanup 不应删掉两侧 id 都在的配对）: %v", got)
+	}
+}
+
+// TestPrepareBodyReorderEarlyThenMerge 管线顺序钉桩：reorderEarly 排最前，但它只搬
+// role:tool 条目、不动 assistant 顺序，所以「早到结果 + 背靠背 assistant」这种混合形态
+// 的出站仍必须是合法 wire——每条 assistant 的结果都紧跟在它后面，不出现两条相邻的
+// assistant.tool_calls（那是 mergeAdjacentToolCalls 要挡的 11148 形态）。
+func TestPrepareBodyReorderEarlyThenMerge(t *testing.T) {
+	body := `{"model":"deepseek-v4.1-flash","messages":[
+		{"role":"tool","tool_call_id":"c0","content":"r0"},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"c0"}]},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"c1"}]},
+		{"role":"tool","tool_call_id":"c1","content":"r1"},
+		{"role":"user","content":"next"}
+	]}`
+	out := PrepareBodyOpt([]byte(body), false)
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("unmarshal 出站 body: %v\n%s", err, out)
+	}
+	messages, _ := obj["messages"].([]any)
+	got := summarizeWithOutput(messages)
+	// 结果必须都跟在各自 assistant 之后：首个 tool 不能出现在任何 assistant 之前。
+	firstAssistant := -1
+	for i, s := range got {
+		if strings.HasPrefix(s, "assistant(") && firstAssistant < 0 {
+			firstAssistant = i
+		}
+		if strings.HasPrefix(s, "tool(") && firstAssistant < 0 {
+			t.Fatalf("工具结果仍排在所有调用之前（上游判 11148）: %v", got)
+		}
+	}
+	// 不得留下相邻的两条 assistant.tool_calls。
+	for i := 1; i < len(got); i++ {
+		if strings.HasPrefix(got[i-1], "assistant(") && strings.HasPrefix(got[i], "assistant(") {
+			t.Fatalf("出站仍是两条相邻的 assistant.tool_calls（上游判 11148）: %v", got)
+		}
+	}
+	// 关键断言（钉住 merge 必须排在 reorderEarly **之前**）：背靠背的两条 assistant 必须被
+	// 合成一条。若 reorderEarly 先跑，它会把早到的 tool 插到两条 assistant 之间，merge 便判
+	// 「不相邻」跳过 —— 出站就成了 assistant|tool|assistant|tool。那个形态在 OpenAI 规范里
+	// 合法，但 deepseek 系模型实测回 503/11148（见 mergeAdjacentToolCalls 的对照实验），
+	// 正是 merge 存在的理由。所以这里数的不是「有没有相邻」，而是「有没有真的合并」。
+	if n := strings.Count(strings.Join(got, " "), "assistant("); n != 1 {
+		t.Fatalf("背靠背的两条 assistant 没被合并（出站 %d 条 assistant）: %v\n"+
+			"说明 mergeAdjacentToolCalls 排在了 reorderEarlyToolResults 之后", n, got)
+	}
+}
+
+// containsSubseq 判断 needle 是否作为**连续**子序列出现在 hay 中。
+func containsSubseq(hay, needle []string) bool {
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		ok := true
+		for j := range needle {
+			if hay[i+j] != needle[j] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}

@@ -256,7 +256,7 @@ func TestReadLineLimitedErrorIsClassifiable(t *testing.T) {
 type boomBody struct{ err error }
 
 func (e boomBody) Read([]byte) (int, error) { return 0, e.err }
-func (e boomBody) Close() error            { return nil }
+func (e boomBody) Close() error             { return nil }
 
 // TestDecodeBodyDeflateReadErrorNotSilent A1-05（P2，剩余面）回归。
 //
@@ -344,8 +344,8 @@ type failConn struct {
 }
 
 func (c *failConn) Write(p []byte) (int, error) { c.writes++; return 0, errors.New("write failed") }
-func (c *failConn) Read([]byte) (int, error)   { return 0, io.EOF }
-func (c *failConn) Close() error               { return nil }
+func (c *failConn) Read([]byte) (int, error)    { return 0, io.EOF }
+func (c *failConn) Close() error                { return nil }
 
 // TestHeadOrderConnWriteReportsConsumed A1-08（P2）回归。
 //

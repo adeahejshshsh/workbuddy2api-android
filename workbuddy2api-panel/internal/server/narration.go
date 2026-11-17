@@ -26,6 +26,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"log"
 	"strings"
 	"unicode/utf8"
@@ -118,57 +119,94 @@ func hasToolCallMarkup(text string) bool {
 //
 // 判据取「措辞 + 问号」，不猜语义：宁可漏救（客户端自己重试一轮的代价是几秒），
 // 也不能替用户按下发送键。
+//
+// 这一组是明确对用户说的话，出现在正文任何位置都算：确认请求后面常跟着草稿本身
+// （"请确认后我再发送。\n\n收件人：…\n主题：…"），只看最后一句就会把草稿当成末句、
+// 漏掉它——那正是 #209 的事故形态（#260 回归）。英文项都是小写（与 ToLower 后的正文比）。
 var userYieldMarkers = []string{
-	"请确认", "确认后", "等你确认", "待你确认", "等你回复", "等你确认后",
-	"是否需要", "需不需要", "要不要我", "要不要", "你希望", "请告知",
-	"让我知道", "请你确认", "你确认后", "确认无误", "可以吗", "行吗", "好吗",
+	"请确认", "请你确认", "你确认后", "等你确认", "待你确认", "等你回复", "让我知道",
+	"please confirm", "let me know",
 }
 
-// userYieldMarkersEN 英文形态（模型偶发用英文收尾）。
-var userYieldMarkersEN = []string{
-	"please confirm", "let me know", "should i ", "do you want", "would you like",
-	"awaiting your", "waiting for your", "confirm before", "shall i ",
+// userYieldDeliberation 也能用来问用户、但同样常见于技术叙述的措辞（上游真机样本：4083 字
+// 正文停在「我将开始修改 internal/verify/check.go」上，命中的是三千字之前的「为“是否需要
+// 更换”提供量化支撑」；同类还有「staging 确认后再上线」「日志格式确认无误」「如有问题请
+// 告知维护者」）。
+//
+// 预告句救援对它们只认三种位置（见 yieldsToUser）：最后一句里；正文最后一个问句里、且问句
+// 之后只剩没有句读的内容（草稿行）；后面紧跟「我 / 你」（"确认后我再发送"，「我们 / 你们」不算）。
+// toolonly 仍按整段认——那条会采纳工具调用，正文又短，宁可少救。
+var userYieldDeliberation = []string{
+	"是否需要", "需不需要", "要不要", "确认后", "确认无误", "请告知", "你希望",
+	"可以吗", "行吗", "好吗",
+	"should i ", "shall i ", "do you want", "would you like", "awaiting your", "waiting for your", "confirm before",
 }
 
-// yieldTailBytes 判「等用户回话」时最多扫末尾这么长的窗口（最后一句过长时兜底）。
-const yieldTailBytes = 200
-
-// yieldTail 取「最后一次句读之后」的窗口：交回控制权总是最后一句里的事，中段甚至
-// 紧邻尾部的「是否需要」都可能是技术叙述（真实样本：结尾是「…为是否需要更换提供量化
-// 支撑。\n\n---\n\n我将开始修改 check.go」，含 200B 窗口也挡掉了救援）。
-// 按最后一句判，承诺句那一段里没有措辞就照常救。
-func yieldTail(s string) string {
-	// 先剥掉末尾的句读：末句完整结束（"…请确认后我再发送。"）时，最后那个句号后面
-	// 是空的，按它切会切出空串，等于放弃判据。
-	s = strings.TrimRight(s, "。！？!?\n ")
-	if i := strings.LastIndexAny(s, "。！？!?\n"); i >= 0 {
-		_, n := utf8.DecodeRuneInString(s[i:])
-		s = s[i+n:]
-	}
-	return tailOf(strings.TrimSpace(s), yieldTailBytes)
-}
-
-// textYieldsToUser 报告这段正文是否在「等用户回话」：以问号收尾，或末句含请确认类措辞。
+// textYieldsToUser 报告这段正文是否在「等用户回话」：以问号收尾，或含请确认类措辞（整段）。
 //
 // 注意问号收尾在 narrationTailSuspends 里被判为「说完了」（句末标点），所以这条判据
 // 必须独立成立——它挡的是「模型主动提问后停下」这个正确行为，而不是「话没说完」。
-func textYieldsToUser(text string) bool {
-	t := strings.TrimSpace(text)
+func textYieldsToUser(text string) bool { return yieldsToUser(text, true) }
+
+// yieldsToUser 同 textYieldsToUser；deliberationAnywhere=false 时 userYieldDeliberation 只按
+// 它注释里的三种位置认（预告句救援用，issue #245 / #260）。
+func yieldsToUser(text string, deliberationAnywhere bool) bool {
+	t := strings.ToLower(strings.TrimSpace(text))
 	if t == "" {
 		return false
 	}
 	if strings.HasSuffix(t, "？") || strings.HasSuffix(t, "?") {
 		return true
 	}
-	tail := yieldTail(t)
-	for _, m := range userYieldMarkers {
-		if strings.Contains(tail, m) {
-			return true
+	if containsAnyOf(t, userYieldMarkers) {
+		return true
+	}
+	if deliberationAnywhere {
+		return containsAnyOf(t, userYieldDeliberation)
+	}
+	return containsAnyOf(toolOnlyLastSentence(t), userYieldDeliberation) ||
+		containsAnyOf(trailingQuestion(t), userYieldDeliberation) ||
+		deliberationAddressesUser(t)
+}
+
+// trailingQuestion 正文最后一个问句——前提是它之后只剩没有句读的内容（"要不要现在发送？\n
+// 收件人：…\n主题：…"，问句后面是草稿行）。问句之后还有完整的句子，说明模型接着往下说了，
+// 那个问句只是叙述的一部分，返回空串。
+func trailingQuestion(t string) string {
+	i := strings.LastIndexAny(t, "？?")
+	if i < 0 {
+		return ""
+	}
+	_, n := utf8.DecodeRuneInString(t[i:])
+	if strings.ContainsAny(t[i+n:], "。！？!?") {
+		return ""
+	}
+	return toolOnlyLastSentence(t[:i+n])
+}
+
+// deliberationAddressesUser 正文里的 userYieldDeliberation 后面是否紧跟「我」「你」
+// （"确认后我再发送"、"是否需要我先发给你过目"）。「我们 / 你们」是叙述主语，不算。
+func deliberationAddressesUser(t string) bool {
+	for _, m := range userYieldDeliberation {
+		for rest := t; ; {
+			i := strings.Index(rest, m)
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len(m):]
+			if (strings.HasPrefix(rest, "我") || strings.HasPrefix(rest, "你")) &&
+				!strings.HasPrefix(rest, "我们") && !strings.HasPrefix(rest, "你们") {
+				return true
+			}
 		}
 	}
-	low := strings.ToLower(tail)
-	for _, m := range userYieldMarkersEN {
-		if strings.Contains(low, m) {
+	return false
+}
+
+// containsAnyOf s 是否含 subs 里任一子串。
+func containsAnyOf(s string, subs []string) bool {
+	for _, m := range subs {
+		if strings.Contains(s, m) {
 			return true
 		}
 	}
@@ -191,6 +229,42 @@ func narrationTailStructurallyOpen(text string) bool {
 		return true
 	}
 	return strings.Count(strings.TrimRight(text, " \t\r\n"), "```")%2 == 1
+}
+
+// narrationPromiseMarkers 承诺下一步动作的措辞（"我将开始修改…"、"我需要先读取…"、"let me check…"）。
+// 「接下来 / 下一步」单独出现不收：它们也常用来对用户说话（"接下来你可以运行 npm test"），
+// 长正文里认它们会把写完的回答续写一段；带上动作的「接下来开始 / 现在开始」才收。
+var narrationPromiseMarkers = []string{
+	"我将", "我会", "我先", "我要", "我来", "我继续", "我现在", "让我",
+	"我需要", "我得", "我打算", "我开始", "我再", "我接着", "我还要", "我马上", "我这就",
+	"我们接着", "接下来开始", "现在开始", "正在",
+	"let me", "let's", "i'll", "i will", "i'm ", "i am going to", "i need to", "i should", "now i",
+}
+
+// narrationPromiseNoise 含承诺词却不是承诺的固定说法，匹配前先剔掉（"对我来说" 里的「我来」）。
+var narrationPromiseNoise = []string{"我来说", "我来看"}
+
+// narrationTailPromises 最后一句是否在预告下一步动作（长正文无标点收尾时救援的前提，issue #245）：
+// 含 narrationPromiseMarkers，或以现在分词开头的英文旁白（"Reading failfirst.sh mutation script"，
+// 见 narrationTailSuspends 的样本）。
+func narrationTailPromises(text string) bool {
+	last := strings.ToLower(strings.TrimSpace(toolOnlyLastSentence(text)))
+	for _, n := range narrationPromiseNoise {
+		last = strings.ReplaceAll(last, n, "")
+	}
+	if containsAnyOf(last, narrationPromiseMarkers) {
+		return true
+	}
+	first, _, _ := strings.Cut(last, " ")
+	if len(first) < 5 || !strings.HasSuffix(first, "ing") {
+		return false
+	}
+	for _, c := range first {
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // tailHangPunct 标点型悬停的收尾符（后面必然还有东西）。
@@ -307,6 +381,10 @@ func (r *continueReader) tryNarrationRetry() bool {
 		return false
 	case r.text.Len() == 0:
 		return false
+	case r.text.Len() == r.narrationTextAt:
+		// 上一次救援一个字都没写出来：再发的请求体与上一次一字不差，只是再付一次
+		// 整段上下文的钱（issue #264）。
+		return false
 	case r.atSegmentCap():
 		return false
 	}
@@ -314,14 +392,19 @@ func (r *continueReader) tryNarrationRetry() bool {
 	// 模型在等用户拍板（问句结尾 / 「请确认后我再…」）：这是**故意的**收尾。
 	// 补一句「继续执行下一步」会拿到工具调用并被采纳，等于替用户按下发送键
 	// （issue #209 两例：要确认的邮件被直接群发）。
-	if textYieldsToUser(txt) {
+	// 「是否需要 / 要不要」这类也常见于技术叙述的措辞只认问用户的用法（见 yieldsToUser）。
+	if yieldsToUser(txt, false) {
 		return false
 	}
 	// 长度闸门只约束「标点型悬停」：那是排版习惯（说明 + 列表以冒号收尾，issue #209），
 	// 整段越长越可能是正常排版。无标点悬停是句子被掐断（"我将…"/"我会…"），与正文
 	// 长度无关——长会话里恰好最常见，按整段长度挡掉会导致一条都不救（issue #245）。
 	// 结构上确实没写完的（未闭合代码块 / 截断的调用标记）同样不受此限。
-	if narrationTailPunctuated(txt) && !narrationTailStructurallyOpen(txt) && len(txt) > narrationMaxBytes {
+	// 但无标点的长正文只救最后一句在预告下一步动作的（见 narrationTailPromises）：写完的
+	// 长总结最后一行常常没有句号（列表项、表格行、「全部测试通过 ✅」、文件路径），一律放开
+	// 的话它们会被续写一段、还被告知「承诺的动作没执行」，每次都是整段上下文重发的计费请求。
+	if !narrationTailStructurallyOpen(txt) && len(txt) > narrationMaxBytes &&
+		(narrationTailPunctuated(txt) || !narrationTailPromises(txt)) {
 		return false
 	}
 	if !narrationTailSuspends(txt) {
@@ -337,8 +420,10 @@ func (r *continueReader) tryNarrationRetry() bool {
 		return false
 	}
 	nudge := narrationNudge
-	if !narrationTailPunctuated(txt) {
-		// 无标点悬停（承诺句）用另一条指令：说成「停在冒号上」模型会反过来争辩。
+	if !narrationTailPunctuated(txt) && !narrationTailStructurallyOpen(txt) {
+		// 无标点悬停（承诺句）用另一条指令：说成「停在冒号上」模型会反过来争辩。截断的
+		// 调用标记、未闭合代码块同样没有标点，但它们不是承诺句：告诉模型「你承诺的动作
+		// 没执行」是答非所问（issue #264）。
 		nudge = narrationPromiseNudge
 	}
 	body, err := r.continuationBodyWithNudge(nudge)
@@ -346,22 +431,19 @@ func (r *continueReader) tryNarrationRetry() bool {
 		return false
 	}
 	r.narrationTries++
-	rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta)
-	if terr != nil || status >= 400 || rc == nil {
-		if rc != nil {
-			rc.Close()
-		}
+	r.narrationTextAt = r.text.Len()
+	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
+	return r.openSegmentAsync(switchNarration, body, func(rc io.ReadCloser) {
+		r.seg++
+		r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
+		r.finish, r.tail = "", nil
+		// 本段 usage 快照归零：下一段的思考/正文构成单独计量。
+		r.segCompletion, r.segThink = 0, 0
+		log.Printf("[narration] acct=%s model=%s seg=%d 正文停在预告句（%dB）→ 续写剩余内容  尾部=%q",
+			r.label(), bareModelOf(r.body), r.seg, r.text.Len(),
+			trimForLog(tailOf(r.text.String(), 60), 60))
+	}, func(status int, terr error) {
 		log.Printf("WARN: [narration] acct=%s seg=%d 续写请求失败（status=%d err=%v）→ 按原样收尾",
 			r.label(), r.seg+1, status, terr)
-		return false
-	}
-	r.seg++
-	r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
-	r.finish, r.tail = "", nil
-	// 本段 usage 快照归零：下一段的思考/正文构成单独计量。
-	r.segCompletion, r.segThink = 0, 0
-	log.Printf("[narration] acct=%s model=%s seg=%d 正文停在预告句（%dB）→ 续写剩余内容  尾部=%q",
-		r.label(), bareModelOf(r.body), r.seg, r.text.Len(),
-		trimForLog(tailOf(r.text.String(), 60), 60))
-	return true
+	})
 }

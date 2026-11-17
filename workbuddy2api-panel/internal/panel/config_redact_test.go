@@ -16,12 +16,12 @@ func TestGetConfigRedactsSecrets(t *testing.T) {
 		APIKey:      "client",
 		LoadConfig: func() (any, error) {
 			return map[string]any{
-				"api_key":         "sk-secret",
-				"admin_api_key":   "admin-secret",
-				"upstream":        map[string]any{"token": "up-token", "user_agent": "UA"},
-				"alerting":        map[string]any{"secret": "hmac-secret", "webhook_url": "https://x/?token=1"},
-				"features":        map[string]any{"three_d_temp_tokens": map[string]any{"u1": "ck_t_x"}},
-				"device_token":    "dev-token",
+				"api_key":           "sk-secret",
+				"admin_api_key":     "admin-secret",
+				"upstream":          map[string]any{"token": "up-token", "user_agent": "UA"},
+				"alerting":          map[string]any{"secret": "hmac-secret", "webhook_url": "https://x/?token=1"},
+				"features":          map[string]any{"three_d_temp_tokens": map[string]any{"u1": "ck_t_x"}},
+				"device_token":      "dev-token",
 				"soft_rate_seconds": 40,
 			}, nil
 		},

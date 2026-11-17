@@ -6,9 +6,10 @@
 // 时只能由人定性，所以给一个显式开关，并把它落进 auth 文件。
 //
 // 三种取值：
-//   ""          自动判定（看 type / enterpriseId，缺省行为）
-//   "enterprise" 强制企业版（不签到、不跑成长任务、额度走企业口径）
-//   "personal"   强制个人版（即使带了 enterpriseId 也按个人号走）
+//
+//	""          自动判定（看 type / enterpriseId，缺省行为）
+//	"enterprise" 强制企业版（不签到、不跑成长任务、额度走企业口径）
+//	"personal"   强制个人版（即使带了 enterpriseId 也按个人号走）
 package panel
 
 import (

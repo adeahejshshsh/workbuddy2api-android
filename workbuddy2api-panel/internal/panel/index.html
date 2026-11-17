@@ -800,6 +800,28 @@ body.veil-open { overflow: hidden; }
   #accTable td:first-child, #taskTable td:first-child { position: static; box-shadow: none; }
 }
 /* ══ DSH-MOBILE-PATCH-END ══ */
+/* ── 任务中心：实时任务卡（view-tasks）─────────────────────────────
+   一行一个任务、按账号分组；分组头带「打开任务」直连账号任务弹窗。
+   不复用 .acc 表格：这张卡在手机上要能一眼扫完，宽表只能横滑。 */
+#liveList { display: flex; flex-direction: column; gap: 9px; padding: 12px 17px 14px; }
+#liveList:empty { display: none; }
+.live-grp { border: 1px solid var(--line-soft); border-radius: 9px; overflow: hidden; }
+.live-grp > header {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 7px 11px; background: var(--surface-2); border-bottom: 1px solid var(--line-soft);
+}
+.live-grp .nm { font-size: 13px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-grp .cnt { color: var(--ink-3); font-size: 11.5px; }
+.live-grp .grow { flex: 1; }
+.live-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 7px 11px; border-top: 1px solid var(--line-soft); font-size: 12.5px;
+}
+.live-row:first-of-type { border-top: none; }
+.live-row .t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-row .id { font: 11px var(--mono); color: var(--ink-3); font-style: normal; margin-left: 6px; }
+.live-row .p { font: 11.5px var(--mono); color: var(--ink-3); white-space: nowrap; }
+.live-row.bad .t { color: var(--bad); white-space: normal; }
 /* ── 余额趋势（view-balhist）──────────────────────────────── */
 .stats .st { padding: 14px 17px; border-right: 1px solid var(--line-soft); }
 .stats .st:last-child { border-right: none; }
@@ -894,6 +916,9 @@ body.veil-open { overflow: hidden; }
       <li><a href="#packages" data-view="packages">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/></svg>
         积分构成</a></li>
+      <li><a href="#tasks" data-view="tasks">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v9H8l-3 3v-3H3z"/><path d="M6 6.5h4M6 9h2.5"/></svg>
+        任务中心</a></li>
       <li><a href="#balhist" data-view="balhist">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 11.5 6 7l3 2.6L14 4.5"/><path d="M14 8.5v-4h-4"/></svg>
         余额趋势</a></li>
@@ -1154,6 +1179,30 @@ body.veil-open { overflow: hidden; }
         <div class="pad"><div class="pk-grid" id="pkSummary"></div></div>
       </div>
       <div id="pkDetail"></div>
+    </section>
+
+    <!-- 任务中心：本仓 v1.23.0 下线了旧的「扫描待办 / 执行队列」界面，这里只保留
+         只读的实时任务卡 —— 进页面即拉、按间隔自动刷，不需要任何手动动作。
+         数据源 GET /panel/api/tasks/live（后端按 TTL 缓存，一轮对每个启用账号一次上游读）。 -->
+    <section class="view" id="view-tasks" hidden>
+      <div class="box">
+        <header>
+          <h3>实时任务 <span class="hint" id="liveSummary"></span></h3>
+          <span class="grow"></span>
+          <label class="sel-note" title="每轮向每个启用账号查一次任务表（上游只读），默认 2 分钟一轮">自动刷新
+            <select id="liveEvery">
+              <option value="0">关</option>
+              <option value="60">1 分钟</option>
+              <option value="120" selected>2 分钟</option>
+              <option value="300">5 分钟</option>
+            </select>
+          </label>
+          <button class="xs" id="btnLiveReload">立即刷新</button>
+        </header>
+        <div class="state" id="liveNote">进入本页自动拉取所有账号的成长任务进度；上游是分钟级聚合，刷新太快没有意义。</div>
+        <div class="state" id="liveEmpty" hidden>还没有数据：点「立即刷新」拉一次。</div>
+        <div id="liveList"></div>
+      </div>
     </section>
 
     <!-- 用量 -->

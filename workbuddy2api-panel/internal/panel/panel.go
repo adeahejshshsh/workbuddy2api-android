@@ -185,6 +185,9 @@ type Panel struct {
 	// campaignCacheMu/campaignCache 活动进度查询的短时缓存（campaign.go）。
 	campaignCacheMu sync.Mutex
 	campaignCache   campaignCacheEntry
+	// taskLive 实时任务快照与「同一时刻只跑一轮」的闸门（tasklive.go）。
+	// 挂在实例上而不是包级变量：缓存天然随面板实例走，测试之间也不会互相污染。
+	taskLive liveCache
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -395,6 +398,10 @@ func (p *Panel) routes() {
 	// 账号级后台任务作业（上游 taskjobs.go 同路径）：最近一轮全账号 + 单账号最新。
 	p.mux.HandleFunc("GET /panel/api/tasks/jobs", p.taskJobsList)
 	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks/job", p.accountTaskJob)
+	// 实时任务（tasklive.go）：直接向每个启用账号查一次任务表并按 TTL 缓存，供看板
+	// 定时轮询。与 tasks/jobs（后台作业结果）、tasks/scan_all（手动扫描）互补 ——
+	// 那两个都要有人先动一下，这里不需要。
+	p.mux.HandleFunc("GET /panel/api/tasks/live", p.tasksLive)
 	p.mux.HandleFunc("POST /panel/api/tasks/skip", p.tasksSkipState)
 	// 任务中心/队列链路（issue ISSUE-15）：界面已下线，但四个 handler 一直存在且
 	// 没注册路由 —— 等于整条链路是死代码，而调度器的成长排程又依赖其中的
@@ -579,16 +586,16 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"auth_required":      authKey != "",
 		// admin_key_set 面板是否已有独立的管理员密钥。前端据此显示「设置管理员密钥」
 		// 横幅（adminkey.go 的自举入口只在 false 时可用）。
-		"admin_key_set": panelDedicated,
-		"redis_mode":         p.cfg.RedisMode,
-		"sticky_sessions":    sticky,
-		"total":              total,
-		"healthy":            healthy,
-		"cooling":            cooling,
-		"disabled":           disabled,
-		"paused":             paused,
-		"in_flight_full":     inFlightFull,
-		"accounts":           p.cfg.Pool.List(),
+		"admin_key_set":   panelDedicated,
+		"redis_mode":      p.cfg.RedisMode,
+		"sticky_sessions": sticky,
+		"total":           total,
+		"healthy":         healthy,
+		"cooling":         cooling,
+		"disabled":        disabled,
+		"paused":          paused,
+		"in_flight_full":  inFlightFull,
+		"accounts":        p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
@@ -1318,6 +1325,11 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 // 46 个号在上游慢时最坏 ≈ 7 分钟。其它 *_all 端点都是「起 goroutine 立刻回 200」，
 // 只有它同步；前端 fetch 无超时，用户点「刷新余额」后按钮一直转，浏览器/代理还可能
 // 先掐断这条长请求（面板报错但服务端仍在跑）。
+//
+// 日志带调用来源：这条路径**只能**由面板「刷新」按钮触发，运维看到「没人点也刷新了」
+// 时无从判断是谁打的（issue #249），把来源地址与 UA 打出来即可区分浏览器误触、
+// 开着旧标签页的机器、或持有面板 key 的脚本。异步形态下 handler 已经返回，所以
+// 必须在起 goroutine 之前把这两个值取出来（r 不保证在 handler 返回后仍可读）。
 func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
@@ -1327,6 +1339,7 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "上一轮余额刷新仍在执行，请稍后再试")
 		return
 	}
+	src, ua := r.RemoteAddr, r.UserAgent()
 	go func() {
 		defer p.cfg.Scheduler.EndTask(scheduler.TaskBalance)
 		defer func() {
@@ -1341,7 +1354,7 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		p.cfg.Scheduler.RunBalanceRefreshNowCtx(ctx)
 		p.syncNicknames()
-		log.Printf("panel: 手动全量余额刷新完成")
+		log.Printf("panel: 手动全量余额刷新完成 src=%s ua=%q", src, ua)
 	}()
 	log.Printf("panel: 手动全量余额刷新已触发（异步）")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
