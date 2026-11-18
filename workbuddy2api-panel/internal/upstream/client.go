@@ -247,6 +247,41 @@ var alreadyNegativeMarkers = []string{
 }
 var badParamsMarkerCode = `"code":11101`
 
+// badParamsMarkers11129 11129「invalid function call parameters」（displayMsg「工具定义
+// 不合规」）的**文案**形态，已小写化，与 strings.ToLower(body) 比对；中文原文无大小写，
+// 同样可比。业务码 11129 / 11152 不在这里：走 hasBusinessCode（见 isToolSchemaRejected），
+// 容忍 JSON 空白、字符串形态与嵌套层级。
+var badParamsMarkers11129 = []string{
+	"invalid function call parameters",
+	"invalid_function_parameters",
+	"invalid_function_call_parameters",
+	"工具定义不合规",
+}
+
+// isToolSchemaRejected 判定「工具定义被上游整体拒收」：11129（schema 形态不合规，
+// displayMsg「工具定义不合规」）与 11152（工具名不合规或重名，displayMsg「工具名称
+// 不规范」）都属同一类——错在客户端声明的 tools，换任何账号都是同一处拒绝。
+// 业务码精确命中（容忍空白/字符串形态/嵌套），或文案命中（首帧 error 帧里 message
+// 可能是英文原文、下划线形态或中文 displayMsg）。lower 须为 strings.ToLower(body)。
+//
+// 11152 是 2026-11-18 真机实测补进来的：工具名带点/冒号/斜杠/CJK/空格、或两个同名
+// 工具，上游一律 400 11152。此前未登记 → 落到 Classify 通用 4xx 兜底 → ErrClient →
+// 喂连败、轮转全池、末端 503 no_healthy_account，把一个确定性请求错误伪装成账号故障。
+func isToolSchemaRejected(body, lower string) bool {
+	return hasBusinessCode(body, "11129") || hasBusinessCode(body, "11152") ||
+		containsAnyMarker(lower, badParamsMarkers11129)
+}
+
+// containsAnyMarker 文本是否命中任一 marker（调用方已小写化）。
+func containsAnyMarker(lower string, markers []string) bool {
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
 // 与容器时区无关）。
 var softRateResetLoc = cst.Loc
@@ -864,7 +899,12 @@ func Classify(status int, body string) ErrKind {
 		// 归 ErrBadParams：不冷却/不熔断/不计错，且**不轮转**——11101 发生在上游解析
 		// 请求体阶段，还没走到模型路由，所以"不同账号可能有不同模型权限"其实是
 		// 11102（ErrModelBlocked）的理由，那里已有 (账号,模型) 负缓存避让。
-		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) {
+		// 工具定义整颗被拒（11129 schema 形态 / 11152 工具名不合规或重名）：同样是
+		// 「同一 body 换任何账号都是同一处拒绝」的确定性请求级错误。不在这里分流就会
+		// 落 ErrClient → 全池轮转 + 每个健康号白记一笔连败 → 连败降权 → 后续请求全 503
+		// （2026-11-18 实案）。schema 侧出站前已由 normalizeToolParameters 修形，走到
+		// 这里说明是修不动的那部分（工具名、或本仓没覆盖的形态）。
+		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) || isToolSchemaRejected(body, lower) {
 			return ErrBadParams
 		}
 		return ErrClient
@@ -2586,11 +2626,20 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	}
 	req.Header.Set("X-Domain", v3ConfigDomain(a, c.chatBase(a)))
 	req.Header.Set("X-Product", "SaaS")
+	// X-Request-ID：5.9.3 真机 /v3/config 必带（9 条全有，纯随机 32 hex，无时间位）。
+	// 与 busyHeaders 同族同形态（randHex32），不要拿 chat 的 UUIDv7 混用。
+	req.Header.Set("X-Request-ID", randHex32())
+	// X-CodeBuddy-Request：**这条路径不发**。真机 /v3/config 主流样本（CLI UA 族）
+	// 恒无此头，只有渲染器侧另一条链的镜像请求带——那是另一族形态，不是我们要对齐
+	// 的那条。此前跟着「D1 全出站覆盖」在这条路径上一起注入了，等于给一个客户端
+	// 明确不发的端点多盖一个风控闸门头（parity 门禁正是靠这条抓包把它抓出来的）。
 	if ua == "" {
 		ua = codeBuddyIDEUA
 	}
 	req.Header.Set("User-Agent", ua)
-	c.injectCodeBuddyRequest(req)
+	// X-Client-*：真机 /v3/config 3/3 条都带（含 CLI 两段式 UA 那条），证明注入挂在
+	// 共享 HTTP 层而不是某个 RPC 模块上。按 realm 隔离注入（国际版不发）。
+	c.injectClientIdentityHeaders(req, a)
 	resp, err := c.do(req)
 	if err != nil {
 		return nil, nil, err

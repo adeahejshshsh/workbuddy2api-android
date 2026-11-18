@@ -1,7 +1,13 @@
 GET /v3/config HTTP/1.1
 Accept: application/json, text/plain, */*
 Connection: close
+X-Client-Version: 5.11.3
+X-Client-Platform: windows
+X-Client-Product: WorkBuddy
+Authorization: Bearer <REDACTED>
+X-User-Id: 00000000-0000-4000-8000-000000000002
+X-Domain: www.workbuddy.cn
+X-Product: SaaS
 User-Agent: WorkBuddy/5.9.3 CLI/2.165.0
 X-Request-ID: c16e715dd3a042cb8f58616fd5b6fe71
-X-Product: SaaS
 Host: www.workbuddy.cn

@@ -98,6 +98,8 @@ func (c *Client) growthJSONMP(a *auth.Auth, method, path string, body any) (json
 		return nil, err
 	}
 	c.BillingHeaders(req, a)
+	// 小程序口径：撤掉 BillingHeaders 按桌面端注入的 X-Client-* 三头，只留平台段。
+	c.dropClientIdentityHeaders(req)
 	req.Header.Set("X-Client-Platform", mpPlatform)
 	return c.doJSON(req)
 }
@@ -123,6 +125,8 @@ func (c *Client) ClaimRewardMP(a *auth.Auth, taskCode string) (credit, energy in
 		return 0, 0, false, err
 	}
 	c.BillingHeaders(req, a)
+	// 同 growthJSONMP：小程序口径不带桌面端的 X-Client-* 三头。
+	c.dropClientIdentityHeaders(req)
 	req.Header.Set("X-Client-Platform", mpPlatform)
 	data, err := c.doJSON(req)
 	if err != nil {

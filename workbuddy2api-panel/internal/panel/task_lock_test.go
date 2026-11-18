@@ -66,7 +66,7 @@ func TestTaskAcceptAllChunksBy20(t *testing.T) {
 			// mp 口径（带 X-Client-Platform 头）返回空列表：本用例只验 CN 侧分片。
 			// 注意 taskAcceptAll 会**再**跑一轮 mp 接受，两轮都返回 45 条会得到
 			// 6 批 [20 20 5 20 20 5] —— 那是正确行为，不是重复提交。
-			if r.Header.Get("X-Client-Platform") != "" {
+			if r.Header.Get("X-Client-Platform") == "miniprogram" { // 按取值认，见 issue #257
 				w.Write([]byte(`{"code":0,"data":{"tasks":[]}}`))
 				return
 			}

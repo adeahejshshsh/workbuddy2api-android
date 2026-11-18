@@ -2303,14 +2303,38 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if restricted && h.noteRestriction(acct, kind, errFrame) {
 					stopRotate = true
 				}
-				// 粘性必须解绑（报告 #3）：这一跳以 error 帧收尾，若策略是零动作
-				// （ErrNone/ErrClient/内容拦截），账号侧既不罚也不记，粘性仍钉在刚
-				// 失败的号上，下一轮继续撞。惩罚与否由 applyErrorPolicy 判。
-				fail(acct.UID)
-				st.status = http.StatusServiceUnavailable
-				st.outcome = reqlog.OutcomeStreamError
-				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
-					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, kind, logfmt.Truncate(errFrame, 200))
+				// 请求本身的错误（工具定义 11129/11152、请求体 11101、内容拦截、超长、
+				// 图片、空段、工具配对……）以「200 + error 帧」出现时，与 HTTP ≥400 路径
+				// 同口径：错在请求，换任何账号都是同一个拒绝，账号健康、前缀缓存还热着
+				// ——只释放租约、不解绑会话（同 failKeepBinding 的既有理由），观测归 400。
+				//
+				// 客户端侧的状态码在这里改不动：本仓没有上游的 HeadVetoError 那套首帧
+				// 否决（见 continue_glued_test.go 头注释），StreamHint 是「先写帧、后回调
+				// 观察者」，error 帧此刻已经落进 200 的流里。所以这一分支能做的是把
+				// 「请求级」这个事实落到实处：不记账号故障、不解绑、观测标 400，并且
+				// 由 FrameKind 的正确分类让 error 帧带上点名 tools 的 gateway_hint
+				// （见 upstream.GatewayHint 的 ErrBadParams 分支），客户端因此知道该改
+				// 请求而不是重试。
+				//
+				// 与 HTTP ≥400 分支的差异只有一处：那里 ErrBadParams/ErrEmptyContent 仍走
+				// fail（解绑）。语义上两者都属请求级、都不该解绑，但那条出口不在本次改动
+				// 范围（避免同时动两个出口），这里按「请求级一律 failKeepBinding」收口。
+				if code, requestLevel := requestErrorCodes[kind]; requestLevel {
+					failKeepBinding(acct.UID)
+					st.status = http.StatusBadRequest
+					st.outcome = reqlog.OutcomeStreamError
+					log.Printf("WARN: [server] stream acct=%s model=%s: request-level error frame kind=%s code=%s payload=%s (request's own error, account healthy, binding kept)",
+						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, kind, code, logfmt.Truncate(errFrame, 200))
+				} else {
+					// 粘性必须解绑（报告 #3）：这一跳以 error 帧收尾，若策略是零动作
+					// （ErrNone/ErrClient/内容拦截），账号侧既不罚也不记，粘性仍钉在刚
+					// 失败的号上，下一轮继续撞。惩罚与否由 applyErrorPolicy 判。
+					fail(acct.UID)
+					st.status = http.StatusServiceUnavailable
+					st.outcome = reqlog.OutcomeStreamError
+					log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
+						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, kind, logfmt.Truncate(errFrame, 200))
+				}
 			case sErr != nil:
 				if upstream.IsClientWriteError(sErr) {
 					// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
@@ -3186,6 +3210,26 @@ func egressKey(a *auth.Auth) string {
 		realm = a.Realm()
 	}
 	return "direct:" + realm
+}
+
+// requestErrorCodes 请求级上游错误 → 400 的 error.code：错在请求本身，同一 body 换任何
+// 账号都是同一个拒绝，回 503 会被中转站当成可重试。
+//
+// 两处共用这张表：托管工具探测（searchtool.go 的 probeOnce）止损，以及流式首帧 error
+// 帧的处置（chatCompletions 的 errFrame 分支）。码值与轮转循环里 HTTP ≥400 分支的即刻
+// 400 一致——同一个 Kind 在两条入口上必须给出同一个 error.code，否则客户端按码分支的
+// 逻辑会在「200 首帧」与「HTTP 400」两种到达方式下走出不同行为。
+//
+// 11129（工具 schema 形态）/11152（工具名）都归 ErrBadParams：它们的判据全在请求的
+// tools 里，见 upstream.isToolSchemaRejected。
+var requestErrorCodes = map[upstream.ErrKind]string{
+	upstream.ErrContentBlocked:    "content_blocked",
+	upstream.ErrPromptTooLong:     "prompt_too_long",
+	upstream.ErrImageInvalid:      "image_invalid",
+	upstream.ErrToolMismatch:      "tool_call_mismatch",
+	upstream.ErrBadParams:         "bad_params",
+	upstream.ErrModelParamInvalid: "model_param_invalid",
+	upstream.ErrEmptyContent:      "empty_content",
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。

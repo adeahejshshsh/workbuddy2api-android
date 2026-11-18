@@ -6,10 +6,13 @@
 //
 // 依据（真机夹具，逐字节原文）：
 //
-//	testdata/official_chat_head.txt        43 头，chat 链
-//	testdata/official_report_cn_head.txt   11 头，/v2/report
-//	testdata/official_chat_busy_head.txt    8 头，/v2/chat/busy
-//	testdata/official_v3config_head.txt     4 头，/v3/config
+//	testdata/official_chat_head.txt        46 头，chat 链
+//	testdata/official_report_cn_head.txt   14 头，/v2/report（CN 5.11.3 含 X-Client-*）
+//	testdata/official_chat_busy_head.txt   14 头，/v2/chat/busy
+//	testdata/official_v3config_head.txt    12 头，/v3/config
+//
+// 数字是夹具里**头行的实际条数**（含 Content-Length / Host / Connection 这些由
+// net/http 追加的传输层行）——改夹具时一起改，别让它变成没人核对的装饰。
 //
 // 顺序表按**路径**分族：官方不同链路由不同代码构造头对象，顺序本就不通用，
 // 拿 chat 的顺序套 report 反而更假。表里没有的路径保持 Go 原生排序——不做
@@ -44,6 +47,11 @@ var officialHeadOrder = map[string][]string{
 		"X-IDE-Version",
 		"X-Agent-Intent",
 		"X-Agent-Runtime",
+		// 5.11.3 起按 origin 注入的三头（issue #257），抓包位置紧跟在
+		// X-Agent-Runtime 之后、X-Private-Data 之前。
+		"X-Client-Version",
+		"X-Client-Platform",
+		"X-Client-Product",
 		"X-Private-Data",
 		"acp-connection-id",
 		"x-codebuddy-request",
@@ -75,6 +83,10 @@ var officialHeadOrder = map[string][]string{
 		"Accept",
 		"Content-Type",
 		"X-Request-ID",
+		// 同 chat：5.11.3 的三头落在 X-Request-ID 之后、X-Product 之前。
+		"X-Client-Version",
+		"X-Client-Platform",
+		"X-Client-Product",
 		"X-Product",
 		"User-Agent",
 		"Authorization",
@@ -90,6 +102,9 @@ var officialHeadOrder = map[string][]string{
 		"Content-Type",
 		"User-Agent",
 		"X-Request-ID",
+		"X-Client-Version",
+		"X-Client-Platform",
+		"X-Client-Product",
 		"X-Product",
 		"Authorization",
 		"X-User-Id",
@@ -101,9 +116,19 @@ var officialHeadOrder = map[string][]string{
 	"/v3/config": {
 		"Accept",
 		"Connection",
+		// /v3/config 是 issue #257 抓包里 3/3 条都带 X-Client-* 的路径之一。
+		"X-Client-Version",
+		"X-Client-Platform",
+		"X-Client-Product",
+		// 真机这条族本来就有 Authorization / X-User-Id / X-Domain（RPC 族同款），
+		// 顺序在 X-Client-* 之后、User-Agent 之前；此前本表漏列，是因为 parity 用例
+		// 手拼头没发它们（见 official_fixture_test.go 的 v3config case）。
+		"Authorization",
+		"X-User-Id",
+		"X-Domain",
+		"X-Product",
 		"User-Agent",
 		"X-Request-ID",
-		"X-Product",
 		"Host",
 	},
 }
