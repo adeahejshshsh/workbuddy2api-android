@@ -16,6 +16,9 @@ X-IDE-Name: WorkBuddy
 X-IDE-Version: 5.9.3
 X-Agent-Intent: craft
 X-Agent-Runtime: local-agent
+X-Client-Version: 5.11.3
+X-Client-Platform: windows
+X-Client-Product: WorkBuddy
 X-Private-Data: false
 acp-connection-id: 01a194ad-6b5d-7394-92ad-61e04eb3a3df
 x-codebuddy-request: 1

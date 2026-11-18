@@ -35,13 +35,21 @@ import (
 // narrationNudge 救援续写的指令。与 continueNudge 的差别：那条针对「撞长度上限」，
 // 强调不要重复；这条针对「自己以为说完了」，必须点明「你停在一句预告上」，
 // 否则模型会以为任务已完成而再重复一遍结论。
-const narrationNudge = "你上一条回复停在一句预告（例如以冒号结尾的「……：」）上就结束了，剩余内容还没写。请紧接着把剩下的部分写完：需要查看文件、执行命令或调用工具就直接调用，不要重复已经写过的内容，不要重新开头，不要道歉或解释。"
+//
+// 末尾的出口是防假阳性：判据误触发时，模型否则会写一整段自辩（真机原话「上一条回复
+// 并未中断，也没有以冒号结尾…」），那段自辩直接进客户端正文。
+//
+// 出口要求的是**零输出**而不是「只回一句『已完成』」：正文是边收边转发的，发出去就
+// 收不回来（frame() 拿到 content delta 立刻 emit），那三个字会原样拼在正文末尾
+// （issue #273 现象 3：52B + 9B = 61B，与日志逐字节对得上）。
+const narrationNudge = "你上一条回复停在一句预告（例如以冒号结尾的「……：」）上就结束了，剩余内容还没写。请紧接着把剩下的部分写完：需要查看文件、执行命令或调用工具就直接调用，不要重复已经写过的内容，不要重新开头，不要道歉或解释。如果你确实已经写完了，什么都不要输出，直接结束这一轮。"
 
 // narrationPromiseNudge 尾部是「我将…/我会…」这类承诺句时用这条。
 //
 // 不能复用上一句：那条说「停在冒号上」，而承诺句既没有冒号也不是预告排版，模型会
 // 反过来跟你争「上一条并未中断」（真机实测原话），争论也会一并写进客户端正文。
-const narrationPromiseNudge = "你上一条回复最后停在「我将…」「我会…」这类承诺句上就结束了，承诺的动作没有执行。请直接执行它：需要查看文件、执行命令或调用工具就直接调用，不要解释为什么停下，不要重复已经写过的内容，不要重新开头。"
+// 出口同上：零输出，不写字——写出来的每个字都会进客户端正文。
+const narrationPromiseNudge = "你上一条回复最后停在「我将…」「我会…」这类承诺句上就结束了，承诺的动作没有执行。请直接执行它：需要查看文件、执行命令或调用工具就直接调用，不要解释为什么停下，不要重复已经写过的内容，不要重新开头。如果你确实已经写完了，什么都不要输出，直接结束这一轮。"
 
 // toolCallMarkupMarkers 模型把工具调用写成**文本标记**时用到的特征串。
 //
@@ -322,7 +330,10 @@ func narrationTailSuspends(text string) bool {
 		return true
 	}
 	// 句末标点与收尾符：正常说完的形态。
-	if strings.ContainsRune("。.!！?？\"'”’）)》】]}`*~&", last) {
+	// `>` 也归这一类：`<face:…>` / `<sticker:…>` / `<br>` 这类标签闭合即意味着说完了，
+	// 而角色扮演客户端的正文几乎都以表情标签收尾、通篇不写句号（issue #273 原样本
+	// "怎么啦妈 ||| 是干活累着了吗 <face:抱抱>"，52B 每条都被续写一次）。
+	if strings.ContainsRune("。.!！?？\"'”’）)》】]}`*~&>", last) {
 		return false
 	}
 	return true
@@ -375,49 +386,72 @@ const narrationMaxRescues = 2
 // 返回 true 表示已换到新段继续读，调用方直接 return。
 func (r *continueReader) tryNarrationRetry() bool {
 	switch {
-	case r.narrationTries >= narrationMaxRescues, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
-		return false
+	case r.narrationTries >= narrationMaxRescues:
+		return r.skip("narration", "tries_cap")
+	case r.errSeen:
+		return r.skip("narration", "err_frame")
+	case r.toolSeen:
+		return r.skip("narration", "tool_seen")
+	case r.clientGone():
+		return r.skip("narration", "client_gone")
+	case r.outputCapped():
+		return r.skip("narration", "output_capped")
 	case r.finish != "stop":
-		return false
+		return r.skip("narration", "finish_not_stop")
 	case r.text.Len() == 0:
-		return false
+		return r.skip("narration", "no_text")
 	case r.text.Len() == r.narrationTextAt:
 		// 上一次救援一个字都没写出来：再发的请求体与上一次一字不差，只是再付一次
 		// 整段上下文的钱（issue #264）。
-		return false
+		return r.skip("narration", "no_new_text")
 	case r.atSegmentCap():
-		return false
+		return r.skip("narration", "segment_cap")
 	}
 	txt := r.text.String()
 	// 模型在等用户拍板（问句结尾 / 「请确认后我再…」）：这是**故意的**收尾。
 	// 补一句「继续执行下一步」会拿到工具调用并被采纳，等于替用户按下发送键
 	// （issue #209 两例：要确认的邮件被直接群发）。
-	// 「是否需要 / 要不要」这类也常见于技术叙述的措辞只认问用户的用法（见 yieldsToUser）。
+	// 「是否需要 / 要不要」这类也常见于技术叙述的措辞只认问用户的用法（见 deliberationAddressesUser）。
 	if yieldsToUser(txt, false) {
-		return false
+		return r.skip("narration", "yields_to_user")
 	}
-	// 长度闸门只约束「标点型悬停」：那是排版习惯（说明 + 列表以冒号收尾，issue #209），
-	// 整段越长越可能是正常排版。无标点悬停是句子被掐断（"我将…"/"我会…"），与正文
-	// 长度无关——长会话里恰好最常见，按整段长度挡掉会导致一条都不救（issue #245）。
-	// 结构上确实没写完的（未闭合代码块 / 截断的调用标记）同样不受此限。
-	// 但无标点的长正文只救最后一句在预告下一步动作的（见 narrationTailPromises）：写完的
-	// 长总结最后一行常常没有句号（列表项、表格行、「全部测试通过 ✅」、文件路径），一律放开
-	// 的话它们会被续写一段、还被告知「承诺的动作没执行」，每次都是整段上下文重发的计费请求。
-	if !narrationTailStructurallyOpen(txt) && len(txt) > narrationMaxBytes &&
-		(narrationTailPunctuated(txt) || !narrationTailPromises(txt)) {
-		return false
+	// 救援指令早些时候的出口是「只回一句『已完成』」。文案已经换成「什么都不要输出」
+	// （issue #273：那三个字会进客户端正文），但模型按旧习惯照回的情况仍会有——认它，
+	// 免得白付第二次整段上下文。
+	// 按后缀判而不是按「最后一句」判：续写段是直接拼上去的，与上一条之间没有分隔符，
+	// toolOnlyLastSentence 会把两句连成一句。
+	if tail := strings.TrimRight(txt, " 	\r\n「」\"'*_。"); strings.HasSuffix(tail, "已完成") ||
+		strings.HasSuffix(strings.ToLower(tail), "done") {
+		return r.skip("narration", "ack_done")
+	}
+	// 两道形态闸门都不让「聊天文风」过关（issue #273：角色扮演机器人「一两句 + ||| 分条 +
+	// <face:…> 收尾、基本不写句号」，既不是标点型悬停也不是承诺句，于是每条正常回复都被
+	// 续写一次——实测 87 次/天，单条计费 0.2 → 8.58 credits）：
+	//   - 标点型悬停（"说明 + 列表："，issue #209）只救短正文，整段越长越可能是正常排版；
+	//   - 无标点悬停必须含承诺词（"我将…"/"我会…"，issue #245）——那是句子被掐断的唯一
+	//     可靠信号；长总结的最后一行（列表项、表格行、「全部测试通过 ✅」、文件路径）不含
+	//     承诺词，一律放开的话每次都要重付一遍整段上下文。
+	// 结构上确实没写完的（未闭合代码块 / 截断的调用标记）不受这两条限制。
+	if !narrationTailStructurallyOpen(txt) {
+		if narrationTailPunctuated(txt) {
+			if len(txt) > narrationMaxBytes {
+				return r.skip("narration", "tail_punct_long")
+			}
+		} else if !narrationTailPromises(txt) {
+			return r.skip("narration", "tail_no_promise")
+		}
 	}
 	if !narrationTailSuspends(txt) {
-		return false
+		return r.skip("narration", "tail_ends_sentence")
 	}
 	// 结构未闭合（截断的调用标记 / 未闭合代码块）只补一次：残缺标记留在前缀里，
 	// 追加正文补不完它（续写段写多少都还是半截），再救也只是白花一次上游调用。
 	if narrationTailStructurallyOpen(txt) && r.narrationTries >= 1 {
-		return false
+		return r.skip("narration", "structural_retry_cap")
 	}
 	declared, toolTurn := bodyToolShape(r.body)
 	if !declared || !toolTurn {
-		return false
+		return r.skip("narration", "no_tool_history")
 	}
 	nudge := narrationNudge
 	if !narrationTailPunctuated(txt) && !narrationTailStructurallyOpen(txt) {
@@ -428,7 +462,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 	}
 	body, err := r.continuationBodyWithNudge(nudge)
 	if err != nil {
-		return false
+		return r.skip("narration", "body_build_failed")
 	}
 	r.narrationTries++
 	r.narrationTextAt = r.text.Len()

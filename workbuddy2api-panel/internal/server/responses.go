@@ -7,13 +7,17 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
 // responsesWebsocketUnsupported 回应 Codex 的 WS 升级探测（GET /v1/responses）。
@@ -543,9 +547,183 @@ func (m *responsesMeta) flatToolChoice(v any) any {
 	return v
 }
 
+// appendVisibleReasoning 把两段思考文本按序拼成回放用的 reasoning_content：任一为空返回
+// 另一段；两段完全相同只留一份（客户端可能把同一段思考既放进 reasoning 项又内联在
+// assistant 消息上，重复拼接会让上游读到两遍）；否则用 "\n" 连接。不做 trim：思考里的
+// 缩进与换行按原样送达上游，模型才能按原始格式续读。
+func appendVisibleReasoning(current, addition string) string {
+	if addition == "" {
+		return current
+	}
+	if current == "" {
+		return addition
+	}
+	if current == addition {
+		return current
+	}
+	return current + "\n" + addition
+}
+
+// reasoningItemText 提取 reasoning 项里的思考文本。Responses 协议标准形态是 summary 数组
+// （各段 {"type":"summary_text","text":...}），取各段 text 用 "\n" 连接；summary 是字符串
+// 时直取；两者皆空再退到 content（字符串直取，数组取各 text part）。全都取不到返回空串，
+// 调用方按「没有思考」跳过，不产出字段（Codex 会发 {"type":"reasoning","summary":[]}）。
+func reasoningItemText(m map[string]any) string {
+	if s, ok := m["summary"].(string); ok && s != "" {
+		return s
+	}
+	if parts := textParts(m["summary"]); len(parts) > 0 {
+		return strings.Join(parts, "\n")
+	}
+	if c, ok := m["content"].(string); ok && c != "" {
+		return c
+	}
+	if parts := textParts(m["content"]); len(parts) > 0 {
+		return strings.Join(parts, "\n")
+	}
+	return ""
+}
+
+// textParts 从数组形态的 summary/content 里按序取各 map 项的 text 字段（空 text 跳过）。
+func textParts(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var parts []string
+	for _, p := range arr {
+		pm, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t := asString(pm["text"]); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	return parts
+}
+
+// replayMetaTypes 元数据/控制项：不生成消息。
+var replayMetaTypes = map[string]bool{
+	"additional_tools": true, "compaction_trigger": true,
+	"local_shell_call": true, "local_shell_call_output": true,
+}
+
+// replayHandledTypes convertInputItems 里有专门分支的类型（与那里的 switch 一一对应），
+// 其余类型都落默认分支按消息处理。
+var replayHandledTypes = map[string]bool{
+	"message": true, "reasoning": true, "item_reference": true,
+	"compaction": true, "compaction_summary": true, "context_compaction": true,
+	"function_call": true, "function_call_output": true,
+	"custom_tool_call": true, "custom_tool_call_output": true,
+	"agent_message": true,
+}
+
+// replayInert 判断回放项是否「不产生消息、也不动任何状态」：元数据项，以及不认识、没有
+// role、也没有可用内容的类型项——托管工具的回执（web_search_call、image_generation_call、
+// mcp_call、computer_call、file_search_call、code_interpreter_call 等）都是这种形状，
+// 上游没有对应物。它们落进默认分支会变成一条 user 空消息：拆开同一批工具调用、把工具图
+// 插进并行 tool 结果之间（11148）、清空调用前暂存的思考。前瞻归属与主循环共用这一个判据，
+// 两边对同一项的看法才不会分叉。带内容的未知项照旧按消息送达，不因此丢内容。
+//
+// 注意：网关自己代执行的出图产出（responsesMeta.preItems）是**回程**项，不走这里；
+// 本函数只看客户端回放的入站历史，跳过的也只是回执本身，成品由 preItems 照旧交付。
+func replayInert(m map[string]any) bool {
+	typ, _ := m["type"].(string)
+	if replayMetaTypes[typ] {
+		return true
+	}
+	if typ == "" || replayHandledTypes[typ] || m["role"] != nil {
+		return false
+	}
+	c, isText := convertContent(m["content"]).(string)
+	return isText && strings.TrimSpace(c) == ""
+}
+
+// reasoningGroupTarget 从 start+1 起找 reasoning 项之后第一个「实质项」：跳过后续的
+// reasoning（连续段同属一组）、item_reference（主循环里不产消息、不清思考）和 replayInert
+// 项。找不到返回 nil（对话到此结束）。
+func reasoningGroupTarget(items []any, start int) map[string]any {
+	for i := start + 1; i < len(items); i++ {
+		m, ok := items[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		if typ, _ := m["type"].(string); typ == "reasoning" || typ == "item_reference" || replayInert(m) {
+			continue
+		}
+		return m
+	}
+	return nil
+}
+
+// reasoningStartsAssistant 判断前瞻目标是否会开启一段新的 assistant 内容（assistant 消息
+// 或工具调用批次）：会，则思考暂存等它落地；不会，则思考归前一条 assistant。target 为 nil
+// （其后再无实质项）时返回 false。
+func reasoningStartsAssistant(target map[string]any) bool {
+	if target == nil {
+		return false
+	}
+	typ, _ := target["type"].(string)
+	switch typ {
+	case "function_call", "custom_tool_call":
+		return true
+	case "message", "user", "":
+		role, _ := target["role"].(string)
+		return role == "assistant"
+	}
+	return false
+}
+
+// compactionSummaryMax 交接摘要送上游的字节上限。摘要每轮都随历史重发，来源又是客户端，
+// 不封顶时一份异常大的摘要会让此后每一轮都更早撞上 11115。
+const compactionSummaryMax = 32 << 10
+
+// opaqueCompactionBlob 只由 base64 / base64url / token 字符组成、且够长的串：真实的
+// encrypted_content 是密文（URL-safe base64 不带 padding 时标准解码会失败），解不出摘要
+// 就是对上游无意义的乱码。纯文本摘要总会有空白或非 ASCII 字符；短于 32 的放行，免得
+// 「Done」这类单词被当成密文。
+var opaqueCompactionBlob = regexp.MustCompile(`^[A-Za-z0-9+/=_.\-]{32,}$`)
+
+// decodeCompactionSummary 尽力解码 compaction 项的 encrypted_content：正常形态是
+// base64(JSON {"v":1,"summary":...})，先补齐 base64 padding 再解，解出的 summary 为空就是
+// 没有摘要（不把 JSON 原文当摘要）；解不开时，像密文的丢弃，其余按纯文本摘要保留——外部
+// 提供者可能塞的是纯文本摘要，丢了它就丢了唯一一份上下文交接。结果封顶 compactionSummaryMax。
+//
+// 本仓没有网关侧生成 compaction 的路径（既不出也不改上下文压缩结果），这里只处理客户端
+// 回放进来的项：不解码就等于把一段看不懂的密文每轮重发给上游。
+func decodeCompactionSummary(blob string) string {
+	text := strings.TrimSpace(blob)
+	if text == "" {
+		return ""
+	}
+	padded := text + strings.Repeat("=", (4-len(text)%4)%4)
+	if raw, err := base64.StdEncoding.DecodeString(padded); err == nil {
+		var obj struct {
+			Summary string `json:"summary"`
+		}
+		if json.Unmarshal(raw, &obj) == nil {
+			return logfmt.Truncate(obj.Summary, compactionSummaryMax)
+		}
+	}
+	if opaqueCompactionBlob.MatchString(text) {
+		return ""
+	}
+	return logfmt.Truncate(text, compactionSummaryMax)
+}
+
+// convertInputItems 把 /v1/responses 的 input 项转成 Chat messages。
+//
+// 思考（reasoning）项不再整项丢弃，而是按原样补回发给上游的消息里（消息级
+// reasoning_content）：多轮长任务里模型要能看到自己上一轮的思考，读 reasoning 的模型家族
+// （kimi/glm/minimax 等）才不会在一致性校验上退化——此前客户端回放的历史思考到不了上游，
+// 表现就是「越干越笨」。
 func convertInputItems(items []any, meta *responsesMeta) []any {
 	var out []any
 	var pending []any
+	// pendingReasoning 暂存 reasoning 项提取出的思考文本，等它所属的 assistant 内容
+	// （正文消息或工具调用批次）落地时挂上去。
+	var pendingReasoning string
 	// 工具结果里的图片要等本轮工具结果全部落地才发：插在 assistant.tool_calls 与它的
 	// tool 消息之间会打断配对（并行工具调用时判 11148）。
 	var toolImgs []any
@@ -563,15 +741,39 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 		if len(pending) == 0 {
 			return
 		}
-		out = append(out, map[string]any{"role": "assistant", "content": "", "tool_calls": pending})
+		msg := map[string]any{"role": "assistant", "content": "", "tool_calls": pending}
+		if pendingReasoning != "" {
+			// 工具调用前的思考段挂在同一批 assistant 上：思考与调用本是同一轮决策，
+			// 拆开会让该轮在多轮校验里裸奔。
+			msg["reasoning_content"] = pendingReasoning
+			pendingReasoning = ""
+		}
+		out = append(out, msg)
 		pending = nil
 	}
-	for _, it := range items {
+	for idx, it := range items {
 		m, ok := it.(map[string]any)
 		if !ok {
+			// 非 dict 项（纯字符串等）按 user 侧边界处理：没等到归属的过期思考就地
+			// 丢弃，绝不跨轮泄漏到不相关的对话里。
+			pendingReasoning = ""
 			continue
 		}
 		typ, _ := m["type"].(string)
+		if typ == "" && m["role"] == "tool" && asString(m["tool_call_id"]) != "" {
+			// Chat 形状的工具结果（客户端把 chat messages 直接塞进 input）按
+			// function_call_output 处理：落进默认分支只剩 role/content，tool_call_id 丢了，
+			// 出站的 cleanupOrphanToolCalls 会把这一对调用与结果一起删掉。走同一分支也就
+			// 同样拆出图片、同样不在并行结果之间落图。
+			m = map[string]any{"type": "function_call_output", "call_id": m["tool_call_id"],
+				"name": m["name"], "output": m["content"]}
+			typ = "function_call_output"
+		}
+		if replayInert(m) {
+			// 元数据项与托管工具回执：不生成消息、不清空 pendingReasoning、不落图——
+			// 被它们隔开的连续思考段、同一批工具调用与并行工具结果都保持原样。
+			continue
+		}
 		// 图片的落点是「这一轮工具到此为止」的那个项，**不能挂在 flush() 里**：
 		// flush() 在每条 function_call_output 开头都会跑，于是并行工具调用
 		// （assistant 一条带多个 tool_calls）处理第二条结果时，会先把第一条结果的图
@@ -581,21 +783,57 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			flushImgs()
 		}
 		switch typ {
-		case "reasoning", "item_reference":
+		case "reasoning":
 			flush()
+			if text := reasoningItemText(m); text != "" {
+				merged := false
+				// 前瞻判断归属：后面紧跟新的 assistant 内容就暂存等它落地；否则
+				// （对话末尾、后面是 user/tool 边界）归前一条 assistant。
+				if target := reasoningGroupTarget(items, idx); !reasoningStartsAssistant(target) && len(out) > 0 {
+					if prev, ok := out[len(out)-1].(map[string]any); ok && prev["role"] == "assistant" {
+						prev["reasoning_content"] = appendVisibleReasoning(asString(prev["reasoning_content"]), text)
+						merged = true
+					}
+				}
+				if !merged {
+					pendingReasoning = appendVisibleReasoning(pendingReasoning, text)
+				}
+			}
+			continue
+		case "item_reference":
+			// 引用型项指向不存在的存档，无从解引用，维持跳过。
+			flush()
+			continue
+		case "compaction", "compaction_summary", "context_compaction":
+			// 上一轮的上下文压缩结果：对上游它是后续对话赖以延续的交接摘要，以
+			// system 消息保留在回放历史里；解码不出内容则跳过，不造空消息。
+			flush()
+			pendingReasoning = ""
+			if summary := decodeCompactionSummary(asString(m["encrypted_content"])); strings.TrimSpace(summary) != "" {
+				out = append(out, map[string]any{
+					"role":    "system",
+					"content": "Summary of the earlier conversation (context checkpoint):\n\n" + strings.TrimSpace(summary),
+				})
+			}
 			continue
 		case "function_call", "custom_tool_call":
 			pending = append(pending, toToolCall(m, meta))
 			continue
 		case "function_call_output", "custom_tool_call_output":
 			flush()
+			// 工具结果属于 user 侧回应：其前未归属的思考已被 flush 消费或就此过期。
+			pendingReasoning = ""
 			if id := asString(m["call_id"]); id != "" {
 				txt, imgs := splitToolImages(m["output"])
-				out = append(out, map[string]any{
+				msg := map[string]any{
 					"role":         "tool",
 					"tool_call_id": id,
 					"content":      txt,
-				})
+				}
+				if name := asString(m["name"]); name != "" {
+					msg["name"] = name // 只有 Chat 形状的结果带 name，原样保留
+				}
+				out = append(out, msg)
 				toolImgs = append(toolImgs, imgs...)
 				continue
 			}
@@ -620,6 +858,7 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 		case "agent_message":
 			// 来自其他任务（子代理）的消息：按用户指令注入，别伪装成工具结果。
 			flush()
+			pendingReasoning = ""
 			if txt := asContentString(m["content"]); strings.TrimSpace(txt) != "" {
 				out = append(out, map[string]any{"role": "user", "content": agentMessagePrefix + txt})
 			}
@@ -630,7 +869,26 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 		if role == "" {
 			role = "user"
 		}
-		out = append(out, map[string]any{"role": role, "content": convertContent(m["content"])})
+		msg := map[string]any{"role": role, "content": convertContent(m["content"])}
+		if role == "assistant" {
+			// 思考与正文/工具声明同轮保真：pendingReasoning 是这轮正前的思考项；
+			// Chat 形状回放的 assistant 还可能内联 reasoning_content 与 tool_calls——
+			// 丢 tool_calls 会造出孤儿 tool 消息（上游 11148），丢思考则该轮裸奔。
+			if pendingReasoning != "" {
+				msg["reasoning_content"] = pendingReasoning
+				pendingReasoning = ""
+			}
+			if rc := asString(m["reasoning_content"]); rc != "" {
+				msg["reasoning_content"] = appendVisibleReasoning(asString(msg["reasoning_content"]), rc)
+			}
+			if tcs, ok := m["tool_calls"].([]any); ok && len(tcs) > 0 {
+				msg["tool_calls"] = tcs
+			}
+		} else {
+			// user/system 边界：没等到归属的过期思考就地丢弃，绝不跨轮泄漏。
+			pendingReasoning = ""
+		}
+		out = append(out, msg)
 	}
 	flush()
 	flushImgs()

@@ -35,7 +35,9 @@ type splitListFake struct {
 
 func (f *splitListFake) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		mp := r.Header.Get("X-Client-Platform") != ""
+		// 按**取值**认口径，不能按「有这个头」认（issue #257）：CN 桌面端在 billing /
+		// growth 族上也会发 X-Client-Platform: windows，存在性判据会把 CN 请求当成 mp。
+		mp := r.Header.Get("X-Client-Platform") == "miniprogram"
 		f.mu.Lock()
 		tag := r.URL.Path
 		if mp {

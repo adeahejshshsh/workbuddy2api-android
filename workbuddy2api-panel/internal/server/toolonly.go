@@ -189,45 +189,65 @@ func lastMessageIsToolResult(body []byte) bool {
 func (r *continueReader) tryToolOnlyRescue() bool {
 	switch {
 	case !r.toolOnlyRescue:
-		return false
-	case r.toolOnlyTried, r.narrationTries > 0, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
-		return false
+		// 功能开关（features.tool_only_rescue）：关着时连判据都不跑，所以单独给一个码——
+		// 排障时「没救是因为没开」和「开了但被判据挡住」是两件事。
+		return r.skip("toolonly", "feature_off")
+	case r.toolOnlyTried:
+		return r.skip("toolonly", "tried")
+	case r.narrationTries > 0:
+		return r.skip("toolonly", "narration_first")
+	case r.errSeen:
+		return r.skip("toolonly", "err_frame")
+	case r.toolSeen:
+		return r.skip("toolonly", "tool_seen")
+	case r.clientGone():
+		return r.skip("toolonly", "client_gone")
+	case r.outputCapped():
+		return r.skip("toolonly", "output_capped")
 	case r.finish != "stop":
-		return false
+		return r.skip("toolonly", "finish_not_stop")
 	case r.text.Len() == 0 || r.text.Len() > toolOnlyMaxBytes:
-		return false
+		return r.skip("toolonly", "text_len")
 	case r.atSegmentCap():
-		return false
+		return r.skip("toolonly", "segment_cap")
 	}
 	// 正文里含工具调用标记（DSML / XML 形态）：客户端会自己解析执行，这不是「提前收尾」。
 	if hasToolCallMarkup(r.text.String()) {
-		return false
+		return r.skip("toolonly", "tool_markup")
 	}
 	// 模型在等用户拍板（问句 / 「请确认后我再…」）：故意的收尾，不能替它继续。
 	// 这条比长度闸门更优先——线上就是这么把「等确认的邮件」直接发出去的（issue #209）。
 	if textYieldsToUser(r.text.String()) {
-		return false
+		return r.skip("toolonly", "yields_to_user")
 	}
 	// 正文已经像最终答复（够长 + 以句末标点收尾）：不救。见 toolOnlyFinalAnswerBytes
 	// 的实测依据——不加这条时 agent 客户端的每个回合都会被推着多调一次工具。
 	if toolOnlyLooksFinished(r.text.String()) {
-		return false
+		return r.skip("toolonly", "looks_finished")
 	}
 	// 尾部落在预告符上：交给 narration（那条会把正文接上去，比这里更合适）。
 	if narrationTailSuspends(r.text.String()) {
-		return false
+		return r.skip("toolonly", "tail_suspends")
 	}
 	declared, toolTurn := bodyToolShape(r.body)
-	if !declared || !toolTurn || !lastMessageIsToolResult(r.body) {
-		return false
+	if !declared || !toolTurn {
+		return r.skip("toolonly", "no_tool_history")
+	}
+	if !lastMessageIsToolResult(r.body) {
+		return r.skip("toolonly", "last_not_tool_result")
 	}
 	// prompt 未知（上游没给 usage）就不救：无法区分长会话与一句问答。
-	if p, ok := r.usage["prompt_tokens"].(float64); !ok || p < toolOnlyMinPrompt {
-		return false
+	// 「没给 usage」与「给了但太短」是两种结论，码要分开（issue #245 的排障诉求）。
+	p, ok := r.usage["prompt_tokens"].(float64)
+	if !ok {
+		return r.skip("toolonly", "usage_unknown")
+	}
+	if p < toolOnlyMinPrompt {
+		return r.skip("toolonly", "prompt_short")
 	}
 	body, err := r.continuationBodyWithNudge(toolOnlyNudge)
 	if err != nil {
-		return false
+		return r.skip("toolonly", "body_build_failed")
 	}
 	r.toolOnlyTried = true
 	// 首段的终态帧先存起来：续写段如果只给正文，要原样回放这一份。

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -438,8 +439,8 @@ func normalizeStop(obj map[string]any) {
 // openai_responses_to_openai_chat_completions）会把助手历史里的思考片段原样透传进
 // /v1/chat/completions；上游 content 类型白名单不含它，命中即 HTTP 400 code=11101
 // 「unsupported content type at index 0: reasoning_text」。本仓自己的 responses 入站
-// 不产这种片段（客户端回传的 reasoning item 在 convertInputItems 里就丢弃了），这条
-// 是给「链路上游还有别的转换器」兜底。
+// 不产这种片段（客户端回传的 reasoning item 在 convertInputItems 里转成消息级的
+// reasoning_content 字段，不进 content），这条是给「链路上游还有别的转换器」兜底。
 //
 // 思考片段只是模型私有推理，下游续写不需要，剔除无副作用：
 //   - 删除 type 为 reasoning_text / reasoning 的片段（TrimSpace 后比较）
@@ -609,21 +610,24 @@ func normalizeToolChoice(obj map[string]any) {
 	}
 }
 
-// normalizeToolPatterns 归一化 tools 子树里 pattern 的非标准转义 `\_`（→ `_`）。
+// normalizeToolPatterns 归一化 tools 子树的参数定义（OpenAI 形态
+// tools[].function.parameters 与裸 tools[].parameters 两种写法）：
+//   - 顶层补齐：type 缺失或非标别名 → object，properties 缺失 → {}；
+//   - 顶层 $ref：能按 $defs 展开就就地展开，展不开也必须删（见 normalizeToolParameters）；
+//   - 递归规整整棵 Schema 树（见 normalizeSchemaTree）。
 //
-// 上游对 tools[].function.parameters 做严格 JSON Schema/正则文法校验，pattern 含
-// `\_`（转义的字面量下划线）会整体拒收：400 code=11129 invalid_function_call_
-// parameters（displayMsg「工具定义不合规」）。`\_` 不是任何正则文法的合法转义，
-// 但所有主流引擎（RE2/PCRE/JS Annex B）都宽容地视为 `_` 本身——上游校验器比它们
-// 全部更严（对照 V8 严格文法 u 标志，唯一同样拒绝的实现）。实案：ZCode 的 exa 插件
-// agent_run 工具 runId/previousRunId 带 `^agent\_run\_`，deepseek 系全家确定性 400
-// → 网关侧归 ErrClient 只换号不罚但喂连败计数 → 轮转烧满 5 连败触发连败降权、
-// 客户端 503（2026-09-29/30 两次实案）。schema 级拒绝换账号无用，只能在发送前修。
+// 为什么非做不可：上游对 tools 是「整颗定义一次过」的 Go 强类型反序列化，任一处形态
+// 不合规就整条请求 400 code=11129「工具定义不合规」，换任何账号都是同一处拒绝。
+// 此前网关没把这个码认成确定性请求级错误（见 client.go 的 isToolSchemaRejected），
+// 于是逐号轮转、每个健康号白记一笔连败，连败到阈值触发连败降权，整池降权后后续
+// 请求全 503（2026-11-18 实案）。所以「出站前把 schema 修成上游能吃的形状」与
+// 「11129 判请求级」必须一起落，只落一半等于没修。
 //
-// 归一无损：`\_` 与 `_` 在所有引擎匹配语义相同（各引擎实测 + 上游对照探针：归一后
-// 200），工具方功能不变。只动 tools 子树（pattern 值 + patternProperties 键）；
-// 消息正文里的 `\_`（如 Windows 路径 C:\_x）不碰。其余非标转义（`\:` 等）未证实
-// 触发，不扩面——有实案再议。独立于 sanitize 开关：这是「让请求通过」，不是脱敏。
+// 归一无损的边界：只动**形态**（缺的类型、Python 风格别名、非法取值类型、容器位置），
+// 不动**数据**——default / const / enum / example(s) 里的取值是客户端声明的数据，
+// 里面出现 type / items / required / null 也只是数据（见 schemaDataKeys）。
+//
+// 独立于 sanitize 开关：这是「让请求通过」，不是脱敏。
 func normalizeToolPatterns(obj map[string]any) {
 	rawTools, ok := obj["tools"].([]any)
 	if !ok {
@@ -636,18 +640,333 @@ func normalizeToolPatterns(obj map[string]any) {
 		}
 		// OpenAI 形态 tools[].function.parameters；裸 tools[].parameters 兼容。
 		if fn, ok := tool["function"].(map[string]any); ok {
-			unescapePatternLiteralEscapes(fn["parameters"])
+			fn["parameters"] = normalizeToolParameters(fn["parameters"])
 		}
-		unescapePatternLiteralEscapes(tool["parameters"])
+		if _, ok := tool["parameters"]; ok {
+			tool["parameters"] = normalizeToolParameters(tool["parameters"])
+		}
 	}
 }
 
-// unescapePatternLiteralEscapes 递归改写 schema 树里 pattern 值与 patternProperties
-// 键中的 `\_` → `_`（patternProperties 的键也是正则；map 键不可原地改，命中时重建
-// 该层）。
-func unescapePatternLiteralEscapes(node any) {
+// normalizeToolParameters 归一化单颗工具的**顶层**参数定义，再递归规整整棵 Schema 树。
+//
+// 顶层必须是对象：上游的 parameters 是强类型结构体，null / 字符串 / 数组一律 400
+// 11129。补出来的 {"type":"object","properties":{}} 是「无参工具」的合法形态。
+func normalizeToolParameters(node any) any {
+	if node == nil {
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	params, ok := node.(map[string]any)
+	if !ok {
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	// 顶层 $ref：整份参数 schema 指向 $defs 时上游一刀拒收（实测 400 11129），而嵌套
+	// $ref 实测 200 —— 只有顶层要处理。能就地展开就展开（保住真实参数定义），展不开
+	// （非 #/$defs/ 的 ref、目标缺失、循环）也必须删掉：留着等于保证这颗工具每次请求
+	// 都 400，删掉至少退化成一个无参工具。
+	if ref, ok := params["$ref"].(string); ok {
+		delete(params, "$ref")
+		if defs, ok := params["$defs"].(map[string]any); ok && strings.HasPrefix(ref, "#/$defs/") {
+			if t, ok := inlineKimiSchema(map[string]any{"$ref": ref}, defs, nil, 0).(map[string]any); ok {
+				for k, v := range t {
+					if _, dup := params[k]; !dup {
+						params[k] = v
+					}
+				}
+			}
+		}
+	}
+	if normalizeSchemaTypeAlias(params) == "" {
+		params["type"] = "object"
+	}
+	if params["type"] == "object" {
+		if _, hasProps := params["properties"].(map[string]any); !hasProps {
+			params["properties"] = map[string]any{}
+		}
+	}
+	normalizeSchemaTree(params)
+	return params
+}
+
+// schemaTypeAliases 弱类型客户端（Python dict、PHP array、手写 JSON 模板）常见的非标
+// 类型别名 → JSON Schema 标准类型。上游按 Go 强类型反序列化，别名一律 400 11129；
+// 这些映射在 JSON Schema 语义上无损（str→string 等只是同一个类型的另一种写法）。
+var schemaTypeAliases = map[string]string{
+	"str":   "string",
+	"int":   "integer",
+	"float": "number",
+	"bool":  "boolean",
+	"dict":  "object",
+	"list":  "array",
+}
+
+// normalizeSchemaTypeAlias 把 type 的非标别名纠成标准类型，返回纠完之后的 type
+// （未声明 type / 非字符串形态返回空串）。
+//
+// 非字符串形态（联合类型 `["string","null"]`）原样保留：那是合法 schema，上游实测
+// 200，改写它等于把「可为 null」改成「只能 string」，语义没了。
+func normalizeSchemaTypeAlias(n map[string]any) string {
+	t, isStr := n["type"].(string)
+	if !isStr {
+		return ""
+	}
+	t = strings.TrimSpace(t)
+	if t == "" {
+		return ""
+	}
+	if std, ok := schemaTypeAliases[strings.ToLower(t)]; ok {
+		n["type"] = std
+		return std
+	}
+	return t
+}
+
+// fillObjectTypeIfImplied type **缺省**（键不存在或空串）但带 properties 的节点补
+// type=object。联合类型这类非字符串形态不动（见 normalizeSchemaTypeAlias）。
+func fillObjectTypeIfImplied(n map[string]any) {
+	if v, has := n["type"]; has {
+		if s, isStr := v.(string); !isStr || strings.TrimSpace(s) != "" {
+			return
+		}
+	}
+	if _, hasProps := n["properties"]; hasProps {
+		n["type"] = "object"
+	}
+}
+
+// schemaContainerKeys 定义了 JSON Schema 规范里的容器级 map。
+//
+// 容器自身的键是属性名 / 定义名（**用户数据**），绝不能当作 Schema 关键字判定；
+// 递归时只遍历它的子 Schema 节点。不这么分的话，属性名叫 type / items / required
+// 的客户端会被改成 {"type":"string"} 这种垃圾（`properties.required` 被当成
+// required 关键字处理）。
+var schemaContainerKeys = map[string]bool{
+	"properties":        true,
+	"patternProperties": true,
+	"$defs":             true,
+	"definitions":       true,
+	"dependentSchemas":  true,
+	// dependentRequired 的值是属性名数组、dependencies（draft-7）的值是属性名数组或
+	// 子 schema：键都是属性名。不当容器，属性名叫 items / type 时会被当成关键字改写
+	// （["type"] 被换成 {"type":"string"}）。
+	"dependentRequired": true,
+	"dependencies":      true,
+}
+
+// schemaDataKeys 取值是**数据**而不是 schema 的关键字：default / const / enum /
+// example(s) 里的对象就是客户端声明的取值本身，里面出现 type、items、required、null
+// 也只是数据。规整只作用于 schema，绝不递归进这些值——否则改写的是模型看到的默认值、
+// 常量和枚举项（如 default {"type":"str"} 被改成 "string"）。
+var schemaDataKeys = map[string]bool{
+	"default":  true,
+	"const":    true,
+	"enum":     true,
+	"example":  true,
+	"examples": true,
+}
+
+// schemaNumberKeys / schemaBoolKeys / schemaStringKeys 三组关键字的**取值类型**同样被
+// 上游按 Go 强类型反序列化校验，类型不符即整体拒收（code=11129，displayMsg「工具定义
+// 不合规」）。2026-11-18 在 www.workbuddy.cn 上逐形态单独实测，每个样本只带一处缺陷：
+//
+//	minimum:"1"        → 400 11129      minimum:1        → 200
+//	uniqueItems:"true" → 400 11129      uniqueItems:true → 200
+//	description:123    → 400 11129      description:"x"  → 200
+//	enum:"x"           → 400 11129      enum:["x"]       → 200
+//	additionalProperties:"false" → 400 11129
+//
+// 弱类型客户端（Python dict、PHP array、手写 JSON 模板）序列化出来就是这些形状；同一
+// 实测里联合类型 type:["string","null"]、oneOf、嵌套 $ref + $defs、items:{}、
+// required 指向不存在的属性全部 200，所以这里只纠这三组与顶层 $ref，不扩面。
+var schemaNumberKeys = []string{
+	"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+	"minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties",
+}
+var schemaBoolKeys = []string{"uniqueItems", "deprecated", "readOnly", "writeOnly"}
+var schemaStringKeys = []string{"description", "title", "format", "pattern"}
+
+// coerceSchemaKeywords 把三组关键字的取值纠成上游能接受的基本类型；纠不动就删键
+// （留着一个非法值等于保证整颗工具必然 400，删掉只是丢掉一条约束或注释）。
+func coerceSchemaKeywords(n map[string]any) {
+	for _, k := range schemaNumberKeys {
+		if v, ok := n[k]; ok {
+			if num, ok := schemaNumber(v); ok {
+				n[k] = num
+			} else {
+				delete(n, k)
+			}
+		}
+	}
+	for _, k := range schemaBoolKeys {
+		if v, ok := n[k]; ok {
+			if b, ok := schemaBool(v); ok {
+				n[k] = b
+			} else {
+				delete(n, k)
+			}
+		}
+	}
+	for _, k := range schemaStringKeys {
+		if v, ok := n[k]; ok {
+			if _, isStr := v.(string); !isStr {
+				delete(n, k)
+			}
+		}
+	}
+	if v, ok := n["additionalProperties"]; ok {
+		if _, isSchema := v.(map[string]any); !isSchema {
+			if b, ok := schemaBool(v); ok {
+				n["additionalProperties"] = b
+			} else {
+				delete(n, "additionalProperties")
+			}
+		}
+	}
+	for _, k := range []string{"enum", "examples"} {
+		if v, ok := n[k]; ok {
+			if _, isList := v.([]any); !isList {
+				delete(n, k)
+			}
+		}
+	}
+}
+
+// schemaNumber 纠数值关键字：数字原样，纯数字字符串转数值，其余（bool / 对象 /
+// NaN / Infinity）判非法。
+//
+// **必须认 json.Number**（本仓主管线 prepareBodyOptFull 用 dec.UseNumber() 解码，
+// 为保住大整数原文）：只认 float64 的话，客户端**本来就合法**的 `minimum: 1` 在
+// 生产路径上是 json.Number，会被判非法而删掉——把一条真约束静默抹掉，而上游本来
+// 完全接受它。数字形态原样保留 json.Number（重序列化仍是原文数字）。
+func schemaNumber(v any) (any, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		f, err := x.Float64()
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, false
+		}
+		return x, true
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return nil, false
+		}
+		return x, true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, false
+		}
+		return f, true
+	}
+	return nil, false
+}
+
+// schemaBool 纠布尔关键字：bool 原样，"true"/"false" 转义，其余判非法。
+func schemaBool(v any) (bool, bool) {
+	switch x := v.(type) {
+	case bool:
+		return x, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// normalizeSchemaTree 递归归一化工具参数 schema 树（出站前把上游吃不下、但语义上
+// 可无损纠正的形态统一掉，见 normalizeToolPatterns 的「为什么非做不可」）：
+//   - 关键字取值类型纠偏（数值/布尔/字符串关键字，见 coerceSchemaKeywords）；
+//   - 剔除值为 nil 的关键字（description: null、title: null 等导致上游反序列化失败），
+//     数据关键字（default / const / enum / example(s)）的 null 保留；
+//   - 类型别名归一化（str/int/bool/dict/list 等 Python 非标类型别名映射至标准类型）；
+//   - 区分 Schema 节点与 Schema 容器：容器自身键为用户属性名，只对其子 Schema 做规整；
+//   - required 规整（剔除 nil、空字符串及非 string 元素，去重，空列表直接清理）；
+//   - array items 规整（解包 tuple 模式，清理 nil items）；
+//   - pattern 值与 patternProperties 键里的 `\_` → `_`（patternProperties 的键也是正则；
+//     map 键不可原地改，命中时重建该层）；
+//   - 只有 enum、没有 type 的属性补上可无损推断的类型（见 inferEnumType）。
+//
+// `\_` 那一条的实案：上游对 pattern 做严格正则文法校验，`\_`（转义的字面量下划线）
+// 会整体拒收（400 11129）。`\_` 不是任何正则文法的合法转义，但所有主流引擎
+// （RE2/PCRE/JS Annex B）都宽容地视为 `_` 本身——上游校验器比它们全部更严（对照 V8
+// 严格文法 u 标志，唯一同样拒绝的实现）。ZCode 的 exa 插件 agent_run 工具
+// runId/previousRunId 带 `^agent\_run\_`，deepseek 系全家确定性 400（2026-09-29/30
+// 两次实案）。归一无损：`\_` 与 `_` 在所有引擎匹配语义相同（各引擎实测 + 上游对照
+// 探针：归一后 200），工具方功能不变。只动 tools 子树；消息正文里的 `\_`
+// （如 Windows 路径 C:\_x）不碰。其余非标转义（`\:` 等）未证实触发，不扩面——有实案
+// 再议。
+func normalizeSchemaTree(node any) {
 	switch n := node.(type) {
 	case map[string]any:
+		// 0. 关键字取值类型纠偏。放在最前：纠不动的键被删掉，后面的 nil 剔除与类型
+		// 推断就只看剩下的合法值，不必每步都防一次类型。
+		coerceSchemaKeywords(n)
+
+		// 1. 剔除值为 nil 的关键字（避免上游 Go 强类型反序列化失败报 11129）。
+		// 数据关键字除外：const:null（只能是 null）、default:null（缺省为 null）是有
+		// 意义的取值，删了就改了语义（见 schemaDataKeys）。
+		for k, v := range n {
+			if v == nil && !schemaDataKeys[k] {
+				delete(n, k)
+			}
+		}
+
+		// 2. 类型别名归一化。空 type 但带 properties 的当 object——上游对 object
+		// 形态有额外要求，type 缺省时它会按「无类型」拒收。联合类型（数组形态）保留。
+		normalizeSchemaTypeAlias(n)
+		fillObjectTypeIfImplied(n)
+
+		// 3. 规整 required 字段。重复项也要去重：`["a","a"]` 实测同样 400 11129。
+		if req, hasReq := n["required"]; hasReq {
+			if reqList, ok := req.([]any); ok {
+				var cleaned []any
+				seen := make(map[string]bool, len(reqList))
+				for _, item := range reqList {
+					if s, ok := item.(string); ok {
+						s = strings.TrimSpace(s)
+						if s != "" && !seen[s] {
+							seen[s] = true
+							cleaned = append(cleaned, s)
+						}
+					}
+				}
+				if len(cleaned) == 0 {
+					delete(n, "required")
+				} else {
+					n["required"] = cleaned
+				}
+			} else {
+				delete(n, "required")
+			}
+		}
+
+		// 4. 规整 array items：tuple 模式（items 是数组）上游不收，取第一个对象子
+		// schema（多元素时语义已退化，但比整颗工具 400 强）；全是标量时退化成 string。
+		if items, hasItems := n["items"]; hasItems {
+			if items == nil {
+				delete(n, "items")
+			} else if itemList, ok := items.([]any); ok {
+				var firstDict map[string]any
+				for _, it := range itemList {
+					if d, ok := it.(map[string]any); ok {
+						firstDict = d
+						break
+					}
+				}
+				if firstDict != nil {
+					n["items"] = firstDict
+				} else {
+					n["items"] = map[string]any{"type": "string"}
+				}
+			}
+		}
+
+		// 5. pattern 转义修复（含 patternProperties 的键：键也是正则，map 键不可原地
+		// 改，命中时重建该层）。
 		if p, ok := n["pattern"].(string); ok && strings.Contains(p, `\_`) {
 			n["pattern"] = strings.ReplaceAll(p, `\_`, `_`)
 		}
@@ -665,7 +984,8 @@ func unescapePatternLiteralEscapes(node any) {
 				n["patternProperties"] = fixed
 			}
 		}
-		// enum 缺 type：Kimi 系对参数 schema 严格校验，只写 enum 不写 type 直接
+
+		// 6. enum 缺 type：Kimi 系对参数 schema 严格校验，只写 enum 不写 type 直接
 		// 400 11133「Invalid request parameters」——同一个模型对带这类 schema 的客户端
 		// 等于全废（DSH 等客户端的整套工具定义里就有这种写法）。类型能无损推断就补上，
 		// 推断不出唯一类型（混合标量/含 null）保持原样让上游按原语义报错，不猜。
@@ -677,15 +997,38 @@ func unescapePatternLiteralEscapes(node any) {
 				}
 			}
 		}
-		for _, v := range n {
-			unescapePatternLiteralEscapes(v)
+
+		// 7. 递归子树：数据关键字整段跳过；容器键只遍历子 Schema（容器自身的键是属性
+		// 名，见 schemaContainerKeys），防止属性名叫 required / type 的被当成关键字改写。
+		for k, v := range n {
+			if schemaDataKeys[k] {
+				continue
+			}
+			if schemaContainerKeys[k] {
+				if c, ok := v.(map[string]any); ok {
+					for childKey, child := range c {
+						if child == nil {
+							delete(c, childKey)
+							continue
+						}
+						normalizeSchemaTree(child)
+					}
+				}
+				continue
+			}
+			normalizeSchemaTree(v)
 		}
 	case []any:
 		for _, v := range n {
-			unescapePatternLiteralEscapes(v)
+			normalizeSchemaTree(v)
 		}
 	}
 }
+
+// unescapePatternLiteralEscapes 旧入口（enum_type_test 等直接对单个节点调用）：
+// 等价于 normalizeSchemaTree。名字里的「转义修复」已不足以描述现在的职责（类型别名 /
+// nil 关键字 / required / items / 关键字类型纠偏），实现与理由见 normalizeSchemaTree。
+func unescapePatternLiteralEscapes(node any) { normalizeSchemaTree(node) }
 
 // inferEnumType 从 enum 取值推断 JSON Schema 类型；推不出唯一类型时返回空（不改写）。
 // 按「全为整数值」区分 integer / number。

@@ -2,6 +2,9 @@ POST /v2/report HTTP/1.1
 Accept: application/json, text/plain, */*
 Content-Type: application/json;charset=UTF-8
 X-Request-ID: 4891f0b179cc4959be94b2c867c16e3c
+X-Client-Version: 5.11.3
+X-Client-Platform: windows
+X-Client-Product: WorkBuddy
 X-Product: SaaS
 User-Agent: WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
 Authorization: Bearer <REDACTED>

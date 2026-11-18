@@ -11,6 +11,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -85,8 +86,17 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
 		return "request content was rejected by content policy; adjust the prompt and retry"
+	case ErrBadParams:
+		// 11129/11152：整颗工具定义被拒（schema 形态或工具名），换号重试必然复现。
+		// 上游原文只说「工具定义不合规」，客户端看不出该改哪儿，这里点名是 tools。
+		// 11101（请求体 JSON 畸形）与工具无关，不指向 tools——客户端会去翻自己的
+		// schema，翻半天发现是 body 拼错了。
+		if isToolSchemaRejected(msg, strings.ToLower(msg)) {
+			return "the request's tool definitions were rejected by upstream (schema shape or tool name); fix or drop the offending tool — retrying as-is fails the same way"
+		}
+		return ""
 	default:
-		// ErrNone/ErrNotFound/ErrServer/ErrBadParams/ErrClient 等未覆盖形态：无 hint。
+		// ErrNone/ErrNotFound/ErrServer/ErrClient 等未覆盖形态：无 hint。
 		return ""
 	}
 }
@@ -125,6 +135,25 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 	}
 }
 
+// frameRequestCodes 首帧 error 帧里按 error.code 直接定类的请求级错误。帧路径 code 优先；
+// HTTP 路径的 Classify 先判限流文案，所以 11115 配「too many tokens」之类措辞时 HTTP 上仍是
+// ErrSoftRate，两条路径在这个边角上不一致，本表不去改 Classify。
+// 11101 不在内：它与图片文案共用 code，须交给 Classify 的文案优先序。
+var frameRequestCodes = []struct {
+	code string
+	kind ErrKind
+}{
+	{"11115", ErrPromptTooLong},
+	{"11129", ErrBadParams},
+	// 11152 工具名不合规/重名：与 11129 同类（错在客户端声明的 tools），不登记就会滑到
+	// 通用 4xx → 喂连败 + 轮转全池 + 末端 503（2026-11-18 真机实测）。
+	{"11152", ErrBadParams},
+	{"11133", ErrModelParamInvalid},
+	{"11135", ErrImageInvalid},
+	{"11148", ErrToolMismatch},
+	{"11151", ErrEmptyContent},
+}
+
 // FrameKind 从 SSE error 帧 payload 判定 ErrKind：6004 模型级限流的流式形态
 // （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
 // Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
@@ -137,12 +166,28 @@ func FrameKind(payload string) ErrKind {
 	if IsRestricted(payload) {
 		return ErrAccountFault
 	}
+	// 请求级错误以业务码为准：帧里 code 在 error.code 上，只拿 message 去 Classify 会丢掉
+	// 它，而 message 措辞不保证带已知文案（11129 可能是英文原文 / 下划线形态 / 中文
+	// displayMsg，11133 的真实措辞不含 isModelParamInvalid 的任何文案 marker，11151 在
+	// Classify 里只认结构化 code）——判成普通 4xx 后首帧否决照样换号、末端 503。
 	var f struct {
 		Error struct {
+			Code    any    `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal([]byte(payload), &f) != nil || f.Error.Message == "" {
+	if json.Unmarshal([]byte(payload), &f) != nil {
+		return ErrNone
+	}
+	if f.Error.Code != nil {
+		code := strings.TrimSpace(fmt.Sprint(f.Error.Code))
+		for _, c := range frameRequestCodes {
+			if code == c.code {
+				return c.kind
+			}
+		}
+	}
+	if f.Error.Message == "" {
 		return ErrNone
 	}
 	return Classify(http.StatusBadRequest, f.Error.Message)

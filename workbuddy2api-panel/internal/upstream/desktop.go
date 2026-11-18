@@ -161,6 +161,9 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	// /v2/report 是 issue #257 点名的 RPC 族路径：真机 5.11.3 每条都带
+	// X-Client-*（7/7），按 realm 隔离注入（国际版不发）。
+	c.injectClientIdentityHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
 }
@@ -260,6 +263,8 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	// 真机 /v2/user-asset/appearance/set 同属首方 RPC 族，同样带 X-Client-*。
+	c.injectClientIdentityHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
 }
@@ -333,6 +338,9 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	// 渲染器族的 /v2/report 同样带 X-Client-*（2026-11-18 抓包：带 X-Requested-With
+	// 的那几条也齐带三头），故这里与 ReportDesktopEvent 同口径注入。
+	c.injectClientIdentityHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
 }
@@ -460,6 +468,8 @@ func (c *Client) marketExpertList(a *auth.Auth, body map[string]any) ([]MarketEx
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	// 真机 /portal/operation-platform/* 同样带 X-Client-*（3/3 条 expert/list）。
+	c.injectClientIdentityHeaders(req, a)
 	var out struct {
 		Experts []MarketExpert `json:"experts"`
 	}

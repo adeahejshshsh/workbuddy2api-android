@@ -181,15 +181,12 @@ func TestOfficialParity(t *testing.T) {
 			// 实测两路各有独有模型（见 codeBuddyCLIUA 注释）；改成官方两段式会丢模型。
 			ignoreValue: map[string]bool{"user-agent": true},
 			build: func(c *Client, a *auth.Auth, base string) *http.Request {
-				req, _ := http.NewRequest(http.MethodGet, base+"/v3/config", nil)
-				req.Header.Set("Accept", "application/json, text/plain, */*")
-				// 本仓 /v3/config 的 UA 是**刻意偏离**：我们走「IDE UA + CLI UA 双路探测
-				// 取并集」，实测两路各有独有模型（见 codeBuddyCLIUA 注释）；改成官方
-				// 两段式会丢模型。故这里用我方真实 UA，并跳过与夹具的逐字节比对。
-				req.Header.Set("User-Agent", c.userAgent(a))
-				req.Header.Set("X-Request-ID", "x")
-				req.Header.Set("X-Product", "SaaS")
-				return req
+				// 走生产函数而不是手拼头：fetchV3ConfigModelMap 会注入 X-Client-* 等
+				// 身份头，手拼的脚手架看不到这些，夹具与产线就会悄悄分叉
+				// （2026-11-18 抓包确认官方 /v3/config 3/3 条都带 X-Client-*）。
+				c.ChatBaseCN = base
+				_, _, _ = c.fetchV3ConfigModelMap(a, "")
+				return nil // 生产函数已经发过请求
 			},
 		},
 	}

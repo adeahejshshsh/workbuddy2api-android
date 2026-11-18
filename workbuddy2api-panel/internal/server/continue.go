@@ -214,6 +214,10 @@ type continueReader struct {
 	billed   map[string]any
 	segUsage map[string]any
 
+	// rescueWhy 本轮被挡掉的救援判据（枚举码，见 rescue_trace.go）：默认不记录，
+	// 只在 WB2A_RESCUE_TRACE=1 时有值。每轮在 decideNext 开头清空。
+	rescueWhy []string
+
 	done bool
 }
 
@@ -703,6 +707,9 @@ const (
 // false 就落到下一条」一致——例如无限额请求的空截断救援失败后，仍可走一次续写。已经
 // 发起过的规则各自记了用过（starvedTried / toolOnlyTried / narrationTries），不会重复。
 func (r *continueReader) decideNext(sawDone bool, from int) {
+	// 原因码按「一轮」收集：换段失败后 pollPending 会带着 from=下一条重入这里，
+	// 前面几条已经判过（失败回调里另有日志），清空免得把两轮的码混进同一行。
+	r.rescueWhy = r.rescueWhy[:0]
 	if from <= switchStarved && r.tryStarvedRetry() {
 		return
 	}
@@ -760,6 +767,8 @@ func (r *continueReader) decideNext(sawDone bool, from int) {
 		log.Printf("INFO: [continue] acct=%s 累计输出 %d token 已达上限 %d → 停止续写，按截断收尾",
 			r.label(), int(r.totalOutput()), int(r.outputCap()))
 	}
+	// 一条都没救成：把各道闸门记下的枚举码打一行（默认关闭，见 rescue_trace.go）。
+	r.logRescueSkip()
 	r.finishStream(sawDone)
 }
 
