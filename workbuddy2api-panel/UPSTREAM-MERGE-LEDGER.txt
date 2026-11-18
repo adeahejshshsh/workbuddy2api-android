@@ -1142,3 +1142,43 @@ commits API、`git fetch upstream` —— 全部返回同一 sha，`cf16478..7dc
 用例：`bash tests/run.sh all` 19 个包全绿；新增/改写约 60 条；11 组变异验证各自变红
 （不补保活 / 改回同步 / 回退成只看末句 / 去掉 emitted / 不回收在途 / 去掉进度闸门 /
 长尾闸门回退 / 结构未闭合用承诺句指令 / 管线顺序 / 归属口径 / 删掉重排调用）。
+
+### 第二十四批（上游 2026-11-18 批次：`27b7458` → `3412082`，52 条）
+
+数量大，但**一大半是上一批已搬的修复 PR**（#254/#259/#261/#263/#265 现在都进了上游 main）。
+真正新增的分五块：
+
+| 组 | 提交 | 处置 |
+|---|---|---|
+| tools schema | `615dc75` `d6301fe` `733942a` | 搬。`normalizeSchemaTree` 深度递归 + 11129/11152 判请求级。断的是「11129 当通用 4xx → 多轮换号 → 每号记连败 → 全池降权 → 503」这条链 |
+| X-Client-* | `96265d7` `77ca3fe` `b85d4f2` `a0b9f87` | 搬。CN 补三头、小程序口径撤三头、**对拍夹具与 headorder 顺序表一起改** |
+| responses 回放 | `0e41952`（#252）`94a6879` `fdf05ea` `f668215` `5f56e59` | 搬。reasoning 项不再丢（「反代降智」根因）、tool_call_id 保留、托管回执跳过、compaction 摘要封顶 |
+| 救援判据 | `f8d8346` `7565394` `4016199` `3412082` `2159da4` `2e6007c` | 搬。「已完成」出口、聊天文风不救、英文旁白照救、枚举化诊断（默认关） |
+| 首帧请求级 | `ae44d73` | **部分搬**，见下 |
+
+**本仓加固（上游没有）**：
+- `schemaNumber` 必须认 `json.Number`——主管线用 `UseNumber`，只认 float64 会把**本来就合法**的
+  `minimum: 1` 判非法删掉，静默抹掉真约束；
+- 联合类型 `type:["string","null"]` 不许被「空 type 补 object」改写。
+
+**差点漏掉的 CI 门禁**：`ci.yml:43` 跑 `WB2A_PARITY=1`（断言差异为零），不是 `=report`（只打印）。
+CN 补三头后四个夹具仍是旧抓包 → `【多发】[X-Client-*]` → 门禁红。夹具与 `officialHeadOrder`
+必须一起改（`headorder_test.go` 拿夹具当 oracle）。补完后差异 0。
+
+顺带暴露两处**真实生产侧偏差**（把 v3config 夹具改成调生产函数 `fetchV3ConfigModelMap` 才看得出来）：
+漏发 `X-Request-ID`（真机 9 条全带，32 hex 随机）、多发 `X-CodeBuddy-Request`（官方该路径不发，
+本仓此前跟着「全出站覆盖」自造了指纹）。修完才「完全一致」，**没有用测试侧豁免**（先加过
+`ignoreExtra`，确认根因在生产侧后整段撤掉）。
+
+**`ae44d73` 只搬了一半，另一半本仓做不到**：`StreamHint` 是「先写 error 帧、再回调观察者」，
+走到 handler 时 200 已提交；硬写 400 会把 JSON 追加进已提交的 SSE 或降级成第二个 `[DONE]`。
+落的是能落的三件事：不记账号故障、不解绑粘性、观测标 400 + `FrameKind` 让 error 帧带点名 tools
+的 hint；`probeOnce` 遇请求级 kind 直接 break。真实最常见的 11129 是 HTTP 400（不是 200+帧），
+那条路径本来就即刻 400，已用 `TestChatHTTP400ToolSchemaRejected` 钉住（上游只打 1 次、三号连败为 0）。
+**流式路径的真 400 需要在 `internal/upstream/sse.go` 引入首帧否决（`HeadVetoError` 那套），留作下一批。**
+
+**顺带修 panel 两处过期判别式**：`X-Client-Platform` 改按**取值**认口径（`== "miniprogram"`）。
+issue #257 的抓包事实是 CN 桌面端在 billing/growth 族上也发 `windows`，按存在性判会把 CN 请求当 mp。
+
+用例：19 个包全绿；`WB2A_PARITY=1` 差异 0；8 组变异验证各自变红。
+**已知 flaky**：`TestRunWebAgentTurnUsesSandboxToken`（假 ACP SSE 时序抖动，与本批无关，CI 偶发红可优先怀疑它）。
