@@ -408,6 +408,14 @@ type Config struct {
 		// 打开后还要过 toolOnlyLooksFinished 的语义闸门（末句在预告下一步才救，
 		// 见 internal/server/toolonly.go；此前的 server.toolIntentTail 已不存在）。
 		ToolOnlyRescue bool `json:"tool_only_rescue"`
+		// NarrationEnabled 预告式收尾救援的总开关（「……：」「我将…」这类停在半句上就结束
+		// 的回复，网关补发一次续写），缺省 **true**。
+		//
+		// 默认开启是因为 issue #245 的长会话断写确实靠它；但这条救援会往对话里插一条
+		// user 消息再打一次上游，agent 类客户端分辨不出它与真实用户输入的区别（issue
+		// #273 实测被当成授权执行了 9 分钟工具调用）。不需要的部署关掉即可，关后行为
+		// 回到「模型说停就停」，同一请求不再多付一次整段 prompt。热生效。
+		NarrationEnabled bool `json:"narration_enabled"`
 	} `json:"features"`
 
 	Prompt struct {
@@ -670,6 +678,8 @@ func Default() *Config {
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
+	// 预告式收尾救援缺省开启（issue #245 的长会话断写靠它）；agent 客户端可关（#273）。
+	c.Features.NarrationEnabled = true
 	c.Features.SanitizeBrandScope = "all"
 	// 6020/6021 排队等待（见 internal/server/handler.go 的 ErrUpstreamBusy 分支）：
 	// 缺省等一轮（60s 上限），避免把上游明说「40 秒后再来」的排队秒变成客户端可见失败。

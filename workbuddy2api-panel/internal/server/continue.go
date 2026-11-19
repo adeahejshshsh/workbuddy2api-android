@@ -213,6 +213,9 @@ type continueReader struct {
 	// 占用只取末段 prompt，记到账号 / 用量 / 预算上的必须是这一份。segUsage 当前段的 usage。
 	billed   map[string]any
 	segUsage map[string]any
+	// narrationOff features.narration_enabled=false：整条预告式收尾救援不发起（issue #273）。
+	// 生产路径在 handler 建 reader 时按 livecfg 快照赋值；零值 = 开启。
+	narrationOff bool
 
 	// rescueWhy 本轮被挡掉的救援判据（枚举码，见 rescue_trace.go）：默认不记录，
 	// 只在 WB2A_RESCUE_TRACE=1 时有值。每轮在 decideNext 开头清空。

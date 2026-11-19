@@ -42,14 +42,18 @@ import (
 // 出口要求的是**零输出**而不是「只回一句『已完成』」：正文是边收边转发的，发出去就
 // 收不回来（frame() 拿到 content delta 立刻 emit），那三个字会原样拼在正文末尾
 // （issue #273 现象 3：52B + 9B = 61B，与日志逐字节对得上）。
-const narrationNudge = "你上一条回复停在一句预告（例如以冒号结尾的「……：」）上就结束了，剩余内容还没写。请紧接着把剩下的部分写完：需要查看文件、执行命令或调用工具就直接调用，不要重复已经写过的内容，不要重新开头，不要道歉或解释。如果你确实已经写完了，什么都不要输出，直接结束这一轮。"
+const narrationNudge = "【wb2api 网关自动续写·非用户消息】你上一条回复停在一句预告（例如以冒号结尾的「……：」）上就结束了，剩余内容还没写。请紧接着把剩下的部分写完：需要查看文件、执行命令或调用工具就直接调用，不要重复已经写过的内容，不要重新开头，不要道歉或解释。如果你确实已经写完了，什么都不要输出，直接结束这一轮。"
 
+// 两条指令都以【】前缀自报身份（issue #273 第二条评论）：这条消息是以 role=user 追加的，
+// agent 类客户端分辨不出它与真实用户输入的区别，实测被当成「用户批准」去改了工作区配置
+// （客户端历史里还查不到）。前缀不能阻止模型执行，至少让它不再伪装成用户授权。
+//
 // narrationPromiseNudge 尾部是「我将…/我会…」这类承诺句时用这条。
 //
 // 不能复用上一句：那条说「停在冒号上」，而承诺句既没有冒号也不是预告排版，模型会
 // 反过来跟你争「上一条并未中断」（真机实测原话），争论也会一并写进客户端正文。
 // 出口同上：零输出，不写字——写出来的每个字都会进客户端正文。
-const narrationPromiseNudge = "你上一条回复最后停在「我将…」「我会…」这类承诺句上就结束了，承诺的动作没有执行。请直接执行它：需要查看文件、执行命令或调用工具就直接调用，不要解释为什么停下，不要重复已经写过的内容，不要重新开头。如果你确实已经写完了，什么都不要输出，直接结束这一轮。"
+const narrationPromiseNudge = "【wb2api 网关自动续写·非用户消息】你上一条回复最后停在「我将…」「我会…」这类承诺句上就结束了，承诺的动作没有执行。请直接执行它：需要查看文件、执行命令或调用工具就直接调用，不要解释为什么停下，不要重复已经写过的内容，不要重新开头。如果你确实已经写完了，什么都不要输出，直接结束这一轮。"
 
 // toolCallMarkupMarkers 模型把工具调用写成**文本标记**时用到的特征串。
 //
@@ -386,6 +390,8 @@ const narrationMaxRescues = 2
 // 返回 true 表示已换到新段继续读，调用方直接 return。
 func (r *continueReader) tryNarrationRetry() bool {
 	switch {
+	case r.narrationOff:
+		return r.skip("narration", "disabled")
 	case r.narrationTries >= narrationMaxRescues:
 		return r.skip("narration", "tries_cap")
 	case r.errSeen:
@@ -466,6 +472,7 @@ func (r *continueReader) tryNarrationRetry() bool {
 	}
 	r.narrationTries++
 	r.narrationTextAt = r.text.Len()
+	noteRescue("narration")
 	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
 	return r.openSegmentAsync(switchNarration, body, func(rc io.ReadCloser) {
 		r.seg++

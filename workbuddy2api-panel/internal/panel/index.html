@@ -984,6 +984,9 @@ body.veil-open { overflow: hidden; }
         <div class="stat warn"><div class="v" id="sPaused">-</div><div class="k">已暂停选号</div></div>
         <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
         <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
+        <!-- 今日救援：网关替「停在半句上」的回复补发的续写次数。每条都要多打一次上游、
+             重付整段 prompt，异常升高就是假阳性（issue #273）。 -->
+        <div class="stat"><div class="v" id="sRescue" title="narration / toolonly / starved">-</div><div class="k">今日救援</div></div>
       </div>
 
       <!-- 卡片默认可见：此前 hidden + 「仅点检查才渲染」形成死锁（按钮藏在隐藏卡片里，

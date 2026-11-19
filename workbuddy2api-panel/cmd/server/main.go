@@ -421,6 +421,7 @@ func main() {
 		WatermarkStripEnabled:  cfg.Features.WatermarkStripEnabled,
 		ThreeDEnabled:          cfg.Features.ThreeDEnabled,
 		ToolOnlyRescue:         cfg.Features.ToolOnlyRescue,
+		NarrationOff:           !cfg.Features.NarrationEnabled,
 		RecordClientInfo:       cfg.Logging.RequestClientInfo,
 		RecordContext:          cfg.Logging.RequestArchiveContext,
 		ModelFallback:          cfg.Pool.ModelFallback,
@@ -476,6 +477,8 @@ func main() {
 		AdminAPIKey: cfg.AdminAPIKey,
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
+		// 今日救援次数（issue #273）：面板概况卡片用，进程内计数、跨天归零。
+		RescueToday: server.RescueToday,
 		Version:     VersionString(),
 		Live:        live,
 		// 降级路由表：面板据此在限流提示里标注「已路由至 <等价模型>」。
@@ -961,6 +964,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
 		ThreeDEnabled:         newCfg.Features.ThreeDEnabled,
 		ToolOnlyRescue:        newCfg.Features.ToolOnlyRescue,
+		NarrationOff:          !newCfg.Features.NarrationEnabled,
 		RecordClientInfo:      newCfg.Logging.RequestClientInfo,
 		RecordContext:         newCfg.Logging.RequestArchiveContext,
 		// review #3：这两个表是 handler 每次请求从 live 快照读的，漏填等于「保存任意

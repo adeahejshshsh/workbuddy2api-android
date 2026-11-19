@@ -15,6 +15,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // noSelectLogInterval 同一域两条「选不到号」日志的最小间隔。
@@ -27,7 +29,10 @@ var (
 
 // logNoSelectable 池子里挑不出可派发的账号时记一条（按域限流，每分钟最多一条）。
 // 拿不到池子（未配置）时静默返回，不影响请求路径。
-func (h *Handler) logNoSelectable(realm, model string, modelBlocked bool) {
+//
+// why 由调用方按 pick 的判据顺序算好（pool.NoPickForRealm）：这条日志的价值全在
+// 「是哪一类把号挡完的」—— 只报 healthy>0 仍然得靠人去猜（issue #276）。
+func (h *Handler) logNoSelectable(realm, model string, modelBlocked bool, why pool.NoPick) {
 	if h.cfg.Pool == nil {
 		return
 	}
@@ -41,7 +46,6 @@ func (h *Handler) logNoSelectable(realm, model string, modelBlocked bool) {
 	noSelectLast[key] = now
 	noSelectMu.Unlock()
 
-	total, healthy, cooling, disabled, inFlight := h.cfg.Pool.CountsDetailedForRealm(realm)
-	log.Printf("WARN: [pool] no selectable account realm=%q model=%q pool{total=%d healthy=%d cooling=%d disabled=%d in_flight_full=%d} model_blocked=%v —— 该域本请求快速失败（503）；healthy>0 说明是全被在途/积分保底/模型冷却挡住",
-		realm, model, total, healthy, cooling, disabled, inFlight, modelBlocked)
+	log.Printf("WARN: [pool] no selectable account realm=%q model=%q no_pick{%s} model_blocked=%v —— 该域本请求快速失败（503）；healthy>0 说明是全被在途/积分保底/保留积分/冷却挡住",
+		realm, model, why.String(), modelBlocked)
 }

@@ -196,6 +196,7 @@ func (r *continueReader) tryStarvedRetry() bool {
 		return false
 	}
 	r.starvedTried = true
+	noteRescue("starved")
 	// 成因要在重置 r.finish 之前抓：下面马上把它清空给新段用。
 	cause := "预算被思考吃光"
 	if r.finish != "length" {
