@@ -429,13 +429,14 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
-        // 用户主动打开 App = 明确要跑：清掉「用户停止」标记（bug 22），
-        // 否则下次开机 BootReceiver 会继续跳过自启，用户以为坏了。
-        try {
-            getSharedPreferences(GatewayService.PREF, MODE_PRIVATE).edit()
-                    .putBoolean("user_stop", false).apply();
-        } catch (Throwable ignored) {}
-        GatewayService.start(this);
+        // issue #176②：「用户主动停止」是一个**状态**，不能被「打开 App」这个动作撤销。
+        // 原实现每次 onCreate 都先清 user_stop 再 start()，于是「停止」只在关掉 App
+        // 之前有效；而 stop(Context) 自己又要先清标记才能启动 —— 两边互相抵消，
+        // user_stop 在任何路径上都不可能是 true，成了死字段。
+        // 现在：停过就**不自动起**，由控制台的「已停止」终态页给一个显式按钮。
+        // 「下次开机自启」也不需要靠清标记来恢复 —— 用户点一次「启动网关」就清了。
+        boolean userStopped = GatewayService.userStopped(this);
+        if (!userStopped) GatewayService.start(this);
         apiKey = readApiKey();
         // 这里不再 tick()（bug #16）：onStart 会调 tick() + scheduleTick()，
         // onCreate 里再来一次会让首屏连做两次端口探测与两次状态渲染。
@@ -591,8 +592,13 @@ public class MainActivity extends Activity {
         if (!probed) {                                          // 首次探测还没回来，别急着喊"已停止"
             word = "启动中"; c = WARN;
         } else if (portServing) {
-            word = (st == GatewayService.ST_EXTERNAL) ? "运行中（外部）" : "运行中";
-            c = OK;
+            // issue #176④：端口能连上不等于有实例在服务。复用态下若连续多轮
+            // /healthz 不应答，那是残留进程占着端口，不能报「运行中」。
+            boolean stale = st == GatewayService.ST_EXTERNAL
+                    && GatewayService.externalStale() > 0;
+            word = stale ? "端口占用异常"
+                    : (st == GatewayService.ST_EXTERNAL ? "运行中（外部）" : "运行中");
+            c = stale ? BAD : OK;
         } else if (st == GatewayService.ST_RUNNING || st == GatewayService.ST_EXTERNAL) {
             word = "启动中"; c = WARN;
         } else if (st == GatewayService.ST_STARTING) {
@@ -681,6 +687,12 @@ public class MainActivity extends Activity {
     @Override protected void onStart() {
         super.onStart();
         visible = true;
+        // issue #176③：从通知栏点停止后切回 App，Activity 没销毁、Console 不会重建，
+        // 屏幕上还停着停止前那一帧数据（看起来像「网关卡住了」）。必须主动切到终态页。
+        if (console != null && GatewayService.userStopped(this)
+                && GatewayService.statusOf() == GatewayService.ST_STOPPED) {
+            console.showStopped();
+        }
         tick();
         scheduleTick();
     }
@@ -858,6 +870,10 @@ public class MainActivity extends Activity {
     }
 
     void restart() {
+        // 「重启网关」是显式要跑的意图：顺手清掉停止标记，否则服务起来了、
+        // 持久化 user_stop 还是 true —— 下次打开 App 又会因为「用户停过」不自动拉起
+        // （issue #176②：标记现在只有显式动作能清）。
+        GatewayService.clearUserStop(this);
         GatewayService.restart(this);
         injected = false;
         ui.postDelayed(new Runnable() { public void run() {
@@ -961,6 +977,10 @@ public class MainActivity extends Activity {
         // 主线程抛 RejectedExecutionException 直接 FATAL EXCEPTION，同进程的
         // GatewayService 一起陪葬（和「常驻网关」的设计前提直接冲突）。
         try { ui.removeCallbacksAndMessages(null); } catch (Throwable ignored) {}
+        // issue #176⑥：Console 有自己的 Handler（Console.ui），上面那行清的是本类的，
+        // 管不到它。泄漏的两条链会继续 loadOverview、继续往已 detach 的 host 里 show()，
+        // 把新 Console 刚渲染的终态页覆盖回去（主题切换走 recreate()，这条路径很常见）。
+        try { if (console != null) { console.dispose(); console = null; } } catch (Throwable ignored) {}
         try { probe.shutdownNow(); } catch (Throwable ignored) {}
         // WebView 必须显式销毁：它持有 Activity 上下文，不 destroy 就永久泄漏。
         try { if (web != null) { web.destroy(); web = null; } } catch (Throwable ignored) {}
