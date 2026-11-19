@@ -1,5 +1,118 @@
 # 变更记录
 
+## v1.35.21（2026-11-19）
+
+> 全量代码审查（`CODE-REVIEW-2026-11-19.md`，176 条 / 去重 174）的处置版本：
+> **2 条 critical + 26 条 high 全部修完**，加一批 medium/low；外加 issue #189。
+> 六个分片并行修复 + 三轮交叉复核，**60+ 组变异验证**（每条修复都做到「改坏 → 红 → 还原 → 绿」）。
+
+### Critical
+
+- **面板敏感接口白名单漏 12 条写路径**：`panelSensitivePath` 用「列举敏感」而不是
+  「列举豁免」，`model_hidden` / `model_effort` / `model_rules`(+delete/apply) /
+  `request_logs/clear` / `checkin_all` / `travel_all` / `activity_all` / `keepalive_all` /
+  `balance_all` / `usage/save` 全部落进 `return false` —— 持「发给下游客户端的 api_key」
+  即可改配置、删模型隔离规则、清审计、对全池发起上游写。
+  修法不只是把表翻过来：`routes()` 改经 `p.route()` 记录 method+pattern，
+  `isSensitiveRequest` **先查注册表**，未登记路径一律敏感（404 / 301 归一 / 将来新增
+  忘登记都不会漏）；请求里的 `/panel/api/../api/export/accounts` 这类花样匹配不上
+  注册表也直接敏感。测试改成**遍历路由表**断言「每条非 GET 都敏感」——列举式必然漏。
+- **`flushNowErr` 落盘 IO 无互斥**：临界区只到 `p.mu.Unlock()`，之后「快照 → 写 .bak →
+  写 state.json」全无同步。两个 flush 并发时旧快照可覆盖新快照，`dirty` 已置 false
+  不会被重写 → credits/冷却/disabled 集体回退，**已被删除的账号在文件里复活**，
+  `.bak` 轮转被污染。加独立 `flushMu` 串行化整段（不能用 `p.mu`，否则退回锁内 IO）；
+  `Close` 先关 stopCh 再抢同一把锁。用例用 `flushHook` 停在「快照已取」构造**确定性**
+  乱序，不是概率测试。
+
+### High（22 条，摘）
+
+- **上游协议**：调试开关不再打印全部请求头（`Authorization` 前 8 位掩码）；`respTracker`
+  在 `done` 分支复位（此前 keep-alive 连接**只有第一个响应**被正确跟踪，之后头序重排
+  确定性静默失效）；`sseMeta` 加 64 行 / 8KB 双闸；多行 `data:` 逐行写出（此前被塞回
+  单行，客户端按 `\n` 切行后只剩第一行）；客户端断开后 `readLine` 立即收尾（此前要等到
+  `IdleTimeout`，`idle_timeout=0` 时是永久泄漏）。
+- **对外 HTTP**：`withAdminAuth` 改每请求读 live 快照 —— **轮换管理员密钥后旧 key 立即
+  失效**（此前面板说「已生效」，server 侧还在用构造期的旧值）；MCP 不再全量缓冲 +
+  二次序列化（峰值 ~200MB → 16MiB 有界）；换段 goroutine 补 `recover`；`/v2/chat/busy`
+  的 `Models` 上限 64；**流式请求在零字节时把 429/400/503 改写成 `200` + SSE error 的
+  行为已修**，改为首帧否决回真实状态 + `gateway_hint`（Claude Code / Codex 的退避重试
+  此前完全失效）。
+- **面板**：admin key 自举从「回环即信任」改为一次性 `bootstrap_token`（常量时间比较、
+  用后即删）；非 GET 强制同源校验 + Content-Type 白名单（无 Origin 的 curl 仍放行）；
+  admin key 不再落 `localStorage`；导入条数上限对所有形态生效。
+- **账号池 / 调度**：窗口探针抢锁失败不再空转（推后 `ResetAt` + `sent==0` 硬退避）；
+  `p.store` 改 `atomic.Pointer`；**familylock 的 `TryLock→Unlock→delete` 可被抢占** ——
+  两路并发 RefreshToken 同一 RT → 12153 → 健康号被计死禁用，改引用计数 +
+  `CompareAndDelete` + `EndAccountTask` 校验持有者。
+- **其它**：`usage.load` 桶键与 `Add`/`Rollup` 不一致（重启后同桶翻倍并固化）；
+  `reqlog` 加 NaN/Inf 防护（一条毒值让 `/status` 恒 500）；at-rest 密钥来源可见性
+  （`AtRestKeySource()` + 启动横幅，**不改算法**以保持既有 auth 文件兼容）；
+  `LoadDirReport` 只判 `!IsDir()`（一个 FIFO 就能让进程卡在监听端口之前）。
+
+### 跨分片：一条「修 A 引入 B」的真事故
+
+pool 的「合并而非换指针」修复按 `ExpiresAt` 比较新旧凭据，而**刚被 refresh 求证过**的
+新凭据 expiry 常常更短（now+1h vs now+72h）→ 新 refresh token 被静默丢弃，而旧 RT
+已被上游轮换作废 → 该号下次请求就 12153，重导也救不回来。
+新增 `pool.AdoptVerified`：导入的 `verified` 分支**无条件**替换（保留 disabled/冷却/
+战绩/规则引用），普通 Add / 热重载 / 磁盘扫描仍按 expiry 比较。
+
+### APK 侧
+
+- **wakelock 续期回归（本仓自查）**：`1.35.20` 把锁改成 `acquire(30s)`，注释写着
+  「看门狗每 10s 续期」，实现只在 `onStartCommand` 调过一次 —— 30 秒后锁必然释放，
+  看门狗与 Go 定时器一起被冻，退回「过一会儿连不上」。现在 `watchLoop` 每轮续期，
+  且 `holdWake()` 去掉了 `if (!wake.isHeld())` 守卫（带超时的锁在到期前恒为 held，
+  条件永假，续期一次都不会发生）。
+- **注入 admin key 前先验身份**：新增 `InstanceId`（私有目录 32 hex）+ `PanelTrust`
+  （`GET /panel/api/instance` 比对，不把自己的 id 发出去防回显伪造），失败 fail-closed。
+  此前任何持 INTERNET 的应用先 bind 端口就能骗走管理员密钥。
+- **首启自举独立 `admin_api_key`**（32 hex），`copyApi()` 区分「客户端 key / 管理员 key」。
+  `listen` 保持 `:7863`（局域网访问是明确要的用法），改为把「唯一防线」从共享的客户端
+  key 换成独立的管理员 key。
+- 导入账号累计 32MB 硬上限 + 选择器收窄 `application/json`；配置页密钥与 access token
+  掩码；配置页保存前 `clearFocus()`（此前直接点保存会提交失焦前的旧值）；
+  WebView 外链交系统浏览器；`networkSecurityConfig` 只放行回环明文。
+
+### issue #189：停止后通知被 waiter 线程异步重贴
+
+点「停止」→ 通知消失 → 随即又出现一条「已停止 · 端口」，`setOngoing(true)` 划不掉、
+还带「停止」按钮，要再点一次。根因：`killProc(true)` 先把 `proc` 置空再
+`destroyForcibly()`，子进程死亡时 `waiter` 的「已被新实例接管」守卫判不出来，
+一路落到 `refreshNotification()`；而它与 `cancelNotification()` 没有任何同步。
+
+修法：`waiter` 在 `waitFor()` 返回后**先**判 `userStop`（不写状态、不落 lastExit、
+不重贴），并在 `refreshNotification()` 入口也加门 —— 投递点不止 waiter 一个
+（startGateway 成功/失败、看门狗自愈、onStartCommand 的状态刷新）。与 #113/PR #115
+是同一套机制的两面：那次修的是主线程的同步重贴，这次是子进程监视线程的异步重贴。
+
+### 构建与门禁
+
+- `tests/run.sh` 改**动态发现**：补上 `balance` / `safefile` / `livecfg` / `logfmt` /
+  `cmd/trial` 五个**从来没进过全量门禁**的包 —— 这是「全量一直漏跑」的根因。
+  `bash tests/run.sh all` 从 19 个包变成 **24 个包**。
+- CI 加最小权限 `contents: read`、action 固定 `@v4`/`@v5`、`persist-credentials: false`。
+- `tests/android/check_*.py` 从 2 个扩到 **9 个**（22 + 9 + 19 + 17 + 14 + 23 + 31 + 11 + 22
+  条断言），全部挂进 `build_apk.sh` 第 3 步 —— 此前只能手工跑，等于没有。
+- Dockerfile 钉 digest、`.dockerignore` 排除 12.5MB ELF；推送脚本的 GitHub PAT 不再
+  出现在 `curl` argv（`ps` / `/proc/*/cmdline` 可读）。
+
+### 升级须知（行为变更）
+
+1. **`server.require_api_key` 默认 `true`**：`api_key` 为空的部署，非回环请求开始 401。
+   回环仍放行，Android 内嵌与单机自托管不受影响；**反代部署必须配 `api_key`**，
+   或显式 `"server":{"require_api_key":false}`（不推荐）。
+2. **只配 `api_key` 的部署，审计面与写能力页改为要求 `admin_api_key`**：
+   `request_logs` / `credit_history` / `model_rules` / `tasks/jobs` / `accounts/{uid}/*`
+   会 403，面板会提示「设置管理员密钥」。13 条只读观测接口（overview / logs / models /
+   usage / error_summary / request_metrics / model_probes / packages / balance_history /
+   queue / tasks/live / school/vouchers / campaign）不受影响。
+3. **`/v1/messages`、`/v1/responses` 零字节错误现在回真实 4xx/5xx**，不再是
+   `200` + 流内 error。依赖「永远 200 再看流内 error」的脚本需要按状态码处理。
+4. **APK 首次启动会自动生成 `admin_api_key`**，「复制 API 信息」现在显示两把 key。
+5. 网页面板在「对面不是本进程网关」时**不再注入密钥**，改为提示（端口被占的保护）。
+6. 壳内 WebView 只允许回环明文；外链走系统浏览器。
+
 ## v1.35.20（2026-11-19）
 
 > 两个用户报的 bug（#176 停止后卡死、#177 耗电异常）+ 一处局域网地址可见性（#183）
