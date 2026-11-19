@@ -77,6 +77,10 @@ public class GatewayService extends Service {
     static volatile String mode = "";
     static volatile int restarts = 0;
     static volatile boolean external = false;   // 7863 被别的实例占着（比如 DSH 里那个）
+    /** 复用态下「端口能 accept 但 /healthz 不应答」的连续轮数（issue #176④）。
+     *  >0 说明这个「外部实例」很可能不是真在服务，而是上次停止后残留的孤儿网关。 */
+    static volatile int extStale = 0;
+    public static int externalStale() { return extStale; }
 
     // ── 被杀诊断：7863 老被杀，光说"又挂了"没用，得知道是谁杀的、杀了几次
     static final String PREF = "wb2api";
@@ -94,6 +98,24 @@ public class GatewayService extends Service {
     static volatile boolean startCounted = false; // 本进程是否已统计过"被杀重启"（bug #5）
     public static int appRestartCount() { return appRestarts; }
     public static String lastExitText() { return lastExit; }
+
+    /** 用户是不是主动停过（持久化标记，跨进程/跨重启保留）。issue #176②：
+     *  「打开 App」不再撤销它，只有显式的「启动网关」才清 —— 所以这里必须可读。 */
+    public static boolean userStopped(Context c) {
+        try {
+            return c.getSharedPreferences(PREF, MODE_PRIVATE).getBoolean("user_stop", false);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 用户显式要跑：清掉「用户停止」标记（只给「启动网关」按钮与开机自启用）。 */
+    public static void clearUserStop(Context c) {
+        try {
+            c.getSharedPreferences(PREF, MODE_PRIVATE).edit()
+                    .putBoolean("user_stop", false).apply();
+        } catch (Throwable ignored) {}
+    }
 
     // ── 保活：三个锁（CPU / Wi-Fi）+ 一个"常驻图层"，还有一个"我被冻过多久"的账
     static volatile WifiManager.WifiLock wifiLock;
@@ -201,19 +223,34 @@ public class GatewayService extends Service {
             reason = "服务启动被系统拒：" + t.getClass().getSimpleName();
         }
     }
-    /** 用户主动停止：必须与 ACTION_STOP 分支同语义（bug #10）。
-     *  只 stopService 的话，onDestroy 里 `if (!userStop)` 会重挂 alarm + JobScheduler，
-     *  服务 5 分钟内自己回来 —— 用户以为停了其实没停。 */
-    public static void stop(Context c) {
-        userStop = true;
+    /** 落盘「用户主动停止」的唯一实现（issue #176①）。
+     *
+     *  为什么必须抽出来：ACTION_STOP 分支此前只写 service_up=false，没写 user_stop ——
+     *  而 user_stop 是 BootReceiver 与 ReviveJobService 判断「用户停过就别再拉起」的
+     *  唯一依据。于是从通知栏点停止等于告诉系统「用户没停过」：开机自启、15 分钟的
+     *  Job 都会把它拉回来，用户以为停了其实没停。
+     *
+     *  连带影响：service_up 同时是 appRestarts（「系统重启 N」）的计数依据，写成 false
+     *  会让「进程被系统杀过」这一次不计入 —— 诊断数字永远少一次。
+     *
+     *  两个入口（通知栏 ACTION_STOP、静态 stop()）从此共用这一处，语义不可能再漂。 */
+    static void persistUserStop(Context c) {
         try {
-            // 持久化「用户主动停止」（bug 22）：只置内存标记的话，重启手机后
-            // BootReceiver 会无条件把网关拉起来 —— 与「不再自愈」的承诺相反。
             c.getSharedPreferences(PREF, MODE_PRIVATE).edit()
                     .putBoolean("service_up", false)
                     .putBoolean("user_stop", true)
                     .apply();
         } catch (Throwable ignored) {}
+    }
+
+    /** 用户主动停止：必须与 ACTION_STOP 分支同语义（bug #10）。
+     *  只 stopService 的话，onDestroy 里 `if (!userStop)` 会重挂 alarm + JobScheduler，
+     *  服务 5 分钟内自己回来 —— 用户以为停了其实没停。 */
+    public static void stop(Context c) {
+        userStop = true;
+        // 持久化「用户主动停止」（bug 22）：只置内存标记的话，重启手机后
+        // BootReceiver 会无条件把网关拉起来 —— 与「不再自愈」的承诺相反。
+        persistUserStop(c);
         cancelAlarm(c);
         ReviveJobService.cancel(c);
         // 状态复位（bug B3）：与 ACTION_STOP 分支同语义，否则界面永远「启动中」。
@@ -266,11 +303,18 @@ public class GatewayService extends Service {
         appCtx = this;
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {   // 用户主动停：别再自愈
             userStop = true;
-            try { getSharedPreferences(PREF, MODE_PRIVATE).edit().putBoolean("service_up", false).apply(); } catch (Throwable ignored) {}
+            // issue #176①：与 stop(Context) 共用同一处落盘。此前这里只写
+            // service_up=false，user_stop 一直是 false —— 通知栏停止在系统眼里
+            // 等于「用户没停过」，BootReceiver 和 15 分钟的 Job 都会拉回来。
+            persistUserStop(this);
             watching = false;
             cancelAlarm(this);
             ReviveJobService.cancel(this);
-            killProc();
+            // issue #176④：用户明确要停，不需要优雅排空 —— 直接强杀。
+            // 走 destroy() + 3s 延时强杀的话，那一发 destroyForcibly 在 daemon 线程里，
+            // 紧跟其后的 stopSelf() 一旦让进程被系统回收，强杀永远不会发生，
+            // Go 子进程活过 SIGTERM 就成了占着 7863 的孤儿（详见 killProc 注释）。
+            killProc(true);
             releaseWake();
             stopForegroundCompat();
             // 状态必须复位（bug B3）：此前只关通知/关端口，静态 status 仍停在
@@ -353,10 +397,21 @@ public class GatewayService extends Service {
                 external = true;
                 mode = "复用";
                 int extPort = GwConfig.port(this);
-                setState(ST_EXTERNAL, "端口 " + extPort + " 已被占用，复用现有实例",
-                         extPort + " 上已有别的实例在服务，本服务不接管（不抢端口、不杀进程）");
+                // issue #176④：同 watchLoop 的 external 分支 —— 能 accept 不等于在服务。
+                // 重开 App 时最常见的一帧就是「孤儿进程还在 Shutdown、端口还没释放」，
+                // 此时报「复用现有实例」是在撒谎，用户会一直等一个不会来的面板。
+                boolean healthy = httpUp();
+                extStale = healthy ? 0 : extStale + 1;
+                setState(ST_EXTERNAL,
+                        healthy ? "端口 " + extPort + " 已被占用，复用现有实例"
+                                : "端口 " + extPort + " 有进程但不应答 HTTP（疑似残留）",
+                        healthy ? extPort + " 上已有别的实例在服务，本服务不接管（不抢端口、不杀进程）"
+                                : extPort + " 能连上但 /healthz 无响应：很可能是上次停止后残留的"
+                                        + "网关进程（本服务不抢端口、不杀进程）；"
+                                        + "杀掉本 App 的后台进程可释放它");
                 refreshNotification();
             } else {
+                extStale = 0;
                 external = false;
                 startGateway();
             }
@@ -369,7 +424,9 @@ public class GatewayService extends Service {
     @Override public void onDestroy() {
         super.onDestroy();
         watching = false;      // 系统杀我时 alarm 还挂着 → 5 分钟内自己回来
-        killProc();
+        // 用户主动停的那条路径必须强杀（issue #176④）：服务已经要没了，
+        // 3 秒后那发 destroyForcibly 的 daemon 线程会跟着进程一起消失。
+        killProc(userStop);
         releaseWake();
         // 必须复位展示态（报告 #9）：静态 status 停在 ST_RUNNING 时，MainActivity.tick()
         // 会一直显示「启动中」，直到 5 分钟后的 alarm 把服务拉回来 —— 用户以为卡死了。
@@ -388,6 +445,14 @@ public class GatewayService extends Service {
 
     /** 任务列表被划掉：stopWithTask="false" 时服务还活着，但兜底要重挂一遍 */
     @Override public void onTaskRemoved(Intent root) {
+        // issue #176⑤：用户点过停止就不能再重挂复活链 —— 否则「停止后划掉任务列表」
+        // 等于把刚停掉的网关重新挂回 alarm + JobScheduler，5 分钟内自己回来，
+        // 与「不再自愈」的承诺相反（这条路径此前完全没有 userStop 判断）。
+        if (userStop) {
+            appLog(this, "任务列表被划掉：用户已停止服务，不重挂兜底");
+            super.onTaskRemoved(root);
+            return;
+        }
         setState(status, "任务被划掉，服务继续",
                  "App 任务被划掉（stopWithTask=false 服务继续跑），已重挂 alarm/job 兜底");
         appLog(this, "任务列表被划掉：服务继续跑（stopWithTask=false），已重挂兜底");
@@ -432,10 +497,30 @@ public class GatewayService extends Service {
                     if (portUp()) {        // 端口有主但没有我的孩子 → 外部实例，不插手
                         external = true;
                         mode = "复用";
-                        setState(ST_EXTERNAL, "外部实例在跑（复用）",
-                                 "本服务没持有子进程，" + GwConfig.port(this) + " 由外部实例服务");
+                        // issue #176④：「端口能 accept」不等于「有人在服务」。孤儿进程
+                        // （见 killProc 注释）占着 7863 但已进入 Shutdown 时，这里直接
+                        // continue 会让看门狗**永远跳过下面的 httpUp() 检查**，把一个
+                        // 死端口一直当成健康的外部实例 —— 用户看到的是永久「网关启动中」。
+                        // 所以复用态也要探一次 HTTP，连续不应答就把成因写进状态里。
+                        int port = GwConfig.port(this);
+                        if (httpUp()) {
+                            extStale = 0;
+                            setState(ST_EXTERNAL, "外部实例在跑（复用）",
+                                     "本服务没持有子进程，" + port + " 由外部实例服务");
+                        } else {
+                            extStale++;
+                            setState(ST_EXTERNAL,
+                                     "端口 " + port + " 有进程但不应答 HTTP（第 " + extStale + " 轮）",
+                                     port + " 能连上但 /healthz 无响应：很可能是上次停止后残留的"
+                                             + "网关进程（本服务不抢端口、不杀进程）；"
+                                             + "杀掉本 App 的后台进程可释放它");
+                            // 只在跨过阈值那一刻记一笔，别每 10s 刷一行日志。
+                            if (extStale == 3) appLog(this, "端口 " + port
+                                    + " 连续 3 轮能连上但不应答 HTTP：疑似残留网关进程占用");
+                        }
                         continue;
                     }
+                    extStale = 0;
                     external = false;
                     selfHeal("网关进程已退出");
                     // 自愈里 sleep(backoffMs) 可能长达 60s，而 lastTickAt 在进入本轮时
@@ -827,12 +912,37 @@ public class GatewayService extends Service {
         return f;
     }
 
-    /** 杀掉当前网关句柄。与 startGateway 同锁：proc 的读改写必须串行，否则两个线程
+    /** 杀掉当前网关句柄（默认路径：先 SIGTERM 优雅停，3s 后强杀兜底）。
+     *  与 startGateway 同锁：proc 的读改写必须串行，否则两个线程
      *  交叉执行会出现「拉起后立刻被另一个线程的 killProc 清空句柄」（孤儿进程）。 */
-    synchronized void killProc() {
+    synchronized void killProc() { killProc(false); }
+
+    /** hard=true：用户明确要停（或服务正在销毁），不等优雅排空，立即强杀。
+     *
+     *  issue #176④ —— 孤儿进程的真正来源就在这里。默认路径的强杀是
+     *  `forceKillLater(p, 3000)`：一个 daemon 线程 sleep 3s 再 destroyForcibly。
+     *  ACTION_STOP 分支紧接着就 stopSelf()，服务销毁后 App 没有活跃组件，
+     *  系统随时可以回收进程 —— 那条 daemon 线程跟着一起消失，强杀永远不会发生。
+     *  Go 侧 SIGTERM 后的 Shutdown 预算是 5s（在途 SSE 要排空），活过 3s 窗口的
+     *  子进程就成了孤儿：继续占着 7863，且 App 进程已经没了、没人再管它。
+     *
+     *  重开 App 时 proc 是 null（alive()=false）而 portUp()=true，onStartCommand
+     *  判定「端口有主 → 复用现有实例」，watchLoop 的同名分支又直接 continue，
+     *  连 httpUp() 都不做 —— 于是一个**不应答 HTTP 的残留进程**能被当成健康实例
+     *  一直复用下去，只有杀掉 App 后台进程（连带杀掉子进程组、释放端口）才恢复。
+     *
+     *  用户点了停止就是不要了，没有「优雅」可讲：直接 destroyForcibly。 */
+    synchronized void killProc(boolean hard) {
         Process p = proc;
         proc = null;
         if (p == null) return;
+        if (hard) {
+            try {
+                if (Build.VERSION.SDK_INT >= 26) p.destroyForcibly();
+                else p.destroy();
+            } catch (Throwable ignored) {}
+            return;
+        }
         try { p.destroy(); } catch (Throwable ignored) {}
         // 强杀兜底（bug #4）：只发 SIGTERM 的话，Go 侧一旦卡在优雅停机（在途 SSE 排空 /
         // 锁竞争）就会留下一个**占着 7863 的旧进程** —— 新进程 bind 失败立刻退出，

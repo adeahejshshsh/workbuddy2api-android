@@ -69,6 +69,23 @@ final class Console {
     private int startRetries;
     private static final int MAX_START_RETRIES = 30;
 
+    /** Activity 已销毁：本对象的所有延时回调都必须变成空操作（issue #176⑥）。
+     *  主题切换走 recreate()、旋转、进程恢复都会重建 Activity，旧的 Console 不会自己消失 ——
+     *  它持有的 Handler 队列会把 Runnable 一直送到主线程执行。 */
+    private volatile boolean disposed;
+
+    /** Activity 销毁时必须调。MainActivity.onDestroy 里的 ui.removeCallbacksAndMessages
+     *  清的是 MainActivity 自己的 Handler，管不到 Console 这一个（issue #176⑥）。 */
+    void dispose() {
+        disposed = true;
+        try { ui.removeCallbacksAndMessages(null); } catch (Throwable ignored) {}
+    }
+
+    /** 还活着吗：所有往 UI 写的地方都要先过这一关。 */
+    private boolean dead() {
+        return disposed || a.isFinishing() || a.isDestroyed();
+    }
+
     private String taskMode = "queue";
 
 
@@ -126,7 +143,12 @@ final class Console {
 
         buildNav();
         open("accounts");
-        ui.postDelayed(new Runnable() { public void run() { loadOverview(true); } }, 1200);
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                if (dead()) return;
+                loadOverview(true);
+            }
+        }, 1200);
     }
 
     View view() { return root; }
@@ -198,6 +220,7 @@ final class Console {
     }
 
     void show(ScrollView sv) {
+        if (dead()) return;
         host.removeAllViews();
         host.addView(sv, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -205,6 +228,7 @@ final class Console {
     }
 
     void show(View v) {
+        if (dead()) return;
         host.removeAllViews();
         host.addView(v, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -239,26 +263,142 @@ final class Console {
 
     // ── 数据加载 ───────────────────────────────────────────────────────────
     void loadOverview(final boolean quiet) {
+        if (dead()) return;
         svc.overview(new PanelService.Cb<PanelService.Overview>() {
             public void ok(PanelService.Overview o) {
+                if (dead()) return;
                 startRetries = 0;
                 if ("accounts".equals(screen)) accounts.renderBody(o);
                 else if ("overview".equals(screen)) overview.renderBody(o);
             }
             public void fail(String msg) {
-                if (isConnectErr(msg) && startRetries < MAX_START_RETRIES) {
-                    startRetries++;
-                    showStarting();
-                    ui.postDelayed(new Runnable() {
-                        public void run() {
-                            if ("accounts".equals(screen) || "overview".equals(screen)) loadOverview(true);
-                        }
-                    }, 2000);
+                if (dead()) return;
+                // issue #176③：网关**明确停着**时不许再画「启动中」。
+                // 原来只看失败串 —— Connection refused 也命中 isConnectErr，于是
+                // 「用户点了停止」和「网关还在起」被渲染成同一个界面。更糟的是重试链
+                // 自己调的是 loadOverview(true)（quiet=true），30 次用尽后走到
+                // `if (!quiet)` 恒为 false —— 既不重试也不报错，屏幕永久定格。
+                if (isConnectErr(msg)) {
+                    if (GatewayService.statusOf() != GatewayService.ST_STOPPED
+                            && startRetries < MAX_START_RETRIES) {
+                        startRetries++;
+                        showStarting();
+                        ui.postDelayed(new Runnable() {
+                            public void run() {
+                                if (dead()) return;
+                                if ("accounts".equals(screen) || "overview".equals(screen)) loadOverview(true);
+                            }
+                        }, 2000);
+                        return;
+                    }
+                    showTerminal(msg);   // 停着 / 重试用尽：给终态与出口，别再空转
                     return;
                 }
                 if (!quiet) toast("加载失败：" + msg);
             }
         });
+    }
+
+    /**
+     * 终态页（issue #176③）：网关停着或起不来时唯一该显示的界面。
+     *
+     * 原来 Console 全文不读 GatewayService 任何成员（`grep GatewayService Console.java`
+     * 零命中），所有连接类失败一律画「网关启动中」—— 包括「用户已经点了停止」。
+     * 而 MainActivity 顶部状态条是按 statusOf() + 端口事实判定的，会正确显示「已停止」：
+     * 同一个屏幕上两个互相矛盾的状态，用户看的是内容区，于是以为卡死。
+     *
+     * 这里把「现在是什么状态」「为什么」「下一步点哪」一次说清。
+     */
+    void showTerminal(String msg) {
+        if (dead()) return;
+        boolean stopped = GatewayService.statusOf() == GatewayService.ST_STOPPED;
+        boolean byUser = GatewayService.userStopped(a);
+
+        LinearLayout column = Theme.column(a);
+        LinearLayout card = Theme.card(a);
+        column.addView(card, Theme.cardLp(a, Theme.S3));
+
+        String head;
+        int headColor;
+        if (stopped && byUser) { head = "网关已停止"; headColor = Theme.INK; }
+        else if (stopped) { head = "网关启动失败"; headColor = Theme.BAD; }
+        else { head = "网关还在启动"; headColor = Theme.WARN; }
+        card.addView(Theme.text(a, head, 17f, headColor, 2));
+
+        // 状态（给人看的一句）→ 原因（为什么）→ 最后一行日志（现场）
+        String st = GatewayService.stateText();
+        if (st != null && !st.isEmpty()) {
+            TextView t = Theme.text(a, st, 12.5f, Theme.INK2, 0);
+            t.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+            card.addView(t);
+        }
+        String why = GatewayService.reasonText();
+        if (why != null && !why.isEmpty()) {
+            TextView t = Theme.text(a, why, 12f, Theme.INK3, 0);
+            t.setPadding(0, Theme.dp(a, Theme.S1), 0, 0);
+            card.addView(t);
+        }
+        String last = GatewayService.lastLogLine();
+        if (last != null && !last.isEmpty() && !last.equals(why)) {
+            TextView t = Theme.text(a, last, 11.5f, Theme.INK3, 0);
+            t.setPadding(0, Theme.dp(a, Theme.S1), 0, 0);
+            card.addView(t);
+        }
+        // 原始错误：小字灰，保留现场（排障时最不该被藏起来的就是它）
+        if (msg != null && !msg.isEmpty()) {
+            TextView t = Theme.text(a, msg, 11f, Theme.SLATE, 0);
+            t.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+            card.addView(t);
+        }
+
+        // 出口：停止态给「启动网关」，其它给「重新探测」（把 startRetries 归零）
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(0, Theme.dp(a, Theme.S3), 0, 0);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        if (stopped) {
+            TextView go = Theme.primaryButton(a, "启动网关");
+            go.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { startGatewayFromUi(); }
+            });
+            row.addView(go, blp);
+        } else {
+            TextView retry = Theme.primaryButton(a, "重新探测");
+            retry.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    startRetries = 0;
+                    showStarting();
+                    loadOverview(false);
+                }
+            });
+            row.addView(retry, blp);
+        }
+        card.addView(row);
+
+        show(scrollOf(column));
+    }
+
+    /** 终态页的「启动网关」：显式动作 —— 清标记、拉起服务、重新探测。 */
+    void startGatewayFromUi() {
+        if (dead()) return;
+        GatewayService.clearUserStop(a);
+        GatewayService.start(a);
+        startRetries = 0;
+        showStarting();
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                if (dead()) return;
+                loadOverview(false);
+            }
+        }, 1200);
+    }
+
+    /** 从通知栏停止后切回 App：Activity 没销毁，Console 得自己切到终态页。 */
+    void showStopped() {
+        if (dead()) return;
+        startRetries = 0;
+        showTerminal(null);
     }
 
     private static boolean isConnectErr(String msg) {
@@ -270,6 +410,7 @@ final class Console {
     }
 
     private void showStarting() {
+        if (dead()) return;
         LinearLayout box = new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER);
