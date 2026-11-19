@@ -1739,6 +1739,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
 	degradedApplied := false
+	// toolStripApplied 11128 的最后一层抢救只做一次（见 ErrContentBlocked 分支）：
+	// 摘掉 tools[].function.description 再试一个来回，避免无界重试。
+	toolStripApplied := false
 	// 身份首句替换必须先于模式分支（吸收 qcgzxw `a7f10ad1`）：只动客户端原始身份句，
 	// 降级期整体换成 Degraded 时不保留。custom 模式没有客户端身份句，开关不生效。
 	if h.cfg.PromptIdentityOverrideEnabled &&
@@ -2090,6 +2093,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 报成"服务端没号"，客户端会无限重试。
 				i--
 				continue
+			}
+			// 11128 二次确认（"unapproved channel"）：降级期或降级重试之后**仍**被拦，
+			// 说明触发点不在 system 提示词，而在客户端自带的 tools 描述 ——
+			// DSH 系客户端的 `dshmarketplace_*` 工具说明里直接写着品牌词与渠道词，
+			// 上游按连续原文匹配即整单 400。此前这条路径只会再走一次「降级」，
+			// 而降级已生效 → 直接回 400，用户看到的是「一整个白天都失败、try=1」。
+			//
+			// 最后一次抢救：摘掉工具描述（schema/name 不动，模型仍能调用）再试一次；
+			// 同时解除降级锁存 —— 中性提示词既然没救回来，就不该让它占到半夜。
+			if kind == upstream.ErrContentBlocked && !toolStripApplied {
+				if nb, ok := upstream.StripToolDescriptions(body); ok {
+					body = nb
+					toolStripApplied = true
+					h.degrade.Clear(degradeKey)
+					delete(tried, acct.UID)
+					failKeepBinding(acct.UID)
+					log.Printf("content-blocked: 降级未生效，摘除 tools 描述后重试一次")
+					i--
+					continue
+				}
 			}
 			if kind == upstream.ErrContentBlocked {
 				// 内容命中网关内容防火墙：立即回客户端，**不轮转**——换任何账号都会撞同一

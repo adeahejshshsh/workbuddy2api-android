@@ -64,6 +64,20 @@ func (g *degradeGate) Trigger(key string) {
 	}
 }
 
+// Clear 立即解除 key 的降级锁存。
+//
+// 为什么需要（11128 二次确认）：降级是「用中性提示词换一次通过」的抢救手段，
+// 但它把状态锁到次日 00:00 —— 一旦触发点其实不在 system 提示词（例如在客户端
+// 自带的 tools 描述里），后续每一次请求都会带着中性提示词去撞同一面墙，
+// 用户看到的是「一整个白天都 400，而且 try=1，连重试都没有」。
+// 降级重试仍然失败就说明这条路走不通，应当立刻解除锁存、让真实提示词回来，
+// 而不是把一个已经证明无效的降级态保留到半夜。
+func (g *degradeGate) Clear(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.byKey, key)
+}
+
 // nextMidnightCST 返回 now 之后最近的 Asia/Shanghai 00:00 时刻（纯函数，方便单测）。
 //
 // 边界语义：
