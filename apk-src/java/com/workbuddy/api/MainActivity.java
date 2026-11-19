@@ -841,8 +841,15 @@ public class MainActivity extends Activity {
 
     void copyApi() {
         String key = apiKey.isEmpty() ? readApiKey() : apiKey;
-        String txt = "Base URL: http://127.0.0.1:" + GwConfig.port(this) + "/v1\nAPI Key: " + key +
-                "\n(局域网: 把 127.0.0.1 换成手机 IP)";
+        int port = GwConfig.port(this);
+        String lan = GwConfig.lanIPv4();
+        // 局域网地址直接算出来，别让用户自己去系统设置里翻 IP —— 翻错一位就是
+        // connect error，而那个错误信息完全指不到「地址写错了」。
+        String lanLine = lan.isEmpty()
+                ? "\n(局域网: 没取到本机 IP，请确认已连 Wi-Fi；地址形如 http://192.168.x.x:" + port + "/v1)"
+                : "\n局域网: http://" + lan + ":" + port + "/v1";
+        String txt = "Base URL: http://127.0.0.1:" + port + "/v1" + lanLine +
+                "\nAPI Key: " + key;
         try {
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("wb2api", txt));

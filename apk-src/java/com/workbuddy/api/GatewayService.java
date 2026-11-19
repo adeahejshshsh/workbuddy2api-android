@@ -330,6 +330,14 @@ public class GatewayService extends Service {
         // 前台已在 ensureChannel 之后立刻起过（5 秒窗口），这里只刷新通知内容。
         refreshNotification();
         holdWake();   // 保活：不持它，后台时看门狗线程与 Go 定时器都会被冻住
+        // 局域网地址打进日志（启动一次）：用户报「局域网 connect error」时，第一件要确认的
+        // 就是「你以为的地址」和「手机实际地址」是否一致 —— 手翻系统设置翻错一位就是
+        // connect error，而那个错误指不到真实原因。
+        String lanIp = GwConfig.lanIPv4();
+        int port = GwConfig.port(this);
+        appLog(this, lanIp.isEmpty()
+                ? "局域网：未取到本机 IPv4（未连 Wi-Fi？）；仅本机可用 http://127.0.0.1:" + port
+                : "局域网：http://" + lanIp + ":" + port + "/v1 （手机当前 IP；换网络后会变）");
         appLog(this, "保活状态：wakelock=" + wakeHeld() + "，常驻图层=" + (overlay != null)
                 + "，alarm=" + (exactAlarmOk(this) ? "精确" : "非精确（未授予「闹钟与提醒」）") + "，任务列表=划掉也不停");
         // 重启：必须等旧进程真的退出再拉新的（destroy 是异步的，句柄清空 ≠ 进程已死）。
