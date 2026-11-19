@@ -57,6 +57,8 @@ import java.util.UUID;
  *      + BOOT_COMPLETED 开机自启（BootReceiver）。
  *   4) 保活级：服务在跑就一直持 partial wakelock —— 不持的话屏幕一灭 CPU 就进 suspend，
  *      看门狗线程和 Go 里的定时器全被冻住，症状正是「只有 App 在前台时才生效」。
+ *      锁是**带超时**的（WAKE_TIMEOUT_MS，由看门狗每轮续期，issue #177①）：
+ *      无参 acquire() 会被系统的耗电归因直接点名成「在后台阻止系统休眠」。
  */
 public class GatewayService extends Service {
     public static final String ACTION_STOP = "com.workbuddy.api.action.STOP";
@@ -70,6 +72,10 @@ public class GatewayService extends Service {
     static final long STABLE_MS = 120_000L;     // 稳定这么久 → 退避计数清零
     static final long ALARM_MS = 5 * 60_000L;   // 系统级兜底间隔
     static final int ALARM_REQ = 7;
+    /** wakelock 单次持有上限（issue #177①）。看门狗每 TICK_MS 续一次，
+     *  3 个 tick 的余量足够跨过一轮 GC / 慢盘写；而看门狗真被冻住 ≥ 30s 时
+     *  锁会自动释放 —— 那正是「设备该睡了」的唯一正确表达。 */
+    static final long WAKE_TIMEOUT_MS = 3 * TICK_MS;
 
     static volatile Process proc;
     static volatile String state = "未启动";
@@ -123,6 +129,8 @@ public class GatewayService extends Service {
     static volatile int freezes = 0;            // 心跳断了（= 被系统冻过）的次数
     static volatile String freezeText = "";
     static volatile long lastTickAt = 0;
+    /** 上次 armAlarm 的时刻（elapsedRealtime）。issue #177⑤：用来节流重臂 —— 见 watchLoop。 */
+    static volatile long alarmArmedAt = 0;
     public static int freezeCount() { return freezes; }
     public static String freezeText() { return freezeText; }
 
@@ -488,11 +496,14 @@ public class GatewayService extends Service {
                     appLog(this, freezeText);
                 }
                 lastTickAt = now;
-                // 每轮都重臂系统级 alarm（BUG-3）：armAlarm 用的是一次性
-                // setExactAndAllowWhileIdle，只有每轮重臂才维持「每 5 分钟一次」。
-                // 它原先在循环体末尾，而下面两条分支都 continue 提前跳过 ——
-                // 停在「外部实例复用」或反复自愈态时，第 3 层（App 被整体杀掉后自启）失效。
-                armAlarm(this);
+                // issue #177⑤：原来**每轮**都重臂到「现在 + 5 分钟」（TICK_MS = 10s），
+                // 于是这个 5 分钟兜底 alarm 永远不会到期 —— 每分钟 6 次 binder 调用，
+                // 换一个不存在的保险。改成过半程才续：重臂间隔 2.5min < ALARM_MS，
+                // alarm 仍能在看门狗死掉后的 5 分钟内 fire；binder 降到 0.4 次/分。
+                //
+                // 位置仍留在循环体开头（BUG-3）：下面几条分支都会 continue 提前跳过，
+                // 放末尾的话「外部实例复用」态与反复自愈态下第 3 层会整体失效。
+                if (SystemClock.elapsedRealtime() - alarmArmedAt > ALARM_MS / 2) armAlarm(this);
                 if (!alive()) {
                     if (portUp()) {        // 端口有主但没有我的孩子 → 外部实例，不插手
                         external = true;
@@ -980,23 +991,32 @@ public class GatewayService extends Service {
                 wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "wb2api:gateway");
                 wake.setReferenceCounted(false);   // 反复 acquire 不叠加，release 一次就放
             }
-            if (!wake.isHeld()) wake.acquire();
+            // issue #177①：无参 acquire() = 永久持有。系统的耗电归因正是按「持有无超时
+            // wakelock 的进程」来点名的，用户看到的「耗电异常 / 在后台阻止系统休眠」
+            // 弹窗就是它。改成带超时后：看门狗每 10s 一轮走到这里自动续期，实际效果
+            // 仍是常驻；而看门狗真被冻住 ≥ WAKE_TIMEOUT_MS 时锁自动释放 —— 那正是
+            // 设备该睡的时刻，也是「被冻住」这个事实的正确表达（而不是继续按住 CPU）。
+            if (!wake.isHeld()) wake.acquire(WAKE_TIMEOUT_MS);
         } catch (Throwable ignored) {}
         holdWifi();
         installOverlay();
     }
 
     /**
-     * Wi-Fi 高性能锁：从电脑/别的设备经局域网连过来时，屏幕一灭 Wi-Fi 就进省电甚至休眠，
+     * Wi-Fi 锁：从电脑/别的设备经局域网连过来时，屏幕一灭 Wi-Fi 就进省电甚至休眠，
      * 表现同样是"连不上"。127.0.0.1 本机连不受影响，所以这条是给局域网场景的。
+     *
+     * issue #177②：原来用的是 WIFI_MODE_FULL_HIGH_PERF —— 那是给低延迟游戏/串流用的，
+     * 它让射频**永不降档**，是整个 App 里最贵的一项。HTTP 网关不需要低延迟，
+     * WIFI_MODE_FULL 已经能保证屏幕熄灭后 Wi-Fi 不进休眠，这就是局域网访问需要的全部。
      */
     void holdWifi() {
         try {
             if (wifiLock == null) {
                 WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
                 if (wm == null) return;
-                try { wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "wb2api:wifi"); }
-                catch (Throwable t) { wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL, "wb2api:wifi"); }
+                try { wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL, "wb2api:wifi"); }
+                catch (Throwable t) { wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "wb2api:wifi"); }
                 wifiLock.setReferenceCounted(false);
             }
             if (!wifiLock.isHeld()) wifiLock.acquire();
@@ -1097,6 +1117,8 @@ public class GatewayService extends Service {
             boolean exact = Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms();
             if (exact) am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, due, pi);
             else am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, due, pi);
+            // 只有真的下发了才记时间（issue #177⑤）：抛异常时保持旧值，下一轮再试。
+            alarmArmedAt = SystemClock.elapsedRealtime();
         } catch (Throwable ignored) {}
     }
 
@@ -1107,6 +1129,9 @@ public class GatewayService extends Service {
             int fl = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= 23) fl |= PendingIntent.FLAG_IMMUTABLE;
             am.cancel(PendingIntent.getService(c, ALARM_REQ, i, fl));
+            // 取消之后就没有挂着的 alarm 了，下次 arm 必须真的下发（issue #177⑤ 的节流
+            // 依赖这个时间戳，留着旧值会让「取消 → 重新 arm」这一步被误判成「还新鲜」）。
+            alarmArmedAt = 0;
         } catch (Throwable ignored) {}
     }
 
