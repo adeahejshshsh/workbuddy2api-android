@@ -1,5 +1,107 @@
 # 变更记录
 
+## v1.35.20（2026-11-19）
+
+> 两个用户报的 bug（#176 停止后卡死、#177 耗电异常）+ 一处局域网地址可见性（#183）
+> + 一个修 bug 时自己带出来、又被自审抓到的回归（#186）。**全部只动 `apk-src`，
+> Go 侧零改动，19 个包不受影响。**
+
+### 停止网关后重开 App 永远卡在「网关启动中」（#176）
+
+三段链路叠在一起，每段单独看都不算错。
+
+- **`ACTION_STOP` 漏写 `user_stop`**：通知栏「停止」只落盘 `service_up=false`，而
+  `user_stop` 是 `BootReceiver` 与 `ReviveJobService` 判断「用户停过就别再拉起」的
+  唯一依据 —— 从通知栏停止等于告诉系统「用户没停过」，开机自启与 15 分钟的 Job 都会
+  拉回来。顺带把 `appRestarts`（状态条上的「系统重启 N」）也带偏：`service_up` 是它的
+  判据，写成 false 会让「进程被系统杀过」这一次不计入。抽 `persistUserStop(Context)`，
+  两个入口共用。
+- **`MainActivity.onCreate` 无条件撤销停止**：每次打开 App 都先清 `user_stop` 再
+  `start()`，而 `stop(Context)` 自己又要先清标记才能启动 —— 两边互相抵消，`user_stop`
+  在任何路径上都不可能是 true，成了死字段。改成「停过就不自动起」，「启动网关」变成
+  终态页上的显式按钮。
+- **`Console` 没有「已停止」终态**：它此前全文不引用 `GatewayService` 任何成员，所有
+  连接类失败一律画「网关启动中」，包括「用户已经点了停止」。而 `MainActivity.tick()`
+  是按 `statusOf()` + 端口事实判定的，会**正确**显示「已停止」—— 同一屏两个矛盾状态，
+  用户看的是内容区。更糟的是重试链自己调 `loadOverview(true)`（`quiet=true`），30 次
+  用尽后 `if (!quiet) toast(...)` 恒为 false：既不重试也不报错，屏幕永久定格在第 30 次
+  渲染的那一帧。新增 `showTerminal()`：状态 / 原因 / 最后一行日志 / 原始错误 + 出口按钮。
+
+另外三条同源缺陷：
+
+- **停止时的强杀会丢**：`killProc()` 的强杀是 3s 后的 daemon 线程，`ACTION_STOP` 紧接着
+  `stopSelf()`，进程一旦被系统回收，那发 `destroyForcibly` 就永远不发生了 —— Go 子进程
+  活过 SIGTERM（Shutdown 预算 5s）就成了占着 7863 的孤儿。而 `watchLoop` 的 external
+  分支直接 `continue`、连 `httpUp()` 都不做，死端口会被当成健康实例永久复用。停止路径改
+  `killProc(true)` 直接强杀（孤儿窗口归零）；复用态补探 `/healthz` 并记 `extStale`，
+  状态条显示「端口占用异常」而不是「运行中（外部）」。
+- **`onTaskRemoved` 无条件重挂**：停止后划掉任务列表会把网关重新挂回 alarm + JobScheduler。
+- **`Console` Handler 泄漏**：它有自己的 Handler，`MainActivity.onDestroy` 里的
+  `removeCallbacksAndMessages` 清的是 MainActivity 那个，管不到它。泄漏的旧链会继续
+  `loadOverview` 并把新 Console 刚渲染的终态页覆盖回去 —— 主题切换走 `recreate()`，
+  这条路径很常见。加 `dispose()` + `dead()` 闸门。
+
+### 耗电异常：无超时 wakelock + 高频 Wi-Fi 锁（#177）
+
+- **partial wakelock 带超时**：`acquire()` 无参 = 永久持有，系统的耗电归因正是按「持有
+  无超时 wakelock 的进程」点名的。改 `acquire(WAKE_TIMEOUT_MS)`（30s = 3 个 tick），
+  看门狗每 10s 一轮自动续期 —— **实际效果仍是常驻**；而看门狗真被冻住 ≥30s 时锁自动
+  释放，那正是设备该睡的时刻，也是「被冻住」这个事实的正确表达。
+- **Wi-Fi 锁降档**：`WIFI_MODE_FULL_HIGH_PERF` → `WIFI_MODE_FULL`。HIGH_PERF 让射频
+  永不降档（给低延迟游戏/串流用），HTTP 网关不需要；FULL 已能保证屏幕熄灭后 Wi-Fi 不进
+  休眠，这就是局域网访问需要的全部。
+- **5 分钟兜底 alarm 原来永远不会触发**：`TICK_MS=10s`，每轮重臂到 `now+5min`，30 次/
+  周期 —— 每分钟 6 次 binder 调用，换一个不存在的保险。改成过半程才续（2.5min）：重臂
+  间隔 < `ALARM_MS`，alarm 真能在看门狗死掉后 5 分钟内 fire，binder 降到 0.4 次/分。
+  `cancelAlarm` 里把 `alarmArmedAt` 清零，避免「取消 → 重新 arm」被节流误判成「还新鲜」。
+- **`balance_refresh_minutes` 5 → 30**（模板默认）：每轮对池内每个账号发一次真实上游
+  额度查询，5 分钟太密。只影响新装 —— 老用户的 `files/gateway/config.json` 不会被
+  `ensureConfig` 覆盖，README 给了手动改法。
+- **不动 1×1 悬浮窗**：它是防 app-freezer 的唯一手段，去掉就是「过一会儿连不上、拉回
+  前台立刻就好」回归，而这正是这个 App 最原始的问题。
+- **不动 reqlog 的 1Hz ticker**：`flush()` 首行是 `if w.buf == nil { return }`，空转是
+  一次函数调用加一个 nil 判断，不是耗电源；改了反而是无谓的上游 divergence。
+
+README 新增「关于耗电」表，四项取值与理由写清楚，并说明老版本怎么手改。
+
+### 局域网地址直接算出来（#183）
+
+`copyApi()` 原来只写「局域网: 把 127.0.0.1 换成手机 IP」—— 用户得自己去系统设置里翻 IP，
+翻错一位就是 `connect error`，而那个错误完全指不到「地址写错了」。手机 IP 还是 DHCP
+分配的，换网络就变。
+
+- 新增 `GwConfig.lanIPv4()`：`NetworkInterface` 枚举当前 IPv4，无需权限。只认
+  `wlan` / `ap` / `swlan` / `softap` / `eth` 前缀，**不认 `rmnet`/`ccmni`** —— 把运营商
+  IP 写成「局域网地址」比不写更糟；
+- `copyApi()` 直接给出 `局域网: http://192.168.x.x:7863/v1`，取不到时说明「未连 Wi-Fi」
+  并给出格式；
+- 启动日志打一行当前局域网地址（排障第一件事就是核对它）；
+- README 新增「局域网访问排查」六步。
+
+### 自审抓到的一个回归（#186）
+
+#184 把「网关明确停着」的判据定成 `statusOf() == ST_STOPPED`，但 **status 的初值就是
+`ST_STOPPED`** —— 而 `Console` 构造后 1.2s 就来加载面板，那一刻网关通常还没开始监听
+（冷启动 + 慢盘 + 前台服务握手）。于是正常冷启动会闪一下「网关启动失败」并停在终态页，
+比原来的「启动中」更糟。
+
+用 `everStarted`（`onStartCommand` 进过的痕迹）+ `!userStopped(a)` 把两种情况分开，
+单独一档「网关还没开始启动」。`!userStopped(a)` 这一条不能漏：用户主动停过时
+`MainActivity` 根本不 `start()`，`everStarted` 永远是 false —— 不排除的话「已停止」会被
+渲染成「还没开始启动」，等于把用户的显式操作又说成没发生。
+
+### 测试
+
+Java 侧新增两个源码级断言脚本（纯文本，不需要 JDK/android.jar —— 这些语义全在 Android
+框架里，宿主 JVM 跑不起来）：
+
+- `tests/android/check_stop_semantics.py` — 19 项
+- `tests/android/check_wake_semantics.py` — 7 项
+
+都做了变异验证（破坏 → 必须红 → 还原 → 全绿），**9 个破坏点全部按预期变红**。
+
+`WatchdogSelfCheck`（退避序列）仍 OK；Go 侧 19 个包全绿。
+
 ## v1.35.19（2026-11-19）
 
 > 三批上游合并（`27b7458` → `d40d4b8`，共 **59 条**）+ 一个面板可用性修复
