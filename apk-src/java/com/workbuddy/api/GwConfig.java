@@ -36,6 +36,59 @@ final class GwConfig {
         return p > 0 ? p : DEFAULT_PORT;
     }
 
+    /**
+     * 手机当前的局域网 IPv4（尽力而为，取不到返回空串）。
+     *
+     * 为什么需要：壳里「复制 API 信息」此前只写「把 127.0.0.1 换成手机 IP」——
+     * 用户得自己去系统设置里翻 IP，翻错一个数字就是 connect error，而错误信息
+     * 完全指不到「地址写错了」这个真实原因。这里直接把当前地址算出来。
+     *
+     * 只用 NetworkInterface 枚举，不需要任何权限：优先 wlan 与 ap 前缀的接口，其余非回环 IPv4 兜底。
+     * 结果缓存一次（接口列表在按钮点击这种频率下没必要每次重算，而且枚举是 I/O）。
+     */
+    static String lanIPv4() {
+        synchronized (GwConfig.class) {
+            if (lanCache != null) return lanCache;
+            String best = "";
+            try {
+                java.util.Enumeration<java.net.NetworkInterface> ifs =
+                        java.net.NetworkInterface.getNetworkInterfaces();
+                while (ifs != null && ifs.hasMoreElements()) {
+                    java.net.NetworkInterface ni = ifs.nextElement();
+                    try {
+                        if (!ni.isUp() || ni.isLoopback()) continue;
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    String nm = ni.getName() == null ? "" : ni.getName();
+                    java.util.Enumeration<java.net.InetAddress> addrs = ni.getInetAddresses();
+                    while (addrs != null && addrs.hasMoreElements()) {
+                        java.net.InetAddress a = addrs.nextElement();
+                        if (a.isLoopbackAddress() || a.isLinkLocalAddress()) continue;
+                        String h = a.getHostAddress();
+                        // 只要 IPv4：IPv6 字面量在 URL 里要加方括号，写进「复制」文本
+                        // 用户粘到客户端里十有八九是错的。
+                        if (h == null || h.indexOf(':') >= 0) continue;
+                        // 只认会与局域网同网段的接口：wlan / ap / swlan（部分 ROM 的
+                        // Wi-Fi 名）/ eth（USB 网卡）。**不认 rmnet/ccmni 这类蜂窝接口**
+                        // —— 把运营商 IP 写进「局域网地址」比不写更糟：用户照着连一定失败。
+                        if (nm.startsWith("wlan") || nm.startsWith("ap")
+                                || nm.startsWith("swlan") || nm.startsWith("softap")
+                                || nm.startsWith("eth")) {
+                            best = h;
+                            break;
+                        }
+                    }
+                    if (!best.isEmpty()) break;
+                }
+            } catch (Throwable ignored) {}
+            lanCache = best;
+            return lanCache;
+        }
+    }
+
+    private static String lanCache;
+
     /** 从 listen 字符串里取端口号；取不到返回 0。 */
     static int parsePort(String listen) {
         if (listen == null) return 0;
