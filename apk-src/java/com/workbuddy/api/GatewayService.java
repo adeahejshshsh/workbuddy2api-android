@@ -733,6 +733,17 @@ public class GatewayService extends Service {
                 try {
                     int rc = me.waitFor();
                     String why = exitMeaning(rc);
+                    // issue #189：用户主动停止这条路径上必须**先**退出。
+                    // killProc(true) 是「先把 proc 置空、再 destroyForcibly」的，所以子进程
+                    // 死亡时 `proc == null` —— 下面那道 `proc != null && proc != me` 的
+                    // 「已被新实例接管」守卫判不出来，代码一路落到 refreshNotification()，
+                    // 在 ACTION_STOP 的 cancelNotification() 之后把「已停止 · 端口」重新贴回去
+                    // （同一 NOTIF_ID，且 setOngoing(true) 划不掉，看着像停不掉）。
+                    // 停止就是停止：不写状态、不落 lastExit、不重贴通知。
+                    if (userStop) {
+                        appLog(this, "网关进程退出（" + why + "）：用户已停止服务，不再更新状态与通知");
+                        return;
+                    }
                     // 先判「我还是不是当前进程」（bug #4）：看门狗自愈先 SIGTERM 旧进程
                     // 再退避 2s 拉新的，而 Go 侧优雅停机最长 5s —— 旧进程的 waitFor
                     // 可能在新进程 setState(RUNNING) **之后**才返回，把状态和 lastExit
@@ -749,6 +760,9 @@ public class GatewayService extends Service {
                     setState(ST_STOPPED, "已退出 " + why,
                              "网关进程退出：" + why + "，看门狗按退避重拉");
                 } catch (Exception e) {
+                    // issue #189：停止路径上 waitFor 抛异常（进程被杀时的竞态）同样不该
+                    // 覆盖「已停止 · 用户点了停止」这个状态。
+                    if (userStop) return;
                     if (proc != null && proc != me) return; // 同上：真被接管了就别写全局状态
                     setState(ST_STOPPED, "等待异常 " + e, "等待网关进程出错：" + e);
                 }
@@ -1304,6 +1318,16 @@ public class GatewayService extends Service {
     }
 
     void refreshNotification() {
+        // issue #189：用户主动停止之后，本进程**任何**通知投递都是幽灵 ——
+        // 停止路径的顺序是 killProc → stopForeground → setState → cancelNotification，
+        // 而子进程的 waiter 线程是异步的，它可能在 cancelNotification 之后才醒过来，
+        // 用同一个 NOTIF_ID 把「已停止 · 端口」重新贴成一条 setOngoing(true)、
+        // 带「停止」按钮、又划不掉的通知。用户必须再点一次才能清掉。
+        //
+        // 门放在这里而不是只放在 waiter 里，是因为投递点不止一个（startGateway 的
+        // 成功/失败分支、看门狗自愈、onStartCommand 的状态刷新）。只要 userStop 为真，
+        // 一次性全挡掉；「启动网关」按钮会先 clearUserStop 再 start，不会误伤。
+        if (userStop) return;
         try {
             NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             nm.notify(NOTIF_ID, buildNotification());
