@@ -1631,8 +1631,11 @@ async function loadLogs() {
     const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
     box.innerHTML = entries.length
       ? entries.map(e => {
-        // 后端日志前缀是 WARN: / ERR:（大写），正则必须带 i（报告 #7）
-    const lvl = /error|失败|错误/i.test(e.text) ? ' e' : /warn|冷却|熔断/i.test(e.text) ? ' w' : '';
+        // 后端日志前缀是 WARN: / ERR: / INFO:（大写），正则必须带 i（报告 #7）。
+        // `err` 这一支不能漏（issue #188）：只写 `error` 的话，`i` 标志只能解决大小写，
+        // 拼写对不上 —— 27 处 `ERR:` 前缀的错误行一条都不会标红。注释早就写着要覆盖
+        // `ERR:`，实现一直没跟上。
+    const lvl = /error|err|失败|错误/i.test(e.text) ? ' e' : /warn|冷却|熔断/i.test(e.text) ? ' w' : '';
         const t = e.ts ? new Date(e.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '';
         // 频道兜底分支必须 esc（审查 W4F1-019）：左侧 class 用了 esc(e.ch)，右侧的
         // 显示文案却把同一个服务端原值裸拼进 innerHTML —— 同一表达式两套口径。

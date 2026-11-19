@@ -237,6 +237,10 @@ if [ -f "$AJ" ]; then
   rm -rf test-out && mkdir -p test-out
   javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$WS"/tests/android/WatchdogSelfCheck.java
   java -cp "$AJ:classes:test-out" WatchdogSelfCheck
+  # 日志级别判据自检（issue #188）：与网页面板 app.js 的 loadLogs() 正则同口径，
+  # 宿主 JVM 直接跑 —— 判据漂开会让同一条日志在网页标红、在 App 里不标。
+  javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$WS"/tests/android/LogLevelSelfCheck.java
+  java -cp "$AJ:classes:test-out" LogLevelSelfCheck
 
   echo "== 4/6 dex (d8) =="
   java -cp "$R8" com.android.tools.r8.D8 --min-api 24 --lib "$AJ" --output dex \
