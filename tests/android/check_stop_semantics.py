@@ -27,6 +27,20 @@ def read(name):
     return p.read_text(encoding="utf-8")
 
 
+
+def strip_comments(src):
+    """剥掉 // 行注释，断言只看代码。
+
+    必须做这一步：修复说明里会写「不能再用 if (userStop) 之外的条件」这类字面量，
+    而字面量检查会把注释当成代码 —— 反向断言会被自己的注释绊红，正向断言会被
+    注释骗绿。与 check_wake_semantics.py 里那份同源（两个脚本各自独立可跑）。
+    """
+    out = []
+    for line in src.splitlines():
+        i = line.find("//")
+        out.append(line if i < 0 else line[:i])
+    return "\n".join(out)
+
 def body(src, signature):
     """取 signature 所在函数的函数体（从签名处按花括号配平）。
 
@@ -136,10 +150,26 @@ nys = body(console, "private boolean notYetStarted()")
 check("userStopped" in nys,
       "notYetStarted 必须排除 userStopped（否则「已停止」被说成「还没开始」）")
 
+# ⑨ 通知撤销（issue #189）：用户停止后，子进程的 waiter 线程会异步醒来，
+#    用同一个 NOTIF_ID 把「已停止 · 端口」重新贴成一条 setOngoing 且划不掉的通知。
+#    killProc 先把 proc 置空，所以原来的「被新实例接管」守卫判不出来 —— 必须
+#    显式用 userStop 拦住。两处都要拦：waiter 里（不写状态）+ refreshNotification 里
+#    （任何投递点都挡住，投递点不止 waiter 一个）。
+waiter_body = body(gw, "waiter = new Thread")
+check("if (userStop)" in strip_comments(waiter_body),
+      "waiter 必须在 waitFor 返回后判 userStop（否则停止后会重贴通知）")
+check(re.search(r"if\s*\(\s*userStop\s*\)[\s\S]{0,200}?return;", strip_comments(waiter_body))
+      is not None,
+      "waiter 的 userStop 分支必须 return，不能继续往下写状态")
+
+refresh = body(gw, "void refreshNotification()")
+check("if (userStop) return;" in strip_comments(refresh),
+      "refreshNotification 必须在投递前判 userStop（撤掉之后又被贴回来）")
+
 print()
 if fails:
     print("失败 %d 项" % len(fails))
     for f in fails:
         print("  - %s" % f)
     sys.exit(1)
-print("全部通过（%d 项）" % 19)
+print("全部通过（%d 项）" % 22)
