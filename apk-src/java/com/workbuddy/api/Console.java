@@ -86,6 +86,22 @@ final class Console {
         return disposed || a.isFinishing() || a.isDestroyed();
     }
 
+    /** 「还没开始」≠「启动失败」—— 这是 issue #176 修复带出来的一处误报，必须分开。
+     *
+     *  进程刚起时 status 就是默认的 ST_STOPPED；而 Console 构造后 1.2s 就来加载面板，
+     *  那一刻网关通常还没开始监听（冷启动 + 慢盘 + 前台服务握手）。若只看
+     *  `statusOf() == ST_STOPPED`，正常冷启动会闪一下「网关启动失败」。
+     *  `everStarted` 是 onStartCommand 进过的痕迹，用它把两种情况分开。
+     *
+     *  还要排掉「用户主动停过」：那条路径上 MainActivity 根本不 start()，所以
+     *  everStarted 也永远是 false —— 不排除的话，「已停止」会被渲染成
+     *  「还没开始启动」，等于把用户的显式操作又说成没发生。 */
+    private boolean notYetStarted() {
+        return GatewayService.statusOf() == GatewayService.ST_STOPPED
+                && !GatewayService.everStarted()
+                && !GatewayService.userStopped(a);
+    }
+
     private String taskMode = "queue";
 
 
@@ -279,8 +295,10 @@ final class Console {
                 // 自己调的是 loadOverview(true)（quiet=true），30 次用尽后走到
                 // `if (!quiet)` 恒为 false —— 既不重试也不报错，屏幕永久定格。
                 if (isConnectErr(msg)) {
-                    if (GatewayService.statusOf() != GatewayService.ST_STOPPED
-                            && startRetries < MAX_START_RETRIES) {
+                    // 「停着」才算终态；「还没开始」（见 notYetStarted）继续按启动中重试。
+                    boolean terminal = GatewayService.statusOf() == GatewayService.ST_STOPPED
+                            && !notYetStarted();
+                    if (!terminal && startRetries < MAX_START_RETRIES) {
                         startRetries++;
                         showStarting();
                         ui.postDelayed(new Runnable() {
@@ -311,7 +329,8 @@ final class Console {
      */
     void showTerminal(String msg) {
         if (dead()) return;
-        boolean stopped = GatewayService.statusOf() == GatewayService.ST_STOPPED;
+        boolean notYet = notYetStarted();
+        boolean stopped = GatewayService.statusOf() == GatewayService.ST_STOPPED && !notYet;
         boolean byUser = GatewayService.userStopped(a);
 
         LinearLayout column = Theme.column(a);
@@ -322,6 +341,7 @@ final class Console {
         int headColor;
         if (stopped && byUser) { head = "网关已停止"; headColor = Theme.INK; }
         else if (stopped) { head = "网关启动失败"; headColor = Theme.BAD; }
+        else if (notYet) { head = "网关还没开始启动"; headColor = Theme.WARN; }
         else { head = "网关还在启动"; headColor = Theme.WARN; }
         card.addView(Theme.text(a, head, 17f, headColor, 2));
 
