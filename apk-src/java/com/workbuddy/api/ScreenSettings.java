@@ -119,6 +119,17 @@ final class ScreenSettings {
         }));
         col.addView(sched, Theme.cardLp(a, Theme.S3));
 
+        // 余额刷新间隔（issue #194）：此前只在「全部配置（高级）」里能改，而那一页是裸
+        // key-value 列表，改坏了没有校验也没有回退。这个值直接决定「设备不睡的前提下
+        // 还额外打多少上游请求」，是 #177 里除 wakelock 外唯一可调、又真正影响耗电的项，
+        // 不该让用户自己去翻 schedule.balance_refresh_minutes。
+        //
+        // 保存后**不需要重启网关**：cmd/server 的 ApplyConfig 会调
+        // scheduler.SetBalanceInterval（main.go:1049），热生效、下一轮就用新间隔。
+        // 「关闭」走 balance_refresh_enabled=false —— 不能把分钟数设成 0，
+        // config 校验会把 <=0 回落成 5（config.go:1501）。
+        col.addView(balanceCard(st), Theme.cardLp(a, Theme.S3));
+
         LinearLayout other = Theme.card(a);
         other.addView(Theme.label(a, "日志"));
         other.addView(toggleRow("运行日志落盘", st.panelLog, new BoolSet() {
@@ -147,6 +158,72 @@ final class ScreenSettings {
 
         col.addView(Theme.text(a, "只覆盖这里的开关，其余配置原样保留。", 11.5f, Theme.INK3, 0));
         show(scrollOf(col));
+    }
+
+    /**
+     * 余额刷新间隔卡片（issue #194）。
+     *
+     * 为什么不复用 toggleRow：这一项是「多个档位 + 关闭」，不是布尔。做成横向 pill
+     * 组而不是下拉，是因为设置页其余控件都是 pill/开关，插一个 Spinner 会破坏手感；
+     * 档位只有 5 个，横排刚好一屏放得下（窄屏可横滑）。
+     */
+    private View balanceCard(final PanelService.Settings st) {
+        LinearLayout card = Theme.card(a);
+        card.addView(Theme.label(a, "余额刷新"));
+
+        final int[] options = {5, 10, 30, 60, 0};      // 0 = 关闭
+        final String[] labels = {"5 分钟", "10 分钟", "30 分钟", "60 分钟", "关闭"};
+        final TextView[] pills = new TextView[options.length];
+        final LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+
+        HorizontalScrollView hs = new HorizontalScrollView(a);
+        hs.setHorizontalScrollBarEnabled(false);
+        for (int i = 0; i < options.length; i++) {
+            final int idx = i;
+            pills[i] = Theme.pill(a, labels[i], false);
+            pills[i].setTextSize(11.5f);
+            pills[i].setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    st.balanceEnabled = options[idx] > 0;
+                    if (options[idx] > 0) st.balanceMinutes = options[idx];
+                    for (int k = 0; k < pills.length; k++) applyPill(pills[k], k == idx);
+                }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (i < options.length - 1) lp.rightMargin = Theme.dp(a, Theme.S1);
+            row.addView(pills[i], lp);
+        }
+        hs.addView(row);
+        card.addView(hs);
+
+        // 初始选中：关闭时选最后一档；否则找最接近的档位（老配置 5/10/30/60 之外的
+        // 值不会凭空改用户配置，只把「最接近的那档」标成选中，保存前用户不动它就不写）。
+        int sel = options.length - 1;
+        if (st.balanceEnabled) {
+            sel = 0;
+            int best = Integer.MAX_VALUE;
+            for (int i = 0; i < options.length - 1; i++) {
+                int d = Math.abs(options[i] - st.balanceMinutes);
+                if (d < best) { best = d; sel = i; }
+            }
+        }
+        for (int k = 0; k < pills.length; k++) applyPill(pills[k], k == sel);
+
+        card.addView(Theme.text(a,
+                "每轮会对池内每个账号发一次上游额度查询，调小会增加耗电。"
+                        + "保存后立即生效，不需要重启网关。",
+                11.5f, Theme.INK3, 0));
+        return card;
+    }
+
+    /** pill 选中态样式（与 toggleRow 同一套令牌，避免两处视觉漂移）。 */
+    private void applyPill(TextView p, boolean on) {
+        p.setBackground(on ? Theme.round(a, Theme.ACCENT, Theme.R_PILL)
+                : Theme.outlined(a, Theme.OVERLAY_SOFT, Theme.R_PILL, Theme.LINE, 1));
+        p.setTextColor(on ? Theme.ON_ACCENT : Theme.INK2);
     }
 
     private interface BoolSet { void set(boolean v); }

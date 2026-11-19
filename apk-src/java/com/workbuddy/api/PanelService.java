@@ -779,6 +779,12 @@ final class PanelService {
     static final class Settings {
         boolean checkin = true, travel = true, activity = true, webActivity = false,
                 keepalive = true, panelLog = true;
+        // 余额刷新（issue #194）：schedule.balance_refresh_minutes + balance_refresh_enabled。
+        // 这是 #177 里除 wakelock 之外唯一一个用户可调、又真正影响耗电的项：每轮会对池内
+        // 每个账号发一次真实上游额度查询。缺省 30（与 assets 模板一致）；老用户配置文件
+        // 里可能是 5，load 时按实际值填，别用缺省盖掉。
+        int balanceMinutes = 30;
+        boolean balanceEnabled = true;
         String path = "";
     }
 
@@ -797,6 +803,8 @@ final class PanelService {
                     st.activity = sch.optBoolean("activity_enabled", true);
                     st.webActivity = sch.optBoolean("web_activity_enabled", false);
                     st.keepalive = sch.optBoolean("keepalive_enabled", true);
+                    st.balanceMinutes = sch.optInt("balance_refresh_minutes", 30);
+                    st.balanceEnabled = sch.optBoolean("balance_refresh_enabled", true);
                 }
                 JSONObject lg = cfg.optJSONObject("logging");
                 if (lg != null) st.panelLog = lg.optBoolean("panel_log_enabled", true);
@@ -817,6 +825,11 @@ final class PanelService {
             sch.put("activity_enabled", st.activity);
             sch.put("web_activity_enabled", st.webActivity);
             sch.put("keepalive_enabled", st.keepalive);
+            // issue #194：0 不是"关闭"——config 校验会把 <=0 回落成 5（见 config.go:1501）。
+            // 真正的关闭开关是 balance_refresh_enabled；分钟数在关闭时保持原值不动，
+            // 用户下次打开开关还是原来的节奏。
+            if (st.balanceMinutes > 0) sch.put("balance_refresh_minutes", st.balanceMinutes);
+            sch.put("balance_refresh_enabled", st.balanceEnabled);
             JSONObject lg = rawConfig.optJSONObject("logging");
             if (lg == null) { lg = new JSONObject(); rawConfig.put("logging", lg); }
             lg.put("panel_log_enabled", st.panelLog);

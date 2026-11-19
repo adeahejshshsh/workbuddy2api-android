@@ -66,6 +66,9 @@ final class Console {
     private ScreenSettings settings;
     private ScreenMore more;
 
+    /** 首页的耗电提示条（issue #177 第 2 条）。null = 尚未构建。 */
+    private LinearLayout costBanner;
+
     private int startRetries;
     private static final int MAX_START_RETRIES = 30;
 
@@ -134,6 +137,10 @@ final class Console {
         tlp.leftMargin = Theme.dp(a, Theme.S2);
         appBar.addView(title, tlp);
         root.addView(appBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        costBanner = buildCostBanner();
+        root.addView(costBanner, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         host = new FrameLayout(a);
@@ -233,6 +240,78 @@ final class Console {
         else if ("tasks".equals(id)) tasks.render();
         else if ("settings".equals(id)) settings.render();
         else if ("gateway".equals(id)) more.renderGatewayPage();
+        refreshCostBanner();
+    }
+
+    // ── 耗电提示条（issue #177 第 2 条 / #194）────────────────────────────
+    //
+    // 为什么是「首页一行可关闭的文字」而不是开屏弹窗：这个 App 的定位就是常驻网关，
+    // 阻止设备休眠是它的**固有代价**，不是缺陷。开屏弹窗会在每次冷启动拦住用户，
+    // 而这件事只需要被「知道一次」—— 而且用户看到系统那条「耗电异常」通知时的第一
+    // 反应是「这 App 在偷电」，恰恰需要在 App 里能立刻找到一句解释，并顺手把
+    // 余额刷新间隔调下来（#194）。
+    //
+    // 关闭一次即永久不再显示（落 SharedPreferences），不做「每次启动都提醒」。
+    private static final String PREF_COST_BANNER = "cost_banner_dismissed";
+
+    private LinearLayout buildCostBanner() {
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.HORIZONTAL);
+        box.setGravity(Gravity.CENTER_VERTICAL);
+        box.setPadding(Theme.dp(a, Theme.S3), Theme.dp(a, Theme.S2),
+                Theme.dp(a, Theme.S2), Theme.dp(a, Theme.S2));
+        box.setBackgroundColor((Theme.WARN & 0x00FFFFFF) | 0x1A000000);
+        box.setVisibility(View.GONE);
+
+        View dot = Theme.dot(a, Theme.WARN, 6);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        dlp.rightMargin = Theme.dp(a, Theme.S2);
+        box.addView(dot, dlp);
+
+        TextView t = Theme.text(a,
+                "常驻网关会阻止设备休眠，系统提示「耗电异常」属预期",
+                11.5f, Theme.WARN, 0);
+        t.setSingleLine(false);
+        box.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView adj = Theme.pill(a, "调整", false);
+        adj.setTextSize(11f);
+        adj.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { open("settings"); }
+        });
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.leftMargin = Theme.dp(a, Theme.S1);
+        box.addView(adj, alp);
+
+        TextView close = Theme.text(a, "×", 16f, Theme.INK3, 0);
+        close.setPadding(Theme.dp(a, Theme.S2), 0, Theme.dp(a, Theme.S1), 0);
+        close.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                try {
+                    a.getSharedPreferences(GatewayService.PREF, 0).edit()
+                            .putBoolean(PREF_COST_BANNER, true).apply();
+                } catch (Throwable ignored) {}
+                refreshCostBanner();
+            }
+        });
+        box.addView(close);
+        return box;
+    }
+
+    /** 只在「首页 + 网关确实在跑 + 用户没关过」时显示。 */
+    void refreshCostBanner() {
+        if (costBanner == null || dead()) return;
+        boolean dismissed = false;
+        try {
+            dismissed = a.getSharedPreferences(GatewayService.PREF, 0)
+                    .getBoolean(PREF_COST_BANNER, false);
+        } catch (Throwable ignored) {}
+        int st = GatewayService.statusOf();
+        boolean running = st == GatewayService.ST_RUNNING || st == GatewayService.ST_EXTERNAL;
+        boolean home = "accounts".equals(screen);
+        costBanner.setVisibility(!dismissed && home && running ? View.VISIBLE : View.GONE);
     }
 
     void show(ScrollView sv) {
