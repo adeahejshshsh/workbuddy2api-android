@@ -70,7 +70,14 @@ public class MainActivity extends Activity {
         try {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
-            i.setType("*/*");
+            // W6-H-04：这里只该选 JSON。`*/*` 让用户误选 300MB 视频时，读取端要先把
+            // 整份读进堆才发现不对（OOM 会带走同进程的 GatewayService）。
+            i.setType("application/json");
+            // 有些文件管理器给 .json 标的 MIME 是 text/plain 或 application/octet-stream，
+            // 只写 application/json 会把它们过滤掉，所以显式列一组等价类型。
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                    "application/json", "text/json", "text/plain",
+                    "application/octet-stream"});
             startActivityForResult(i, REQ_IMPORT_FILE);
         } catch (Throwable t) {
             toast("打开文件选择器失败：" + t);
@@ -263,6 +270,8 @@ public class MainActivity extends Activity {
     final Handler ui = new Handler(Looper.getMainLooper());
     String apiKey = "";
     boolean injected = false;
+    /** 本 Activity 生命周期内是否已通过实例校验（W6-H-02）。 */
+    private boolean panelTrusted;
 
     @Override protected void onCreate(Bundle b) {
         // 窗口主题必须在 super.onCreate 之前定（手动覆盖时走 setTheme，auto 走清单里的
@@ -406,7 +415,12 @@ public class MainActivity extends Activity {
                 if (intent == null || intent.resolveActivity(getPackageManager()) == null) {
                     intent = new Intent(Intent.ACTION_GET_CONTENT);
                     intent.addCategory(Intent.CATEGORY_OPENABLE);
-                    intent.setType("*/*");
+                    // W6-H-04：兜底也不能退回 `*/*` —— 面板的 <input type=file> 只用于
+                    // 导入 JSON；放开成任意文件同样是「误选大文件 → OOM」的入口。
+                    intent.setType("application/json");
+                    intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                            "application/json", "text/json", "text/plain",
+                            "application/octet-stream"});
                 }
                 try {
                     startActivityForResult(intent, REQ_FILE_CHOOSER);
@@ -436,7 +450,15 @@ public class MainActivity extends Activity {
         // 现在：停过就**不自动起**，由控制台的「已停止」终态页给一个显式按钮。
         // 「下次开机自启」也不需要靠清标记来恢复 —— 用户点一次「启动网关」就清了。
         boolean userStopped = GatewayService.userStopped(this);
+        // W6-H-03：网关只在**启动时**读 config.json，所以 admin_api_key 必须在
+        // GatewayService.start 之前补齐，否则第一次拉起时面板仍然退回用客户端 api_key
+        // 鉴权（客户端 key 要发给每个下游，等于把只读面全交出去）。
+        AdminKey.Result adminKey = AdminKey.ensure(this);
+        // W6-H-02：instance_id 与 Go 进程共用，必须在它起来之前写好。
+        InstanceId.ensure(this);
+        if (adminKey.generated) AdminKey.logLanExposure(this);
         if (!userStopped) GatewayService.start(this);
+        if (!userStopped) scheduleAdminKeyFixup();
         apiKey = readApiKey();
         // 这里不再 tick()（bug #16）：onStart 会调 tick() + scheduleTick()，
         // onCreate 里再来一次会让首屏连做两次端口探测与两次状态渲染。
@@ -761,7 +783,27 @@ public class MainActivity extends Activity {
      * 现在写入后**回读校验**，确认 localStorage 里确实是目标值才 reload；
      * 不一致就重试（最多 3 次，每次 300ms），仍失败就在状态条上明说。
      */
-    void injectKey() { injectKey(0); }
+    void injectKey() {
+        // W6-H-02：注入前先证明 127.0.0.1:PORT 是本进程拉起的网关。nativeMode=true 时
+        // 这条路径当前不会走（WebView 不挂载、不加载），但把门禁补在这里，将来打开
+        // fallback 模式时不会重新长出一个「无条件注入管理员密钥」的洞。
+        if (panelTrusted) {
+            injectKey(0);
+            return;
+        }
+        PanelTrust.verify(this, new PanelTrust.Cb() {
+            public void done(boolean ok, String reason) {
+                if (!ok) {
+                    injected = false;
+                    logLine.setText(PanelTrust.message(reason));
+                    logLine.setTextColor(WARN);
+                    return;
+                }
+                panelTrusted = true;
+                injectKey();
+            }
+        });
+    }
 
     void injectKey(final int attempt) {
         // 注入的是**面板**密钥：P0-1（1.35.15）之后面板的管理接口只认 admin_api_key，
@@ -778,8 +820,17 @@ public class MainActivity extends Activity {
         }
         if (web == null) return;
         final String want = panelKey;
-        String js = "try{localStorage.setItem('" + LS_KEY + "'," + quote(want) + ");"
-                + "localStorage.getItem('" + LS_KEY + "');}catch(e){null}";
+        // W3-04：与 WebPanelActivity 同一口径 —— 不写 localStorage（明文落盘、永不过期），
+        // 改 window 变量 + sessionStorage（仅内存、单标签页）。回读用 sessionStorage。
+        StringBuilder jsb = new StringBuilder("try{");
+        jsb.append("window.__WB2A_ADMIN_KEY=").append(quote(want)).append(';');
+        jsb.append("sessionStorage.setItem('").append(LS_KEY).append("',").append(quote(want)).append(");");
+        String tok = AdminKey.bootstrapToken(this);
+        if (!tok.isEmpty()) {
+            jsb.append("window.__WB2A_BOOTSTRAP_TOKEN=").append(quote(tok)).append(';');
+        }
+        jsb.append("sessionStorage.getItem('").append(LS_KEY).append("');}catch(e){null}");
+        String js = jsb.toString();
         web.evaluateJavascript(js, new android.webkit.ValueCallback<String>() {
             public void onReceiveValue(String got) {
                 // evaluateJavascript 把字符串结果再包一层 JSON：带引号才算成功写入
@@ -851,8 +902,39 @@ public class MainActivity extends Activity {
         } catch (Throwable t) { return ""; }
     }
 
+    /**
+     * 首次安装的一次性补偿（W6-H-03）。
+     *
+     * 冷启动顺序是：MainActivity.onCreate → GatewayService.start → ensureConfig 才把
+     * assets/config.json 落盘。所以「配置还不存在」的那一次 ensure 只能返回空，真正
+     * 生成 admin_api_key 要等模板落盘之后。这里延迟 3 秒补一次；只有真的**新生成**了
+     * 才重启网关（配置只在启动时读），且每进程最多一次，不会形成重启循环。
+     */
+    private static boolean adminFixupArmed;
+
+    private void scheduleAdminKeyFixup() {
+        if (adminFixupArmed) return;
+        adminFixupArmed = true;
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                // 这 3 秒里用户可能点了「停止」：那就别再把网关拉起来。
+                if (GatewayService.userStopped(MainActivity.this)) return;
+                AdminKey.Result r = AdminKey.ensure(MainActivity.this);
+                // needsRestart：配置是在网关已经起来之后才改的。首次安装那条路径在
+                // start 之前就落盘了，这里不用重启（generated 但 needsRestart=false）。
+                if (!r.needsRestart) return;
+                AdminKey.logLanExposure(MainActivity.this);
+                GatewayService.restart(MainActivity.this);
+                toast("已生成管理员密钥（admin_api_key），网关重启后生效");
+            }
+        }, 3000);
+    }
+
     void copyApi() {
         String key = apiKey.isEmpty() ? readApiKey() : apiKey;
+        // W6-H-03(c)：两把 key 必须分开写清楚 —— 此前只有一个「API Key」，
+        // 用户会把面板管理员密钥当客户端 key 发出去（或反过来），两种都是事故。
+        String admin = AdminKey.read(this);
         int port = GwConfig.port(this);
         String lan = GwConfig.lanIPv4();
         // 局域网地址直接算出来，别让用户自己去系统设置里翻 IP —— 翻错一位就是
@@ -860,8 +942,11 @@ public class MainActivity extends Activity {
         String lanLine = lan.isEmpty()
                 ? "\n(局域网: 没取到本机 IP，请确认已连 Wi-Fi；地址形如 http://192.168.x.x:" + port + "/v1)"
                 : "\n局域网: http://" + lan + ":" + port + "/v1";
+        String adminLine = admin.isEmpty()
+                ? "\nAdmin Key（本机面板专用）: 未生成，打开面板「设置」页生成"
+                : "\nAdmin Key（只在本机面板用，别外发）: " + admin;
         String txt = "Base URL: http://127.0.0.1:" + port + "/v1" + lanLine +
-                "\nAPI Key: " + key;
+                "\nAPI Key（给下游客户端）: " + key + adminLine;
         try {
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("wb2api", txt));

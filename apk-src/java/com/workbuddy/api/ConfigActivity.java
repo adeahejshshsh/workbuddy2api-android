@@ -66,6 +66,17 @@ public class ConfigActivity extends Activity {
     private TextView status;
     private PanelService svc;
 
+    /**
+     * 每个可编辑控件 → 「把控件当前文本写回 cfg」的动作（W6-M-02）。
+     *
+     * 为什么需要：编辑值原先只在**失焦**时写回。用户改完最后一个输入框直接点顶部
+     * 「保存」时，那个控件通常还没失焦（点击按钮不一定先触发 focus change，部分 ROM
+     * 上更是完全不触发），提交的就是旧值 —— 表现为「改了、保存了、重进又变回去」。
+     * 现在保存前先 clearFocus() 再按登记表逐个提交，任何输入路径都不会漏。
+     */
+    private final java.util.IdentityHashMap<EditText, Runnable> commits =
+            new java.util.IdentityHashMap<EditText, Runnable>();
+
     @Override protected void onCreate(Bundle b) {
         Theme.applyActivityTheme(this);
         super.onCreate(b);
@@ -149,6 +160,7 @@ public class ConfigActivity extends Activity {
 
     private void render() {
         content.removeAllViews();
+        commits.clear();   // 每次重建都会重新登记，旧控件不能留在表里（会写回已废弃的 owner）
         List<String> keys = new ArrayList<String>();
         for (Iterator<String> it = cfg.keys(); it.hasNext(); ) keys.add(it.next());
         Collections.sort(keys);
@@ -226,25 +238,44 @@ public class ConfigActivity extends Activity {
             return box;
         }
         if (value instanceof Number) {
-            EditText et = numberInput(String.valueOf(value));
+            final EditText et = numberInput(String.valueOf(value));
+            final Runnable commit = new Runnable() {
+                public void run() { commitNumber(owner, key, et.getText().toString()); }
+            };
             et.setOnFocusChangeListener(new View.OnFocusChangeListener() {
                 public void onFocusChange(View v, boolean has) {
                     if (has) return;
-                    commitNumber(owner, key, ((EditText) v).getText().toString());
+                    commit.run();
                 }
             });
+            commits.put(et, commit);
             box.addView(et);
             return box;
         }
         if (value instanceof String) {
-            EditText et = textInput((String) value);
+            final EditText et = isSecretKey(key) ? secretInput((String) value) : textInput((String) value);
+            final Runnable commit = new Runnable() {
+                public void run() {
+                    try { owner.put(key, et.getText().toString()); } catch (Throwable ignored) {}
+                }
+            };
             et.setOnFocusChangeListener(new View.OnFocusChangeListener() {
                 public void onFocusChange(View v, boolean has) {
                     if (has) return;
-                    try { owner.put(key, ((EditText) v).getText().toString()); } catch (Throwable ignored) {}
+                    commit.run();
                 }
             });
+            commits.put(et, commit);
             box.addView(et);
+            if (isSecretKey(key)) {
+                // W6-M-01：密钥默认掩码；想核对时点「显示」（再点「隐藏」）。
+                // 掩码只影响显示，EditText 里始终是真实值，保存拿到的也是真实值。
+                LinearLayout tools = new LinearLayout(this);
+                tools.setOrientation(LinearLayout.HORIZONTAL);
+                tools.setGravity(Gravity.END);
+                tools.addView(revealToggle(et));
+                box.addView(tools);
+            }
             return box;
         }
         if (value instanceof JSONArray && onlyNumbers((JSONArray) value)) {
@@ -254,14 +285,18 @@ public class ConfigActivity extends Activity {
                 if (i > 0) sb.append(',');
                 sb.append(arr.optInt(i));
             }
-            EditText et = textInput(sb.toString());
+            final EditText et = textInput(sb.toString());
             et.setHint("逗号分隔，例如 9,21");
+            final Runnable commit = new Runnable() {
+                public void run() { commitNumberArray(owner, key, et.getText().toString()); }
+            };
             et.setOnFocusChangeListener(new View.OnFocusChangeListener() {
                 public void onFocusChange(View v, boolean has) {
                     if (has) return;
-                    commitNumberArray(owner, key, ((EditText) v).getText().toString());
+                    commit.run();
                 }
             });
+            commits.put(et, commit);
             box.addView(et);
             return box;
         }
@@ -351,6 +386,13 @@ public class ConfigActivity extends Activity {
 
     private void saveAll() {
         if (cfg == null) return;
+        // W6-M-02：先把焦点从输入框上摘下来（触发一次失焦提交），再把所有登记过的
+        // 编辑器的最新文本无一遗漏地同步进 cfg —— 直接点保存时提交旧值的问题到此为止。
+        View focused = getCurrentFocus();
+        if (focused != null) focused.clearFocus();
+        for (Runnable r : commits.values()) {
+            try { r.run(); } catch (Throwable ignored) {}
+        }
         status.setText("保存中…");
         svc.saveConfig(cfg, new PanelService.Cb<String>() {
             public void ok(String extra) {
@@ -362,6 +404,58 @@ public class ConfigActivity extends Activity {
                 toast("保存失败：" + msg);
             }
         });
+    }
+
+    /**
+     * 哪些键要当密钥处理（W6-M-01）。
+     *
+     * 判据是「键名以 _key / token 结尾」，而不是只写死 api_key/admin_api_key：
+     * upstash.token 之类同样是凭据，漏掉一个就是同源的第二个洞。排除 *_file / *_dir /
+     * *_url —— 那些是路径与地址，掩码只会让人没法核对。
+     */
+    private static boolean isSecretKey(String key) {
+        if (key == null) return false;
+        String k = key.toLowerCase(java.util.Locale.US);
+        if (k.endsWith("_file") || k.endsWith("_dir") || k.endsWith("_url")) return false;
+        return k.equals("token") || k.endsWith("_token")
+                || k.equals("key") || k.endsWith("_key");
+    }
+
+    /** 掩码输入框：显示成圆点，值本身不变。 */
+    private EditText secretInput(String value) {
+        EditText et = textInput(value);
+        et.setSingleLine(true);
+        et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        return et;
+    }
+
+    /** 「显示 / 隐藏」切换：只改显示方式，不碰 EditText 里的值。 */
+    private TextView revealToggle(final EditText et) {
+        final TextView t = new TextView(this);
+        t.setText("显示");
+        t.setTextSize(11.5f);
+        t.setTextColor(ACCENT);
+        t.setPadding(dp(8), dp(4), dp(2), dp(4));
+        t.setClickable(true);
+        t.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                boolean masked = (et.getInputType() & InputType.TYPE_TEXT_VARIATION_PASSWORD) != 0;
+                if (masked) {
+                    et.setInputType(InputType.TYPE_CLASS_TEXT
+                            | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+                    t.setText("隐藏");
+                } else {
+                    et.setInputType(InputType.TYPE_CLASS_TEXT
+                            | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+                    t.setText("显示");
+                }
+                // setInputType 会把 typeface 重置成默认字体，重新挂等宽；
+                // 光标也回到末尾，不然切换到可见后光标停在开头很别扭。
+                et.setTypeface(Theme.mono(ConfigActivity.this));
+                try { et.setSelection(et.getText().length()); } catch (Throwable ignored) {}
+            }
+        });
+        return t;
     }
 
     private EditText textInput(String value) {

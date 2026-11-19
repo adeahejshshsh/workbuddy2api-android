@@ -1,6 +1,7 @@
 {
   "listen": ":7863",
   "api_key": "CHANGE_ME",
+  "admin_api_key": "",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": {

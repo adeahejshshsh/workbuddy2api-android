@@ -611,21 +611,61 @@ final class ScreenAccounts {
         });
     }
 
+    /**
+     * 导入文件大小上限（W6-H-04）。
+     *
+     * 32MB 的依据：一份 cockpit 导出的 auths JSON 正常在几百 KB 量级，32MB 已经比
+     * 真实用量的上限高两个数量级；而 `ByteArrayOutputStream` 扩容时峰值约 2.5×
+     * （旧缓冲 + 新缓冲 + 目标数组），32MB → 峰值 80MB 左右，仍在低端机可承受范围。
+     */
+    private static final long IMPORT_MAX_BYTES = 32L * 1024 * 1024;
+
     void importUri(android.net.Uri uri) {
-        try {
-            java.io.InputStream in = a.getContentResolver().openInputStream(uri);
+        if (uri == null) { toast("读不到文件"); return; }
+        // 先看 provider 报的大小：能在读之前就拒掉就不读（300MB 视频连 8KB 都不用读）。
+        try (android.database.Cursor c = a.getContentResolver().query(uri,
+                new String[]{android.provider.OpenableColumns.SIZE}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) {
+                long size = c.getLong(0);
+                if (size > IMPORT_MAX_BYTES) {
+                    toast("文件 " + (size / 1024 / 1024) + "MB，超过 32MB 上限，已中止导入");
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
+            // 有的 provider 不支持查 SIZE：落到下面的流式累计上限。
+        }
+        byte[] data;
+        // try-with-resources：旧代码在 read 抛异常时 in 永不 close，连续失败几次就是
+        // 句柄泄漏；而这里读的正是用户随手选的大文件（异常概率不低）。
+        try (java.io.InputStream in = a.getContentResolver().openInputStream(uri)) {
             if (in == null) { toast("读不到文件"); return; }
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
             byte[] buf = new byte[8192];
             int n;
-            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
-            in.close();
-            byte[] data = bos.toByteArray();
-            if (data.length == 0) { toast("文件为空"); return; }
-            String name = String.valueOf(uri.getLastPathSegment());
-            int slash = name.lastIndexOf('/');
-            if (slash >= 0) name = name.substring(slash + 1);
-            toast("导入中…");
+            long total = 0;
+            while ((n = in.read(buf)) > 0) {
+                // 累计到上限立刻中止：provider 报的 SIZE 可能是 null/撒谎，这里才是硬闸。
+                // 不设上限时 OOM 被外层 catch(Throwable) 吞掉，但堆已经碎了，
+                // 同一进程里的 GatewayService（7×24 网关 + 在途 SSE）会跟着一起崩。
+                total += n;
+                if (total > IMPORT_MAX_BYTES) {
+                    toast("文件超过 32MB 上限，已中止导入");
+                    return;
+                }
+                bos.write(buf, 0, n);
+            }
+            data = bos.toByteArray();
+        } catch (Throwable t) {
+            toast("导入失败：" + t);
+            return;
+        }
+        if (data.length == 0) { toast("文件为空"); return; }
+        String name = String.valueOf(uri.getLastPathSegment());
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) name = name.substring(slash + 1);
+        toast("导入中…");
+        try {
             svc.importFile(name, data, new PanelService.Cb<PanelService.ImportResult>() {
                 public void ok(PanelService.ImportResult r) {
                     toast("导入完成：新增 " + r.imported + "，跳过 " + r.skipped);
@@ -678,7 +718,9 @@ final class ScreenAccounts {
     private void apiKeyDialog() {
         LinearLayout box = Theme.column(a);
         final EditText uid = field("uid（手机号或 UUID）");
-        final EditText token = field("access token（ck_ / pt_ 开头）");
+        // W6-M-11：access token 是账号凭据，输入框必须掩码（同屏还有人围观/录屏）。
+        // 用 VARIATION_PASSWORD 而不是全屏数字键盘：token 是 ASCII 混合串。
+        final EditText token = secretField("access token（ck_ / pt_ 开头）");
         final EditText nick = field("昵称（可选）");
         box.addView(uid);
         box.addView(token);
@@ -701,6 +743,20 @@ final class ScreenAccounts {
         et.setHint(hint);
         et.setTextSize(15f);
         et.setTypeface(Theme.sans(a));
+        return et;
+    }
+
+    /**
+     * 掩码输入框（W6-M-11）。
+     *
+     * 单行 + 密码变体：显示成圆点，且不进入输入法的学习/联想词库
+     * （VARIATION_PASSWORD 会关掉自动纠正与建议）。长按仍可粘贴，符合"输入一次"的用法。
+     */
+    private EditText secretField(String hint) {
+        EditText et = field(hint);
+        et.setSingleLine(true);
+        et.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         return et;
     }
 
