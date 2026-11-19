@@ -1182,3 +1182,22 @@ issue #257 的抓包事实是 CN 桌面端在 billing/growth 族上也发 `windo
 
 用例：19 个包全绿；`WB2A_PARITY=1` 差异 0；8 组变异验证各自变红。
 **已知 flaky**：`TestRunWebAgentTurnUsesSandboxToken`（假 ACP SSE 时序抖动，与本批无关，CI 偶发红可优先怀疑它）。
+
+### 第二十五批（上游 2026-11-19 批次：`3412082` → `d40d4b8`，3 条）
+
+| 上游提交 | 处置 | 本仓落点 |
+|---|---|---|
+| `1fafb14` 免费端点进请求台账（#275） | 搬 | `isChatEntry` 补 `/v1/search` `/v1/fetch` `/v1/embeddings`；准入标准从「会不会扣积分」改成「任何被代理到上游的 POST」 |
+| `85179d4` 救援开关 + 自报身份 + 今日计数（#273） | 搬 | `features.narration_enabled`（默认 true、热生效，快照取反存 `NarrationOff`）、两条 nudge 加 `【wb2api 网关自动续写·非用户消息】`、面板「今日救援」 |
+| `d40d4b8` 选号失败成因拆解（#276） | 搬 | 新增 `pool/nopick.go`（按 pick 排除顺序归类）、WARN 日志与 503 的 `gateway_hint` 都带 `no_pick{...}` |
+
+**为什么 85179d4 重要**：报的不是成本而是**伪造用户授权** —— 救援指令以 `role=user` 追加，
+agent 类客户端分辨不出它与真实输入的区别，实测被当成「用户批准」无人值守跑了 9 分钟工具调用，
+且客户端 `history.db` 里查不到。开关的意义不是省一次调用，而是「网关不再往对话里插 user 消息」。
+
+**d40d4b8 的判据顺序**：`disabled/paused → 在途满 → 保留积分 → 健康 → 积分保底 → 可选`，
+必须与 `pick` 一致，否则「选不到」与「归到哪类」会自相矛盾；`healthy` 非 0 即说明 pick 里
+还有别的闸门（留作自检）。
+
+变异验证 3 组：去掉 `no_pick` 拼接 / 去掉 `narrationOff` 闸门 / （台账由
+`TestFreeEndpointsRecordedInPanel` 正面钉住）。19 个包全绿，gofmt 干净。
