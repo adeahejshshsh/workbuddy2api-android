@@ -715,6 +715,9 @@ public class MainActivity extends Activity {
                 && GatewayService.statusOf() == GatewayService.ST_STOPPED) {
             console.showStopped();
         }
+        // 提示条跟随「网关是否在跑」：从后台回来时状态可能已经变了（自愈成功/被停），
+        // 只在 onStart 刷一次就够，不必每 2s 的 tick 都动视图。
+        if (console != null) console.refreshCostBanner();
         tick();
         scheduleTick();
     }
