@@ -32,8 +32,36 @@ import (
 // 注意这里**不做** decodeBodyIfNeeded：chat 是 SSE，Accept-Encoding 已被删掉让
 // net/http 自己透明解压，再套一层解码会打乱 monitorBody/idle/首包计时的时序。
 func prepareOutbound(req *http.Request) *http.Request {
+	sanitizeOutboundHeaderValues(req)
 	applyConnectionHeader(req)
 	return normalizeHeaderSpelling(req)
+}
+
+// sanitizeOutboundHeaderValues 出站前把所有头值过一遍 HeaderSafe（审查 W1-06）。
+//
+// 为什么放在这里而不是逐点包 HeaderSafe：X-User-Id / X-Enterprise-Id / X-Domain
+// 在十余处构造点各 Set 一次，逐点加必然漏 —— 本轮就漏了这三条。它们的取值来自
+// 账号落盘数据（uid / 企业号 / domain 都可由导入的 auths/*.json 提供），一旦带
+// CRLF：
+//   - net/http 在写请求时直接拒绝整个请求（invalid header field value）；
+//   - 这次失败被上层记成「上游故障」，同一账号连续 5 次降权出池 ——
+//     一个畸形字段就能把好号耗死，且日志里只看得到「上游 5 次失败」。
+//
+// prepareOutbound 是全部出站请求的唯一出口（do() 与 chat 流式路径都过它），
+// 在这里做「默认清洗」，以后新增任何头都不可能绕过。只删控制字符，可打印内容
+// 逐字保留，与 HeaderSafe 既有语义一致。
+func sanitizeOutboundHeaderValues(req *http.Request) {
+	if req == nil {
+		return
+	}
+	for k, vs := range req.Header {
+		for i, v := range vs {
+			if s := HeaderSafe(v); s != v {
+				vs[i] = s
+			}
+		}
+		req.Header[k] = vs
+	}
 }
 
 func (c *Client) do(req *http.Request) (*http.Response, error) {

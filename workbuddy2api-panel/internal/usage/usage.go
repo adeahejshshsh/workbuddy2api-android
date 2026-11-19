@@ -225,7 +225,7 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	// 键用**长度前缀**编码，不用裸分隔符（审查 A8）：model 是客户端可控字符串
 	// （网关对未登记模型名是透传的），带 `|` 的名字能拼出与另一账号/另一模型相同的桶键，
 	// 用量与积分就记到别人头上。长度前缀让每段的边界无歧义。
-	key := keyPart(scope) + keyPart(realm) + keyPart(uid) + keyPart(model) + keyPart(d.ModelRate)
+	key := bucketKey(scope, realm, uid, model, d.ModelRate)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -318,7 +318,7 @@ func (r *Recorder) Rollup(now time.Time) {
 		// 模型名仍然能造出撞键。
 		moves = append(moves, move{
 			from:  k,
-			to:    keyPart(day) + keyPart(b.Realm) + keyPart(b.UID) + keyPart(b.Model) + keyPart(b.Rate),
+			to:    bucketKey(day, b.Realm, b.UID, b.Model, b.Rate),
 			scope: day,
 		})
 	}
@@ -448,31 +448,80 @@ func (r *Recorder) load() error {
 		if !validScope(b.Scope) {
 			continue
 		}
-		k := b.Scope + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate
+		// 键编码必须与 Add/Rollup 完全一致（W5-01）：此前这里还是裸 "|" 拼接，
+		// 而写侧早已改成 keyPart 长度前缀 —— 重启后同一逻辑桶会以两个不同的内存键
+		// 并存，SnapshotWindow 把两份历史相加、Rollup 再把重复量固化进日桶，
+		// 全程无日志。桶键只能有一处实现（bucketKey）。
+		k := b.key()
 		// 同 key 累加而不是覆盖（bug #16）：文件里若出现两条同 key（手工合并、
 		// 旧版本写坏、两次落盘交错），后一条会把前一条的累计值直接顶掉 ——
 		// 用量凭空少一截且没有任何日志。
 		if old, ok := r.buckets[k]; ok {
-			old.Req += b.Req
-			old.Err += b.Err
-			old.PT += b.PT
-			old.CT += b.CT
-			old.TT += b.TT
-			old.LatMs += b.LatMs
-			old.LatN += b.LatN
-			old.TPS += b.TPS
-			old.TPSN += b.TPSN
-			old.CR += b.CR
-			old.CRN += b.CRN
-			old.CRT += b.CRT
-			old.CH += b.CH
-			old.CM += b.CM
+			mergeBucket(old, &b)
 			continue
 		}
 		r.buckets[k] = &b
 	}
+	// 旧键一次性归一（W5-01 部署迁移）：历史版本（或测试/外部工具）可能已经把
+	// 裸 "|" 键塞进 map。map 不落盘，但热加载/嵌入场景可能复用同一实例；
+	// 这里按桶自身字段重算规范键并合并，保证内存里不会再留两套键空间。
+	if n := r.migrateLegacyKeysLocked(); n > 0 {
+		log.Printf("[usage] WARN: 已归一 %d 个旧格式桶键（裸 \"|\" → keyPart，W5-01）", n)
+	}
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil
+}
+
+// bucketKey 生成桶键：长度前缀编码，模型名里的 "|" 无法伪造段边界（审查 A8）。
+// Add / Rollup / load / 迁移必须全部走这里，别再手拼键（W5-01）。
+func bucketKey(scope, realm, uid, model, rate string) string {
+	return keyPart(scope) + keyPart(realm) + keyPart(uid) + keyPart(model) + keyPart(rate)
+}
+
+// key 返回该桶的规范键（等价于 bucketKey 的各字段重算）。
+func (b *bucket) key() string {
+	return bucketKey(b.Scope, b.Realm, b.UID, b.Model, b.Rate)
+}
+
+// mergeBucket 把 src 的累计量并入 dst（dst 保留自身 Scope 等身份字段）。
+func mergeBucket(dst, src *bucket) {
+	dst.Req += src.Req
+	dst.Err += src.Err
+	dst.PT += src.PT
+	dst.CT += src.CT
+	dst.TT += src.TT
+	dst.LatMs += src.LatMs
+	dst.LatN += src.LatN
+	dst.TPS += src.TPS
+	dst.TPSN += src.TPSN
+	dst.CR += src.CR
+	dst.CRN += src.CRN
+	dst.CRT += src.CRT
+	dst.CH += src.CH
+	dst.CM += src.CM
+}
+
+// migrateLegacyKeysLocked 把非规范（旧裸 "|" 编码）键重算成 bucketKey 并合并。
+// 调用方必须持 r.mu；返回被改写的键数。
+func (r *Recorder) migrateLegacyKeysLocked() int {
+	moved := 0
+	for k, b := range r.buckets {
+		want := b.key()
+		if k == want {
+			continue
+		}
+		if dst, ok := r.buckets[want]; ok && dst != b {
+			mergeBucket(dst, b)
+		} else {
+			r.buckets[want] = b
+		}
+		delete(r.buckets, k)
+		moved++
+	}
+	if moved > 0 {
+		r.dirty = true
+	}
+	return moved
 }
 
 // bucketTimeKey 取桶的时间分片键（h:2026-10-21T15 / d:2026-10-21），

@@ -25,8 +25,19 @@ package upstream
 
 import (
 	"bufio"
+	"errors"
 	"time"
 )
+
+// errHeadClientGone 首帧心跳窗口内客户端已断开（心跳写失败）。
+//
+// 审查 W1-05：这不是上游错误。区分它是为了让 StreamHint 走「客户端写失败」口径
+// 收尾（账号照常记成功），而不是被 readErr 分支当成「上游流断了」记故障。
+var errHeadClientGone = errors.New("head keepalive: client write failed")
+
+// isHeadClientGone 报告错误是否为首帧心跳窗口内客户端断开。
+// 只在包内判定用（对外语义是 IsClientWriteError —— 它已经被 clientWriteErr 包了一层）。
+func isHeadClientGone(err error) bool { return errors.Is(err, errHeadClientGone) }
 
 // WithHeadKeepalive 打开首帧心跳：首个 data 帧到达之前，每 every 向客户端写一条
 // ": keepalive" 注释帧。every<=0 = 关闭（与不挂一致）。
@@ -73,7 +84,15 @@ func newHeadHeartbeat(br *bufio.Reader, every time.Duration) *headHeartbeat {
 // readLine 请辅助协程读一行，等待期间到点就调一次 tick（在调用方协程里）。节拍跨行连续计时：
 // 上游自己的空行/注释行不能把心跳一直往后推。返回时这一问的答复已经拿到，辅助协程回到等待
 // 状态，调用方此后可以直接读 br。
-func (h *headHeartbeat) readLine(tick func()) (string, error) {
+//
+// tick 返回 false 表示调用方已判定「这次心跳写不出去」（客户端断开）：立刻返回
+// errHeadClientGone，**不再等上游那一行**。
+//
+// 审查 W1-05：此前 tick 无返回值，hbDead 只置位不中断等待 —— 客户端走了，本协程仍然
+// 钉在「上游下一次吐字节」上。ChatHTTP.Timeout=0，唯一的上界是 IdleTimeout（默认
+// 300s）；idle_timeout=0 时是永久泄漏。每个僵尸占着协程 + 上游连接 + 账号在途名额，
+// 几十个就能打满池 → 全站 503。tick 的 false 就是那个「立刻退出」的信号。
+func (h *headHeartbeat) readLine(tick func() bool) (string, error) {
 	h.req <- struct{}{}
 	t := time.NewTimer(time.Until(h.next))
 	defer t.Stop()
@@ -82,7 +101,9 @@ func (h *headHeartbeat) readLine(tick func()) (string, error) {
 		case r := <-h.resp:
 			return r.line, r.err
 		case <-t.C:
-			tick()
+			if !tick() {
+				return "", errHeadClientGone
+			}
 			h.next = time.Now().Add(h.every)
 			t.Reset(h.every)
 		}

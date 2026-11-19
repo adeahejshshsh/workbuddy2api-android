@@ -633,12 +633,12 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 						status = http.StatusBadRequest
 					}
 					st.status, st.outcome = status, "http_error"
-					log.Printf("videos model=%s realm=%s: 请求级错误 kind=%v，不再换号", bare, realm, ue.Kind)
+					log.Printf("videos model=%s realm=%s: 请求级错误 kind=%v，不再换号", logModel(bare), realm, ue.Kind)
 					writeOpenAIError(w, status, "upstream_error", ue.Msg)
 					return
 				}
 			}
-			log.Printf("videos %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), bare, attempt+1, err)
+			log.Printf("videos %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), logModel(bare), attempt+1, err)
 			continue
 		}
 
@@ -646,7 +646,7 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 		if taskID == "" {
 			// 上游 200 但没给任务 id：这不是「成功」，别让客户端拿着空 id 去轮询。
 			lastErr = fmt.Errorf("上游提交回执缺少任务 id：%s", clipText(string(data), 200))
-			log.Printf("videos %s model=%s: %v", logfmt.Label(a.UID, a.Nickname), bare, lastErr)
+			log.Printf("videos %s model=%s: %v", logfmt.Label(a.UID, a.Nickname), logModel(bare), lastErr)
 			continue
 		}
 		st.status, st.outcome = http.StatusOK, "success"
@@ -657,7 +657,7 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 		}
 		h.videoLedger.noteState(taskID, seed)
 		log.Printf("videos %s model=%s: 任务已提交 task=%s status=%s 用时=%s",
-			logfmt.Label(a.UID, a.Nickname), bare, taskID, taskStatus, time.Since(start).Round(time.Millisecond))
+			logfmt.Label(a.UID, a.Nickname), logModel(bare), taskID, taskStatus, time.Since(start).Round(time.Millisecond))
 
 		if !waitSet || syncWait <= 0 {
 			writeJSON(w, http.StatusOK, videoTaskPayload(taskID, videoTaskStateFromSubmit(taskStatus), model, h.videoLedger))
@@ -705,7 +705,7 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 		status = ue.Status
 	}
 	st.status, st.outcome = status, ""
-	log.Printf("videos model=%s realm=%s: 提交全部失败（%d 个账号）：%v", bare, realm, len(tried), lastErr)
+	log.Printf("videos model=%s realm=%s: 提交全部失败（%d 个账号）：%v", logModel(bare), realm, len(tried), lastErr)
 	writeOpenAIError(w, status, code, lastErr.Error())
 }
 
@@ -1232,7 +1232,7 @@ func (h *Handler) recordVideoUsage(st *chatStat, realm, uid, bare, modelRate, ta
 		h.cfg.Pool.NoteModelCost(uid, bare, state.Credit, int(state.Tokens))
 	}
 	log.Printf("videos %s model=%s: 出片 task=%s %ds credit=%.2f 用时=%s",
-		logfmt.Label(uid, st.nick), bare, taskID, state.Duration, state.Credit,
+		logfmt.Label(uid, st.nick), logModel(bare), taskID, state.Duration, state.Credit,
 		time.Since(start).Round(time.Millisecond))
 	if h.cfg.Usage != nil {
 		h.cfg.Usage.Add(time.Now(), realm, uid, bare, usage.Delta{

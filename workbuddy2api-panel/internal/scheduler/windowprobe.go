@@ -81,6 +81,14 @@ const (
 	// 客户端/反代早就超时了，而停机时也没人能打断它。保留该入口（调用方零改动）
 	// 但给它一个**硬预算**：超过就收摊，剩余窗口留给下一轮巡检。
 	windowProbeManualBudget = 5 * time.Minute
+	// windowProbeBusyBackoff 一轮巡检「一条都没发出去」时的硬退避（W4-02）。
+	//
+	// 原来的循环在 due 非空时处理完立刻 continue 重查；只要 probeWindow 全部返回
+	// false（族锁被占、或闸门拦下后记录已删），DueModelWindows 会因为 ResetAt 没变
+	// 而反复命中同一批窗口 —— 面板「立即探针」持锁最长 60s，后台就紧凑空转 60s
+	// （每轮 RLock + 全表遍历 + sort）。2s 对秒级窗口事件无感，却把最坏情况压到
+	// 0.5 次/秒；窗口本身还会被族锁失败路径推后 15s，正常情况下退避根本用不上。
+	windowProbeBusyBackoff = 2 * time.Second
 )
 
 // windowProbeBody 构造探针请求体。
@@ -119,9 +127,17 @@ func (s *Scheduler) StartModelWindowProbe(ctx context.Context) {
 		for {
 			due := s.cfg.Pool.DueModelWindows(time.Now())
 			if len(due) > 0 {
-				s.runWindowProbes(ctx, due)
+				sent := s.runWindowProbes(ctx, due)
 				if ctx.Err() != nil {
 					return
+				}
+				if sent == 0 {
+					// W4-02：本轮一条探针都没发出去（全部被族锁/闸门挡下）。此前直接
+					// continue，而窗口的 ResetAt 没变 —— 同一批窗口被立刻再取出来，
+					// 紧凑空转整整一个「立即探针」的持锁时长（最长 60s）。硬退避一段。
+					if !s.waitProbeBackoff(ctx) {
+						return
+					}
 				}
 				// 一轮处理完立刻回到循环顶重判（可能还有待处理窗口）。
 				continue
@@ -217,6 +233,17 @@ func (s *Scheduler) probeWindow(ctx context.Context, w pool.ModelWindow) bool {
 	// 账号级族锁（审查 E4）：后台循环与面板「立即探针」会同时打同一个窗口，
 	// 而每次探针都是**真实计费**的上游请求。
 	if !s.TryBeginAccountTask(w.UID, TaskWindowProbe) {
+		// W4-02：这是唯一既不 DropModelWindow 也不 RecordWindowProbe 的返回路径。
+		// ResetAt 不推后 → DueModelWindows 下一轮仍命中同一条，Run 循环立刻重查
+		// 就是紧凑空转。这里把窗口推到常规重试时刻（attempts 不变：这次一个请求
+		// 都没发出，不能算作探针失败，否则会被白算满 20 次而提前放弃）。
+		now := time.Now()
+		p := s.cfg.Pool
+		if p != nil {
+			p.RecordWindowProbe(w.UID, w.Model, now.Add(windowProbeRetryDelay), w.Attempts,
+				"同账号同族已有探针在跑（族锁被占用），稍后重试", now)
+		}
+		s.noteWindowProbeLockSkip(w)
 		return false
 	}
 	defer s.EndAccountTask(w.UID, TaskWindowProbe)
@@ -417,4 +444,44 @@ func clip(s string) string {
 		return string(r[:maxRunes])
 	}
 	return s
+}
+
+// noteWindowProbeLockSkip 记录一次「因族锁被占用而跳过」并节流告警（W4-02）。
+//
+// 为什么要有失败计数：跳过本身是正常互斥（手动探针就该赢过后台），但**持续**跳过
+// 说明锁被长期占用（面板点了一次 60s 的探针，或某条路径忘了 EndAccountTask）——
+// 后者会让这条窗口永远等不到探针。首跳打一条、之后每 windowProbeSkipLogEvery 次
+// 一条，既不刷屏也不静默。
+const windowProbeSkipLogEvery = 10
+
+func (s *Scheduler) noteWindowProbeLockSkip(w pool.ModelWindow) {
+	n := s.probeLockSkips.Add(1)
+	if n == 1 || n%windowProbeSkipLogEvery == 0 {
+		log.Printf("WARN: [window] %s 的 %s 因族锁被占用跳过 %d 次（推后 %s 重试；检查是否有探针长期持锁）",
+			shortUID(w.UID), w.Model, n, windowProbeRetryDelay)
+	}
+}
+
+// waitProbeBackoff 零发送后的硬退避（W4-02）。返回 false = ctx 已取消（调用方应退出）。
+// 单列成方法是为了能被用例钉住：真正的风险是「这个退避被删掉/不被调用」，
+// 而不是它睡多久。
+func (s *Scheduler) waitProbeBackoff(ctx context.Context) bool {
+	s.noteWindowProbeIdleRound()
+	t := time.NewTimer(windowProbeBusyBackoff)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// noteWindowProbeIdleRound 记录一次「整轮零发送」的巡检（W4-02），节流告警。
+func (s *Scheduler) noteWindowProbeIdleRound() {
+	n := s.probeIdleRounds.Add(1)
+	if n == 1 || n%windowProbeSkipLogEvery == 0 {
+		log.Printf("WARN: [window] 本轮巡检未发出任何探针（全部被族锁/闸门跳过），硬退避 %s（累计 %d 轮）",
+			windowProbeBusyBackoff, n)
+	}
 }

@@ -539,10 +539,10 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 		h.Set("X-Expert-Id", expertID)
 	}
 	if os.Getenv("WB2A_DEBUG_CHAT") != "" {
-		fmt.Printf("[dbg] URL=%s\n", req.URL)
-		for k := range req.Header {
-			fmt.Printf("[dbg] %s: %s\n", k, req.Header.Get(k))
-		}
+		// 审查 W1-01：只打白名单头 + 打码 Authorization（见 debugdump.go）。
+		// 此前这里是 `for k := range req.Header` 全量打印，Bearer token 与
+		// X-Device-Token 明文进 stdout（= docker logs）。
+		dumpDebugChatRequest(os.Stdout, req)
 	}
 	resp, err := c.do(req)
 	if err != nil {

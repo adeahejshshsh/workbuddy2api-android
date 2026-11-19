@@ -10,6 +10,9 @@ scripts/__pycache__/
 /credit
 /wb2api
 /signin_bin
+# W6-M-09：`COPY . .` 会把上下文里所有东西塞进构建层。本仓根目录恰好躺着一个
+# 12.5MB 的 ELF（cmd/trial 的产物，见 W6-M-05），它既不是源码也不该进镜像。
+/trial
 # 真实配置不进镜像（镜像默认用 config.example.json，生产以挂载卷覆盖）
 config.json
 PLAN.md
@@ -20,3 +23,13 @@ README.md
 *.apk
 *.idsig
 *.keystore
+
+# 构建/发布副产物与本地排障材料
+dist/
+*.log
+*.tar
+*.tar.gz
+*.zip
+.github/
+CODE-REVIEW*.md
+*REVIEW*.md

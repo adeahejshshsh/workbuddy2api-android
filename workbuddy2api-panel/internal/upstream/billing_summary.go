@@ -160,24 +160,69 @@ type ExpiryBucket struct {
 // 同样的日志。变量供测试缩短。
 var estimatedExpiryWarnEvery = time.Hour
 
-var estimatedExpiryWarned sync.Map // uid -> time.Time（上次 WARN 的时刻）
+// estimatedExpiryWarnLimit 限频表的条目上限（审查 W1-13）。
+//
+// 此前是包级 sync.Map 且**只写不删**：uid 来自导入账号，删号/换号后条目永久留在
+// 进程里；网关 7×24 常驻、账号反复导入导出，这张表就是单调增长。sync.Map 没有
+// Len()，连「现在多大」都观测不到，所以改成带清理的 mutex map。
+// 4096 个条目足够覆盖任何真实账号池（超出的部署应按分片/多实例部署，而不是靠这张表）。
+// 变量供测试缩短规模（与 estimatedExpiryWarnEvery 同一约定）。
+var estimatedExpiryWarnLimit = 4096
 
-// estimatedExpiryWarnDue 返回该账号这次是否该写 WARN，并记下时刻。
-func estimatedExpiryWarnDue(uid string, now time.Time) bool {
-	// 多个刷新协程可能同时算同一账号：用 LoadOrStore + CompareAndSwap，
-	// 保证同一间隔内只有一个调用方拿到 true。
-	for {
-		v, loaded := estimatedExpiryWarned.LoadOrStore(uid, now)
-		if !loaded {
-			return true
-		}
-		if now.Sub(v.(time.Time)) < estimatedExpiryWarnEvery {
-			return false
-		}
-		if estimatedExpiryWarned.CompareAndSwap(uid, v, now) {
-			return true
+var (
+	estimatedExpiryWarnMu sync.Mutex
+	// estimatedExpiryWarned uid -> 上次 WARN 时刻。
+	estimatedExpiryWarned = make(map[string]time.Time)
+)
+
+// pruneEstimatedExpiryWarnedLocked 清掉「已经超过 2 个间隔没再出现」的 uid。
+//
+// 为什么是 2 个间隔：条目本身只影响「同一间隔内不重复写日志」，清掉一个仍在
+// 刷新的 uid 不会改变语义（下次调用直接重新写一条 WARN），所以清理是安全的；
+// 但正常账号每 5 分钟刷一轮、间隔 1 小时，留 2 倍余量避免把活跃账号在临界点上反复清。
+// 清完仍超上限（全都活跃，说明池子规模本身超过常量）时淘汰最老的一条，保证有界。
+// 调用方必须持有 estimatedExpiryWarnMu。
+func pruneEstimatedExpiryWarnedLocked(now time.Time) {
+	if len(estimatedExpiryWarned) < estimatedExpiryWarnLimit {
+		return
+	}
+	keepAfter := estimatedExpiryWarnEvery * 2
+	for uid, last := range estimatedExpiryWarned {
+		if now.Sub(last) >= keepAfter {
+			delete(estimatedExpiryWarned, uid)
 		}
 	}
+	if len(estimatedExpiryWarned) < estimatedExpiryWarnLimit {
+		return
+	}
+	oldestUID := ""
+	var oldest time.Time
+	for uid, last := range estimatedExpiryWarned {
+		if oldestUID == "" || last.Before(oldest) {
+			oldestUID, oldest = uid, last
+		}
+	}
+	if oldestUID != "" {
+		delete(estimatedExpiryWarned, oldestUID)
+	}
+}
+
+// estimatedExpiryWarnDue 返回该账号这次是否该写 WARN，并记下时刻。
+//
+// 多个刷新协程可能同时算同一账号：整段在锁内判定 + 记录，保证同一间隔内只有
+// 一个调用方拿到 true（与升级前的 LoadOrStore+CAS 语义一致）。
+func estimatedExpiryWarnDue(uid string, now time.Time) bool {
+	if uid == "" {
+		return false
+	}
+	estimatedExpiryWarnMu.Lock()
+	defer estimatedExpiryWarnMu.Unlock()
+	if last, ok := estimatedExpiryWarned[uid]; ok && now.Sub(last) < estimatedExpiryWarnEvery {
+		return false
+	}
+	pruneEstimatedExpiryWarnedLocked(now)
+	estimatedExpiryWarned[uid] = now
+	return true
 }
 
 // globalUserResourceBuckets 同 globalUserResource，另外给出「按自然日聚合的到期桶」

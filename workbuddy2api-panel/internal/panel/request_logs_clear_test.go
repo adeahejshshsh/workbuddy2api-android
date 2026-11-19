@@ -16,7 +16,9 @@ import (
 func TestRequestLogsClearEndpoint(t *testing.T) {
 	rl := reqlog.New(reqlog.Config{Enabled: true, Dir: t.TempDir(), RetentionDays: 7})
 	rl.Record(reqlog.Event{Time: time.Now().Add(-time.Minute), RequestID: "a", Status: 200, OK: true})
-	p := New(Config{Version: "test", APIKey: "k", RequestLog: rl})
+	// 清空归档与读取归档都是审计面：C-01 之后必须用独立 admin key（否则客户端
+	// key 就能灭迹）。这里把同一把值同时当 admin key，专注于端点语义。
+	p := New(Config{Version: "test", APIKey: "k", AdminAPIKey: "k", RequestLog: rl})
 
 	req := httptest.NewRequest("POST", "/panel/api/request_logs/clear", nil)
 	req.Header.Set("Authorization", "Bearer k")

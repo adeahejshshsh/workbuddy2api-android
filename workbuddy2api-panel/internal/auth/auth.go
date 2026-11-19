@@ -1007,12 +1007,38 @@ func LoadDirReport(dir string) (LoadReport, error) {
 	// 且不在 workbuddy*.json 的扫描口径内，否则会永久躺在磁盘上随备份扩散。
 	sweepStaleTemps(dir)
 	var files []string
+	// 文件类型/大小闸（W5-05）：此前只判 !IsDir()，于是 auths/ 下一个名为
+	// workbuddy*.json 的 FIFO 会让 os.ReadFile 永久阻塞 —— 进程卡在监听端口之前，
+	// 端口不监听且没有任何日志；/dev/zero 的符号链接或 GB 级文件则直接 OOM。
+	// 用 e.Info()（lstat 语义）只认普通文件，并设 1MB 上限（auth 文件正常几 KB）。
+	// 被跳过的条目计入 ParseError：热重载据此「只增不删」，不会把在池账号误删。
+	const maxAuthFileBytes = 1 << 20
+	var skipped []string
 	for _, e := range entries {
-		if ok, _ := filepath.Match("workbuddy*.json", e.Name()); ok && !e.IsDir() {
-			files = append(files, filepath.Join(dir, e.Name()))
+		if ok, _ := filepath.Match("workbuddy*.json", e.Name()); !ok {
+			continue
 		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			log.Printf("WARN: auth 文件取属性失败，已跳过: %s: %v", e.Name(), ierr)
+			skipped = append(skipped, e.Name()+": stat: "+ierr.Error())
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			log.Printf("WARN: auth 文件不是普通文件（FIFO/设备/符号链接等），已跳过: %s（mode=%s）",
+				e.Name(), info.Mode().Type())
+			skipped = append(skipped, e.Name()+": not a regular file")
+			continue
+		}
+		if info.Size() > maxAuthFileBytes {
+			log.Printf("WARN: auth 文件超过 %d 字节上限，已跳过: %s（%d 字节）",
+				maxAuthFileBytes, e.Name(), info.Size())
+			skipped = append(skipped, e.Name()+": file too large")
+			continue
+		}
+		files = append(files, filepath.Join(dir, e.Name()))
 	}
-	report := LoadReport{Files: len(files)}
+	report := LoadReport{Files: len(files), ParseError: skipped}
 	// seenUID 重复 UID 检测：同 UID 出现在多个文件时（双 realm 同名 UID 概率近零）
 	// 打 WARN 告警含两文件路径，由「后载入者胜出」保持现状行为（不改变加载结果）。
 	seenUID := make(map[string]string, len(files))

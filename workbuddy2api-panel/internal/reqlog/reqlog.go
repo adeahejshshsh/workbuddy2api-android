@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -232,6 +233,10 @@ func (r *Recorder) Record(e Event) {
 	if r == nil {
 		return
 	}
+	// 毒值入口统一消毒（W5-02）：Credit 来自上游响应，NaN/±Inf 会让整个
+	// Snapshot 的 json.Marshal 永久失败 —— /status 与面板运行日志 500，直到
+	// 这条事件被 100 条新事件挤出。必须在入环前清掉，归档路径也才拿得到干净值。
+	e = sanitizeEvent(e)
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
@@ -288,13 +293,19 @@ func (r *Recorder) Snapshot() Snapshot {
 		return Snapshot{}
 	}
 	r.mu.Lock()
+	// 第三道口（W5-02）：环里可能存在本进程升级前/测试注入的历史毒值，
+	// 序列化前再消毒一次，保证 Snapshot 永远可 marshal。
+	recent := reversedEvents(r.recentInOrderLocked())
+	for i := range recent {
+		recent[i] = sanitizeEvent(recent[i])
+	}
 	s := Snapshot{
 		StartedAt: r.started,
 		Completed: r.completed,
 		InFlight:  r.inFlight,
 		Succeeded: r.succeeded,
 		// 内部环序展开成"旧→新"，对外契约是"新→旧"（bug #17/#14）。
-		Recent: reversedEvents(r.recentInOrderLocked()),
+		Recent: recent,
 	}
 	if r.completed > 0 {
 		s.Failed = r.completed - r.succeeded
@@ -323,6 +334,17 @@ func (r *Recorder) Close() {
 		return
 	}
 	r.archive.close()
+}
+
+// sanitizeEvent 把非有限的 Credit 归零并标记为“未观测”（W5-02）。
+// 姊妹包 usage 已有同款 sanitizeNonFinite；这里只处理唯一一个浮点业务字段，
+// 用显式判断而不是 JSON 往返（快、且不会误伤其它字段）。
+func sanitizeEvent(e Event) Event {
+	if math.IsNaN(e.Credit) || math.IsInf(e.Credit, 0) {
+		e.Credit = 0
+		e.HasCredit = false
+	}
+	return e
 }
 
 func round1(v float64) float64 {
@@ -530,11 +552,19 @@ func clipBytes(s string, max int) string {
 
 // encodeEvent 把事件编码成一行，并对超大事件做硬截断（审查 C7-014 P1）。
 //
-// 返回 nil = 这条事件写不出去（调用方计入 oversized，不落盘）。
+// 返回 nil = 这条事件写不出去。可恢复的编码失败计入 dropped；截断后仍超限
+// 计入 oversized（两条都必须让面板看得见，W5-02）。
 func (w *archiveWriter) encodeEvent(e *Event) []byte {
+	// 归档是第二道口（W5-02）：即使调用方绕过 Record（测试/未来新路径）塞进毒值，
+	// json.Marshal 也不能失败返回 nil —— 那会静默丢事件且 dropped 不计数。
+	clean := sanitizeEvent(*e)
+	e = &clean
 	raw, err := json.Marshal(e)
 	if err != nil {
 		w.setErr(err)
+		// W5-02：编码失败返回 nil 的路径必须计入 dropped，否则归档少了一条
+		// 而面板显示 dropped_writes 不变，属于「静默丢事件」。
+		w.dropped.Add(1)
 		return nil
 	}
 	if len(raw) <= maxEventBytes {
@@ -546,6 +576,7 @@ func (w *archiveWriter) encodeEvent(e *Event) []byte {
 		e.Context = json.RawMessage(fmt.Sprintf(`{"truncated":true,"bytes":%d}`, n))
 		if raw, err = json.Marshal(e); err != nil {
 			w.setErr(err)
+			w.dropped.Add(1)
 			return nil
 		}
 		if len(raw) <= maxEventBytes {
@@ -564,6 +595,7 @@ func (w *archiveWriter) encodeEvent(e *Event) []byte {
 	e.UserAgent = clipBytes(e.UserAgent, 256)
 	if raw, err = json.Marshal(e); err != nil {
 		w.setErr(err)
+		w.dropped.Add(1)
 		return nil
 	}
 	if len(raw) > maxEventBytes {

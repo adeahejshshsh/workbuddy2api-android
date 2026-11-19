@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -40,5 +41,46 @@ func TestEstimatedExpiryWarnRateLimited(t *testing.T) {
 	}
 	if !estimatedExpiryWarnDue(uid, now.Add(2*time.Hour)) {
 		t.Fatal("过了间隔应重新允许")
+	}
+}
+
+// TestEstimatedExpiryWarnMapPruned W1-13 回归：限频表必须有界。
+//
+// 缺陷：包级 sync.Map 只写不删，uid 来自导入账号，删号/换号后条目永久残留；
+// 网关 7×24 常驻、账号反复导入导出 → 单调增长，且 sync.Map 连长度都观测不到。
+func TestEstimatedExpiryWarnMapPruned(t *testing.T) {
+	oldLimit, oldEvery := estimatedExpiryWarnLimit, estimatedExpiryWarnEvery
+	estimatedExpiryWarnLimit, estimatedExpiryWarnEvery = 4, time.Hour
+	estimatedExpiryWarnMu.Lock()
+	estimatedExpiryWarned = make(map[string]time.Time)
+	estimatedExpiryWarnMu.Unlock()
+	t.Cleanup(func() {
+		estimatedExpiryWarnLimit, estimatedExpiryWarnEvery = oldLimit, oldEvery
+		estimatedExpiryWarnMu.Lock()
+		estimatedExpiryWarned = make(map[string]time.Time)
+		estimatedExpiryWarnMu.Unlock()
+	})
+
+	now := time.Now()
+	// 塞满到上限：4 条都是 3 小时前写的（超过 2 个间隔 → 可清）。
+	for i := 0; i < 4; i++ {
+		if !estimatedExpiryWarnDue(fmt.Sprintf("stale-%d", i), now.Add(-3*time.Hour)) {
+			t.Fatalf("首次应允许写 WARN（stale-%d）", i)
+		}
+	}
+	// 第 5 个不同 uid：触发清理，4 条陈旧条目应被清掉。
+	if !estimatedExpiryWarnDue("fresh", now) {
+		t.Fatal("新 uid 首次应允许写 WARN")
+	}
+	estimatedExpiryWarnMu.Lock()
+	n := len(estimatedExpiryWarned)
+	_, hasFresh := estimatedExpiryWarned["fresh"]
+	estimatedExpiryWarnMu.Unlock()
+	if n > 1 || !hasFresh {
+		t.Fatalf("陈旧条目未被清理：len=%d（应只剩 1 条 fresh）", n)
+	}
+	// 清理不能改变限频语义：同一间隔内 fresh 仍然只允许一次。
+	if estimatedExpiryWarnDue("fresh", now.Add(time.Minute)) {
+		t.Fatal("清理后限频语义被破坏（同一间隔重复写 WARN）")
 	}
 }

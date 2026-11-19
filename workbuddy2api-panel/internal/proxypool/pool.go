@@ -218,7 +218,13 @@ type ImportResult struct {
 }
 
 type Manager struct {
-	mu         sync.Mutex
+	mu sync.Mutex
+	// writeMu IO 顺序锁（W4-09）：串行化「提交序」，保证落盘顺序与状态变更顺序
+	// 一致（旧提交不会后落盘覆盖新提交）。锁序固定 writeMu → mu，反向无路径。
+	writeMu sync.Mutex
+	// commitHook 仅供测试注入的同步点（W4-09 变异验证）：在「m.mu 已放、落盘尚未
+	// 开始」这一刻回调，用来证明 fsync 不在状态锁内。生产路径恒 nil。
+	commitHook atomic.Pointer[func()]
 	path       string
 	data       disk
 	health     map[string]health
@@ -399,15 +405,45 @@ func (m *Manager) copyLocked() disk {
 	return d
 }
 
-func (m *Manager) commitLocked(d disk) error {
+// mutateCommit 执行一次「改状态 + 落盘」提交（W4-09）。
+//
+// 为什么需要这个形状：commitLocked 原先在 m.mu 内做 json.MarshalIndent +
+// MkdirAll + WriteKeep（内含 fsync/rename）。磁盘慢或 bind mount 时单次几十毫秒，
+// 而这把锁是 selectLocked（每请求热路径）、Snapshot（面板轮询）共用的 —— 表现为
+// 整网关偶发卡顿。拆成「锁内改状态、锁外 IO」又不能无序：两个并发提交里旧的那份
+// 可能后落盘，把配置写回上一版（与 pool 的 C-02 完全同形）。
+//
+// 所以用一把独立的 writeMu 做 IO 顺序锁，锁序固定 **writeMu → m.mu**：
+//  1. 先拿 writeMu：从这一刻起，本次提交在「提交序」里占位；
+//  2. 拿 m.mu，执行 fn 构造新状态并序列化，然后**立刻放掉 m.mu**；
+//  3. 在 writeMu 保护下落盘（fsync 不再阻塞读路径）；
+//  4. 落盘成功后才发布 m.data —— 与旧语义一致：写失败时运行态不变
+//     （TestWriteFailureDoesNotPublish 钉的就是这条）。
+//
+// fn 在 m.mu 内执行，可以安全调用 copyLocked/resetLocked 等 *Locked 方法；
+// changed=false 表示「无需写盘」（例如配置没变化）。
+func (m *Manager) mutateCommit(fn func() (disk, bool, error)) error {
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+
+	m.mu.Lock()
 	if m.closed {
+		m.mu.Unlock()
 		return errors.New("proxy pool is closed")
 	}
+	d, changed, err := fn()
+	var raw []byte
+	if err == nil && changed && m.path != "" {
+		raw, err = json.MarshalIndent(d, "", "  ")
+	}
+	m.mu.Unlock()
+	if err != nil || !changed {
+		return err
+	}
+	if hook := m.commitHook.Load(); hook != nil {
+		(*hook)()
+	}
 	if m.path != "" {
-		raw, err := json.MarshalIndent(d, "", "  ")
-		if err != nil {
-			return err
-		}
 		if err := os.MkdirAll(filepath.Dir(m.path), 0o700); err != nil {
 			return err
 		}
@@ -415,8 +451,10 @@ func (m *Manager) commitLocked(d disk) error {
 			return err
 		}
 	}
+	m.mu.Lock()
 	m.data = d
 	m.signal()
+	m.mu.Unlock()
 	return nil
 }
 
@@ -494,54 +532,57 @@ func (m *Manager) Import(text string) ([]ImportResult, error) {
 		return nil, fmt.Errorf("订阅含 %d 条，超过单次上限 %d（请分批导入）", len(entries), maxImportNodes)
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	d := m.copyLocked()
-	seen := map[string]string{}
-	for _, n := range d.Nodes {
-		seen[n.URL] = n.ID
-	}
-	results := []ImportResult{}
+	// W4-09：改状态与落盘拆开（mutateCommit 内锁外 fsync），提交序由 writeMu 保证。
+	var results []ImportResult
 	var added []string
-	for _, entry := range entries {
-		r := ImportResult{Line: entry.Line, Name: entry.Name}
-		if entry.URL == "" {
-			// 认得出来但协议不支持 → unsupported（面板不计入「无效」，也不把整段
-			// 订阅原样回填到输入框：那对用户没有意义）。真认不出的 → invalid。
+	err = m.mutateCommit(func() (disk, bool, error) {
+		d := m.copyLocked()
+		seen := map[string]string{}
+		for _, n := range d.Nodes {
+			seen[n.URL] = n.ID
+		}
+		results = []ImportResult{}
+		for _, entry := range entries {
+			r := ImportResult{Line: entry.Line, Name: entry.Name}
+			if entry.URL == "" {
+				// 认得出来但协议不支持 → unsupported（面板不计入「无效」，也不把整段
+				// 订阅原样回填到输入框：那对用户没有意义）。真认不出的 → invalid。
+				r.Status = "invalid"
+				if entry.Unsupported {
+					r.Status = "unsupported"
+				}
+				r.Error = entry.Reason
+				results = append(results, r)
+				continue
+			}
 			r.Status = "invalid"
-			if entry.Unsupported {
-				r.Status = "unsupported"
+			u, err := parseURL(entry.URL)
+			if err != nil {
+				r.Error = err.Error()
+			} else if id := seen[u.String()]; id != "" {
+				r.Status, r.ID = "duplicate", id
+			} else {
+				var b [16]byte
+				if _, err := cryptorand.Read(b[:]); err != nil {
+					return disk{}, false, err
+				}
+				id := hex.EncodeToString(b[:])
+				d.Nodes = append(d.Nodes, node{ID: id, Name: nodeName(u.Host, entry.Name), URL: u.String(), Enabled: true})
+				seen[u.String()] = id
+				added = append(added, id)
+				r.Status, r.ID = "added", id
 			}
-			r.Error = entry.Reason
 			results = append(results, r)
-			continue
 		}
-		r.Status = "invalid"
-		u, err := parseURL(entry.URL)
-		if err != nil {
-			r.Error = err.Error()
-		} else if id := seen[u.String()]; id != "" {
-			r.Status, r.ID = "duplicate", id
-		} else {
-			var b [16]byte
-			if _, err := cryptorand.Read(b[:]); err != nil {
-				return nil, err
+		if len(added) > 0 {
+			for _, id := range added {
+				m.generation[id] = 1
 			}
-			id := hex.EncodeToString(b[:])
-			d.Nodes = append(d.Nodes, node{ID: id, Name: nodeName(u.Host, entry.Name), URL: u.String(), Enabled: true})
-			seen[u.String()] = id
-			added = append(added, id)
-			r.Status, r.ID = "added", id
 		}
-		results = append(results, r)
-	}
-	if len(added) > 0 {
-		if err := m.commitLocked(d); err != nil {
-			return nil, err
-		}
-		for _, id := range added {
-			m.generation[id] = 1
-		}
+		return d, len(added) > 0, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return results, nil
 }
@@ -561,69 +602,68 @@ func nodeName(host, want string) string {
 }
 
 func (m *Manager) Update(id string, in Input) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	d := m.copyLocked()
-	for i, n := range d.Nodes {
-		if n.ID != id {
-			continue
-		}
-		// 存量 URL 解析失败时不能带着 nil 往下走（审查 W2-C6-12 同类）：
-		// 下面 u.User 会直接解引用 —— 配置被外部改坏就是一次面板接口 panic。
-		u, perr := parseURL(n.URL)
-		if perr != nil {
-			u = nil
-		}
-		if in.URL != "" {
-			var err error
-			u, err = parseURL(in.URL)
-			if err != nil {
-				return err
+	// W4-09：改状态在 m.mu 内，fsync 在 writeMu 保护下、m.mu 之外。
+	return m.mutateCommit(func() (disk, bool, error) {
+		d := m.copyLocked()
+		for i, n := range d.Nodes {
+			if n.ID != id {
+				continue
 			}
-			if u.User != nil {
-				old, _ := parseURL(n.URL)
-				_, supplied := u.User.Password()
-				if !supplied && old.User != nil {
-					if password, ok := old.User.Password(); ok {
-						u.User = url.UserPassword(u.User.Username(), password)
+			// 存量 URL 解析失败时不能带着 nil 往下走（审查 W2-C6-12 同类）：
+			// 下面 u.User 会直接解引用 —— 配置被外部改坏就是一次面板接口 panic。
+			u, perr := parseURL(n.URL)
+			if perr != nil {
+				u = nil
+			}
+			if in.URL != "" {
+				var err error
+				u, err = parseURL(in.URL)
+				if err != nil {
+					return disk{}, false, err
+				}
+				if u.User != nil {
+					old, _ := parseURL(n.URL)
+					_, supplied := u.User.Password()
+					if !supplied && old.User != nil {
+						if password, ok := old.User.Password(); ok {
+							u.User = url.UserPassword(u.User.Username(), password)
+						}
 					}
 				}
 			}
-		}
-		if in.Password != "" {
-			if u == nil {
-				return errors.New("invalid stored proxy URL")
+			if in.Password != "" {
+				if u == nil {
+					return disk{}, false, errors.New("invalid stored proxy URL")
+				}
+				if u.User == nil {
+					return disk{}, false, errors.New("password requires a username in the proxy URL")
+				}
+				u.User = url.UserPassword(u.User.Username(), in.Password)
 			}
-			if u.User == nil {
-				return errors.New("password requires a username in the proxy URL")
+			for _, other := range d.Nodes {
+				if other.ID != id && other.URL == u.String() {
+					return disk{}, false, errors.New("duplicate proxy URL")
+				}
 			}
-			u.User = url.UserPassword(u.User.Username(), in.Password)
-		}
-		for _, other := range d.Nodes {
-			if other.ID != id && other.URL == u.String() {
-				return errors.New("duplicate proxy URL")
+			if in.Name != "" {
+				if len(in.Name) > 128 {
+					return disk{}, false, errors.New("proxy name must not exceed 128 bytes")
+				}
+				d.Nodes[i].Name = strings.TrimSpace(in.Name)
 			}
-		}
-		if in.Name != "" {
-			if len(in.Name) > 128 {
-				return errors.New("proxy name must not exceed 128 bytes")
+			d.Nodes[i].URL = u.String()
+			if in.Enabled != nil {
+				d.Nodes[i].Enabled = *in.Enabled
 			}
-			d.Nodes[i].Name = strings.TrimSpace(in.Name)
+			if d.Nodes[i].URL != n.URL || d.Nodes[i].Enabled != n.Enabled {
+				// 换地址/启停 = 换出口：旧连接池与健康台账都作废。这是纯内存副作用，
+				// 落盘失败时最多多重连一次（比把 fsync 塞回锁内便宜得多）。
+				m.resetLocked(id)
+			}
+			return d, true, nil
 		}
-		d.Nodes[i].URL = u.String()
-		if in.Enabled != nil {
-			d.Nodes[i].Enabled = *in.Enabled
-		}
-		reset := d.Nodes[i].URL != n.URL || d.Nodes[i].Enabled != n.Enabled
-		if err := m.commitLocked(d); err != nil {
-			return err
-		}
-		if reset {
-			m.resetLocked(id)
-		}
-		return nil
-	}
-	return ErrNotFound
+		return disk{}, false, ErrNotFound
+	})
 }
 
 func (m *Manager) resetLocked(id string) {
@@ -637,35 +677,41 @@ func (m *Manager) resetLocked(id string) {
 }
 
 func (m *Manager) Delete(id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, b := range m.data.Bindings {
-		if b.Mode == "fixed" && b.ProxyID == id {
-			return ErrBound
-		}
-	}
-	for _, b := range m.data.Realms {
-		if b.Mode == "fixed" && b.ProxyID == id {
-			return ErrBound
-		}
-	}
-	d := m.copyLocked()
-	for i, n := range d.Nodes {
-		if n.ID == id {
-			d.Nodes = append(d.Nodes[:i], d.Nodes[i+1:]...)
-			if err := m.commitLocked(d); err != nil {
-				return err
+	removed := false
+	err := m.mutateCommit(func() (disk, bool, error) {
+		for _, b := range m.data.Bindings {
+			if b.Mode == "fixed" && b.ProxyID == id {
+				return disk{}, false, ErrBound
 			}
-			m.resetLocked(id)
-			// 删节点时把两张只增不删的表一起清掉（审查 W2-C6-16）：订阅刷新场景下反复
-			// 导入/删除，generation 与 requested 会单调增长，长期运行就是内存泄漏。
-			delete(m.generation, id)
-			delete(m.requested, id)
-			delete(m.checking, id)
-			return nil
 		}
+		for _, b := range m.data.Realms {
+			if b.Mode == "fixed" && b.ProxyID == id {
+				return disk{}, false, ErrBound
+			}
+		}
+		d := m.copyLocked()
+		for i, n := range d.Nodes {
+			if n.ID == id {
+				d.Nodes = append(d.Nodes[:i], d.Nodes[i+1:]...)
+				removed = true
+				return d, true, nil
+			}
+		}
+		return disk{}, false, ErrNotFound
+	})
+	if err != nil || !removed {
+		return err
 	}
-	return ErrNotFound
+	// 落盘成功后再清运行态（写失败时节点还在，generation/health 必须一起留着）。
+	m.mu.Lock()
+	m.resetLocked(id)
+	// 删节点时把两张只增不删的表一起清掉（审查 W2-C6-16）：订阅刷新场景下反复
+	// 导入/删除，generation 与 requested 会单调增长，长期运行就是内存泄漏。
+	delete(m.generation, id)
+	delete(m.requested, id)
+	delete(m.checking, id)
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) validateBindingLocked(b Binding) error {
@@ -688,18 +734,18 @@ func (m *Manager) validateBindingLocked(b Binding) error {
 }
 
 func (m *Manager) Bind(uid string, b Binding) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.validateBindingLocked(b); err != nil {
-		return err
-	}
-	d := m.copyLocked()
-	if b.Mode == "random" {
-		delete(d.Bindings, uid)
-	} else {
-		d.Bindings[uid] = b
-	}
-	return m.commitLocked(d)
+	return m.mutateCommit(func() (disk, bool, error) {
+		if err := m.validateBindingLocked(b); err != nil {
+			return disk{}, false, err
+		}
+		d := m.copyLocked()
+		if b.Mode == "random" {
+			delete(d.Bindings, uid)
+		} else {
+			d.Bindings[uid] = b
+		}
+		return d, true, nil
+	})
 }
 
 func (m *Manager) Unbind(uid string) error { return m.Bind(uid, Binding{Mode: "random"}) }
@@ -710,21 +756,21 @@ func (m *Manager) BindRealm(realm string, b Binding) error {
 	if realmKey(realm) == "" {
 		return errors.New("realm must be cn or global")
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.validateBindingLocked(b); err != nil {
-		return err
-	}
-	d := m.copyLocked()
-	if d.Realms == nil {
-		d.Realms = map[string]Binding{}
-	}
-	if b.Mode == "random" {
-		delete(d.Realms, realmKey(realm))
-	} else {
-		d.Realms[realmKey(realm)] = b
-	}
-	return m.commitLocked(d)
+	return m.mutateCommit(func() (disk, bool, error) {
+		if err := m.validateBindingLocked(b); err != nil {
+			return disk{}, false, err
+		}
+		d := m.copyLocked()
+		if d.Realms == nil {
+			d.Realms = map[string]Binding{}
+		}
+		if b.Mode == "random" {
+			delete(d.Realms, realmKey(realm))
+		} else {
+			d.Realms[realmKey(realm)] = b
+		}
+		return d, true, nil
+	})
 }
 
 // RequestCheck queues probes on the service lifecycle, independent of browser disconnects.
@@ -750,18 +796,26 @@ func (m *Manager) Configure(s Settings) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	d := m.copyLocked()
-	if d.Settings == s {
-		return nil
-	}
-	d.Settings = s
-	if err := m.commitLocked(d); err != nil {
+	var nodes []node
+	err := m.mutateCommit(func() (disk, bool, error) {
+		d := m.copyLocked()
+		if d.Settings == s {
+			return d, false, nil
+		}
+		d.Settings = s
+		nodes = d.Nodes
+		return d, true, nil
+	})
+	if err != nil {
 		return err
 	}
-	for _, n := range d.Nodes {
-		m.resetLocked(n.ID)
+	// 探测参数变化 → 全部节点的健康台账/连接池作废（内存副作用，见 Update 同款说明）。
+	if len(nodes) > 0 {
+		m.mu.Lock()
+		for _, n := range nodes {
+			m.resetLocked(n.ID)
+		}
+		m.mu.Unlock()
 	}
 	return nil
 }

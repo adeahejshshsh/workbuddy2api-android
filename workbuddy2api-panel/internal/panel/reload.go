@@ -427,12 +427,14 @@ func (p *Panel) reloadAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	at, _ := p.ReloadStatus()
+	// W3-20：不回显 auth_dir —— 服务器的绝对路径对排障没有增量信息（面板日志里
+	// 已经打了相对文件名），却把部署结构（用户名、数据目录层级）交给了任何持
+	// 客户端 key 的人。要的只是「这轮扫了几个、删了几个」。
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"result":   res,
-		"at":       at,
-		"auth_dir": p.cfg.AuthDir,
-		"pool":     len(p.cfg.Pool.List()),
+		"ok":     true,
+		"result": res,
+		"at":     at,
+		"pool":   len(p.cfg.Pool.List()),
 	})
 }
 
@@ -451,7 +453,6 @@ func (p *Panel) reloadStatus(w http.ResponseWriter, r *http.Request) {
 		"ok":             true,
 		"at":             at,
 		"result":         res,
-		"auth_dir":       p.cfg.AuthDir,
 		"interval":       interval.String(),
 		"delete_confirm": confirm,
 		"pending_delete": missing,

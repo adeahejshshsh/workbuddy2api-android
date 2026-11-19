@@ -26,6 +26,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/balance"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -147,6 +148,20 @@ func main() {
 		}
 		if err != nil {
 			log.Fatalf("load config: %v", err)
+		}
+	}
+
+	// W5-04：把 server.require_api_key 接到 httpauth 的空 key 闸口。
+	// 缺省 true = api_key 为空时拒绝所有非回环请求（旧行为是全开）。
+	// 必须在任何监听/请求之前生效：放在 auth 加载之前，FIFO 卡住时也能在日志
+	// 里看到「当前是失败关闭还是全开」，而不是只看到进程不响应。
+	httpauth.SetAllowEmptyKey(!cfg.Server.RequireAPIKey)
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		if cfg.Server.RequireAPIKey {
+			log.Printf("WARN: api_key 为空且 server.require_api_key=true → 已拒绝所有非回环请求（本机回环仍放行；" +
+				"Android 内嵌/单机部署可正常用，反代或局域网部署必须配 api_key）")
+		} else {
+			log.Printf("WARN: api_key 为空且 server.require_api_key=false → 未启用鉴权：任何能连上 %s 的人都可调用 /v1 与 /status", cfg.Listen)
 		}
 	}
 
@@ -547,7 +562,9 @@ func main() {
 	// 等于承诺了「操作有据可查」却拿不出证据。
 	var auditLog *server.AuditLog
 	if cfg.Admin.AuditEnabled {
-		al, aerr := server.NewAuditLog(cfg.Admin.AuditFile, cfg.APIKey)
+		// W5-16：审计指纹用管理员密钥，不用发给下游客户端的 api_key
+		// （32 bit 指纹可被任何持 key 者离线验证/关联）。
+		al, aerr := server.NewAuditLog(cfg.Admin.AuditFile, auditLogKey(cfg))
 		if aerr != nil {
 			p.Flush() // Fatal 绕过 defer：至少把池状态落盘再退
 			log.Fatalf("admin audit: %v", aerr)
@@ -729,6 +746,12 @@ func main() {
 	}()
 
 	log.Print(listenBanner(cfg.Listen, loadedFrom, cfg.APIKey))
+	// W5-03：内置 at-rest 密钥 + 存在 $wbEncrypted 文件时升级为启动横幅。
+	// 面板与 /status 的显式展示由 panel/server 分片接入 AtRestKeySource()；
+	// 这里保证「不带 UI 的容器/CLI 部署」也能在日志里看到这条风险。
+	if banner := atRestKeyBanner(auth.AtRestKeySource(), cfg.AuthDir); banner != "" {
+		log.Print(banner)
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		p.Flush() // Fatal 绕过所有 defer：至少把池状态落盘再退，否则丢整轮运行状态
 		log.Fatalf("http: %v", err)
@@ -979,6 +1002,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		ThinkingOverrideScope:  newCfg.Thinking.OverrideScope,
 		ThinkingModelDefaults:  newCfg.Thinking.ModelDefaults,
 	})
+	// W5-04：require_api_key 热应用（面板保存后立即生效，不必重启）。
+	allowEmpty := !newCfg.Server.RequireAPIKey
+	if httpauth.AllowEmptyKey() != allowEmpty {
+		log.Printf("已热应用 server.require_api_key=%v（空 api_key 时%s）",
+			newCfg.Server.RequireAPIKey, map[bool]string{true: "拒绝所有非回环请求", false: "全开"}[newCfg.Server.RequireAPIKey])
+		httpauth.SetAllowEmptyKey(allowEmpty)
+	}
 	// 3D 临时凭证热生效：面板保存后整体替换手工凭证表（内容不进日志）。
 	// 自动签发开关（three_d_auto_token）走重启生效——它决定装配哪个实现。
 	if auto, ok := up.ThreeDCredential.(*upstream.AutoThreeDCredentials); ok {

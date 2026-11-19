@@ -2,9 +2,12 @@
   "listen": "127.0.0.1:7863",
   "api_key": "",
   "admin_api_key": "",
+  "_comment_wb_at_rest_key_file": "可选：把环境变量 WB_AT_REST_KEY_FILE 指向一个仅本机可读的文件（内容为 at-rest 密钥字符串），覆盖源码内置的 $wbEncrypted 固定密钥。也可用 WB_AT_REST_KEY 直接给值。换密钥后既有加密 auth 文件需重新登录导入。",
+  "_comment_require_api_key": "server.require_api_key（缺省 true）：api_key 为空时拒绝所有非回环请求；显式设 false 才回到旧的全开行为（仅限完全可信的本机环境）。",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": {
+    "require_api_key": true,
     "read_timeout": "300s",
     "head_keepalive": "1500ms"
   },

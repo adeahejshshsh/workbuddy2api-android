@@ -46,6 +46,11 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if !c.Features.BusyRetry || c.Features.BusyWaitSeconds != 60 {
 		t.Errorf("features.busy_retry / busy_wait_seconds 示例应为 true / 60: %+v", c.Features)
 	}
+	// W5-04：require_api_key 的默认值是失败关闭，示例必须显式写出 true，
+	// 否则用户只会在 README 里看到这个开关。
+	if !c.Server.RequireAPIKey {
+		t.Error("server.require_api_key 示例值应为 true（缺省失败关闭）")
+	}
 	// DeferredToolCall 参数修复是实验特性：示例里必须显式给成 false（默认关），
 	// 否则用户不知道有这个开关，也无从判断「为什么它没生效」。
 	var example struct {

@@ -29,8 +29,29 @@ func newBootstrapPanel(saved *[]byte) *Panel {
 	})
 }
 
+// withBootstrapToken 往 JSON body 里补 bootstrap_token（已有则不动）。
+func withBootstrapToken(t *testing.T, p *Panel, body string) string {
+	t.Helper()
+	if strings.Contains(body, "bootstrap_token") {
+		return body
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("用例 body 不是 JSON 对象: %v (%s)", err, body)
+	}
+	m["bootstrap_token"] = p.BootstrapToken()
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(out)
+}
+
+// postAdminKey 发一次自举请求。body 里没写 bootstrap_token 时自动补上本进程令牌
+// （W3-02：真实路径同样是「拿到令牌再填」——宿主注入或用户从 0600 文件复制）。
 func postAdminKey(t *testing.T, p *Panel, remote, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	body = withBootstrapToken(t, p, body)
 	r := httptest.NewRequest(http.MethodPost, "/panel/api/admin_key", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	// 带上当前生效的 key：真实浏览器手里就有它（老部署是客户端 key，配过之后是 admin key）。
@@ -50,7 +71,7 @@ func postAdminKey(t *testing.T, p *Panel, remote, body string) *httptest.Respons
 func TestAdminKeyBootstrapFromLoopback(t *testing.T) {
 	var saved []byte
 	p := newBootstrapPanel(&saved)
-	body := `{"admin_api_key":"0123456789abcdef0123"}`
+	body := withBootstrapToken(t, p, `{"admin_api_key":"0123456789abcdef0123"}`)
 	r := httptest.NewRequest(http.MethodPost, "/panel/api/admin_key", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer client-key-123456") // 老部署手里就这把

@@ -455,22 +455,24 @@ func TestResponsesEndpointStream(t *testing.T) {
 }
 
 func TestResponsesEndpointStreamErrorBeforeSSE(t *testing.T) {
+	// W2-08 更新断言：零字节提交时的请求级/上游错误必须回真实 HTTP 状态码。
+	// 旧断言（200 + response.failed）让 Codex 的按状态码退避重试完全失效。
 	h := NewHandler(Config{Pool: pool.New(""), Upstream: &upstream.Client{}})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"glm-5.2","input":"hi","stream":true}`))
 	h.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("code=%d want 200 SSE", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d want 503（首帧前失败应回真实状态码）body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Header().Get("Content-Type"), "event-stream") {
-		t.Fatalf("ct=%s body=%s", rec.Header().Get("Content-Type"), rec.Body.String())
+	if strings.Contains(rec.Header().Get("Content-Type"), "event-stream") {
+		t.Fatalf("不该是 SSE：ct=%s body=%s", rec.Header().Get("Content-Type"), rec.Body.String())
 	}
-	types := sseTypes(rec.Body.String())
-	if !containsStr(types, "response.failed") {
-		t.Fatalf("types=%v body=%s", types, rec.Body.String())
+	var obj map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &obj); err != nil {
+		t.Fatalf("错误体不是 JSON: %v body=%s", err, rec.Body.String())
 	}
-	if containsStr(types, "response.completed") {
-		t.Fatalf("failed stream must not complete: %v", types)
+	if _, ok := obj["error"]; !ok {
+		t.Fatalf("应是错误 JSON：%s", rec.Body.String())
 	}
 }
 

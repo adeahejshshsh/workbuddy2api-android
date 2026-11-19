@@ -19,12 +19,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 )
 
@@ -222,6 +224,53 @@ func (h *Handler) mcpCallTool(ctx context.Context, params json.RawMessage) (any,
 	return nil, &mcpRPCError{Code: -32602, Message: "Invalid params: 未知工具 " + p.Name}
 }
 
+// MCP 代理回执的捕获上限（W2-03）。
+//
+// 旧实现用 httptest.NewRecorder 全量缓冲 → prettyJSON（MarshalIndent）→
+// structuredContent 再整体序列化一次：base64 图片路径单请求峰值约 200MB，
+// 几个并发就能把进程 OOM。现在改为写进一个有界 ResponseWriter：
+//   - 超过上限立刻停止捕获并回 isError（明确告诉模型用 URL 格式 / REST 端点），
+//     **不再**继续吃内存；
+//   - 小回执（≤1MiB）才额外解析 structuredContent，大回执只保留 text 一份；
+//   - prettyJSON 只在调试开关（WB2A_MCP_PRETTY=1）下用，生产走紧凑原文。
+const (
+	mcpProxyMaxBytes      = 16 << 20 // 16MiB：正常 b64 图片够用，200MB 放大被截断
+	mcpStructuredMaxBytes = 1 << 20  // 超过这个体积不再解析对象树（省一份内存）
+)
+
+// mcpCaptureWriter 有界捕获 writer：实现 http.ResponseWriter，供代理 handler 直接写。
+// 不实现 Flush（MCP 这些入口都是非流式 JSON）。
+type mcpCaptureWriter struct {
+	header   http.Header
+	status   int
+	buf      bytes.Buffer
+	overflow bool
+}
+
+func newMCPCaptureWriter() *mcpCaptureWriter {
+	return &mcpCaptureWriter{header: http.Header{}}
+}
+
+func (w *mcpCaptureWriter) Header() http.Header { return w.header }
+
+func (w *mcpCaptureWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+}
+
+func (w *mcpCaptureWriter) Write(p []byte) (int, error) {
+	if w.buf.Len()+len(p) > mcpProxyMaxBytes {
+		if n := mcpProxyMaxBytes - w.buf.Len(); n > 0 {
+			_, _ = w.buf.Write(p[:n])
+		}
+		w.overflow = true
+		// 返回 len(p)：让 handler 以为写成功，避免它把「响应太大」误判成客户端断连。
+		return len(p), nil
+	}
+	return w.buf.Write(p)
+}
+
 // mcpProxyCall 把工具参数当请求体打到既有的网关入口上，回执原样转成 MCP 内容。
 //
 // 这样做是刻意的：MCP 与 REST 走**同一条**选号 / 失败换号 / 计费 / 台账路径，不会出现
@@ -234,23 +283,38 @@ func (h *Handler) mcpProxyCall(ctx context.Context, args map[string]any, path st
 	}
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body))).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	fn(rec, req)
+	cw := newMCPCaptureWriter()
+	fn(cw, req)
 
-	data := rec.Body.Bytes()
-	status := rec.Code
+	status := cw.status
 	if status == 0 {
 		status = http.StatusOK
 	}
+	if cw.overflow {
+		msg := fmt.Sprintf(`{"error":"response too large","limit_bytes":%d,"gateway_hint":"该工具回执超过 MCP 单次上限（通常是 base64 图片）；请改用 url 格式（response_format=url）或走 REST 端点"}`, mcpProxyMaxBytes)
+		return map[string]any{
+			"content": []map[string]any{{"type": "text", "text": msg}},
+			"isError": true,
+		}, nil
+	}
+	data := cw.buf.Bytes()
 	// 2xx：把回执同时塞进 structuredContent（机器读）与 text（模型读）。
+	// 大回执只留 text：解析成对象树 + 再序列化一遍正是 W2-03 要消掉的放大。
 	var parsed any
 	text := strings.TrimSpace(string(data))
-	if json.Unmarshal(data, &parsed) == nil {
-		text = prettyJSON(parsed)
+	if len(data) <= mcpStructuredMaxBytes && json.Unmarshal(data, &parsed) == nil {
+		if mcpPrettyEnabled() {
+			text = prettyJSON(parsed)
+		} else {
+			text = strings.TrimSpace(string(data))
+		}
 	}
 	content := []map[string]any{{"type": "text", "text": text}}
 	if status >= 400 {
 		return map[string]any{"content": content, "isError": true}, nil
+	}
+	if parsed == nil {
+		return map[string]any{"content": content, "isError": false}, nil
 	}
 	return map[string]any{
 		"content":           content,
@@ -296,7 +360,7 @@ func mcpWrapResponse(rec *httptest.ResponseRecorder) map[string]any {
 	data := rec.Body.Bytes()
 	var parsed any
 	text := strings.TrimSpace(string(data))
-	if json.Unmarshal(data, &parsed) == nil {
+	if json.Unmarshal(data, &parsed) == nil && mcpPrettyEnabled() {
 		text = prettyJSON(parsed)
 	}
 	status := rec.Code
@@ -371,6 +435,11 @@ func (h *Handler) mcpListModels(args map[string]any) any {
 		"isError":           false,
 	}
 }
+
+// mcpPrettyEnabled 调试开关：只有显式 WB2A_MCP_PRETTY=1 时才做缩进美化。
+// 生产默认关闭——对 16MiB 回执 MarshalIndent 会再分配一份同等大小的字符串，
+// 正是 W2-03 要消掉的放大点。
+func mcpPrettyEnabled() bool { return os.Getenv("WB2A_MCP_PRETTY") == "1" }
 
 // prettyJSON 给模型看的紧凑可读 JSON（缩进两格；失败回退原文）。
 func prettyJSON(v any) string {

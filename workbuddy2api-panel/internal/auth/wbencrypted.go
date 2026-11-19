@@ -47,6 +47,27 @@ const wbBuiltinAtRestSecretKey = "Sik9U5aXhCdwTVEwsEySDOmDoB9r9ntFxHF1fst9LQI="
 // 计算期望值，所以覆盖后两侧口径仍然一致。
 var wbAtRestSecretKey = resolveAtRestSecretKey()
 
+// AtRestKeySourceInfo 当前 at-rest 密钥的来源（W5-03）。
+//
+// 为什么要显式暴露：内置密钥写在公开源码里，全仓/全部署/全账号共用一把——
+// 拿到任意一份 auth 文件的人都能离线解出 token。加密强度实际等于混淆。
+// 面板与 /status 必须把这件事摆到明面上（红字/警告），不能只留一行启动日志。
+type AtRestKeySourceInfo struct {
+	// Source: builtin / env / file。
+	Source string `json:"source"`
+	// Builtin 为真 = 正在用公开源码里的固定密钥（高风险）。
+	Builtin bool `json:"builtin"`
+	// Detail 人类可读来源说明（环境变量名 / 文件路径），不含密钥本身。
+	Detail string `json:"detail,omitempty"`
+}
+
+// atRestKeyInfo 由 resolveAtRestSecretKey 在包初始化时写入，之后只读，无锁。
+var atRestKeyInfo = AtRestKeySourceInfo{Source: "builtin", Builtin: true, Detail: "源码内置 wbBuiltinAtRestSecretKey"}
+
+// AtRestKeySource 返回当前 at-rest 密钥来源，供面板与 /status 展示（W5-03）。
+// 只返回来源元数据，**不返回密钥材料**。
+func AtRestKeySource() AtRestKeySourceInfo { return atRestKeyInfo }
+
 // resolveAtRestSecretKey 解析密钥材料：WB_AT_REST_KEY > WB_AT_REST_KEY_FILE > 内置值。
 //
 // 覆盖语义是「整个字符串参与 sha256」——与内置值的用法完全一致（内置值本身是个
@@ -54,11 +75,13 @@ var wbAtRestSecretKey = resolveAtRestSecretKey()
 // 这是刻意的：宁可明确报错，也不要解出乱码当 token 用。
 func resolveAtRestSecretKey() string {
 	if v := strings.TrimSpace(os.Getenv("WB_AT_REST_KEY")); v != "" {
+		atRestKeyInfo = AtRestKeySourceInfo{Source: "env", Detail: "环境变量 WB_AT_REST_KEY"}
 		return v
 	}
 	if p := strings.TrimSpace(os.Getenv("WB_AT_REST_KEY_FILE")); p != "" {
 		if b, err := os.ReadFile(p); err == nil {
 			if v := strings.TrimSpace(string(b)); v != "" {
+				atRestKeyInfo = AtRestKeySourceInfo{Source: "file", Detail: "文件 " + p}
 				return v
 			}
 		} else {
@@ -67,6 +90,9 @@ func resolveAtRestSecretKey() string {
 	}
 	log.Printf("WARN: [auth] $wbEncrypted 使用源码内置 at-rest 密钥（第三方桌面端固定密钥，全仓共用）。" +
 		"多租户/自建部署请设 WB_AT_REST_KEY 或 WB_AT_REST_KEY_FILE 覆盖；换密钥后既有加密文件会报 at_rest_key_mismatch。")
+	// 回落路径也必须刷新来源（W5-03）：此前只在 env/file 分支赋值，若同一进程
+	// 先解析过 env 再回落到 builtin（测试/热重载），AtRestKeySource 会一直谎报 env。
+	atRestKeyInfo = AtRestKeySourceInfo{Source: "builtin", Builtin: true, Detail: "源码内置 wbBuiltinAtRestSecretKey"}
 	return wbBuiltinAtRestSecretKey
 }
 

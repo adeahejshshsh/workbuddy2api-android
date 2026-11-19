@@ -19,6 +19,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
@@ -30,6 +31,14 @@ const (
 	busyLevelBusy    = "busy"
 	busyLevelUnknown = "unknown"
 )
+
+// busyMaxModels /v2/chat/busy 单请求最多接受的模型条数。
+//
+// W2-05：输出与 len(req.Models) 线性放大（每条一个 {model,busy_level} 对象 +
+// 一次 servableModelSet 查表），而 body 上限是 1MiB。一个 1MiB 的 {"models":[...]}
+// 能塞进约 6 万条，响应 60-75MB、堆上还要再留一份 map 切片——没有上限时这是一条
+// 零成本的放大器。64 条已远超官方客户端（一次只问当前选择器里的十几个模型）。
+const busyMaxModels = 64
 
 // chatBusy 处理 POST /v2/chat/busy。
 //
@@ -47,6 +56,12 @@ func (h *Handler) chatBusy(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
+		return
+	}
+	// W2-05：超限 400，不能先构造再判——构造本身就是要防的放大点。
+	if len(req.Models) > busyMaxModels {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+			fmt.Sprintf("too many models: %d (max %d)", len(req.Models), busyMaxModels))
 		return
 	}
 	out := make([]map[string]any, 0, len(req.Models))

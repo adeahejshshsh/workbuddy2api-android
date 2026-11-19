@@ -102,8 +102,13 @@ func TestResponsesImageToolBlockedByBudgetGate(t *testing.T) {
 				t.Fatalf("闸拒绝后不该有上游调用：对话 %d 次，出图 %d 次", f.chatCalls.Load(), f.imgCalls.Load())
 			}
 			if stream {
-				if !strings.Contains(rec.Body.String(), "response.failed") {
-					t.Fatalf("流式拒绝应折成 response.failed：code=%d body=%s", rec.Code, rec.Body)
+				// W2-08 更新断言：预算闸在零字节时拒绝，必须回真实 429（旧断言
+				// 200 + response.failed 会让 Codex 把限流当成功流，不触发退避）。
+				if rec.Code != http.StatusTooManyRequests {
+					t.Fatalf("流式拒绝应回 429：code=%d body=%s", rec.Code, rec.Body)
+				}
+				if strings.Contains(rec.Body.String(), "response.failed") {
+					t.Fatalf("不该再折成 SSE response.failed：%s", rec.Body)
 				}
 			} else if rec.Code != http.StatusTooManyRequests {
 				t.Fatalf("code=%d want 429（同 chatCompletions）body=%s", rec.Code, rec.Body)

@@ -203,7 +203,17 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			warnings = append(warnings, fmt.Sprintf("uid=%s 凭据落盘失败（%v），新令牌只在内存里生效，请检查凭证目录后重新导入一次", ia.uid, err))
 		}
 		p.reloadMu.Lock()
-		p.cfg.Pool.Add(ia.a)
+		// verified=true 表示这份凭据刚被上游 refresh 求证过，其 RT 已把池里那份作废。
+		// 必须走 AdoptVerified **无条件**换掉池内条目：upsertLocked 的新旧判据是
+		// `ExpiresAt 更大才算新`（W4-12），而刚换来的 access token 有效期常常更短
+		// （now+1h vs 池里旧文件写的 now+72h）→ 新凭据会被当成「旧副本」静默丢弃，
+		// 而旧 RT 已被上游轮换 → 这个号下次请求就 12153，且重导也救不回来。
+		// AdoptVerified 保留 disabled/冷却/战绩/规则引用，只有凭证指针被换掉。
+		if verified {
+			p.cfg.Pool.AdoptVerified(ia.a)
+		} else {
+			p.cfg.Pool.Add(ia.a)
+		}
 		p.reloadMu.Unlock()
 		p.cfg.Pool.Revive(ia.uid)
 		imported++
@@ -459,6 +469,11 @@ func parseImportPayload(raw []byte) ([]cockpitAccount, error) {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys) // 稳定顺序，便于前端展示与测试比对
+		// W3-05：字典形态同样受条数上限约束（此前这里直接 return out，2000 的
+		// 上限只对数组形态生效 —— 32MB 的 {"uid":{...}} 能解出几十万条）。
+		if len(keys) > importMaxEntries {
+			return nil, fmt.Errorf("账号条数 %d 超过单次导入上限 %d，请分批导入", len(keys), importMaxEntries)
+		}
 		out := make([]cockpitAccount, 0, len(keys))
 		for _, k := range keys {
 			acc, derr := decodeImportItem(probe[k])
@@ -521,22 +536,34 @@ func sanitizeNickname(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// checkImportShape 解码前的字节级形状预检（W2-IM-01）。
+// checkImportShape 解码前的**字节级**预检（W2-IM-01 / W3-05）。
 //
-// 只做两件事，不解析 JSON 语义：
-//  1. 括号嵌套深度 ≤ importMaxDepth —— 深嵌套会让 encoding/json 递归爆栈，
-//     Go 的栈溢出是 fatal error（recover 无效），一个 32MB 的 `[[[[…` 就能带走
-//     整个网关进程；
-//  2. 粗数顶层数组元素（逗号计数，仅在根是数组时）≤ importMaxEntries ——
-//     在 Unmarshal 之前挡住「几万条账号」的内存放大。
+// 不解析 JSON 语义，只数结构；字符串内的括号/逗号按状态机跳过（含转义），
+// 避免把正文里的 `[` 当结构。
 //
-// 字符串内的括号/逗号按状态机跳过（含转义），避免把正文里的 `[` 当结构。
+// 两个目的：
+//  1. 深度：深嵌套会让 json.Unmarshal 递归到打穿 goroutine 栈（fatal error，
+//     recover 无效，整个网关进程直接没）；
+//  2. 条数：账号导入有三种形态 —— 根数组、信封 `{"accounts":[...]}`、字典
+//     `{"<uid>":{...}}`。此前的条数上限只在**根数组**上数逗号，后两种直接跳过，
+//     32MB 的字典形态能解出几十万条账号。这里对三种都做**粗计数**：
+//     根数组数元素、根对象数**顶层键**（字典形态一键一号）、根对象下的一级数组
+//     数元素（信封形态，取所有一级数组的最大值，避免把单账号里的 models 数组
+//     累加进来）。
+//
+// 粗计数只用于「明显超标就拒」：精确条数由 parseImportPayload 在解码后按
+// len(items) 再判一次（那里对所有出口都检查，见 W3-05）。
 func checkImportShape(raw []byte) error {
 	depth := 0
 	inStr := false
 	esc := false
-	topElems := 1
 	rootArray := false
+	rootObject := false
+	topElems := 1   // 根数组元素数（第一个元素前没有逗号）
+	topKeys := 0    // 根对象顶层键数（逗号数 = 键数-1，差一不影响上限判定）
+	arrayElems := 0 // 当前一级数组的元素数
+	maxArrayElems := 0
+	arrayDepth := -1 // 正在计数的一级数组的容器深度（0 = 没有）
 	for i, b := range raw {
 		if inStr {
 			switch {
@@ -554,13 +581,25 @@ func checkImportShape(raw []byte) error {
 			inStr = true
 		case '[', '{':
 			depth++
-			if i == 0 && b == '[' {
-				rootArray = true
+			if i == 0 {
+				rootArray = b == '['
+				rootObject = b == '{'
+			}
+			// 根对象下的一级数组（深度 2）：信封形态的账号数组。
+			if rootObject && depth == 2 && b == '[' && arrayDepth < 0 {
+				arrayDepth = depth
+				arrayElems = 1
 			}
 			if depth > importMaxDepth {
 				return fmt.Errorf("JSON 嵌套过深（>%d 层），拒绝解析", importMaxDepth)
 			}
 		case ']', '}':
+			if arrayDepth >= 0 && depth == arrayDepth && b == ']' {
+				if arrayElems > maxArrayElems {
+					maxArrayElems = arrayElems
+				}
+				arrayDepth = -1
+			}
 			if depth > 0 {
 				depth--
 			}
@@ -568,10 +607,26 @@ func checkImportShape(raw []byte) error {
 			if rootArray && depth == 1 {
 				topElems++
 			}
+			if rootObject && depth == 1 {
+				topKeys++
+			}
+			// 一级数组的元素分隔符与数组同深度（元素是对象时，逗号落在数组的
+			// 容器深度上；元素是标量时也是同一层）。
+			if arrayDepth >= 0 && depth == arrayDepth {
+				arrayElems++
+			}
 		}
 	}
 	if rootArray && topElems > importMaxEntries {
 		return fmt.Errorf("账号条数超过单次导入上限 %d，请分批导入", importMaxEntries)
+	}
+	if rootObject {
+		if topKeys >= importMaxEntries {
+			return fmt.Errorf("账号条数超过单次导入上限 %d（字典形态按顶层键计数），请分批导入", importMaxEntries)
+		}
+		if maxArrayElems > importMaxEntries {
+			return fmt.Errorf("账号条数超过单次导入上限 %d（信封形态按一级数组计数），请分批导入", importMaxEntries)
+		}
 	}
 	return nil
 }

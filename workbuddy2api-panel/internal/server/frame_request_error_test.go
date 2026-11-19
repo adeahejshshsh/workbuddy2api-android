@@ -6,10 +6,9 @@
 // 也不该把会话粘性从健康号上摘下来（摘了下次重试就落到冷号，十万~几十万 token 的前缀
 // 从头重算）。
 //
-// 与上游的差别（本仓结构决定，不是取舍）：上游 StreamHint 有 HeadVetoError 那套
-// 「首帧否决」——error 帧在写出前就返回给调用方，所以能改成 400 JSON。本仓没有那一层
-// （见 continue_glued_test.go 头注释），StreamHint 是「先写帧、后回调观察者」，走到
-// handler 时 200 已经提交，状态码改不动。所以这里钉的是本仓能做到的两件事：
+// 首帧否决由 server 侧的 sseCommitWriter 实现（W2-08）：首个完整事件是 error 帧时
+// 先扣住、零字节提交，handler 因此能回真实 HTTP 状态（见 first_frame_veto_test.go）。
+// 本文件钉的是「已开流」形态下的账号处置语义：
 //   - 请求级错误不记账号故障、不解绑粘性（与 HTTP ≥400 路径的 failKeepBinding 同口径）；
 //   - 托管工具探测（probeOnce）不再为请求级错误逐个试号。
 //

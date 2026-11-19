@@ -152,14 +152,12 @@ func TestFamilyLockPruneKeepsHeldEntry(t *testing.T) {
 		s.EndAccountTask(uid, TaskCheckin)
 	}
 	// 把全部条目老化到 familyLockIdle 之外：只剩「是否被持有」这一条判据。
-	s.family.mu.Lock()
-	for _, l := range s.family.m {
+	s.family.each(func(_ string, l *familyLock) {
 		l.used.Store(time.Now().Add(-familyLockIdle - time.Minute).UnixNano())
-	}
-	before := len(s.family.m)
+	})
+	before := s.family.count()
 	s.family.pruneLocked()
-	after := len(s.family.m)
-	s.family.mu.Unlock()
+	after := s.family.count()
 
 	if before <= 1 {
 		t.Fatalf("测试前提失败：只造出 %d 个条目", before)

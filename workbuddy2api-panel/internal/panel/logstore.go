@@ -500,7 +500,7 @@ func readLogFileReport(path string) ([]LogEntry, int) {
 //
 // 按天选文件（文件名即日期），再按行内的 TS 精确裁剪——这样跨天区间不会带进
 // 区间外的行，且不必把全部历史读进内存两遍（每行独立判定，直接流式写 zip）。
-func (s *LogStore) Export(w *os.File, from, to time.Time) (int, error) {
+func (s *LogStore) Export(w io.Writer, from, to time.Time) (int, error) {
 	if s == nil {
 		return 0, fmt.Errorf("日志落盘未启用")
 	}
@@ -597,18 +597,39 @@ const logBodyKeep = 200
 // logBearerRe 匹配 "Bearer <凭据>"，用于把密钥换成 ***。
 var logBearerRe = regexp.MustCompile(`(Bearer\s+)[A-Za-z0-9._\-]{8,}`)
 
-// sanitizeLogText 落盘前的最小脱敏（W2-LS-03）：
+// logTextMaxBytes 单条日志的落盘/入环上限（W3-06）。
+// 与 ringMaxLineBytes 同量级：一条带堆栈的日志 8KB 已经足够，再长只说明有人把
+// body 或 base64 拼进了日志。
+const logTextMaxBytes = ringMaxLineBytes
+
+// sanitizeLogText 落盘前的统一清洗（W2-LS-03 / W3-06）：**内存环与落盘文件走同一个函数**
+// （W3-11 之前只有落盘走，环里是原文，面板看到的口径与导出包不一致）。
 //
-//   - "Bearer <token>" → "Bearer ***"：日志里偶尔带 Authorization 原文，
-//     导出包外发即等于交出密钥；
-//   - "body=" 之后的内容截到 200 字节：上游错误体常回带命中的用户原文/长 base64，
-//     完整落盘就把日志目录变成对话内容的持久副本。
+//   - 换行/回车 → 空格：uid、禁用原因、上游错误体都来自请求，原样保留 \n 就能
+//     伪造整行日志（`INFO ok\nERR: 池已清空` 这种），而日志是排障与审计的唯一依据；
+//   - 控制字符（除 \t）→ 丢弃：落到 JSONL 里会让下游解析器把一行拆开；
+//   - "Bearer <token>" → "Bearer ***"：日志里偶尔带 Authorization 原文；
+//   - "body=" 之后截到 200 字节：上游错误体常回带用户原文/长 base64；
+//   - 整行超过 8KB 截断：单行无上限时，一条日志就能把环与磁盘放大几十倍。
 //
-// 只做这两条：其余字段（uid/模型/状态码）是排障必需，不能一刀切。
+// 只做这几条：其余字段（uid/模型/状态码）是排障必需，不能一刀切。
 func sanitizeLogText(s string) string {
 	if s == "" {
 		return s
 	}
+	if strings.ContainsAny(s, "\r\n") {
+		// Replace 一次扫完：日志是热路径（每条请求一行），逐字符 Builder 反而更慢。
+		s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
+	}
+	s = strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 	s = logBearerRe.ReplaceAllString(s, "${1}***")
 	if i := strings.Index(s, "body="); i >= 0 {
 		head := s[:i+len("body=")]
@@ -616,6 +637,9 @@ func sanitizeLogText(s string) string {
 		if len(tail) > logBodyKeep {
 			s = head + truncateRunes(tail, logBodyKeep) + "…(truncated)"
 		}
+	}
+	if len(s) > logTextMaxBytes {
+		s = truncateRunes(s, logTextMaxBytes) + "…(truncated)"
 	}
 	return s
 }

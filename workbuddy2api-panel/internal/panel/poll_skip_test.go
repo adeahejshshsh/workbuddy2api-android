@@ -32,6 +32,7 @@ const ctx = {
   esc: x => String(x == null ? '' : x),
   setHTML: () => {}, toast: () => {},
   renderUpdateStatus: () => {}, renderExpirySnapshot: () => {}, syncAdminKeyBar: () => {},
+  renderSecBars: () => {},
   renderAccounts: () => { calls.accounts++; },
   renderModelLocks: () => { calls.locks++; },
   startPolling: () => {},

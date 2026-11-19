@@ -388,10 +388,11 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `listen` | `:7863` | HTTP 监听地址 |
-| `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
+| `listen` | `127.0.0.1:7863` | HTTP 监听地址（默认只绑回环；要对外必须改 `0.0.0.0:7863` 并配 `api_key`） |
+| `api_key` | 空 | 网关鉴权密钥。**空 + `server.require_api_key=true`（默认）= 只允许本机回环**；显式 `require_api_key=false` 才是旧的全开放行（公网必须设置 key） |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
+| `server.require_api_key` | `true` | 空 `api_key` 时是否要求鉴权：`true` = 拒绝所有非回环请求（W5-04 新默认，防同机 App / 反代裸奔）；`false` = 回到旧的全开放行。支持 `WB2A_REQUIRE_API_KEY` 环境变量覆盖与面板保存热生效 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
 | `panel.package_detail_limit` | `5` | 积分构成页单账号默认展示的最早到期包数；其余未用完包与已用完包聚合折叠 |
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
@@ -662,7 +663,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 http://127.0.0.1:7863/panel/
 ```
 
-鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用。
+鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用（**仅限本机回环**；空 key 且 `require_api_key=true` 时面板顶部应显示红色警告横幅）。
 界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航七个视图：
 
 | 视图 | 功能 |
@@ -691,6 +692,8 @@ http://127.0.0.1:7863/panel/
 请求记录表会显示每次调用的来源：IP 取 `X-Forwarded-For` 首段 → `X-Real-IP` → 回落 TCP 对端（直连部署下这是唯一线索）；User-Agent 截断 200 字节入库，stdout 流水行同时追加压缩后的客户端标签（`src=203.0.113.7 ua="Chrome/120.0.0.0"`，浏览器 UA 不会整段铺开）。
 
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
+
+**`$wbEncrypted` at-rest 密钥（W5-03）**：新版桌面端 auth 文件的 `$wbEncrypted` 字段用一把**硬编码在公开源码里的固定密钥**加密（第三方桌面端 keyId 约束，不能换成仓库自有密钥，否则桌面端读不回自己的文件）。这意味着拿到任意一份 auth 文件（备份 / 镜像层 / 排障包）的人都能离线解出 access/refresh token。部署方可用 `WB_AT_REST_KEY`（直接给密钥字符串）或 `WB_AT_REST_KEY_FILE`（指向仅本机可读的密钥文件）覆盖；启动时若仍是内置密钥且 `auths/` 里存在 `$wbEncrypted` 文件，日志会打一条醒目横幅。面板与 `/status` 通过 `auth.AtRestKeySource()` 展示来源（`builtin` / `env` / `file`）。
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
 `logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
@@ -727,7 +730,9 @@ http://127.0.0.1:7863/panel/
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
-> 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
+> 鉴权规则：`api_key` 非空时校验 `Authorization: Bearer <api_key>`；**`api_key` 为空且 `server.require_api_key=true`（默认）时只放行回环请求（127.0.0.1 / ::1）**，非回环一律 401；只有显式 `require_api_key=false` 才回到「空 key 直接放行」的旧行为。`/healthz` 恒无鉴权。
+>
+> **迁移提示（W5-04）**：这条默认值会改变现有「空 api_key + 局域网/反代」部署的行为——升级后远端请求会开始 401。要么配 `api_key`，要么显式设 `server.require_api_key=false`（不推荐）。Android 内嵌与单机自托管（流量来自回环）不受影响。
 
 > **面板鉴权另有一把 key**：`admin_api_key`。面板能导出全池 refresh token、改写整份配置、删号停号，
 > 所以它**不**复用发给下游的 `api_key`——配了 `admin_api_key` 时 `/panel/*` 只认它；

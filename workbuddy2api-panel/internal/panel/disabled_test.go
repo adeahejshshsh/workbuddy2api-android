@@ -33,6 +33,12 @@ process.stdout.write(JSON.stringify({
   session401:   kind('网关 401 × 3 且 refresh 验证失败（token 已确认失效）'),
   // 11140：上游封禁（需申诉）
   banned:       kind('11140 request illegal'),
+  // W3-17：上游 11128 的三种写法（无连字符 / ASCII 连字符 / U+2011 非断连字符）
+  // 都必须归到「鉴权失败」。旧实现把 U+2011 写进了正则的字面量位置，
+  // /11‑-128/ 只匹配「11‑-128」这一串字面量，分支永不命中。
+  code11128:    kind('11128 内容拦截'),
+  code11dash:   kind('11-128 内容拦截'),
+  code11u2011:  kind('11\u2011128 内容拦截'),
   // 手动：随时可解冻
   manual:       kind('面板手动禁用（管理员操作）'),
   // 未知：兜底
@@ -58,7 +64,7 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("disabled-kind node test failed: %v\n%s", err, out)
 	}
-	const want = `{"session12153":{"label":"登录失效","tone":"warn","advice":"需重新登录，解冻无效"},"session401":{"label":"登录失效","tone":"warn","advice":"需重新登录，解冻无效"},"banned":{"label":"上游封禁","tone":"bad","advice":"需在官方申诉，解冻无效"},"manual":{"label":"手动禁用","tone":"mute","advice":"随时可解冻"},"unknown":{"label":"已禁用","tone":"mute","advice":"见下方原因"},"ages":["刚刚","5 分钟前","3 小时前","2 天前","",""]}`
+	const want = `{"session12153":{"label":"登录失效","tone":"warn","advice":"需重新登录，解冻无效"},"session401":{"label":"登录失效","tone":"warn","advice":"需重新登录，解冻无效"},"banned":{"label":"上游封禁","tone":"bad","advice":"需在官方申诉，解冻无效"},"code11128":{"label":"鉴权失败","tone":"warn","advice":"检查账号类型与通道"},"code11dash":{"label":"鉴权失败","tone":"warn","advice":"检查账号类型与通道"},"code11u2011":{"label":"鉴权失败","tone":"warn","advice":"检查账号类型与通道"},"manual":{"label":"手动禁用","tone":"mute","advice":"随时可解冻"},"unknown":{"label":"已禁用","tone":"mute","advice":"见下方原因"},"ages":["刚刚","5 分钟前","3 小时前","2 天前","",""]}`
 	if got := strings.TrimSpace(string(out)); got != want {
 		t.Fatalf("disabledKind/disabledAge=%s\nwant %s", got, want)
 	}

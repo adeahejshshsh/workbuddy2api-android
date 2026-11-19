@@ -93,6 +93,36 @@ func imageChargeKey(realm, model, size, quality string) string {
 	return realm + ":" + model + "@" + size + "/" + quality
 }
 
+// imageChargeMaxBuckets 分档表容量上限（审查 W1-07）。
+//
+// 为什么必须有上限：键里带 size/quality，而这两个字段**由客户端请求体控制**
+// （images API 的 size/quality），表又是只写不删的 map —— 随便刷几千个不重复的
+// 尺寸/画质就能把它撑到任意大；面板每次读还要全表遍历 + 排序。
+// 真实档位只有个位数（1024x1024/low|medium|high…），256 已远超实际需要。
+const imageChargeMaxBuckets = 256
+
+// evictImageChargeLocked 在插入新键前腾一个位置：淘汰样本最少、且最久没出现的桶。
+//
+// 选「样本少」而不是「最早」：攻击流量造出来的一次性桶样本恒为 1，会先被扔掉，
+// 真实档位（反复出图）反而留得住。调用方必须持有 imageChargeMu。
+func (c *Client) evictImageChargeLocked() {
+	if len(c.imageCharges) < imageChargeMaxBuckets {
+		return
+	}
+	victim := ""
+	minSamples := int(^uint(0) >> 1) // MaxInt
+	var oldest time.Time
+	for k, agg := range c.imageCharges {
+		at, _ := time.Parse(time.RFC3339, agg.LastAt)
+		if agg.Samples < minSamples || (agg.Samples == minSamples && at.Before(oldest)) {
+			victim, minSamples, oldest = k, agg.Samples, at
+		}
+	}
+	if victim != "" {
+		delete(c.imageCharges, victim)
+	}
+}
+
 // RecordImageCharge 记录一次出图实扣（数量取上游回执 usage.credit）。
 // tokens 为 usage.output_image_tokens（CN 侧不回该字段，记 0）。
 // 只在 credit > 0 时调用（上游省略 usage 时不编数）。
@@ -105,6 +135,9 @@ func (c *Client) RecordImageCharge(realm, model, size, quality string, credit fl
 	defer c.imageChargeMu.Unlock()
 	if c.imageCharges == nil {
 		c.imageCharges = make(map[string]ImageChargeAgg)
+	}
+	if _, exists := c.imageCharges[key]; !exists {
+		c.evictImageChargeLocked()
 	}
 	agg := c.imageCharges[key]
 	agg.Realm, agg.Model = realm, model

@@ -28,9 +28,26 @@ type Pool struct {
 	rules   map[string]ModelRule
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
-	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。
+	// flushMu 串行化「取快照 → 序列化 → 写 state.json → 镜像 Redis」整段（C-02 / W4-01）。
+	//
+	// 为什么必须独立于 p.mu：p.mu 只在取快照时持有（IO 必须在锁外，审查 C5-37），
+	// 但两个 flush 并发时快照之间没有全序 —— G1 取旧快照 S1、G2 取新快照 S2，
+	// G2 先落盘、G1 后落盘，state.json 回退到 S1；而 dirty 已被置 false，下一轮
+	// 不会重写：credits/冷却/disabled/soft_streak 集体回退，已被 Remove 删除的账号
+	// 在文件里复活，.bak 轮转也被污染（把最新内容当「上一版」）。这把锁只包 IO
+	// 顺序，不包 p.mu，所以不会退回「锁内 IO」。
+	// 锁序：flushMu → p.mu（反向没有路径：持 p.mu 的代码从不抢 flushMu）。
+	flushMu sync.Mutex
+	// flushHook 仅供测试注入的同步点（C-02 变异验证）：在「快照已取、尚未落盘」
+	// 这一刻回调，把并发 flush 的乱序窗口钉成确定性用例；生产路径恒 nil。
+	flushHook atomic.Pointer[func()]
+	// storeRef 池状态快照镜像（redisstore.Store）；nil = 无需镜像。
 	// SaveState/LoadState 经它接线，与本地 state.json 并存作启动恢复备份。
-	store StoreSnapshotter
+	//
+	// W4-03：用 atomic.Pointer 而不是裸接口字段 —— SetStore 热切换与
+	// mirrorToStore/RestoreFromSnapshot 的无锁读并发时会读到撕裂的 iface
+	// （nil 或旧 store），镜像写丢/写错目标（-race 可复现）。
+	storeRef atomic.Pointer[storeHolder]
 	// 熔断器调优（SetBreaker 注入；默认值见 defaultBreaker*）。
 	breakerThreshold   int
 	breakerCooldown    time.Duration
@@ -131,9 +148,12 @@ type Pool struct {
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
-	// persistFails 本地 state.json 连续落盘失败计数（仅 saveLocked 在持锁下读写，无需 atomic）。
+	// persistFails 本地 state.json 连续落盘失败计数（W4-08）。
+	// 用 atomic.Int64：writeSnapshot 在 flushMu 内、但 Close 的最终落盘与
+	// notePersistFail 的日志读取来自不同 goroutine，非原子读写是数据竞争
+	// （-race 可复现）；而且这个计数只用于日志节流，不值得为它再拉一把锁。
 	// 用于落盘失败的日志节流：首败/每 N 次提醒/恢复各打一条，避免磁盘满时刷屏。
-	persistFails int
+	persistFails atomic.Int64
 	// pickSeq 单调递增的选号序号：每次 pick 选中账号时自增并记到 entry.usedSeq，
 	// 为 LRU 兜底/防惊群提供与 time.Now() 精度无关的严格全序（Windows ~0.5ms 精度下
 	// lastUsed 墙钟会全等）。仅 pick 写锁路径读写，无需 atomic。
@@ -218,7 +238,15 @@ func (p *Pool) Close() {
 	p.closeOnce.Do(func() {
 		close(stopCh)
 	})
-	p.Flush()
+	// C-02：先关 stopCh（ticker 不再发起新一轮），再抢**同一把** IO 顺序锁做最后
+	// 一次落盘 —— 保证退出时的写盘严格排在所有在途 flush 之后，不会被更旧的快照
+	// 覆盖，也不会与 ticker 那一路交错。直接调 flushLocked 而不是 Flush()：
+	// 后者会再抢一次 flushMu（重入即自锁）。
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+	if p.dirty.Load() {
+		_ = p.flushLocked()
+	}
 }
 
 // SetBreaker 注入熔断器参数（main 从 config 解析后调用）。非正值保留原值（用默认）。
@@ -481,10 +509,22 @@ func (p *Pool) inFlightLimit(e *entry) int {
 
 // SetStore 注入池状态快照镜像（redisstore.Store）。nil 表示不镜像（纯本地恢复）。
 // 必须在 SyncToDir 之前调用，使"择新恢复"发生在账号对齐之前。
+//
+// W4-03：原子替换。读侧（mirrorToStore / RestoreFromSnapshot）不持 p.mu，
+// 这里若还在 p.mu 内写裸接口字段，热切换时读侧看到的是撕裂值（nil / 旧 store）。
 func (p *Pool) SetStore(s StoreSnapshotter) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.store = s
+	p.storeRef.Store(&storeHolder{s: s})
+}
+
+// storeHolder 把接口值装进可 atomic.Pointer 的实体（接口本身不能原子存取）。
+type storeHolder struct{ s StoreSnapshotter }
+
+// storeSnapshot 读当前镜像目标（nil = 未配置）。W4-03。
+func (p *Pool) storeSnapshot() StoreSnapshotter {
+	if h := p.storeRef.Load(); h != nil {
+		return h.s
+	}
+	return nil
 }
 
 // Acquire 为 uid 占一个在途名额（会话粘性命中后调用）；池上限内返回 true。
@@ -555,6 +595,40 @@ func (p *Pool) Add(a *auth.Auth) {
 	p.upsertLocked(a)
 }
 
+// AdoptVerified 用一份**已被上游求证**的凭证替换池内条目的凭证（W4-12 的求证入口）。
+//
+// 为什么不能靠 upsertLocked 的 expiry 比较（实测回归）：refresh 求证回来的凭据
+// expiry 往往**更短**（池内 72h、刚换发的 1h），而换发的那一刻旧 RT 已被上游
+// 轮换作废。按「谁 expiry 更晚谁新」判会把新凭据丢掉，池里留着已作废的 RT ——
+// 该号下一次请求 12153，重导也救不回来（panel 的
+// TestImportCockpitKeepsRotatedCredentialInMemoryWhenSaveFails 钉的就是这条）。
+//
+// 调用方契约：**只在「这份凭证刚被上游 refresh 求证过」时调用**。
+// 磁盘扫描（SyncToDir）、普通 Add、热重载继续走 upsertLocked 的 expiry 比较 ——
+// 那条路径的来源可能比内存旧，无条件替换会把刚刷新的令牌盖回去（W4-12 本体）。
+//
+// 条目状态（credits/冷却/disabled/战绩/分组/规则引用/在途计数）一概保留：只换 a。
+// 返回值：true = 替换了池内已有条目；false = 池里没有（按常规入池，含 parked 复活）。
+func (p *Pool) AdoptVerified(a *auth.Auth) bool {
+	if a == nil || a.UID == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[a.UID]
+	if !ok {
+		// 不在池里（新号，或正被热重载暂存）：走常规入池，parked 分支会原样接回
+		// 禁用/暂停/分组等人工状态。
+		p.upsertLocked(a)
+		return false
+	}
+	e.a = a
+	e.needAuth = false
+	// 换凭证可能换了域：规则按「两域全命中」展开，必须重算（同 upsertLocked 的 C5）。
+	p.recomputeRulesLocked()
+	return true
+}
+
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。
 // 剔除结果持久化回 state.json，避免已删账号在下次启动时被 load() 复活。
 func (p *Pool) SyncToDir(auths []*auth.Auth) {
@@ -594,13 +668,20 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	// parked 与 delete 一样不在 byUID 里（不会复活进池），但状态保留在
 	// state.json 的 parked_accounts，文件回来时 upsertLocked 原样接回。
 	parkInstead := len(missing)*2 > total
+	// W4-13：真正被删除（而非暂存）的 uid 要同步摘掉等级事实，否则
+	// model_tier.json 会永久保留这批已消失账号的 UIDType/模型黑名单（轮换导入场景下
+	// 文件单调变大）。暂存的号不能摘：文件回来时要按原等级复活。
+	var droppedTier []string
 	for _, uid := range missing {
 		e := p.byUID[uid]
 		delete(p.byUID, uid)
 		if !parkInstead {
+			droppedTier = append(droppedTier, uid)
 			continue
 		}
 		if len(p.parked) >= maxParked {
+			// 暂存区满：这条实际是被丢弃（状态不再保留），等级事实同样没有保留意义。
+			droppedTier = append(droppedTier, uid)
 			log.Printf("WARN: [pool] 暂存区已满（%d 条），无法暂存缺席账号 uid=%s（状态丢弃）", maxParked, logfmt.UID8(uid))
 			continue
 		}
@@ -615,6 +696,9 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	}
 	p.dirty.Store(true)
 	p.mu.Unlock()
+	// 等级事实的落盘不参与 p.mu（dropTierUID 自己取锁 + 独立文件写），
+	// 放在解锁后避免把 model_tier.json 的 IO 塞进池锁。
+	p.dropTierUID(droppedTier...)
 	_ = p.flushNowErr() // 热重载要「返回即已落盘」，但 IO 在锁外（审查 C5-37）
 }
 
@@ -678,7 +762,26 @@ func (p *Pool) InFlight(uid string) int {
 // 调用方必须已持有 p.mu；Add 与 SyncToDir 共用此 upsert 逻辑。
 func (p *Pool) upsertLocked(a *auth.Auth) {
 	if e, ok := p.byUID[a.UID]; ok {
-		e.a = a            // 保留 credits/cooling 状态
+		// W4-12：合并而不是换指针。e.a 可能刚被 refresher **原地**刷新过
+		// （refresh 改的是同一个 Auth 对象，不换指针），而 a 往往是磁盘扫描出的
+		// 旧副本；直接 `e.a = a` 会把刚刷新的令牌盖回旧值 —— 下一次请求带着
+		// 已失效的 token 打上游 → 401/12153 → 健康号被计死禁用。
+		//
+		// 判据与 auth.AdoptNewer 同口径：来源 token 非空、与内存不同、且 expiry
+		// 更晚（或两边都无过期语义，典型是 API key 账号：此时没有「新旧」可比，
+		// 调用方显式 Add 即视为要换）。只走 AccessTokenValue/ExpiresAtValue 两个
+		// 单字段访问器，不在这里调 AdoptNewer —— 避免把 auth.mu 的临界区嵌进
+		// 池锁（Reconcile 的注释记录过这个约束）。
+		if e.a == nil {
+			e.a = a
+		} else if e.a != a {
+			inTok, inExp := a.AccessTokenValue(), a.ExpiresAtValue()
+			curTok, curExp := e.a.AccessTokenValue(), e.a.ExpiresAtValue()
+			newer := inTok != "" && inTok != curTok && (inExp > curExp || (inExp == 0 && curExp == 0))
+			if newer {
+				e.a = a
+			}
+		}
 		e.needAuth = false // 拿到真实凭证：解除占位标记（bug P1-3）
 		// 换凭证可能换了域（占位期 realm 为空，规则按「两域全命中」展开）：必须重算，
 		// 否则规则会越权放行或误拦（审查 C5）。

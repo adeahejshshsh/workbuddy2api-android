@@ -356,6 +356,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   border: 1px solid var(--warn); background: var(--warn-soft); color: var(--ink);
   font-size: 13px; line-height: 1.5; }
 .admk-bar[hidden] { display: none; }
+/* 红色安全横幅（W5-03 / W5-04）：与上面的「未设管理员密钥」同一形态，但配色走 bad 档
+   —— 这两条是「配置现状本身有风险」，不是「你还差一步」的引导。 */
+.sec-bar { border-color: var(--bad); background: var(--bad-soft); }
 .admk-bar .grow { flex: 1; min-width: 8px; }
 .admk-bar code { padding: 1px 5px; border-radius: 4px; background: rgba(127,127,127,.18); font-size: 12px; }
 /* 生成的明文（issue #172）：密码框在 Android WebView 里既选不中也复制不了，
@@ -948,6 +951,19 @@ body.veil-open { overflow: hidden; }
       <span class="grow"></span>
       <button class="primary" id="btnAdminKey">设置管理员密钥</button>
       <button id="btnAdminKeyLater">稍后</button>
+    </div>
+    <!-- 安全现状横幅（W5-04）：api_key 为空且 require_api_key=true 时只剩回环可用。
+         显示条件由 overview 的 empty_key_only_loopback 决定（app.js renderSecBars）。 -->
+    <div class="admk-bar sec-bar" id="emptyKeyBar" role="alert" hidden>
+      <span>⚠ 当前没有配置 <code>api_key</code>：网关与面板<b>只接受本机回环</b>访问，
+        经反向代理 / 局域网访问会直接 401。请在「配置」页设置 <code>api_key</code> 并重启进程。</span>
+    </div>
+    <!-- 安全现状横幅（W5-03）：at-rest 用内置密钥时，auth 文件等于可离线解密。
+         数据来自 overview 的 at_rest_key（同一份 auth.AtRestKeySource()，不重复实现）。 -->
+    <div class="admk-bar sec-bar" id="atRestBar" role="alert" hidden>
+      <span>⚠ at-rest 加密正在使用<b>源码内置密钥</b>：拿到 <code>auths/</code> 里任意一个文件的人
+        都能离线解出 access/refresh token，等价于拿走账号。请设置环境变量
+        <code>WB_AT_REST_KEY_FILE</code>（或 <code>WB_AT_REST_KEY</code>）后重启。</span>
     </div>
     <div class="topbar">
       <h2 id="ttl">账号池</h2>
@@ -1920,6 +1936,18 @@ body.veil-open { overflow: hidden; }
       <div class="inline">
         <input type="password" id="admkInput2" placeholder="再输一遍" autocomplete="new-password" aria-label="再输一遍管理员密钥">
         <button type="button" class="xs" id="btnAdmkEye2">显示</button>
+      </div>
+
+      <!-- 自举令牌（W3-02）：Android 上回环是跨 App 共享的，只凭「本机访问」就能
+           设置管理员密钥等于把面板交给任意本地 App。令牌只在进程启动时生成一次，
+           写入数据目录下 panel_bootstrap_token（0600），用后即作废。 -->
+      <label class="hint" for="admkToken" style="margin-top:10px">引导令牌（一次性，必填）</label>
+      <div class="inline">
+        <input type="password" id="admkToken" placeholder="bootstrap_token" autocomplete="off" aria-label="管理员密钥自举令牌">
+      </div>
+      <div class="hint">
+        启动日志里「自举令牌已写入 …」那行给出了文件路径（权限 0600），把文件内容复制到这里；
+        宿主 App 会自动填入。令牌设置成功后立即作废，不会进入任何浏览器存储。
       </div>
 
       <!-- 生成的明文（issue #172）：密码框在 WebView 里选不中、复制不了，生成结果必须有

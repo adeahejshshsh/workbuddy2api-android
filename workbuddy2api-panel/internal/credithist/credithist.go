@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -79,6 +80,34 @@ func New(path string, maxEntries int) *Ledger {
 // load 读回快照与流水（无文件 = 空账本，不是错误）。
 func (l *Ledger) load() {
 	if l.path == "" {
+		return
+	}
+	// 类型/大小闸（W5-09）：与 auth.LoadDirReport 同源。此前直接 os.ReadFile：
+	// FIFO 永久阻塞、/dev/zero 符号链接或 GB 级文件直接 OOM。用 Lstat（不跟随
+	// 符号链接）只认普通文件，并设 8MB 上限（2000 条流水的正常文件只有几十 KB）。
+	const maxLedgerBytes = 8 << 20
+	info, statErr := os.Lstat(l.path)
+	if statErr != nil {
+		if !os.IsNotExist(statErr) {
+			log.Printf("[credithist] 读取 %s 失败（从空账本开始）: %v", l.path, statErr)
+		}
+		return
+	}
+	if !info.Mode().IsRegular() {
+		log.Printf("WARN: [credithist] %s 不是普通文件（mode=%s），已跳过加载（保留原文件）",
+			l.path, info.Mode().Type())
+		return
+	}
+	if info.Size() > maxLedgerBytes {
+		// 超限文件先备份再按空账本启动：不备份的话下一次 Observe 会用空账本
+		// 把它原地覆盖，历史彻底消失（与损坏文件同一处置）。
+		if backup := l.backupCorrupt(); backup != "" {
+			log.Printf("WARN: [credithist] %s 超过 %d 字节上限（%d 字节），已备份为 %s 并从空账本开始",
+				l.path, maxLedgerBytes, info.Size(), filepath.Base(backup))
+		} else {
+			log.Printf("WARN: [credithist] %s 超过 %d 字节上限（%d 字节），备份失败，从空账本开始",
+				l.path, maxLedgerBytes, info.Size())
+		}
 		return
 	}
 	raw, err := os.ReadFile(l.path)
@@ -223,7 +252,10 @@ func (l *Ledger) write(raw []byte, seq uint64) {
 	// 落盘内容变成 B 的；rename 失败还只打日志、账本静默停在旧值。
 	// 与 auth.ReplaceAtomic / pool 的落盘同一手法。
 	tmp := fmt.Sprintf("%s.tmp.%d.%d", l.path, os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// W5-06：只 WriteFile+rename 不 fsync，掉电可能留下长度正确、内容全 0 的文件
+	// （rename 的日志先提交、数据块后刷盘），等于丢光积分历史。临时文件必须先
+	// fsync 再 rename，rename 后尽力 fsync 目录（目录项落盘）。
+	if err := writeFileSync(tmp, raw, 0o600); err != nil {
 		log.Printf("[credithist] 写临时文件失败: %v", err)
 		return
 	}
@@ -242,5 +274,47 @@ func (l *Ledger) write(raw []byte, seq uint64) {
 	if renameErr != nil {
 		log.Printf("[credithist] 原子替换失败: %v", renameErr)
 		_ = os.Remove(tmp) // 不留明文临时文件（审查 W2-C2-23 同款口径）
+		return
 	}
+	// 目录 fsync 尽力而为：部分 FS（含 Android 某些分区）返回 EINVAL，
+	// 内容已 fsync 过，不该让调用方以为整次写入失败。
+	if serr := syncDirHook(filepath.Dir(l.path)); serr != nil {
+		log.Printf("[credithist] 目录 fsync 失败（内容已落盘）: %v", serr)
+	}
+}
+
+// syncFileHook / syncDirHook 是 fsync 的间接层（W5-06）：掉电语义无法在单测里
+// 直接观测，只能在用例里钉住「确实调用了 fsync」。生产默认就是 f.Sync()。
+var (
+	syncFileHook = func(f *os.File) error { return f.Sync() }
+	syncDirHook  = func(dir string) error {
+		d, err := os.Open(dir)
+		if err != nil {
+			return err
+		}
+		syncErr := d.Sync()
+		closeErr := d.Close()
+		if syncErr != nil {
+			return syncErr
+		}
+		return closeErr
+	}
+)
+
+// writeFileSync 写临时文件并 fsync（W5-06）。O_EXCL + O_NOFOLLOW：临时名虽唯一，
+// 仍不允许被同机预置的符号链接顶替（与 auth.writeFileSync 同口径）。
+func writeFileSync(path string, raw []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := syncFileHook(f); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }

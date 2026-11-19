@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -90,6 +91,10 @@ type Config struct {
 	Usage *usage.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
 	RequestLog *reqlog.Recorder
+
+	// InstanceIDPath 实例标识文件路径（W6-H-02）。空 = <ConfigPath 同目录>/data/instance_id，
+	// 与 Android 壳的 files/gateway/data/instance_id 同一个文件；两者都空则接口 500。
+	InstanceIDPath string
 
 	// ProbeFile 模型输出上限探测结果文件（scripts/probe_max_tokens.py --panel-out
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
@@ -192,6 +197,36 @@ type Panel struct {
 	// taskLive 实时任务快照与「同一时刻只跑一轮」的闸门（tasklive.go）。
 	// 挂在实例上而不是包级变量：缓存天然随面板实例走，测试之间也不会互相污染。
 	taskLive liveCache
+
+	// routeTable routes() 注册的全部路由（method + 模式），**注册顺序**。
+	//
+	// 为什么要有它（C-01 / W3-01）：敏感接口判定此前是「列举敏感路径」，漏一条就是
+	// 静默放行，而 60 多条路由靠人眼对齐必然漏（实测漏了 12 条写接口）。有了这份
+	// 表，判定与测试都能**遍历注册信息**，而不是维护第二份手写清单：
+	//   - ServeHTTP 的判定改为「查表 → 默认敏感」，未登记路径同样敏感；
+	//   - admin_key_test.go 遍历本表，断言「每条非 GET 都判敏感」。
+	routeTable []panelRoute
+
+	// bootstrapToken 管理员密钥自举的一次性令牌（W3-02）。
+	// 只在进程内存里，用后置空；bootstrapMu 守护它对「读 + 置空」的并发。
+	bootstrapToken string
+	bootstrapMu    sync.Mutex
+
+	// logExportSem 日志导出并发闸门（W3-14）：容量 1，抢不到直接 429。
+	// 导出要把整区间现打包进临时文件，几个并发就能把磁盘与 IO 打满。
+	logExportSem chan struct{}
+
+	// instanceMu/instanceID 实例标识（instance.go）的进程内缓存与生成锁。
+	// 缓存的是「已经读成功或写成功」的值；读失败不缓存，下一次重试。
+	instanceMu sync.Mutex
+	instanceID string
+}
+
+// panelRoute 一条已注册的面板路由。path 是注册模式原文（可能含 {uid} / {$}），
+// 判定时用它查豁免表，路径匹配时按 Go 1.22 ServeMux 的段语义展开。
+type panelRoute struct {
+	method string
+	path   string
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -259,8 +294,13 @@ func New(cfg Config) *Panel {
 		reloadDeleteConfirm: 2,
 		// 容量 8：与余额刷新的上游 QPS 同量级（见 refreshCreditsAsync）。
 		creditRefreshSem: make(chan struct{}, 8),
+		// 容量 1：同一时刻只允许一个日志打包（W3-14）。
+		logExportSem: make(chan struct{}, 1),
 	}
 	p.growthConc.Store(int64(cfg.GrowthConcurrency))
+	// 自举令牌要在面板可服务之前就绪（adminkey.go）：否则首个请求撞上空令牌，
+	// 引导入口会给出「令牌不可用」这种莫名其妙的结果。
+	p.initBootstrapToken()
 	p.routes()
 	return p
 }
@@ -333,110 +373,167 @@ func (p *Panel) withLiveFlags(entries []map[string]any) []map[string]any {
 
 func (p *Panel) Logs() *Ring { return p.logs }
 
+// route 注册一条路由，并把它记进 routeTable（C-01）。
+//
+// 为什么不在每个 handler 上另外标注「是否敏感」：注释会漂移，而注册表不会 ——
+// 只要注册了就一定进表，判定与测试都读同一份数据。pattern 用 Go 1.22 的
+// "METHOD /path" 形态；没有方法前缀时按 GET 记（ServeMux 的默认语义）。
+func (p *Panel) route(pattern string, h http.HandlerFunc) {
+	method, path := http.MethodGet, pattern
+	if i := strings.IndexByte(pattern, ' '); i > 0 {
+		method = strings.ToUpper(strings.TrimSpace(pattern[:i]))
+		path = strings.TrimSpace(pattern[i+1:])
+	}
+	p.routeTable = append(p.routeTable, panelRoute{method: method, path: path})
+	p.mux.HandleFunc(pattern, h)
+}
+
+// matchRoute 在注册表里找同样 method 且路径匹配的路由。
+//
+// 只按**注册信息**匹配，不信任请求里的形态：ServeMux 自己还会做 301 归一
+// （/panel → /panel/），那些请求在这里匹配不到，于是走「默认敏感」的兜底。
+func (p *Panel) matchRoute(method, path string) (panelRoute, bool) {
+	for _, rt := range p.routeTable {
+		if rt.method == method && routePatternMatch(rt.path, path) {
+			return rt, true
+		}
+	}
+	return panelRoute{}, false
+}
+
+// routePatternMatch 按 ServeMux 的段语义匹配一条注册模式。
+//
+// {name} 匹配一个非空段；{$} 只匹配「路径到此为止」（即结尾多一个空段）。
+// 面板没有用 {name...} 通配，出现了也按普通段处理 —— 宁可匹配不上（默认敏感）。
+func routePatternMatch(pattern, path string) bool {
+	ps := strings.Split(strings.TrimPrefix(pattern, "/"), "/")
+	xs := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(ps) != len(xs) {
+		return false
+	}
+	for i, seg := range ps {
+		if seg == "{$}" {
+			return i == len(ps)-1 && xs[i] == ""
+		}
+		if strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}") {
+			if xs[i] == "" {
+				return false
+			}
+			continue
+		}
+		if seg != xs[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *Panel) routes() {
-	p.mux.HandleFunc("GET /panel/{$}", p.index)
-	p.mux.HandleFunc("POST /panel/api/model_hidden", p.setModelHidden)
-	p.mux.HandleFunc("POST /panel/api/model_effort", p.setModelEffort)
-	p.mux.HandleFunc("GET /panel/theme.js", p.themeScript)
-	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
-	p.mux.HandleFunc("GET /panel/api/credit_history", p.creditHistory)
-	p.mux.HandleFunc("GET /panel/api/overview", p.overview)
-	p.mux.HandleFunc("GET /panel/api/logs", p.logsHandler)
+	p.route("GET /panel/{$}", p.index)
+	p.route("POST /panel/api/model_hidden", p.setModelHidden)
+	p.route("POST /panel/api/model_effort", p.setModelEffort)
+	p.route("GET /panel/theme.js", p.themeScript)
+	p.route("GET /panel/app.js", p.appScript)
+	p.route("GET /panel/api/credit_history", p.creditHistory)
+	// 实例身份探针（instance.go）：唯一免鉴权的 API，只回环、只回随机 id。
+	p.route("GET /panel/api/instance", p.instanceInfo)
+	p.route("GET /panel/api/overview", p.overview)
+	p.route("GET /panel/api/logs", p.logsHandler)
 	// 落盘日志按区间导出（zip）：事故复盘「把最近三天发我」不必登设备翻文件。
-	p.mux.HandleFunc("GET /panel/api/logs/export", p.logsExportHandler)
+	p.route("GET /panel/api/logs/export", p.logsExportHandler)
 	// 账号目录热重载（reload.go）：POST 手动对齐一次，GET 看上次结果。
 	// 人工定性是否企业版（覆盖上游自动判定；落 auth 文件）。
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/enterprise", p.accountEnterpriseOverride)
-	p.mux.HandleFunc("POST /panel/api/accounts/reload", p.reloadAccounts)
-	p.mux.HandleFunc("GET /panel/api/accounts/reload", p.reloadStatus)
+	p.route("POST /panel/api/accounts/{uid}/enterprise", p.accountEnterpriseOverride)
+	p.route("POST /panel/api/accounts/reload", p.reloadAccounts)
+	p.route("GET /panel/api/accounts/reload", p.reloadStatus)
 	// 错误观测：把日志环里的 WARN/ERR 按「账号 × 错误类型」聚合（见 errors.go）。
 	// 与日志同源、零新增存储——原始日志里几十行同质 WARN，人眼抓不到真正重要的差异。
-	p.mux.HandleFunc("GET /panel/api/error_summary", p.errorSummary)
-	p.mux.HandleFunc("GET /panel/api/request_metrics", p.requestMetrics)
-	p.mux.HandleFunc("GET /panel/api/request_logs", p.requestLogs)
+	p.route("GET /panel/api/error_summary", p.errorSummary)
+	p.route("GET /panel/api/request_metrics", p.requestMetrics)
+	p.route("GET /panel/api/request_logs", p.requestLogs)
 	// 清空请求事件归档（issue #160）：日志留存归运营自己管，别只能等定期 prune。
-	p.mux.HandleFunc("POST /panel/api/request_logs/clear", p.requestLogsClear)
-	p.mux.HandleFunc("GET /panel/api/models", p.models)
+	p.route("POST /panel/api/request_logs/clear", p.requestLogsClear)
+	p.route("GET /panel/api/models", p.models)
 	// (账号 × 模型) 手动开关：运维显式禁用某账号的某模型（永久语义，仅手动解）。
 	// 与上游触发的临时冷却（6004/11102）正交，且手动优先。
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_toggle", p.modelToggle)
+	p.route("POST /panel/api/accounts/{uid}/model_toggle", p.modelToggle)
 	// 模型规则（面板「模型规则」页）：一批模型的黑/白名单，挂到账号上即刻影响选号。
 	// 与 model_toggle 的手动单点开关并存，两者任一命中都会把该 (账号, 模型) 判为不可用。
-	p.mux.HandleFunc("GET /panel/api/model_rules", p.modelRules)
-	p.mux.HandleFunc("POST /panel/api/model_rules", p.modelRuleSave)
-	p.mux.HandleFunc("POST /panel/api/model_rules/delete", p.modelRuleDelete)
-	p.mux.HandleFunc("POST /panel/api/model_rules/apply", p.modelRuleApply)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_rules", p.accountModelRules)
+	p.route("GET /panel/api/model_rules", p.modelRules)
+	p.route("POST /panel/api/model_rules", p.modelRuleSave)
+	p.route("POST /panel/api/model_rules/delete", p.modelRuleDelete)
+	p.route("POST /panel/api/model_rules/apply", p.modelRuleApply)
+	p.route("POST /panel/api/accounts/{uid}/model_rules", p.accountModelRules)
 	// 手动关闭的模型清单（只读）：原生控制台/脚本据此显示当前开关状态，
 	// 不必先 POST 一次才知道。
-	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/models_off", p.accountModelsOff)
+	p.route("GET /panel/api/accounts/{uid}/models_off", p.accountModelsOff)
 	// 封禁账号探活：只读探测上游是否已解封，不 revive、不参与选号。
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/probe_ban", p.accountProbeBan)
-	p.mux.HandleFunc("POST /panel/api/login/start", p.loginStart)
-	p.mux.HandleFunc("GET /panel/api/login/poll", p.loginPoll)
-	p.mux.HandleFunc("GET /panel/api/login/regions", p.loginRegions)
-	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.importCockpit)
+	p.route("POST /panel/api/accounts/{uid}/probe_ban", p.accountProbeBan)
+	p.route("POST /panel/api/login/start", p.loginStart)
+	p.route("GET /panel/api/login/poll", p.loginPoll)
+	p.route("GET /panel/api/login/regions", p.loginRegions)
+	p.route("POST /panel/api/import/cockpit", p.importCockpit)
 	// 导出凭据：与导入同构，导出的文件可直接粘回「导入 JSON」页签（见 export.go）。
-	p.mux.HandleFunc("GET /panel/api/export/accounts", p.exportAccounts)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.accountRevive)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remark", p.accountRemark)
+	p.route("GET /panel/api/export/accounts", p.exportAccounts)
+	p.route("POST /panel/api/accounts/{uid}/revive", p.accountRevive)
+	p.route("POST /panel/api/accounts/{uid}/remark", p.accountRemark)
 	// 账号分组标签（issue #159）：纯管理维度，落 state.json，供面板按组筛选与组内批量。
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/group", p.accountGroup)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.accountDisable)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.accountPause)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.accountResume)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.accountCheckin)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.accountBalance)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.accountRemove)
-	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.accountTasks)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.accountTaskAccept)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.taskAcceptAll)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.accountTaskClaim)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.accountTaskAuto)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.accountTaskAutoAll)
+	p.route("POST /panel/api/accounts/{uid}/group", p.accountGroup)
+	p.route("POST /panel/api/accounts/{uid}/disable", p.accountDisable)
+	p.route("POST /panel/api/accounts/{uid}/pause", p.accountPause)
+	p.route("POST /panel/api/accounts/{uid}/resume", p.accountResume)
+	p.route("POST /panel/api/accounts/{uid}/checkin", p.accountCheckin)
+	p.route("POST /panel/api/accounts/{uid}/balance", p.accountBalance)
+	p.route("POST /panel/api/accounts/{uid}/remove", p.accountRemove)
+	p.route("GET /panel/api/accounts/{uid}/tasks", p.accountTasks)
+	p.route("POST /panel/api/accounts/{uid}/tasks/accept", p.accountTaskAccept)
+	p.route("POST /panel/api/accounts/{uid}/tasks/accept_all", p.taskAcceptAll)
+	p.route("POST /panel/api/accounts/{uid}/tasks/claim", p.accountTaskClaim)
+	p.route("POST /panel/api/accounts/{uid}/tasks/auto", p.accountTaskAuto)
+	p.route("POST /panel/api/accounts/{uid}/tasks/auto_all", p.accountTaskAutoAll)
 	// 跳过名单 / 尝试型任务开关。任务中心界面已下线，但这个开关仍被 autotask 的
 	// 三个入口（单任务、全部、accept_all）读取：不注册路由时 setAllowAttempt /
 	// skipClear 永远调不到，attemptAllowed() 恒 false，尝试型任务被永久锁死，
 	// 而 409 文案还指向一个不存在的界面。保留为纯 API 入口（可用 curl 开）。
-	p.mux.HandleFunc("GET /panel/api/tasks/skip", p.tasksSkipState)
+	p.route("GET /panel/api/tasks/skip", p.tasksSkipState)
 	// 账号级后台任务作业（上游 taskjobs.go 同路径）：最近一轮全账号 + 单账号最新。
-	p.mux.HandleFunc("GET /panel/api/tasks/jobs", p.taskJobsList)
-	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks/job", p.accountTaskJob)
+	p.route("GET /panel/api/tasks/jobs", p.taskJobsList)
+	p.route("GET /panel/api/accounts/{uid}/tasks/job", p.accountTaskJob)
 	// 实时任务（tasklive.go）：直接向每个启用账号查一次任务表并按 TTL 缓存，供看板
 	// 定时轮询。与 tasks/jobs（后台作业结果）、tasks/scan_all（手动扫描）互补 ——
 	// 那两个都要有人先动一下，这里不需要。
-	p.mux.HandleFunc("GET /panel/api/tasks/live", p.tasksLive)
-	p.mux.HandleFunc("POST /panel/api/tasks/skip", p.tasksSkipState)
+	p.route("GET /panel/api/tasks/live", p.tasksLive)
+	p.route("POST /panel/api/tasks/skip", p.tasksSkipState)
 	// 任务中心/队列链路（issue ISSUE-15）：界面已下线，但四个 handler 一直存在且
 	// 没注册路由 —— 等于整条链路是死代码，而调度器的成长排程又依赖其中的
 	// RunGrowthQueueOnce。这里把 API 挂上（纯 curl 可用，不依赖 UI）。
-	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.tasksScanAll)
-	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.tasksRunQueue)
-	p.mux.HandleFunc("POST /panel/api/tasks/claim_sweep", p.claimSweep)
-	p.mux.HandleFunc("GET /panel/api/queue", p.tasksQueueStatus)
-	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.schoolVouchers)
+	p.route("POST /panel/api/tasks/scan_all", p.tasksScanAll)
+	p.route("POST /panel/api/tasks/run_queue", p.tasksRunQueue)
+	p.route("POST /panel/api/tasks/claim_sweep", p.claimSweep)
+	p.route("GET /panel/api/queue", p.tasksQueueStatus)
+	p.route("GET /panel/api/school/vouchers", p.schoolVouchers)
 	// 运营活动（星巴克等）：批量读进度 + 批量领已达标的奖励。
 	// 只做「读 + 领」——任务本身要客户端真实会话，服务端侧伪造不计数。
-	p.mux.HandleFunc("GET /panel/api/campaign", p.campaignStatus)
-	p.mux.HandleFunc("POST /panel/api/campaign/claim", p.campaignClaim)
-	p.mux.HandleFunc("POST /panel/api/checkin_all", p.checkinAll)
-	p.mux.HandleFunc("POST /panel/api/travel_all", p.travelAll)
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/travel", p.accountTravel)
-	p.mux.HandleFunc("POST /panel/api/activity_all", p.activityAll)
-	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.keepaliveAll)
-	p.mux.HandleFunc("POST /panel/api/balance_all", p.balanceAll)
-	p.mux.HandleFunc("GET /panel/api/packages", p.packages)
-	p.mux.HandleFunc("GET /panel/api/balance_history", p.balanceHistory)
-	p.mux.HandleFunc("POST /panel/api/accounts/add_apikey", p.addAPIKey)
-	p.mux.HandleFunc("GET /panel/api/usage", p.usage)
-	p.mux.HandleFunc("POST /panel/api/usage/save", p.usageSave)
-	p.mux.HandleFunc("GET /panel/api/model_probes", p.modelProbes)
-	p.mux.HandleFunc("GET /panel/api/config", p.getConfig)
-	p.mux.HandleFunc("POST /panel/api/config", p.saveConfig)
+	p.route("GET /panel/api/campaign", p.campaignStatus)
+	p.route("POST /panel/api/campaign/claim", p.campaignClaim)
+	p.route("POST /panel/api/checkin_all", p.checkinAll)
+	p.route("POST /panel/api/travel_all", p.travelAll)
+	p.route("POST /panel/api/accounts/{uid}/travel", p.accountTravel)
+	p.route("POST /panel/api/activity_all", p.activityAll)
+	p.route("POST /panel/api/keepalive_all", p.keepaliveAll)
+	p.route("POST /panel/api/balance_all", p.balanceAll)
+	p.route("GET /panel/api/packages", p.packages)
+	p.route("GET /panel/api/balance_history", p.balanceHistory)
+	p.route("POST /panel/api/accounts/add_apikey", p.addAPIKey)
+	p.route("GET /panel/api/usage", p.usage)
+	p.route("POST /panel/api/usage/save", p.usageSave)
+	p.route("GET /panel/api/model_probes", p.modelProbes)
+	p.route("GET /panel/api/config", p.getConfig)
+	p.route("POST /panel/api/config", p.saveConfig)
 	// 管理员密钥自举（adminkey.go）：不在 panelSensitivePath 里 —— 它的用途恰恰是
 	// 让「还没配 admin_api_key」的部署能把钥匙配进去，否则门锁上、钥匙锁在屋里。
 	// 安全性由「只接受回环 + 已配过即关闭」保证，不靠这把门禁。
-	p.mux.HandleFunc("POST /panel/api/admin_key", p.adminKeyBootstrap)
+	p.route("POST /panel/api/admin_key", p.adminKeyBootstrap)
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
@@ -453,7 +550,28 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, panelMaxBodyBytes)
 	}
-	// 鉴权**默认拒绝**：除三个静态资源外，一切 /panel 请求先验 Bearer，再分发。
+	// 跨站写闸门（W3-03）：非 GET 先验同源与 Content-Type，再进鉴权。
+	//
+	// 为什么两道都要：`api_key` 为空是文档化的部署形态（此时没有任何凭据），
+	// 任意网页都能用 `Content-Type: text/plain` + `mode:'no-cors'` 发一个**简单请求**
+	// —— 浏览器不预检、不回读响应，但请求本身照发：清空账号池、停号、改配置。
+	// 只挡 Origin 不够（老 WebView 不发 Origin 的情况要用 Referer / Sec-Fetch-Site 兜），
+	// 只挡 Content-Type 也不够（表单编码同样是简单请求）。
+	//
+	// 放行原则（别把 curl 用户挡死）：不带 Origin/Referer/Sec-Fetch-Site 的请求
+	// —— curl、脚本、移动端 —— 一律放行，它们本来就不携带浏览器自动凭证。
+	if !panelPublicPath(r.URL.Path) && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if msg := panelCrossSiteDenyReason(r); msg != "" {
+			writeErr(w, http.StatusForbidden, msg)
+			return
+		}
+		if msg := panelContentTypeDenyReason(r); msg != "" {
+			writeErr(w, http.StatusUnsupportedMediaType, msg)
+			return
+		}
+	}
+	// 鉴权**默认拒绝**：除 panelPublicPath 里那几条（静态资源 + 实例探针）外，
+	// 一切 /panel 请求先验 Bearer，再分发。
 	//
 	// 此前是 60 多条路由逐条包 withAuth —— 哪天新增一条忘了包，就是**静默匿名公开**：
 	// 失效方向不安全，而且从代码上看不出来。收到这里之后，「未登记」的语义是 401
@@ -462,9 +580,17 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		key, dedicated := p.apiKey()
 		switch {
 		case key == "":
-			// 全仓「api_key 为空 = 不鉴权」的既有语义（运维有意关掉鉴权时保持可用）。
-			// 注意：此时面板也全开——部署在反代/隧道之后请务必配上 admin_api_key。
-		case !dedicated && panelSensitivePath(r.Method, r.URL.Path):
+			// 空 key 的语义**不在这里自己判**（W5-04）：统一走 httpauth 的开关，
+			// 否则两侧会分叉（server 按 require_api_key 拒绝非回环，面板却全放行）。
+			// AllowEmptyKey()=true（默认）= 既有「没配 key 就不鉴权」；
+			// false = 只放行回环（Android 内嵌形态的全部流量都是回环），
+			// 反代/局域网直接 401 —— 判定只看 RemoteAddr，忽略 X-Forwarded-For。
+			if !httpauth.AllowEmptyKey() && !httpauth.VerifyBearer(r, "") {
+				writeErr(w, http.StatusUnauthorized,
+					"api_key_required：未配置 api_key，当前只接受本机回环访问（请设置 api_key 或改为回环访问）")
+				return
+			}
+		case !dedicated && p.isSensitiveRequest(r.Method, r.URL.Path):
 			writeErr(w, http.StatusForbidden,
 				"admin_key_required：该接口会导出凭据或改写状态，必须用独立的 admin_api_key；"+
 					"当前面板仍在用下游 api_key 当门禁")
@@ -490,16 +616,95 @@ func limitJSONBody(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// panelCrossSiteDenyReason 非 GET 的同源校验（W3-03）。返回空串 = 放行。
+//
+// 判定顺序（浏览器一定会带其中至少一个）：
+//  1. Origin：必须与 r.Host **完全一致**（含端口）—— 只比 host 名会让
+//     http://127.0.0.1:其他端口 的本地页面通过；
+//  2. 无 Origin 但有 Referer：取它的 host 与 r.Host 比；
+//  3. 两者都无：看 Sec-Fetch-Site，same-origin / none 放行，其余拒绝
+//     （拿不到任何可验证信号时，宁可拒绝浏览器发来的跨站写）；
+//  4. 三个头都没有：放行（curl / 脚本 / 移动端原生请求）。
+//
+// 不用 X-Forwarded-* 判断：那是客户端可写的。反代若改写了 Host，面板应当只监听
+// 回环（W6-H-03），此时浏览器发的 Origin 与 Host 自然一致。
+func panelCrossSiteDenyReason(r *http.Request) string {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			return "cross_site_rejected：Origin 无法解析（只接受同源请求）"
+		}
+		if !strings.EqualFold(u.Host, r.Host) {
+			return "cross_site_rejected：跨站写请求被拒绝（Origin " + u.Host + " ≠ " + r.Host + "）"
+		}
+		return ""
+	}
+	if ref := strings.TrimSpace(r.Header.Get("Referer")); ref != "" {
+		u, err := url.Parse(ref)
+		if err != nil || u.Host == "" {
+			return "cross_site_rejected：Referer 无法解析（只接受同源请求）"
+		}
+		if !strings.EqualFold(u.Host, r.Host) {
+			return "cross_site_rejected：跨站写请求被拒绝（Referer " + u.Host + " ≠ " + r.Host + "）"
+		}
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))) {
+	case "", "same-origin", "none":
+		// "" = 非浏览器客户端（curl/脚本）：没有浏览器自动附带的东西，放行。
+		// none = 地址栏直达 / 书签，同源语义。
+		return ""
+	default:
+		return "cross_site_rejected：缺少 Origin/Referer 且 Sec-Fetch-Site=" +
+			r.Header.Get("Sec-Fetch-Site") + "，拒绝跨站写请求"
+	}
+}
+
+// panelContentTypeDenyReason 非 GET 的 Content-Type 白名单（W3-03）。返回空串 = 放行。
+//
+// 只收三种：
+//   - application/json：面板自己的 fetch 全走它；
+//   - 空：无 body 的 POST（例如「暂停/恢复」这类纯路径动作），curl -X POST 也是这种；
+//   - multipart/form-data：账号导入上传（import.go 的 FormData）。
+//
+// 明确拒绝 text/plain 与 application/x-www-form-urlencoded —— 它们与 multipart 一样
+// 都是 CORS「简单请求」，能在不预检的情况下跨站发出；挡掉前两个最常见的形态，
+// 再叠加同源校验，就不存在「网页直接写管理接口」的路径了。
+func panelContentTypeDenyReason(r *http.Request) string {
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if ct == "" {
+		return ""
+	}
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	switch ct {
+	case "application/json", "multipart/form-data":
+		return ""
+	}
+	return "unsupported_media_type：面板写接口只接受 application/json 或 multipart/form-data，收到 " + ct
+}
+
 // withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
 // api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
 // 即用新值（无需重启）。
-// panelPublicPath 免鉴权的静态资源：三个页面本体，不含任何秘密。
+// panelPublicPath 免鉴权的路径：三个页面本体 + 一个只回环的实例身份探针。
 //
-// **只放这三个**。任何新增的 API / 数据接口都必须走鉴权 —— 这里不做前缀匹配，
-// 宁可写死完整路径，避免「/panel/api 前缀一放开就全放开」这类事故。
+// **一张写死的完整路径表**，不做前缀匹配 —— 避免「/panel/api 前缀一放开就全放开」
+// 这类事故。表里除静态资源外只有 /panel/api/instance，它有独立的三条硬约束
+// （只回环 / 只回随机 id / 不回显请求，见 instance.go），是因为壳必须在拿到任何
+// 密钥之前就能调它。新增任何其它 API / 数据接口都必须走鉴权。
 func panelPublicPath(p string) bool {
 	switch p {
 	case "/panel/", "/panel/theme.js", "/panel/app.js":
+		return true
+	case "/panel/api/instance":
+		// 唯一的 API 例外（W6-H-02）：Android 壳要在**拿到任何密钥之前**确认
+		// 「对面是本进程拉起的网关」，否则就只能凭「URL 是 127.0.0.1」把
+		// admin key 注入一个占位进程的页面。它只回一个 32 hex 随机串、只接受
+		// 回环（handler 自己判 RemoteAddr），不回显任何请求参数 —— 不构成
+		// 「数据接口」。新增其它 API 仍然必须走鉴权。
 		return true
 	}
 	return false
@@ -527,35 +732,71 @@ func (p *Panel) apiKey() (key string, dedicated bool) {
 	return p.cfg.APIKey, false
 }
 
-// panelSensitivePath 会**泄漏凭据或改写状态**的接口：没有独立的 admin_api_key 时一律拒绝。
+// panelReadOnlyExempt 只读观测接口的**显式豁免表**（C-01 / W3-01）。
 //
-// 为什么单独列而不是「全部 /panel/api 都要 admin」：既有部署只配了 api_key，把整个面板
-// 一刀切会让人连只读页都打不开；而这些接口正好是 P0 的攻击面（导出全池 RT、改写配置、
-// 增删账号、代登录）。
+// 方向是「默认敏感 + 列举豁免」，而不是此前的「列举敏感 + 默认放行」：后者漏一条
+// 就是静默放行（实测漏了 12 条写接口：model_hidden / model_effort / model_rules* /
+// request_logs/clear / *_all / usage/save，持客户端 key 即可改配置、删规则、清审计）。
+//
+// 入表条件（三条都满足才收）：
+//   - GET：不改任何状态；
+//   - 不导出凭据、不回显密钥、不触发上游动作；
+//   - 不含个人可识别信息以外的运维秘密（uid/积分/用量这类只读观测可以）。
+//
+// 特别注意**不要**往里加：request_logs（含 client_ip / UA）、logs/export（整包审计）、
+// credit_history、config、login/*、accounts/{uid}/* —— 它们要么是审计面、要么可写。
+var panelReadOnlyExempt = map[string]struct{}{
+	"GET /panel/api/overview":        {},
+	"GET /panel/api/logs":            {},
+	"GET /panel/api/models":          {},
+	"GET /panel/api/usage":           {},
+	"GET /panel/api/error_summary":   {},
+	"GET /panel/api/request_metrics": {},
+	"GET /panel/api/model_probes":    {},
+	"GET /panel/api/packages":        {},
+	"GET /panel/api/balance_history": {},
+	"GET /panel/api/queue":           {},
+	"GET /panel/api/tasks/live":      {},
+	"GET /panel/api/school/vouchers": {},
+	"GET /panel/api/campaign":        {},
+}
+
+// panelNonGetExempt 非 GET 的**唯一**豁免：管理员密钥自举入口。
+//
+// 它在「还没有 admin_api_key」时被调用，此时任何基于 admin key 的门禁都只会把
+// 钥匙锁在屋里。它的安全性由 adminkey.go 的**一次性 bootstrap_token** 保证
+// （W3-02），不靠这条门禁 —— 所以这里是白名单上唯一的非 GET 例外，改动必须
+// 同时在 admin_key_test.go 的豁免清单里登记。
+const panelNonGetExempt = "POST /panel/api/admin_key"
+
+// panelSensitivePath 报告一个**已注册**路由是否敏感：没有独立 admin_api_key 时
+// 敏感路由一律 403（只剩客户端 key 的部署也能看只读页）。
+//
+// 实现是纯豁免表查询 —— 默认 true。W3-21 顺手清掉了此前那个
+// `strings.Count(...) >= 0` 的恒真子表达式。
 func panelSensitivePath(method, path string) bool {
-	switch {
-	case strings.HasPrefix(path, "/panel/api/export/"):
-		return true
-	case path == "/panel/api/config": // GET 回显密钥、POST 改写整份配置
-		return true
-	case strings.HasPrefix(path, "/panel/api/import/"):
-		return true
-	case strings.HasPrefix(path, "/panel/api/login/"):
-		return true
-	case strings.HasPrefix(path, "/panel/api/accounts/"):
-		// 账号列表（GET /panel/api/accounts）是只读的；带 uid 的子路径与任何写方法都算敏感。
-		if method != http.MethodGet {
-			return true
-		}
-		return strings.Count(strings.TrimPrefix(path, "/panel/api/accounts/"), "/") >= 0 && strings.TrimPrefix(path, "/panel/api/accounts/") != ""
-	case strings.HasPrefix(path, "/panel/api/campaign/claim"):
-		return true
-	case strings.HasPrefix(path, "/panel/api/admin/"):
-		return true
-	case strings.HasPrefix(path, "/panel/api/tasks/") && method != http.MethodGet:
-		return true
+	if _, ok := panelReadOnlyExempt[method+" "+path]; ok {
+		return false
 	}
-	return false
+	if method+" "+path == panelNonGetExempt {
+		return false
+	}
+	return true
+}
+
+// isSensitiveRequest 是 ServeHTTP 用的判定入口（C-01）：先查**注册表**，再查豁免表。
+//
+// 两步的意义：
+//  1. 未登记的路径（404 / ServeMux 的 301 归一 / 将来新增但忘了登记）一律敏感，
+//     不会因为「没匹配到规则」而落进放行分支；
+//  2. 命中登记后按**注册时的 method + 模式**判，而不是请求里的原始 path ——
+//     请求写 /panel/api/../api/export/accounts 这类花样匹配不上注册表，直接敏感。
+func (p *Panel) isSensitiveRequest(method, path string) bool {
+	if rt, ok := p.matchRoute(method, path); ok {
+		return panelSensitivePath(rt.method, rt.path)
+	}
+	// 未登记：保守判敏感。GET 的静态资源在 panelPublicPath 已经放行，不走这里。
+	return true
 }
 
 // expiringSoonWindow 返回调度器当前生效的快过期路由窗口；测试面板无调度器时返回 0。
@@ -588,6 +829,12 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"version":            p.cfg.Version,
 		"uptime_sec":         int(time.Since(p.started).Seconds()),
 		"auth_required":      authKey != "",
+		// empty_key_only_loopback（W5-04）：空 key 且已开启「只放行回环」——
+		// 前端据此显示红色横幅（反代/局域网会 401，用户得知道）。
+		"empty_key_only_loopback": authKey == "" && !httpauth.AllowEmptyKey(),
+		// at_rest_key（W5-03）：at-rest 密钥来源的**元数据**（不含密钥材料）。
+		// 直接调 auth.AtRestKeySource()，与 /status 是同一个数据源，不重复实现判定。
+		"at_rest_key": auth.AtRestKeySource(),
 		// admin_key_set 面板是否已有独立的管理员密钥。前端据此显示「设置管理员密钥」
 		// 横幅（adminkey.go 的自举入口只在 false 时可用）。
 		"admin_key_set":   panelDedicated,
@@ -616,9 +863,44 @@ func (p *Panel) rescueToday() map[string]int {
 	return p.cfg.RescueToday()
 }
 
+// 日志环分页参数（W3-15）。
+//
+// 前端 5 秒一轮拉全环（500 条 × 每频道），高 QPS 下每轮都是几百 KB 的 JSON
+// 重新序列化 + 一次整表 innerHTML 重建。默认 200 条已远超一屏（面板只渲染可见
+// 的一段），要更早的历史该用 logs/export 拿落盘文件。
+const (
+	logsDefaultLimit = 200
+	logsMaxLimit     = 500
+)
+
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
+//
+// ?limit=N 取**最近** N 条（1..500，缺省 200）；total 是环内总条数，供前端显示
+// 「已显示最近 N / 共 M 条」。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
+	limit := logsDefaultLimit
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeErr(w, http.StatusBadRequest, "limit 需为正整数")
+			return
+		}
+		if n > logsMaxLimit {
+			n = logsMaxLimit
+		}
+		limit = n
+	}
+	entries := p.logs.Snapshot()
+	total := len(entries)
+	if len(entries) > limit {
+		// 环内是时间升序：截尾保留最新的一段。
+		entries = entries[len(entries)-limit:]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries": entries,
+		"total":   total,
+		"limit":   limit,
+	})
 }
 
 // errorSummary 把日志环里的 WARN/ERR 按「账号 × 类型」聚合（见 errors.go）。
@@ -1030,7 +1312,10 @@ func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
 		reason = "面板手动禁用（管理员操作）"
 	}
 	p.cfg.Pool.Disable(uid, reason)
-	log.Printf("panel: disable uid=%s（人工禁用：%s）", uid, reason)
+	// W3-06：reason 来自请求体，原样进日志 = 可以用 \n 伪造整行日志（日志是排障与
+	// 审计的唯一依据），也可以塞几十 MB 把单行撑爆。统一过 sanitizeLogText
+	// （剥 \n/\r + Bearer 脱敏 + 8KB 上限）。
+	log.Printf("panel: disable uid=%s（人工禁用：%s）", sanitizeLogText(uid), sanitizeLogText(reason))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

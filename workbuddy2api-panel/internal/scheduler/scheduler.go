@@ -150,6 +150,11 @@ type Scheduler struct {
 	// probeLoops 只增不减：用例据它断言「重复装配没有起第二个循环」。
 	probeStarted atomic.Bool
 	probeLoops   atomic.Int32
+	// probeLockSkips/probeIdleRounds 窗口探针的「跳过」统计（W4-02）：
+	// 前者=族锁被占用而跳过的次数，后者=整轮零发送（触发硬退避）的轮数。
+	// 只用于节流 WARN（持续跳过意味着锁被长期占用或某条路径漏了 End）。
+	probeLockSkips  atomic.Int64
+	probeIdleRounds atomic.Int64
 	// sweepStarted 补领清扫循环的启动幂等（审查 C7-075），语义同上。
 	sweepStarted atomic.Bool
 	sweepLoops   atomic.Int32

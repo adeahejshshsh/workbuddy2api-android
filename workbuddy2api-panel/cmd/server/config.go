@@ -120,6 +120,17 @@ type Config struct {
 		// 4MB，20MB 原图转 base64 约 27MB），真要更大就显式填一个更大的数。
 		// 用指针而不是 int：0 与"没填"必须可区分（前者是安全上限、后者是默认 64）。
 		MaxBodyMB *int `json:"max_body_mb"`
+		// RequireAPIKey 缺省 true：api_key 为空时**拒绝所有非回环请求**（W5-04）。
+		//
+		// 为什么改默认：旧行为是 api_key 为空 = 全开，而 APK 出厂配置与大量自托管
+		// 部署根本没配 key —— /v1/*、/v1/models、/status 与整个面板对任何能连上
+		// 端口的人开放（同设备任意 App / 反代后的公网）。httpauth.SetAllowEmptyKey
+		// 这个闸口此前在生产代码零调用点（死代码），本条把它接上。
+		//
+		// 保留 true 时的回环豁免：Android 内嵌与单机自托管流量全部来自 127.0.0.1，
+		// 连本机也拒会让「漏配 key」变成服务不可用。要完全关掉鉴权（旧行为）显式
+		// 设 false，启动日志会打 WARN。
+		RequireAPIKey bool `json:"require_api_key"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -632,6 +643,8 @@ func Default() *Config {
 	c.Thinking.ClientPriority = true
 	c.Thinking.OverrideScope = "level"
 	c.Server.ReadTimeout = "300s"
+	// W5-04：默认失败关闭（非回环必须带 key）。显式 false 才回到旧的全开行为。
+	c.Server.RequireAPIKey = true
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
@@ -912,6 +925,11 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_API_KEY"); v != "" {
 		c.APIKey = v
+	}
+	if v := os.Getenv("WB2A_REQUIRE_API_KEY"); v != "" {
+		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			c.Server.RequireAPIKey = b
+		}
 	}
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		c.AuthDir = v

@@ -985,6 +985,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 注释行（`:` 开头）例外：它本身就是合法的事件帧（心跳），且「整条流只有心跳按空流
 	// 处理」是既有契约（TestStreamEmptyFramesCase 钉住），不能被这次改动带偏。
 	var sseMeta []string
+	// sseMetaBytes 已缓冲元数据行的字节数（含行尾 \n），与 sseMetaMaxBytes 配对。
+	var sseMetaBytes int
 	// writeMeta 输出缓冲的元数据行。terminate=true 时补一个空行**结束当前事件**
 	// （只有流尾「有 event 但没有 data」时才需要；接 data 行的场合不能补，否则
 	// 元数据行与 data 行被空行拆成两个事件 —— 那正是 D2 要修的病）。
@@ -1004,6 +1006,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			committed = true
 		}
 		sseMeta = sseMeta[:0]
+		sseMetaBytes = 0
 		return nil
 	}
 	writeOut := func(payload string) error {
@@ -1016,7 +1019,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		if werr := writeMeta(false); werr != nil { // 帧内元数据行与 data 同属一个事件
 			return werr
 		}
-		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
+		// 审查 W1-04：多行 payload 必须逐行带 `data: ` 前缀（见 writeDataEvent）。
+		if werr := writeDataEvent(w, payload); werr != nil {
 			return clientWriteErr(werr)
 		}
 		wroteAny = true
@@ -1181,6 +1185,14 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			return []map[string]any{obj}
 		}
 		var calls []MarkupCall
+		// 审查 W1-19：这里曾用 `emit, got := repair.Feed(txt)` —— `emit` 遮蔽了外层
+		// 的 emit 闭包（写帧函数）。虽然当前作用域内只当字符串用、行为正确，但任何
+		// 后续在这段里补一句「失败就走 emit(...)」都会静态报错或误写成字符串拼接。
+		// 改成预先声明 + `=`，名字也改成与语义一致的 visible（可见正文）。
+		var (
+			visible string
+			got     []MarkupCall
+		)
 		for _, ci := range chs {
 			c, ok := ci.(map[string]any)
 			if !ok {
@@ -1194,12 +1206,12 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			if !ok || txt == "" {
 				continue
 			}
-			emit, got := repair.Feed(txt)
+			visible, got = repair.Feed(txt)
 			calls = append(calls, got...)
-			if emit == "" {
+			if visible == "" {
 				delete(d, "content")
 			} else {
-				d["content"] = emit
+				d["content"] = visible
 			}
 		}
 		if len(calls) == 0 {
@@ -1377,19 +1389,24 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		hb = newHeadHeartbeat(br, o.headKeepalive)
 		defer hb.stop()
 	}
-	heartbeat := func() {
+	// heartbeat 写一条注释帧；返回 false = 客户端已断开。
+	//
+	// 审查 W1-05：返回值会一路传到 headHeartbeat.readLine，让等待上游首帧的协程
+	// 立刻收手（此前只置 hbDead，等待仍在继续）。
+	heartbeat := func() bool {
 		if hbDead {
-			return
+			return false
 		}
 		if _, werr := io.WriteString(w, ": keepalive\n\n"); werr != nil {
 			hbDead = true
-			return
+			return false
 		}
 		committed = true // 头已随这次写发出（审查 D6）
 		// 只能直接 Flush：辅助协程此刻可能正在读 br，flushIfDrained 会去碰 br。
 		if fl != nil {
 			fl.Flush()
 		}
+		return true
 	}
 readLoop:
 	for {
@@ -1474,7 +1491,27 @@ readLoop:
 				committed = true
 			} else {
 				// event: / id: / retry: —— 与随后的 data 行同属一个事件，先缓冲（审查 D2）。
-				sseMeta = append(sseMeta, trimmed)
+				//
+				// 审查 W1-03：这里有**两个上限**。这些行只追加、只在 writeMeta 清空，
+				// 上游只要连发 event:/id: 而不发 data，缓冲就无上限增长（单行 8MB，
+				// 万行 80GB；Go OOM 是进程级）。超限时先把已缓冲的行刷成一个事件帧
+				// 再追加本行 —— 字节不丢，只是拆成多个事件。
+				if len(sseMeta) > 0 && (len(sseMeta) >= sseMetaMaxLines ||
+					sseMetaBytes+len(trimmed)+1 > sseMetaMaxBytes) {
+					if werr := writeMeta(true); werr != nil {
+						return werr
+					}
+				}
+				if len(trimmed)+1 > sseMetaMaxBytes {
+					// 单行就吃掉整个预算：不缓冲，直接单独成帧写出（仍不吞字节）。
+					if _, werr := io.WriteString(w, trimmed+"\n\n"); werr != nil {
+						return clientWriteErr(werr)
+					}
+					committed = true
+				} else {
+					sseMeta = append(sseMeta, trimmed)
+					sseMetaBytes += len(trimmed) + 1
+				}
 			}
 			// 注释/心跳行同样只在缓冲读空时 flush（与 data 帧同一条理由：
 			// 成批到达时逐行 flush 是纯系统调用开销）。
@@ -1560,6 +1597,13 @@ readLoop:
 	// 上游读错误（流中途断）：补一帧 error 再补 [DONE]。客户端因此能区分
 	// 「说完了」与「说到一半上游断了」，不会把半截答案当完整答案。
 	if readErr != nil {
+		// 审查 W1-05：首帧心跳窗口内客户端断开（心跳写不出去）走**客户端写失败**口径。
+		// 上游一个字节都没坏，不能按 errUpstreamRead 记账号故障；连接也已经没了，
+		// 更不该再往里补 error 帧/[DONE]（写了只会再失败一次）。直接返回 errClientWrite，
+		// handler 据此记 Interrupted + NoteSuccess，账号不被降权。
+		if isHeadClientGone(readErr) {
+			return clientWriteErr(readErr)
+		}
 		// 一个字节都没发就断：此时响应头还没发出（committed=false），**不写** error 帧与
 		// [DONE]——那会把 200 钉死，白白放弃换号重试的机会。交给调用方决定：换号
 		// 重试，或回一个正经的 502 JSON（见 ErrStreamBrokeBeforeFlush）。

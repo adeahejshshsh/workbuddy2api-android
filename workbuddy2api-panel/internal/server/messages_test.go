@@ -531,19 +531,25 @@ func TestMessagesEndpointStream(t *testing.T) {
 }
 
 func TestMessagesEndpointStreamErrorBeforeSSE(t *testing.T) {
+	// W2-08 更新断言：首帧之前就失败（零字节）时必须回真实 HTTP 状态，而不是
+	// 200 + SSE error。旧断言钉的正是被修掉的错误行为：Claude Code 只看得到 200，
+	// 退避重试永远不会触发。
 	h := NewHandler(Config{Pool: pool.New(""), Upstream: &upstream.Client{}})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"glm-5.2","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}`))
 	h.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("code=%d want 200 SSE", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d want 503（首帧前失败应回真实状态码）body=%s", rec.Code, rec.Body.String())
 	}
-	types := sseTypes(rec.Body.String())
-	if !containsStr(types, "error") {
-		t.Fatalf("types=%v body=%s", types, rec.Body.String())
+	if strings.Contains(rec.Header().Get("Content-Type"), "event-stream") {
+		t.Fatalf("不该是 SSE：ct=%s body=%s", rec.Header().Get("Content-Type"), rec.Body.String())
 	}
-	if containsStr(types, "message_stop") {
-		t.Fatalf("failed stream must not stop cleanly: %v", types)
+	var obj map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &obj); err != nil {
+		t.Fatalf("错误体不是 JSON: %v body=%s", err, rec.Body.String())
+	}
+	if _, ok := obj["error"]; !ok {
+		t.Fatalf("应是 Anthropic 错误体：%s", rec.Body.String())
 	}
 }
 

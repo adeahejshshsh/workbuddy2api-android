@@ -174,7 +174,10 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		return h.cfg.Live.Load()
 	}
 	return livecfg.Snapshot{
-		APIKey:           h.cfg.APIKey,
+		APIKey: h.cfg.APIKey,
+		// W2-01：fallback 结构必须带上 AdminAPIKey。漏了它时 withAdminAuth 每请求
+		// 都读到空串，配了 admin_api_key 的裸用路径（Live == nil）会退回客户端 key。
+		AdminAPIKey:      h.cfg.AdminAPIKey,
 		SoftCooldown:     h.cfg.SoftCooldown,
 		RecordClientInfo: h.cfg.RecordClientInfo,
 		RecordContext:    h.cfg.RecordContext,
@@ -502,16 +505,29 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // withAdminAuth 运维面鉴权：配了 admin_api_key 就只认它（客户端那把 key 一律拒绝），
-// 没配则回退 withAuth 保持旧行为。
+// 没配则回退 APIKey 保持旧行为。
 //
 // 回退而不是「强制要求 admin key」：既有部署里 /status 一直用主 key 调，直接改成
 // 强制会静默打断脚本；而配了 admin key 的人显然想要隔离。
+//
+// W2-01/02：密钥必须**每请求**从 live 快照读，不能在构造期捕获。
+//   - 构造期捕获时，未配 admin key 的部署永远走客户端 key 回退，于是任一持客户端
+//     key 者都能读 /status 的整池 uid/昵称/积分并触发 7 类排程任务；
+//   - 面板「设置管理员密钥」只更新 live 快照（main.go 的 live.Store），构造期闭包
+//     拿的还是旧值 —— 面板显示「已生效」，旧 key 在 server 侧却仍然有效。
 func (h *Handler) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
-	adminKey := h.cfg.AdminAPIKey
-	if adminKey == "" {
-		return h.withAuth(next)
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		live := h.loadLive()
+		adminKey := live.AdminAPIKey
+		if adminKey == "" {
+			// 旧部署回退：也走每请求的 live 快照，保证 api_key 热轮换同样生效。
+			if !httpauth.VerifyBearer(r, live.APIKey) {
+				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+				return
+			}
+			next(w, r)
+			return
+		}
 		if !httpauth.VerifyBearer(r, adminKey) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key",
 				"this endpoint requires the admin api key")
@@ -559,6 +575,10 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 // 已知偏差（沿用上游实现，不影响本仓使用）：
 //   - available_accounts 不按 realm 过滤，恒为全池健康数
 //   - 未配置 APIKey 时回 401，与 withAuth 的放行语义不同（本仓生产始终配置 key）
+//
+// W5-04 口径说明：这里是**失败关闭**的显式拒绝（不是「key == "" 就放行」的
+// fail-open 分支），保留原行为；空 key 的放行语义只由 withAuth/withAdminAuth/
+// messages 这些走 httpauth.VerifyBearer 的路径决定。
 func (h *Handler) capacity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if strings.TrimSpace(h.loadLive().APIKey) == "" {
@@ -585,6 +605,10 @@ func (h *Handler) capacity(w http.ResponseWriter, r *http.Request) {
 		"available_accounts":       poolAvailable,
 	})
 }
+
+// atRestKeySource 是 auth.AtRestKeySource 的测试接缝：/status 的三态（builtin/
+// env/file）不需要真的改进程环境变量就能覆盖。生产路径恒等于 auth.AtRestKeySource。
+var atRestKeySource = auth.AtRestKeySource
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	total, healthy, cooling, disabled, inFlightFull := h.cfg.Pool.CountsDetailed()
@@ -621,6 +645,15 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		// credits_raw 才是快照」这个语义差别，于是又算回死钱。零回归只增键。
 		"credits":    h.poolCreditsSummary(),
 		"redis_mode": redisMode,
+		// W5-03：at-rest 加密密钥来源（builtin/env/file），只暴露来源标识，
+		// **不含密钥本身**。builtin = 用的是公开源码里的固定密钥，等于「加密=混淆」，
+		// 运维/面板必须能一眼看到（面板据此显示红字）。
+		"at_rest_key":         atRestKeySource().Source,
+		"at_rest_key_builtin": atRestKeySource().Builtin,
+		"at_rest_key_detail":  atRestKeySource().Detail,
+		// W5-04：require_api_key = 空 api_key 是否被拒绝（失败关闭）。
+		// 与面板前端约定同名；默认 false（未配 key 的老部署保持放行）。
+		"require_api_key": !httpauth.AllowEmptyKey(),
 		// model_locks 当前有未过期模型级限流的 (域, 模型) 全清单：账号池视图回答
 		// 「哪些号不能用」，本键回答「哪些模型不能用、锁了几个号、还要锁多久」。
 		// 与 ModelBlocked（请求失败时的单模型判定）互补；无锁时为 null。零回归只增键。
@@ -978,6 +1011,13 @@ func (h *Handler) modelHidden(realm, bare string) bool {
 }
 
 func (h *Handler) modelList() []map[string]any {
+	// W2-13：modelList 会直接解引用 h.cfg.Upstream（ContextWindowListingV4 /
+	// MaxOutputTokensListingV4 / FetchGlobalModelInfos），而 NewHandler 允许
+	// Upstream == nil（只挂 MCP/面板的进程、单测）。同文件 generationModelEntries
+	// 早有同样的 nil 保护，这里补齐——否则 /v1/models 与 /v2/chat/busy 直接 panic。
+	if h.cfg.Upstream == nil {
+		return []map[string]any{}
+	}
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
 		// 账号等级闸门：该域**每个**号都已知用不了该模型 → 不列出（避免客户端挑中必失败）。
@@ -1342,6 +1382,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+	// W2-07：日志专用副本（剥控制字符 + 长度上限）。客户端可控的 model 名直接进
+	// log.Printf 时，"\n" 能伪造日志行、几十 MB 的名字能刷爆日志；业务值
+	// （peek.Model/bareModel）保持原样，别名解析与出站重写都不受影响。
+	logName := logModel(peek.Model)
 	// 裸名（没有任何 realm 前缀）—— 末端要用它把「裸名只路由 cn」讲清楚（bug 3）
 	// 黑名单点名拒绝（上游 PR #225）：/v1/models 已隐藏，但客户端可能硬编码模型名。
 	// 给 400 + model_unavailable（换模型才有用），不换号、不罚号。
@@ -1363,7 +1407,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					body = nb
 					realm, bareModel = resolveModel(target)
 					aliasEcho = peek.Model
-					log.Printf("INFO: [server] model alias applied: %s -> %s", peek.Model, target)
+					log.Printf("INFO: [server] model alias applied: %s -> %s", logName, logModel(target))
 				}
 			}
 		}
@@ -1429,7 +1473,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return false
 		}
 		fallbackTried[to] = true
-		log.Printf("model fallback: %s -> %s (6004 model rate limit, uid pending)", curModel, to)
+		log.Printf("model fallback: %s -> %s (6004 model rate limit, uid pending)", logModel(curModel), logModel(to))
 		curModel = to
 		// 请求记录要能区分「请求的模型」与「实际用的模型」：不记这一位，面板上
 		// 明明成功了却显示原模型，6004 降级这条路径在事后完全不可见。
@@ -1461,10 +1505,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 「连接僵死」自行放弃（线上实测四次零内容中断全落在 3.46~4.09s）。
 	// 放在轮转循环之前：选号/建请求这段空窗也一起覆盖；写过注释后响应头已提交，
 	// 后续错误由 writeOpenAIError* 的「已提交」分支降级成协议内 error 帧。
-	if h.cfg.HeadKeepalive > 0 && peek.Stream {
-		// 只套一层「是否已提交」的记录器；注释帧本身由 upstream.StreamHint 在**同一个协程**里
-		// 写（见 upstream/headkeepalive.go）——不另起协程碰 ResponseWriter。
-		w = &sseCommitWriter{ResponseWriter: w}
+	// W2-08：流式请求一律套一层「首帧否决」记录器（不只是开了 head_keepalive 时）。
+	// 首个完整 SSE 事件若就是上游 error 帧，在零字节提交的前提下把它扣住，交给
+	// 下方 errFrame 分支回真实 HTTP 状态码；非 error 首帧原样直写，延迟不变。
+	// 注释帧（head keepalive）本身也是完整事件，照旧立即提交 —— 它存在的前提就是
+	// 「客户端已经等太久」，不能为了保留否决窗口把保活也扣掉。
+	if peek.Stream {
+		w = &sseCommitWriter{ResponseWriter: w, vetoFirstFrame: true}
 	}
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
@@ -1778,7 +1825,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//
 	// 救援方式：把请求改成 tool_choice=required 重发一次。只有改得动（客户端没把
 	// 工具关掉、也没钉死某个函数）才值得扣帧等待 —— 否则重发就是原样再撞一次。
-	_, canForceTools := forceToolChoiceRequired(body)
+	// W2-09：这里只要「改不改得动」，不要改写后的 body —— 用判定版避免把整份
+	// body 再解一遍、序列化一遍（旧代码 `_, canForceTools := force...` 丢弃结果
+	// 却仍付出一次全量 marshal）。
+	canForceTools := canForceToolChoiceRequired(body)
 	// 客户端原发的 tool_choice 短标签（空串 = 没发，默认 auto）：静默回合 WARN 用它
 	// 判断「是不是客户端自己把工具关了」。必须在 body 被救援改写前取。
 	clientToolChoice := toolChoiceLabel(body)
@@ -1826,7 +1876,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if !slotWaited && h.cfg.Pool.SlotWaitForRealm(curModel, realm) {
 				slotWaited = true
 				log.Printf("slot-wait: model=%s realm=%q all healthy accounts at in-flight cap, waiting up to %s then retry once (issue #117)",
-					bareModel, realm, busyWaitCap)
+					logName, realm, busyWaitCap)
 				if !waitForSlot(r.Context(), h.cfg.Pool, curModel, realm) {
 					break // 客户端已断连：不必再等
 				}
@@ -1838,7 +1888,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// **先报 503、根本走不到降级**，恰好在最需要降级的场景（全池被限流）失效。
 			// 故在「选不到号」时也尝试换模型：锁定等值模型后重新进入下一轮选号。
 			if to := fallbackTo(); to != "" {
-				log.Printf("model fallback: %s -> %s (no account for model, 6004 blocked)", curModel, to)
+				log.Printf("model fallback: %s -> %s (no account for model, 6004 blocked)", logModel(curModel), logModel(to))
 				if applyFallback(to) {
 					continue
 				}
@@ -1926,7 +1976,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 客户端取消而上游还没回响应头，说明客户端的耐心比上游 TTFB 短，
 				// 网关这边再改超时也没用（要改的是客户端，或换更快的模型/线路）。
 				log.Printf("INFO: [server] chat acct=%s model=%s: 客户端在 %s 后取消（上游尚未回响应头）→ 记 Interrupted，不罚号",
-					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel,
+					logfmt.Label(acct.UID, acct.NicknameValue()), logName,
 					time.Since(attemptStarted).Round(time.Millisecond))
 				break
 			}
@@ -2015,7 +2065,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						delete(tried, acct.UID)
 						bareModel = savedBare // 冷却记账口径不变，仅 curModel 改了
 						releaseHeld()
-						log.Printf("model fallback: %s -> %s (6004 model rate limit, uid=%s)", savedBare, to, acct.UID)
+						log.Printf("model fallback: %s -> %s (6004 model rate limit, uid=%s)", logModel(savedBare), logModel(to), acct.UID)
 						continue
 					}
 				}
@@ -2193,7 +2243,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						d = h.cfg.BusyWaitMax
 					}
 					log.Printf("queue-wait: model=%s realm=%q upstream 6020 queued (retry_after=%s), waiting %s then retry once",
-						bareModel, realm, uerr.RetryAfter.Round(time.Millisecond), d.Round(time.Millisecond))
+						logName, realm, uerr.RetryAfter.Round(time.Millisecond), d.Round(time.Millisecond))
 					if !sleepCtx(r.Context(), d) {
 						break // 客户端已断连：不必再等
 					}
@@ -2263,6 +2313,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}), opts...)
+			// W2-08：首事件若始终没成形（零帧/半截元数据），丢掉缓冲并解除否决，
+			// 下面的空流/断流分支才能回真实 HTTP 错误而不是写进 pending 里消失。
+			if cw, ok := w.(*sseCommitWriter); ok {
+				cw.Settle()
+			}
 			switch {
 			case upstream.IsSilentEmptyTurn(sErr):
 				// 模型既没说话也没调工具就收尾，而客户端一个字节都没收到（扣帧生效）。
@@ -2288,7 +2343,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = ""
 				st.ttfb = 0
 				log.Printf("WARN: [server] stream acct=%s model=%s: silent stop with %d declared tool(s), zero content → retry once (tool_choice=required: %v)",
-					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, len(declaredTools), forced)
+					logfmt.Label(acct.UID, acct.NicknameValue()), logName, len(declaredTools), forced)
 				continue
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
@@ -2299,7 +2354,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 502 观测没有意义）。
 				st.status = http.StatusBadGateway
 				st.outcome = reqlog.OutcomeStreamError
-				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.NicknameValue()), bareModel)
+				// W2-08：首帧否决窗口内一个字节都没提交，就不必再伪装成 200 流——
+				// 直接回正经 502 JSON，客户端按状态码重试。
+				if cw, ok := w.(*sseCommitWriter); ok && !cw.Committed() {
+					cw.DisarmVeto()
+					w.Header().Del("Cache-Control")
+					w.Header().Del("Connection")
+					w.Header().Del("X-Accel-Buffering")
+					writeOpenAIError(w, http.StatusBadGateway, "upstream_parse",
+						"upstream returned an empty stream (200 with zero frames)")
+				}
+				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.NicknameValue()), logName)
 			case errFrame != "":
 				// 上游以 error 帧报错（6004 限流 / 内容拦截 / 审核）：按帧内容分类并
 				// 处置账号——**不记成功、不清 11102 负缓存、不绑粘性**。此前这些动作
@@ -2318,23 +2383,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 同口径：错在请求，换任何账号都是同一个拒绝，账号健康、前缀缓存还热着
 				// ——只释放租约、不解绑会话（同 failKeepBinding 的既有理由），观测归 400。
 				//
-				// 客户端侧的状态码在这里改不动：本仓没有上游的 HeadVetoError 那套首帧
-				// 否决（见 continue_glued_test.go 头注释），StreamHint 是「先写帧、后回调
-				// 观察者」，error 帧此刻已经落进 200 的流里。所以这一分支能做的是把
-				// 「请求级」这个事实落到实处：不记账号故障、不解绑、观测标 400，并且
-				// 由 FrameKind 的正确分类让 error 帧带上点名 tools 的 gateway_hint
-				// （见 upstream.GatewayHint 的 ErrBadParams 分支），客户端因此知道该改
-				// 请求而不是重试。
-				//
-				// 与 HTTP ≥400 分支的差异只有一处：那里 ErrBadParams/ErrEmptyContent 仍走
-				// fail（解绑）。语义上两者都属请求级、都不该解绑，但那条出口不在本次改动
-				// 范围（避免同时动两个出口），这里按「请求级一律 failKeepBinding」收口。
+				// W2-08 首帧否决：sseCommitWriter 在「首个完整事件就是 error 帧」时会
+				// 把它扣下（零字节提交）。此时可以直接回真实 HTTP 状态码——429/400/503
+				// 不再被改写成「200 + SSE error」，Claude Code / Codex 按状态码做的退避
+				// 重试因此重新生效。若已经写过正常帧（中途报错），保持既有语义：状态码
+				// 已不可改，只能在 200 的流里写 error 帧。
+				var cw *sseCommitWriter
+				if k, ok := w.(*sseCommitWriter); ok {
+					cw = k
+				}
+				vetoed := false
+				if cw != nil {
+					_, vetoed = cw.Vetoed()
+				}
+				vetoMsg := briefBodyOr(errFrame, "upstream returned an error before any content")
+				vetoHint := h.hintOf(kind, errFrame, bareModel, reqHasImage, nil)
 				if code, requestLevel := requestErrorCodes[kind]; requestLevel {
 					failKeepBinding(acct.UID)
 					st.status = http.StatusBadRequest
 					st.outcome = reqlog.OutcomeStreamError
+					if vetoed {
+						cw.DisarmVeto()
+						w.Header().Del("Cache-Control")
+						w.Header().Del("Connection")
+						w.Header().Del("X-Accel-Buffering")
+						writeOpenAIErrorHint(w, http.StatusBadRequest, code, vetoMsg, vetoHint)
+					}
 					log.Printf("WARN: [server] stream acct=%s model=%s: request-level error frame kind=%s code=%s payload=%s (request's own error, account healthy, binding kept)",
-						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, kind, code, logfmt.Truncate(errFrame, 200))
+						logfmt.Label(acct.UID, acct.NicknameValue()), logName, kind, code, logfmt.Truncate(errFrame, 200))
 				} else {
 					// 粘性必须解绑（报告 #3）：这一跳以 error 帧收尾，若策略是零动作
 					// （ErrNone/ErrClient/内容拦截），账号侧既不罚也不记，粘性仍钉在刚
@@ -2342,8 +2418,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					fail(acct.UID)
 					st.status = http.StatusServiceUnavailable
 					st.outcome = reqlog.OutcomeStreamError
+					if vetoed {
+						// 账号级/限流级错误：真实状态码让客户端知道「该等」还是「该换」。
+						st.status = vetoStatusForKind(kind)
+						cw.DisarmVeto()
+						w.Header().Del("Cache-Control")
+						w.Header().Del("Connection")
+						w.Header().Del("X-Accel-Buffering")
+						writeOpenAIErrorHint(w, st.status, "upstream_error", vetoMsg, vetoHint)
+					}
 					log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
-						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, kind, logfmt.Truncate(errFrame, 200))
+						logfmt.Label(acct.UID, acct.NicknameValue()), logName, kind, logfmt.Truncate(errFrame, 200))
 				}
 			case sErr != nil:
 				if upstream.IsClientWriteError(sErr) {
@@ -2369,7 +2454,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					cont.Close()
 					if i+1 < h.cfg.MaxRotate {
 						log.Printf("WARN: [server] stream acct=%s model=%s: upstream broke before first frame after %s (no bytes sent) → retry on another account (%d/%d)",
-							logfmt.Label(acct.UID, acct.NicknameValue()), bareModel,
+							logfmt.Label(acct.UID, acct.NicknameValue()), logName,
 							time.Since(attemptStarted).Round(time.Millisecond), i+1, h.cfg.MaxRotate)
 						// 本次尝试什么都没送达：观测复位，让请求流水行反映最终真正服务的那次
 						// （否则 status/outcome 会停在这笔失败的 502 上，看着像整轮都失败）。
@@ -2383,7 +2468,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					st.status = http.StatusBadGateway
 					st.outcome = reqlog.OutcomeStreamError
 					log.Printf("WARN: [server] stream acct=%s model=%s: upstream broke before first frame, retries exhausted (%d): %v",
-						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, h.cfg.MaxRotate, sErr)
+						logfmt.Label(acct.UID, acct.NicknameValue()), logName, h.cfg.MaxRotate, sErr)
 					// 清掉 StreamHint 设的 SSE 头（它们还没被发出，可以撤）
 					w.Header().Del("Cache-Control")
 					w.Header().Del("Connection")
@@ -2401,7 +2486,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					st.outcome = reqlog.OutcomeStreamError
 					h.cfg.Pool.NoteFailures(acct.UID)
 					log.Printf("WARN: [server] stream acct=%s model=%s: upstream read error after %s (frames=%d): %v",
-						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel,
+						logfmt.Label(acct.UID, acct.NicknameValue()), logName,
 						time.Since(attemptStarted).Round(time.Millisecond), stats.Frames(), sErr)
 				}
 			default:
@@ -2437,12 +2522,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 修复命中：上游本来会把工具调用吐成正文标记，这里已还原成 tool_calls。
 				// 打一行便于运维确认「这次不再空转」以及统计发生率。
 				log.Printf("INFO: [server] stream acct=%s model=%s: repaired %d native tool call(s) from assistant text (tool names known=%d)",
-					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, n, len(declaredTools))
+					logfmt.Label(acct.UID, acct.NicknameValue()), logName, n, len(declaredTools))
 			} else if m := repair.Seen(); m > 0 {
 				// 识别到标记却没还原：说明判定没过（工具名不合规 / 块内夹带正文 /
 				// 参数畸形）。单独记一行，排障时能一眼区分「没识别到」与「识别到但拒绝」。
 				log.Printf("WARN: [server] stream acct=%s model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
-					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, m, len(declaredTools))
+					logfmt.Label(acct.UID, acct.NicknameValue()), logName, m, len(declaredTools))
 			}
 			// issue #44：声明了 tools 却拿到 finish_reason=stop 且全流零 tool_calls ——
 			// 上游把这个形态当正常收尾，客户端据此认为回合完成、工具一次没跑，用户
@@ -2468,7 +2553,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				log.Printf("%s: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (content=%dB tool_choice=%q; %s)",
 					// 昵称走加锁读取器（W1A3-02）：面板同步昵称会在 a.mu 内改写该字段，
 					// 裸读昵称字段与写锁竞争（-race 必报），此前这里是包内唯一的无锁读点。
-					level, logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, len(declaredTools),
+					level, logfmt.Label(acct.UID, acct.NicknameValue()), logName, len(declaredTools),
 					stats.ContentBytes(), clientToolChoice, note)
 			}
 			// 工具面观测量（issue #44）：归档里能按模型/账号聚合出「零工具收尾」的
@@ -2520,18 +2605,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						}
 						resp = resp2
 						log.Printf("INFO: [starved] non-stream acct=%s model=%s: 预算被思考吃光（正文 0B）→ 同额度关思考重发成功",
-							logfmt.Label(acct.UID, acct.NicknameValue()), bareModel)
+							logfmt.Label(acct.UID, acct.NicknameValue()), logName)
 					} else {
 						rc2.Close()
 						log.Printf("WARN: [starved] non-stream acct=%s model=%s: 重发聚合失败: %v",
-							logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, e3)
+							logfmt.Label(acct.UID, acct.NicknameValue()), logName, e3)
 					}
 				} else {
 					if rc2 != nil {
 						rc2.Close()
 					}
 					log.Printf("WARN: [starved] non-stream acct=%s model=%s: 关思考重发失败（status=%d err=%v）→ 保留原截断响应",
-						logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, st2, e2)
+						logfmt.Label(acct.UID, acct.NicknameValue()), logName, st2, e2)
 				}
 			}
 		}
@@ -2549,7 +2634,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.applyErrorPolicy(acct.UID, kind, ef.Payload, bareModel, uerr)
 				fail(acct.UID)
 				log.Printf("WARN: [server] non-stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
-					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, kind, logfmt.Truncate(ef.Payload, 200))
+					logfmt.Label(acct.UID, acct.NicknameValue()), logName, kind, logfmt.Truncate(ef.Payload, 200))
 				// 请求级错误：换任何号都是同一个审核/同一个超限/同一份非法 body，
 				// 轮转只会把无效请求放大 MaxRotate 倍，立即终止交给末端映射。
 				stop := false
@@ -2575,7 +2660,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusServiceUnavailable
 				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, err)
 				log.Printf("WARN: [server] non-stream upstream timeout acct=%s model=%s: %v (rotation stopped, account not penalized)",
-					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, err)
+					logfmt.Label(acct.UID, acct.NicknameValue()), logName, err)
 				break
 			}
 			// 上游中途断流：与流式路径同一个错误码（bug #1 附带项）。
@@ -2584,7 +2669,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.cfg.Pool.NoteFailures(acct.UID)
 				fail(acct.UID)
 				log.Printf("WARN: [server] chat acct=%s model=%s: upstream read error: %v",
-					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, err)
+					logfmt.Label(acct.UID, acct.NicknameValue()), logName, err)
 				// **换号重试**（报告 #2）：这里还在轮转循环内，同一个请求换个号本可成功。
 				// 此前写完 502 就 return，把 MaxRotate 整体作废 —— 流式受限于已写出的
 				// 帧只能 502，非流式没有这个限制（超时分支的不轮转是另一套显式设计）。
@@ -2602,7 +2687,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 499 = nginx 的 client closed request，与真 5xx 一眼可分；连接已关，不写响应体。
 			if cerr := r.Context().Err(); cerr != nil {
 				log.Printf("WARN: [server] sync acct=%s model=%s: 调用方断开（%v），上游输出已丢弃（CDN 回源超时常见于 EdgeOne 默认 15s）",
-					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, cerr)
+					logfmt.Label(acct.UID, acct.NicknameValue()), logName, cerr)
 				st.status = 499
 				st.outcome = reqlog.OutcomeInterrupted
 				return
@@ -2622,10 +2707,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		mrepair := upstream.RepairAggregatedResponse(resp, declaredTools, true)
 		if n := mrepair.Converted(); n > 0 {
 			log.Printf("INFO: [server] non-stream model=%s: repaired %d native tool call(s) from assistant text (tool names known=%d)",
-				bareModel, n, len(declaredTools))
+				logName, n, len(declaredTools))
 		} else if m := mrepair.Seen(); m > 0 {
 			log.Printf("WARN: [server] non-stream model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
-				bareModel, m, len(declaredTools))
+				logName, m, len(declaredTools))
 		}
 		// 工具面观测量（非流式，issue #44）：与流式同口径记声明数与实际调用数。
 		st.toolsDeclared = len(declaredTools)
@@ -3249,6 +3334,37 @@ var requestErrorCodes = map[upstream.ErrKind]string{
 	upstream.ErrBadParams:         "bad_params",
 	upstream.ErrModelParamInvalid: "model_param_invalid",
 	upstream.ErrEmptyContent:      "empty_content",
+}
+
+// vetoStatusForKind 首帧否决时该回的 HTTP 状态码（W2-08）。
+//
+// 之前这些错误一律以「200 + SSE error」送出，客户端按 HTTP 状态码判退避的策略
+// 全部失效：429 被当成功、400 被当流内错误、503 也被当成功流。分类口径与轮转
+// 循环里 HTTP ≥400 分支保持一致：
+//   - 请求级（requestErrorCodes）= 400（换号无意义，必须改请求）；
+//   - 限流/排队 = 429（带退避语义）；
+//   - 余额 = 402；账号/会话/风控 = 403 或 503（可重试）；
+//   - 其余上游故障 = 502/503。
+//
+// 只用于「零字节已提交」的路径；已经开流后状态码改不动，仍走协议内 error 帧。
+func vetoStatusForKind(kind upstream.ErrKind) int {
+	if _, requestLevel := requestErrorCodes[kind]; requestLevel {
+		return http.StatusBadRequest
+	}
+	switch kind {
+	case upstream.ErrHardCredit:
+		return http.StatusPaymentRequired
+	case upstream.ErrSoftRate, upstream.ErrModelBusy, upstream.ErrUpstreamBusy:
+		return http.StatusTooManyRequests
+	case upstream.ErrSessionDead, upstream.ErrAccountFault, upstream.ErrWafBlock, upstream.ErrChannelRefused:
+		return http.StatusServiceUnavailable
+	case upstream.ErrNotFound:
+		return http.StatusNotFound
+	case upstream.ErrServer:
+		return http.StatusBadGateway
+	default:
+		return http.StatusServiceUnavailable
+	}
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
