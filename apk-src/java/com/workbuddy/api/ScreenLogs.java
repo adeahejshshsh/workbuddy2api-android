@@ -5,7 +5,12 @@ import android.app.Dialog;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.os.Handler;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.style.BackgroundColorSpan;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.RelativeSizeSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -186,25 +191,116 @@ final class ScreenLogs {
     private void loadLogs(final TextView tv) {
         svc.logs(new PanelService.Cb<List<PanelService.LogRow>>() {
             public void ok(List<PanelService.LogRow> rows) {
-                // 先收集成行再决定顺序：最新在下（默认，等同于终端输出）或最新在上。
-                List<String> lines = new java.util.ArrayList<String>();
+                // 先按频道过滤再决定顺序：最新在下（默认，等同终端输出）或最新在上。
+                List<PanelService.LogRow> picked = new java.util.ArrayList<PanelService.LogRow>();
                 int start = Math.max(0, rows.size() - 400);
                 for (int i = start; i < rows.size(); i++) {
                     PanelService.LogRow r = rows.get(i);
                     if (!"all".equals(logCh) && !logCh.equals(r.channel)) continue;
-                    String ts = r.time;
-                    int t = ts.indexOf('T');
-                    if (t > 0 && ts.length() > t + 9) ts = ts.substring(t + 1, t + 9);
-                    lines.add(ts + "  " + r.text);
+                    picked.add(r);
                 }
-                if (logNewestFirst) java.util.Collections.reverse(lines);
-                StringBuilder sb = new StringBuilder();
-                for (String line : lines) sb.append(line).append('\n');
-                tv.setText(lines.isEmpty() ? "（暂无日志）" : sb.toString());
+                if (logNewestFirst) java.util.Collections.reverse(picked);
+                if (picked.isEmpty()) {
+                    tv.setText("（暂无日志）");
+                    return;
+                }
+                tv.setText(buildLogText(picked));
                 if (logPinned) scrollLogToNewest();
             }
             public void fail(String msg) { tv.setText("日志加载失败：" + msg); }
         });
+    }
+
+    /**
+     * 把日志行拼成一条带样式的文本 —— 对齐网页面板的 `#logBox .ln.e/.w` 与 `.lch.c-*`。
+     *
+     * 此前是 `tv.setText(String)` 一把梭：整页只有 `Theme.INK2` 一种颜色，出错的行和
+     * 普通行长得一模一样，翻日志得逐字读。网页版早就分了三级色 + 频道徽标。
+     *
+     * 为什么用 Spannable 而不是「每行一个 TextView」：
+     *   ① 日志页开了 setTextIsSelectable，单条文本才能整段选中复制；
+     *   ② 400 行的多 View 方案在低端机上滚动会掉帧。
+     *
+     * 为什么徽标用 BackgroundColorSpan（直角色块）而不是 ReplacementSpan（圆角胶囊）：
+     *   ReplacementSpan 会把那段字符排除在选中范围之外，等于把频道名变成一张不可复制的图。
+     *   前后各补一个空格当内边距，视觉上已经接近网页的 2px/6px padding。
+     */
+    private CharSequence buildLogText(List<PanelService.LogRow> rows) {
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        boolean all = "all".equals(logCh);
+        for (int i = 0; i < rows.size(); i++) {
+            if (i > 0) sb.append('\n');
+            PanelService.LogRow r = rows.get(i);
+
+            // ① 频道徽标：只在「全部」下画（与网页 logCh === 'all' 同一条件）
+            if (all) {
+                String label = channelLabel(r.channel);
+                int fg = channelColor(r.channel);
+                int bg = channelSoft(r.channel);
+                int s = sb.length();
+                sb.append(' ').append(label).append(' ');
+                sb.setSpan(new BackgroundColorSpan(bg), s, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                sb.setSpan(new ForegroundColorSpan(fg), s, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                sb.setSpan(new RelativeSizeSpan(0.82f), s, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                sb.append(' ');
+            }
+
+            // ② 时间戳：压暗，让正文先入眼
+            String ts = r.time;
+            int t = ts.indexOf('T');
+            if (t > 0 && ts.length() > t + 9) ts = ts.substring(t + 1, t + 9);
+            int tsStart = sb.length();
+            sb.append(ts).append("  ");
+            sb.setSpan(new ForegroundColorSpan(Theme.INK3), tsStart, tsStart + ts.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+
+            // ③ 正文：按级别上色（判据与网页 app.js 完全同一套词）
+            int bodyStart = sb.length();
+            sb.append(r.text);
+            sb.setSpan(new ForegroundColorSpan(levelColor(r.text)), bodyStart, sb.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return sb;
+    }
+
+    /** 频道显示名，与网页 `{task:'任务', chat:'对话', sys:'系统'}[e.ch]` 一致。 */
+    private static String channelLabel(String ch) {
+        if ("task".equals(ch)) return "任务";
+        if ("chat".equals(ch)) return "对话";
+        if ("sys".equals(ch)) return "系统";
+        return ch;
+    }
+
+    /** 频道主色：任务=强调色、对话=完成色、系统=次级灰（对应网页 accent / ok / ink-3）。 */
+    private static int channelColor(String ch) {
+        if ("task".equals(ch)) return Theme.ACCENT;
+        if ("chat".equals(ch)) return Theme.MINT;
+        return Theme.INK3;
+    }
+
+    /** 频道底色：取主色压到 ~13% 透明度（对应网页 accent-soft / ok-soft / surface-2）。 */
+    private static int channelSoft(String ch) {
+        if ("task".equals(ch)) return alpha(Theme.ACCENT, 0x22);
+        if ("chat".equals(ch)) return alpha(Theme.MINT, 0x1F);
+        return Theme.MUTED;
+    }
+
+    private static int alpha(int color, int a) {
+        return (color & 0x00FFFFFF) | ((a & 0xFF) << 24);
+    }
+
+    /**
+     * 级别配色 —— 判据在 {@link LogLevel#of}，与网页面板 `app.js` 的正则同口径。
+     *
+     * 这里只负责「级别 → 主题令牌」：错误取 BAD、警告取 WARN、普通取 INK2。
+     * 深色/浅色两套调色板下这三个令牌都是压深过的前景色（见 Theme.setDark），
+     * 所以不需要再按主题分支。
+     */
+    private static int levelColor(String text) {
+        int lv = LogLevel.of(text);
+        if (lv == LogLevel.ERROR) return Theme.BAD;
+        if (lv == LogLevel.WARN) return Theme.WARN;
+        return Theme.INK2;
     }
 
     /** 滚到「最新」那一端：最新在下 → 到底；最新在上 → 到顶。 */
