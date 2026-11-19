@@ -403,6 +403,9 @@ final class Console {
     void startGatewayFromUi() {
         if (dead()) return;
         GatewayService.clearUserStop(a);
+        // W6-H-03：从终态页手动启动同样先补齐 admin_api_key / instance_id（幂等）。
+        AdminKey.ensure(a);
+        InstanceId.ensure(a);
         GatewayService.start(a);
         startRetries = 0;
         showStarting();

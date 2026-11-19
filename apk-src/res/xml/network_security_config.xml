@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  W6-M-14：明文 HTTP 的出口白名单。
+
+  原来的 android:usesCleartextTraffic="true" 是全局开关 —— 壳里任何一个 URL（包括
+  面板里被注入的链接、将来接的上游地址）都可以走明文，等于把「只跟本机网关说话」这条
+  隐含假设交给运行时自觉。这里改成默认禁止 + 只放行回环。
+
+  为什么只放行回环而**不影响局域网访问**：
+    · 局域网能力是**入站**的 —— 网关（Go 进程）监听 0.0.0.0:7863，别的设备连进来。
+      networkSecurityConfig 只约束**本应用发起的出站连接**，对入站监听毫无影响。
+    · 壳自己出站只连 http://127.0.0.1:<port>（PanelApi / Console 探针 / 两个 WebView），
+      没有一处直连 192.168.x.x。
+    · Android 的 NSC 语法里没有 CIDR，写不出 192.168.0.0/16；用 base-config 放开就等于
+      回到全局明文。将来若真的要让壳直连局域网地址，在这里补 <domain> 具体 IP 即可。
+
+  注意：不要在 <domain> 里写 "::1" —— NSC 的 domain 是主机名语义，IPv6 字面量在部分
+  ROM 上会让解析失败，应用启动即崩。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

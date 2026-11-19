@@ -23,6 +23,11 @@ public class BootReceiver extends BroadcastReceiver {
                 userStopped = false;
             }
             if (userStopped) return;
+            // W6-H-03：开机自启不经过 MainActivity，这里同样要在拉起网关前补
+            // admin_api_key / instance_id（Go 进程只在启动时读配置）。
+            AdminKey.Result ak = AdminKey.ensure(c);
+            InstanceId.ensure(c);
+            if (ak.generated) AdminKey.logLanExposure(c);
             GatewayService.start(c);
         }
     }

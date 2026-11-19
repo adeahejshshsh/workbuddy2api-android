@@ -44,11 +44,16 @@ final class GwConfig {
      * 完全指不到「地址写错了」这个真实原因。这里直接把当前地址算出来。
      *
      * 只用 NetworkInterface 枚举，不需要任何权限：优先 wlan 与 ap 前缀的接口，其余非回环 IPv4 兜底。
-     * 结果缓存一次（接口列表在按钮点击这种频率下没必要每次重算，而且枚举是 I/O）。
+     *
+     * <p>缓存 30 秒（W6-M-13）：原实现「缓存一次、永不失效」—— 用户从 Wi-Fi 切到热点、
+     * 或 DHCP 换了网段（192.168.1.x → 10.0.0.x）之后，界面上「局域网地址」会一直显示
+     * 旧 IP，复制出去就是 connect error，而错误信息完全指不到「地址过期」。TTL 到期重算，
+     * 枚举是本地系统调用（毫秒级），30 秒一次的开销可以忽略。
      */
     static String lanIPv4() {
         synchronized (GwConfig.class) {
-            if (lanCache != null) return lanCache;
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (lanCache != null && now - lanCacheAt < LAN_CACHE_TTL_MS) return lanCache;
             String best = "";
             try {
                 java.util.Enumeration<java.net.NetworkInterface> ifs =
@@ -83,11 +88,24 @@ final class GwConfig {
                 }
             } catch (Throwable ignored) {}
             lanCache = best;
+            lanCacheAt = now;
             return lanCache;
         }
     }
 
+    /** 缓存有效期：够短到网络切换后马上能反映，够长到不会每次点击都枚举接口。 */
+    private static final long LAN_CACHE_TTL_MS = 30_000L;
+
     private static String lanCache;
+    private static long lanCacheAt;
+
+    /** 网络变化时主动作废（可选调用；TTL 只是兜底）。 */
+    static void invalidateLanCache() {
+        synchronized (GwConfig.class) {
+            lanCache = null;
+            lanCacheAt = 0L;
+        }
+    }
 
     /** 从 listen 字符串里取端口号；取不到返回 0。 */
     static int parsePort(String listen) {

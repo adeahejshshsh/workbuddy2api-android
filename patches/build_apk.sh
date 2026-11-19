@@ -241,6 +241,20 @@ if [ -f "$AJ" ]; then
   # 宿主 JVM 直接跑 —— 判据漂开会让同一条日志在网页标红、在 App 里不标。
   javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$WS"/tests/android/LogLevelSelfCheck.java
   java -cp "$AJ:classes:test-out" LogLevelSelfCheck
+  # 源码级语义断言（W6 那批）：check_*.py 是纯文本检查，不需要 JDK，跑得很快。
+  # 全部挂到构建闸门上 —— 这些断言存在的意义就是「改坏了构建就红」，
+  # 只放在仓库里靠人手跑，等于没有（W6-H-01 就是这么漏的：注释写了续期、
+  # 实现没有，门禁只查函数体写法所以是绿的）。
+  if command -v python3 >/dev/null 2>&1; then
+    for chk in "$WS"/tests/android/check_*.py; do
+      [ -f "$chk" ] || continue
+      printf "  %-46s " "$(basename "$chk")"
+      if python3 "$chk" >/dev/null 2>&1; then echo OK
+      else echo "FAIL"; python3 "$chk" | tail -20; exit 1; fi
+    done
+  else
+    echo "  ⚠ 没有 python3，跳过 tests/android/check_*.py（源码级语义断言）"
+  fi
 
   echo "== 4/6 dex (d8) =="
   java -cp "$R8" com.android.tools.r8.D8 --min-api 24 --lib "$AJ" --output dex \

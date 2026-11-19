@@ -510,6 +510,16 @@ public class GatewayService extends Service {
                 // 位置仍留在循环体开头（BUG-3）：下面几条分支都会 continue 提前跳过，
                 // 放末尾的话「外部实例复用」态与反复自愈态下第 3 层会整体失效。
                 if (SystemClock.elapsedRealtime() - alarmArmedAt > ALARM_MS / 2) armAlarm(this);
+                // W6-H-01：wakelock 现在是**带超时**的（WAKE_TIMEOUT_MS = 30s），必须每轮续期，
+                // 否则 30 秒后锁自动释放、看门狗线程与 Go 定时器一起被冻 —— 正好退回
+                // 「过一会儿连不上、拉回前台就好」那个原始故障。
+                //
+                // 这是 #185（issue #177①）留下的真实回归：注释写了「看门狗每 10s 一轮自动
+                // 续期」，实现却只在 onStartCommand 调过一次 holdWake()。而当时的门禁
+                // check_wake_semantics.py 只断言了 holdWake 函数体的写法（acquire 带超时），
+                // 没断言「有人在循环里调它」—— 于是红线是绿的，功能是坏的。
+                // 现在续期放在心跳路径上：能走到这一行，说明这一轮看门狗确实活着。
+                holdWake();
                 if (!alive()) {
                     if (portUp()) {        // 端口有主但没有我的孩子 → 外部实例，不插手
                         external = true;
@@ -811,6 +821,11 @@ public class GatewayService extends Service {
 
     void ensureConfig(File gwDir) {
         File cfg = new File(gwDir, "config.json");
+        // W6-H-03(b)：admin_api_key 的首启自举也必须覆盖「配置已存在、但只走 headless 自愈
+        // 重拉」这条路径 —— 那种情况下没有 Activity 参与，MainActivity/BootReceiver 的
+        // ensure() 都不会跑，面板就只能退回用客户端 api_key 鉴权。
+        // 幂等且已存在时只补空值，放在这里等于给所有拉起路径兜底。
+        try { AdminKey.ensure(this); } catch (Throwable ignored) {}
         String key = "wb2api-" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
         // 文件已存在也要检查 api_key（bug-03）：首次生成被打断、或用户手改留下
         // "CHANGE_ME"/"test_key"/空串时，网关的 checkListenKey 会直接 log.Fatalf 退出
@@ -1002,7 +1017,13 @@ public class GatewayService extends Service {
             // 弹窗就是它。改成带超时后：看门狗每 10s 一轮走到这里自动续期，实际效果
             // 仍是常驻；而看门狗真被冻住 ≥ WAKE_TIMEOUT_MS 时锁自动释放 —— 那正是
             // 设备该睡的时刻，也是「被冻住」这个事实的正确表达（而不是继续按住 CPU）。
-            if (!wake.isHeld()) wake.acquire(WAKE_TIMEOUT_MS);
+            //
+            // W6-H-01：这里**不能**再套 `if (!wake.isHeld())`。带超时的锁在到期前
+            // `isHeld()` 一直是 true，条件永远不成立 → 续期一次都不会发生，30 秒后
+            // 锁照样释放。`setReferenceCounted(false)` 下重复 acquire 不会叠加引用，
+            // 只会把到期时间往后推（PowerManager 文档语义），所以无条件 acquire 才是
+            // 正确的续期写法。
+            wake.acquire(WAKE_TIMEOUT_MS);
         } catch (Throwable ignored) {}
         holdWifi();
         installOverlay();
