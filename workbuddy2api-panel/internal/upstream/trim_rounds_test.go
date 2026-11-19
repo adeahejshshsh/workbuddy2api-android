@@ -76,3 +76,43 @@ func TestTrimRounds(t *testing.T) {
 		t.Error("非法 JSON 应原样返回")
 	}
 }
+
+// TestTrimRoundsKeepsDeveloper W1-23 回归：developer 指令与 system 同属非对话轮载体，
+// 裁剪时不能被当历史丢掉（丢了表现为长对话里角色/工具约束突然失效）。
+func TestTrimRoundsKeepsDeveloper(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[
+		{"role":"system","content":"系统规则"},
+		{"role":"developer","content":"开发者指令：必须用中文"},
+		{"role":"user","content":"u1"},
+		{"role":"assistant","content":"a1"},
+		{"role":"user","content":"u2"},
+		{"role":"assistant","content":"a2"},
+		{"role":"user","content":"u3"}
+	]}`)
+	out := TrimRounds(body, 1)
+	var root struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("输出不是合法 JSON: %v", err)
+	}
+	var roles []string
+	for _, m := range root.Messages {
+		roles = append(roles, m.Role)
+		if m.Role == "developer" && m.Content != "开发者指令：必须用中文" {
+			t.Fatalf("developer 内容被改写：%q", m.Content)
+		}
+	}
+	want := []string{"system", "developer", "user"}
+	if len(roles) != len(want) {
+		t.Fatalf("roles=%v want %v", roles, want)
+	}
+	for i := range want {
+		if roles[i] != want[i] {
+			t.Fatalf("roles=%v want %v", roles, want)
+		}
+	}
+}

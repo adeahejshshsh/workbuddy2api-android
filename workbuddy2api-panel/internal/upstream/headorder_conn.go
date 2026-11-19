@@ -103,6 +103,11 @@ func (c *headOrderConn) Read(p []byte) (int, error) {
 	if n > 0 {
 		c.respMu.Lock()
 		done := c.resp.feed(p[:n])
+		if done {
+			// 审查 W1-02：响应结束就换新实例。feed 自身也会复位（便于单测直接复用
+			// 同一个 tracker），这里再显式清一次：连接级状态不依赖被调方的隐含契约。
+			c.resp = respTracker{}
+		}
 		c.respMu.Unlock()
 		if done {
 			c.mu.Lock()
@@ -143,7 +148,27 @@ type respTracker struct {
 const maxChunkLine = 4096
 
 // feed 喂入刚读到的字节，返回 true 表示「本响应已完整结束」。
+//
+// 审查 W1-02：**结束时必须把 tracker 复位**。此前 `started` 置真后永不复位，
+// 于是同一 tracker 碰到第二个响应时 `inHead` 不再为 true，直接按「body」消费：
+//   - Content-Length 形态：remain 还是 0 → 第一块字节就被判「完成」，
+//     相位在响应体还在流动时就退回 phaseAwaitRequest；
+//   - chunked 形态：chunkSt 停在 3（收 trailer），把后续响应的头/体当 trailer 扫，
+//     扫不到空行就 unknown=true，该连接此后的头序重排静默失效。
+//
+// 一条 keep-alive 连接上只有第一个响应被正确跟踪，正是这个原因。
+// 复位放在 feed 内部而不是调用方：tracker 的语义就是「一个响应一个实例」，
+// 复用（同一连接的下一个响应）不该要求调用方记得手动 Reset。
 func (t *respTracker) feed(b []byte) bool {
+	if t.feedInner(b) {
+		*t = respTracker{}
+		return true
+	}
+	return false
+}
+
+// feedInner feed 的实现体（不含结束复位）。
+func (t *respTracker) feedInner(b []byte) bool {
 	if t.unknown {
 		return false
 	}

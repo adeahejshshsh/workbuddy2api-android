@@ -26,7 +26,9 @@ func TestEmptyKeyDefaultStillFailOpen(t *testing.T) {
 	}
 }
 
-// 显式关闭后：空 key 一律拒绝（配置漏填密钥时必须能失败关闭）。
+// 显式关闭后：空 key 的非回环请求一律拒绝（配置漏填密钥时必须能失败关闭）。
+// W5-04 起回环请求仍放行，见 w5_04_loopback_test.go；本用例的 httptest 默认
+// RemoteAddr 是 192.0.2.1（非回环），覆盖的正是「远端必须被拒」。
 func TestEmptyKeyFailClosedWhenDisabled(t *testing.T) {
 	SetAllowEmptyKey(false)
 	t.Cleanup(func() { SetAllowEmptyKey(true) })

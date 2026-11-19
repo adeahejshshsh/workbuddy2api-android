@@ -60,6 +60,15 @@ gauth() {
   git "$@"
 }
 
+# GitHub API 调用：认证头从 **stdin** 进 curl（`--config -`），不进 argv（W6-H-05）。
+# 旧写法把 Authorization 头用 -H 直接摊在命令行里，与上面「argv 不可信」的规矩直接矛盾：
+# ps / /proc/*/cmdline 任何进程都能读，泄漏的是能往公开仓库推提交、传 Release 附件的
+# PAT —— 而 Release 正是用户的安装来源，等于可以往里塞一个恶意 APK。
+# 定义必须放在第一次调用之前（bash 函数没有提升，3/5 建仓那一步就要用）。
+ghcurl() {
+  printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl --config - "$@"
+}
+
 # 取不到要明确报错（bug B19 的机制其实不成立：脚本是 set -eu 且**没有** pipefail，
 # 管道的退出码取 sed，所以 grep 找不到不会让脚本退出 —— 实测会带着空版本号一路跑
 # 下去，最后打出 `版本: v` 并用空 tag 建 Release）。这里补显式判空。
@@ -148,14 +157,58 @@ pats = [(re.compile(re.escape(tok)), "GitHub token 本人"),
         # 口令文件本体（issue ISSUE-02）：即便 .gitignore 挡住了提交，暂存目录里
         # 也不该出现明文口令。
         (re.compile(r"(?m)^\s*(wb2api\d{4}|sk-[A-Za-z0-9_-]{16,})\s*$"), "疑似口令文件内容")]
+CHUNK = 1 << 20      # 1MB 一块
+OVERLAP = 4096       # 块与块之间留的重叠：模式可能正好跨在边界上
+
+def scan_big(p):
+    """分块扫描大文件（W6-M-04）。
+
+    旧实现 `if size > 8MB: continue` —— 仓库里正好有一个 12.5MB 的 ELF（cmd/trial 的
+    构建产物），也就是说**最大的文件从来没被扫过**，而泄漏恰恰最容易发生在「打包进去的
+    二进制 / 大 JSON」里。分块读 + 尾部重叠，内存恒定 ~1MB，10GB 的文件也不会 OOM。
+    """
+    found = []
+    tail = ""
+    try:
+        with p.open("rb") as f:
+            while True:
+                buf = f.read(CHUNK)
+                if not buf:
+                    break
+                text = tail + buf.decode("utf-8", "ignore")
+                for rx, why in pats:
+                    if rx.search(text):
+                        found.append(why)
+                if found:
+                    break
+                tail = text[-OVERLAP:]
+    except Exception:
+        # 读不动（权限/IO）时**不能静默跳过**：跳过等于把「没扫」当成「干净」。
+        found.append("无法读取（扫描未完成）")
+    return found
+
 hits = []
 for p in stage.rglob("*"):
     if not p.is_file() or ".git/" in str(p): continue
-    if p.stat().st_size > 8_000_000: continue
-    try: t = p.read_text(errors="ignore")
-    except Exception: continue
-    for rx, why in pats:
-        if rx.search(t): hits.append(f"{p.relative_to(stage)}  ← {why}")
+    try:
+        size = p.stat().st_size
+    except Exception:
+        continue
+    if size > 8_000_000:
+        why_list = scan_big(p)          # 大文件走分块扫描，不再跳过
+    else:
+        why_list = []
+        try:
+            t = p.read_text(errors="ignore")
+        except Exception:
+            t = ""
+        if not t and size > 0:
+            why_list.append("无法读取（扫描未完成）")
+        for rx, why in pats:
+            if rx.search(t):
+                why_list.append(why)
+    for why in why_list:
+        hits.append(f"{p.relative_to(stage)}  ← {why}")
 if hits:
     print("❌ 暂存内容里发现高危串，已中止推送：")
     for h in hits[:20]: print("   ", h)
@@ -185,11 +238,11 @@ fi
 echo "== 3/5 仓库（不存在就建，公开）"
 # set -eu 下命令替换里的 curl 非零会直接触发 errexit，把「3/5 建仓」这步无自述地
 # 中断（网络抖动 / DNS 超时 = curl 6/28）。这里显式容错并降级成空码。
-CODE=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" \
+CODE=$(ghcurl -sS -m 30 -o /dev/null -w '%{http_code}' \
        "https://api.github.com/repos/$OWNER/$NAME" 2>/dev/null) || CODE=""
 if [ "$CODE" = "200" ]; then echo "  已存在"; else
-  curl -sS -m 30 -o /dev/null -w '  建仓 http=%{http_code}\n' -X POST \
-    -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+  ghcurl -sS -m 30 -o /dev/null -w '  建仓 http=%{http_code}\n' -X POST \
+    -H "Accept: application/vnd.github+json" \
     -d "{\"name\":\"$NAME\",\"description\":\"WorkBuddy2API 安卓自托管移植版：网关 APK + 看门狗 + 保活 + 手机端面板\",\"private\":false,\"has_issues\":true,\"has_wiki\":false,\"has_projects\":false}" \
     "https://api.github.com/user/repos"
 fi

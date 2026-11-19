@@ -618,15 +618,22 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 
 // PickByUID 若 uid 当前 healthy 且未占满在途名额，返回其凭证（记录 lastUsed 防撞号）；
 // 否则返回 nil。供会话粘性路由命中校验与直取使用。
+//
+// W4-18：校验只读，走 RLock。此前整段用写锁，粘性命中路径（每请求一次）把所有
+// pick/Status/Counts 全部串行化。lastUsed/usedSeq 仍是**选号写锁路径的运行态**
+// （pick.go 依赖「赋值在锁内」做防惊群判定），不能在读锁里改 —— 所以记录占用
+// 单独进一段极短的写锁，并且回锁校验条目未被替换（否则会写到孤儿对象上，
+// 与 C5-40 是同一类问题）。
 func (p *Pool) PickByUID(uid string) *auth.Auth {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
 	e, ok := p.byUID[uid]
 	if !ok {
+		p.mu.RUnlock()
 		return nil
 	}
 	now := time.Now()
 	if !e.healthy(now) {
+		p.mu.RUnlock()
 		return nil
 	}
 	// 积分保底（审查 C5-01）：无模型粘性直取此前**完全没有**保底判定 ——
@@ -636,6 +643,7 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	// 返回 nil 的契约与 ForModel 版一致：调用方解绑粘性、回落普通轮换换号。
 	// 日志频次天然每请求至多一条（首次返回 nil 即解绑），无需额外节流。
 	if p.floorBlockedNoModelLocked(e, e.a.Realm(), now) {
+		p.mu.RUnlock()
 		log.Printf("WARN: [pool] credit floor: sticky(no-model) acct=%s credits=%d < floor=%d, unbind (paid models held out)",
 			logfmt.Label(e.a.UID, e.a.NicknameValue()), e.credits, p.creditFloorFor(e.a.Realm()))
 		return nil
@@ -643,15 +651,25 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	// 保留积分同判据：无模型上下文判不出「免费模型豁免」，按严格口径处理 ——
 	// 这正是 pick(reqModel=="") 的口径（p.reserveBlocked(e, p.modelFreeOf(e, ""))）。
 	if p.reserveBlocked(e, p.modelFreeOf(e, "")) {
+		p.mu.RUnlock()
 		return nil
 	}
 	if p.inFlightFull(e) {
+		p.mu.RUnlock()
 		return nil
 	}
-	e.lastUsed = now
-	p.pickSeq++
-	e.usedSeq = p.pickSeq
-	return e.a
+	ret := e.a
+	p.mu.RUnlock()
+
+	// 记录占用（写锁只覆盖几条赋值；校验结论已在读锁内做出）。
+	p.mu.Lock()
+	if cur, ok := p.byUID[uid]; ok && cur == e {
+		cur.lastUsed = time.Now()
+		p.pickSeq++
+		cur.usedSeq = p.pickSeq
+	}
+	p.mu.Unlock()
+	return ret
 }
 
 // CountsDetailed 返回 total/healthy/cooling/disabled/inFlightFull 五类计数。

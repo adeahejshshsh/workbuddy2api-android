@@ -32,9 +32,15 @@ func trimMessages(messages []any, keep int) []any {
 	}
 	cut := userIdx[len(userIdx)-keep]
 	out := make([]any, 0, len(messages)-cut+4)
-	// 保留 cut 之前的所有 system（人格/规则），丢弃其余历史。
+	// 保留 cut 之前的 system / developer（人格、规则、开发者指令），丢弃其余历史。
+	//
+	// 审查 W1-23：此前只认 system —— OpenAI 新协议把一部分高优先级指令放在
+	// role:"developer" 里（等价于 system，优先级高于 user），裁剪时会连同旧历史一起
+	// 丢掉，表现为「角色/工具约束在长对话里突然失效」。两者都是**非对话轮**的
+	// 指令载体，必须一起保留。
 	for i := 0; i < cut; i++ {
-		if roleOf(messages[i]) == "system" {
+		switch roleOf(messages[i]) {
+		case "system", "developer":
 			out = append(out, messages[i])
 		}
 	}

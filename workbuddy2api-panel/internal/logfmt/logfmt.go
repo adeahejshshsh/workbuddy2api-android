@@ -57,13 +57,42 @@ func UID8(uid string) string {
 // 标签——昵称认人、uid8 供 grep，两者都保留。
 //
 // uid 与 nick 同时为空时返回 "-"（与 UID8 口径一致，避免打出 "(-)"）。
+//
+// 清洗（W5-08）：昵称来自上游 auth 文件，是**外部可控文本**，直接拼进日志会让
+// 一个含 \n 的昵称伪造整行日志（例如伪装成 "WARN: ... 账号已禁用"），含 \r 则
+// 覆盖终端同一行；\t 会打乱列宽，其余 C0/C1 控制字符（含 ANSI ESC）可以把
+// 日志注入成彩色/清屏。117 处调用点不可能逐个转义，必须在 Label 这一层统一剥掉。
+// 同时给长度上限：昵称没有长度约束，几十 KB 的昵称会把每条日志撑爆。
 func Label(uid, nick string) string {
 	short := UID8(uid)
-	nick = strings.TrimSpace(nick)
+	nick = sanitizeLabelText(nick)
 	if nick == "" {
 		return short
 	}
 	return nick + "(" + short + ")"
+}
+
+// maxLabelNickBytes 昵称在日志里的字节上限。按 UTF-8 边界截断（Truncate 负责），
+// 中文约 16 个字，足够人眼辨认账号。
+const maxLabelNickBytes = 48
+
+// sanitizeLabelText 去掉控制字符（C0/C1、DEL）与 Unicode 行分隔符，再截断。
+// 换行/制表符替换成空格而不是删除：删掉会把两个词粘成一个（"foo\nbar"→"foobar"），
+// 反而制造出原本不存在的标识；空格保留词边界且不破坏单行结构。
+func sanitizeLabelText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0):
+			return -1
+		case r == '\u2028' || r == '\u2029':
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ") // 折叠连续空白，避免昵称里十个空格撑宽日志
+	return Truncate(s, maxLabelNickBytes)
 }
 
 // DisplayWidth 返回 s 的终端显示列宽：CJK / 全角 / emoji 记 2 列，其余记 1 列。

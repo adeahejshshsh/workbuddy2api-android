@@ -148,11 +148,11 @@ func (r *Ring) Write(p []byte) (int, error) {
 			continue
 		}
 		text := tsPrefixRe.ReplaceAllString(line, "")
-		// 单行截断（W2C4-45）：队列上限只管条数，单条长度此前无上限 —— 磁盘卡住时
-		// 内存可以按「10000 × 单行长度」增长（一行几 MB 的堆栈/导出日志就够呛）。
-		if len(text) > ringMaxLineBytes {
-			text = truncateRunes(text, ringMaxLineBytes) + "…(truncated)"
-		}
+		// 清洗与单行截断都交给 sanitizeLogText（W3-11）：此前环里存的是**原文**，
+		// 只有落盘走脱敏 —— 于是同一个事件在面板里能看到 Authorization，在导出包里
+		// 却是 ***；而"面板里看得到"本身就已经是泄漏。现在两条路共用一个函数，
+		// 单行 8KB 上限也在函数里（原 W2C4-45 的截断）。
+		text = sanitizeLogText(text)
 		// strings.Clone（W2C4-44）：text 是 string(p) 的子串切片，共享同一底层数组；
 		// 环里只要留一条，整块写入缓冲（可能上百 KB）都不被回收。入环前拷一份。
 		text = strings.Clone(text)

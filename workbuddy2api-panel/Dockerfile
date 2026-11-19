@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1
 # 基础镜像必须满足 go.mod 的 `go 1.24`（审查 E2）：Go 1.21+ 会强制最低版本，
 # 用 1.23 构建直接报 "go.mod requires go >= 1.24"。此前是 1.23，镜像链实际不可用。
-FROM golang:1.24-alpine AS build
+#
+# W6-M-09：tag 固定到 alpine 小版本 + 钉住 manifest digest。
+# `1.24-alpine` 会随 alpine 大版本漂移（昨天能构建、今天基础库换了就是「什么都没改却
+# 起不来」），而只写 tag 时上游还能重新推送同一个 tag。digest 取自 Docker Hub
+# （2026-11 查）：docker buildx imagetools inspect golang:1.24-alpine3.20
+FROM golang:1.24-alpine3.20@sha256:9f98e9893fbc798c710f3432baa1e0ac6127799127c3101d2c263c3a954f0abe AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -24,7 +29,10 @@ RUN VER="${APP_VERSION:-$(cat VERSION 2>/dev/null || git describe --tags --abbre
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/trial ./cmd/trial
 
-FROM alpine:3.20
+# 运行镜像同样固定小版本 + digest：`alpine:3.20` 是浮动 tag，3.20.x 的 busybox/libc
+# 变化会直接改变运行期行为（本镜像的 HEALTHCHECK 用的就是 busybox wget）。
+# 3.20 分支当前 patch 是 3.20.10，写死它而不是 3.20.3，避免钉在一个带已知 CVE 的旧包上。
+FROM alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 # python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本体。
 RUN apk add --no-cache wget ca-certificates tzdata python3 bash \
  && adduser -D -u 10001 app \

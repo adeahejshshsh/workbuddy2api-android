@@ -9,8 +9,8 @@ import (
 // continueReader：上游把多个 chunk 粘在一个 data 行里（issue #197）时拆成独立帧，正文照常
 // 记账；粘在里面的 error 帧同样能被识别，不会被当成「无 finish 断流」去续写。
 //
-// 首帧否决（HeadVetoError）那半本仓没有——那是更早的上游提交带来的结构，故这里只钉
-// 「拆帧后每份都记状态」这条本仓能保证的行为。
+// 首帧否决已由 server 侧的 sseCommitWriter 实现（W2-08，见 first_frame_veto_test.go），
+// 这里只钉「拆帧后每份都记状态」这条 continueReader 自身能保证的行为。
 func TestContinueReaderSplitsGluedFrames(t *testing.T) {
 	frame := func(txt string) string {
 		return `{"id":"a","choices":[{"index":0,"delta":{"content":"` + txt + `"}}]}`

@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -59,16 +60,15 @@ func TestAccountFamilyLockSingleWinner(t *testing.T) {
 func TestFamilyLockPrunesIdle(t *testing.T) {
 	f := &familyLocks{}
 	// 直接塞满到超过软上限，全部标成很久以前用过。
-	f.mu.Lock()
-	f.m = make(map[string]*familyLock, maxFamilyLocks+16)
+	// （W4-04 起表是 sync.Map：测试适配内部结构，断言不变。）
 	for i := 0; i < maxFamilyLocks+16; i++ {
 		l := &familyLock{}
 		l.used.Store(time.Now().Add(-2 * familyLockIdle).UnixNano())
-		f.m[string(rune(i))+"\x00x"] = l
+		f.m.Store(fmt.Sprintf("u%05d\x00x", i), l)
 	}
+	f.n.Store(int64(maxFamilyLocks + 16))
 	f.pruneLocked()
-	n := len(f.m)
-	f.mu.Unlock()
+	n := f.count()
 	if n >= maxFamilyLocks+16 {
 		t.Fatalf("清理没生效：仍有 %d 条", n)
 	}

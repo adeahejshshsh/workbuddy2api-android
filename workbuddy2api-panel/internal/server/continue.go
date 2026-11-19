@@ -638,7 +638,22 @@ func (r *continueReader) openSegmentAsync(rule int, body []byte, onOK func(io.Re
 	ps := &pendingSeg{ch: make(chan segOpenResult, 1), sawDone: r.segSawDone, next: rule + 1, onOK: onOK, onFail: onFail}
 	r.pending = ps
 	go func() {
+		// W2-04：这个 goroutine 不是 net/http 起的，Go 不会替它 recover——一次
+		// panic（nil client、上游响应解析越界……）会直接 fatal error 带走整个进程，
+		// 所有在途 SSE 一起断。与 admin_tasks.go:85 / videos.go:401 / client.go:1468
+		// 同口径：先兜 panic，再把失败折成 segOpenResult，让 pollPending 走既有的
+		// onFail + decideNext 收尾（而不是把连接永久挂在 r.pending 上）。
+		sent := false
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("ERR: [continue] 换段请求 panic 已恢复: %v", rec)
+				if !sent {
+					ps.ch <- segOpenResult{err: fmt.Errorf("segment open panic: %v", rec)}
+				}
+			}
+		}()
 		rc, status, _, err := r.up.ChatStreamContext(r.openCtx, r.acct, body, r.clientIP, r.meta)
+		sent = true
 		ps.ch <- segOpenResult{rc: rc, status: status, err: err}
 	}()
 	return true
@@ -750,7 +765,7 @@ func (r *continueReader) decideNext(sawDone bool, from int) {
 					starvedNote = fmt.Sprintf(" (额度已被网关抬到下限 %d，续接被该上限切断的正文)", r.budgetFloor)
 				}
 				log.Printf("[continue] seg=%d model=%s text=%dB reason=%dB%s%s -> 续写",
-					r.seg, bareModelOf(r.body), r.text.Len(), r.reason.Len(), blindNote, starvedNote)
+					r.seg, logModel(bareModelOf(r.body)), r.text.Len(), r.reason.Len(), blindNote, starvedNote)
 				r.finish, r.tail = "", nil
 				// 本段 usage 快照归零：下一段的思考/正文构成要重新测（见 segCompletion）。
 				r.segCompletion, r.segThink = 0, 0

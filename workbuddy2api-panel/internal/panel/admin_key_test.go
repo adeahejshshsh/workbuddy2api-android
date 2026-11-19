@@ -57,12 +57,29 @@ func TestPanelClientKeyCannotReachSensitiveAPIs(t *testing.T) {
 }
 
 // 没配 admin_api_key 时：敏感接口一律 403（不是回落到 api_key 放行）。
+//
+// 表里必须包含 C-01 点名的 12 条写路径 —— 之前这张表只列了 3 条「前缀覆盖得到」的，
+// 于是 12 条漏网的写接口一条都没被覆盖（这正是白名单式判定的漏洞能在测试里活下来
+// 的原因）。现在判定改成「默认敏感 + 显式豁免」，这张表是它的行为层兜底。
 func TestPanelSensitiveAPIsRefuseWithoutAdminKey(t *testing.T) {
 	p := New(Config{Pool: pool.New(""), APIKey: "client-key"})
 	for _, c := range []struct{ method, path string }{
 		{"GET", "/panel/api/export/accounts"},
 		{"GET", "/panel/api/config"},
 		{"POST", "/panel/api/import/cockpit"},
+		// C-01 / W3-01：12 条此前漏判的写路径。
+		{"POST", "/panel/api/model_hidden"},
+		{"POST", "/panel/api/model_effort"},
+		{"POST", "/panel/api/model_rules"},
+		{"POST", "/panel/api/model_rules/delete"},
+		{"POST", "/panel/api/model_rules/apply"},
+		{"POST", "/panel/api/request_logs/clear"},
+		{"POST", "/panel/api/checkin_all"},
+		{"POST", "/panel/api/travel_all"},
+		{"POST", "/panel/api/activity_all"},
+		{"POST", "/panel/api/keepalive_all"},
+		{"POST", "/panel/api/balance_all"},
+		{"POST", "/panel/api/usage/save"},
 	} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(c.method, c.path, nil)

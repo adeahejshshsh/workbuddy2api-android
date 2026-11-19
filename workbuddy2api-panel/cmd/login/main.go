@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	auth2 "github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -237,11 +238,75 @@ func runURL(base, origin, realm, statePath string, client *http.Client, out io.W
 		fatal("auth state: missing state or authUrl")
 	}
 	raw, _ := json.Marshal(loginState{State: st.State, Realm: realm})
-	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+	if err := writeLoginState(statePath, raw); err != nil {
 		fatal("write state: %v", err)
 	}
 	// 授权链接补官方参数（version，以及部署侧给了 nonce 时的 ww_device_nonce）。
 	fmt.Fprintln(out, loginsite.DecorateAuthURL(st.AuthURL, loginsite.ForRealm(realm), loginDeviceNonce(), loginsite.NewLoginSessionID()))
+}
+
+// maxLoginStateBytes state 文件上限。正常只有几百字节；上限只防「被换成大文件」。
+const maxLoginStateBytes = 64 << 10
+
+// writeLoginState 原子写 state 文件（W5-07）。
+//
+// 旧实现 os.WriteFile 固定路径：$TMPDIR 是共享目录，同机任意用户/进程可预置
+// 同名符号链接，把「写入 state」变成「覆盖任意可写文件」（O_CREAT 不拒绝链接，
+// 内核跟随到目标）。这里用 os.CreateTemp（O_CREAT|O_EXCL，目标名随机且不会被
+// 抢占）写完 fsync，再 rename 到固定路径 —— rename 替换的是目录项本身，
+// 不会跟随符号链接。
+func writeLoginState(path string, raw []byte) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".wb2api-login-state-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		// rename 成功后 tmp 已不存在；失败路径必须清掉（里面有 state 与 realm）。
+		_ = os.Remove(tmp)
+	}()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// readLoginState 只读普通文件且拒绝符号链接（W5-07）：O_NOFOLLOW 让「把 state
+// 换成指向 /etc/shadow 的链接」直接 ELOOP，而不是读进来再把内容拼进上游请求。
+func readLoginState(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("state file is not a regular file (mode=%s)", info.Mode().Type())
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxLoginStateBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxLoginStateBytes {
+		return nil, fmt.Errorf("state file too large (>%d bytes)", maxLoginStateBytes)
+	}
+	return raw, nil
 }
 
 // loginDeviceNonce 部署侧提供的桌面端设备 nonce（可选，不伪造）。
@@ -253,7 +318,7 @@ func loginDeviceNonce() string {
 // GET 一次，成功再 GET login/account（带 Bearer），stdout 打印完整 token+account JSON。
 // statePath 可注入临时文件便于测试。
 func runPoll(base, origin, realm, statePath string, client *http.Client, out io.Writer) {
-	raw, err := os.ReadFile(statePath)
+	raw, err := readLoginState(statePath)
 	if err != nil {
 		fatal("read state: %v (先跑 login url)", err)
 	}

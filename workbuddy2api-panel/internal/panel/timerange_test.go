@@ -105,7 +105,9 @@ func TestRequestLogsEmptyRangeReturnsArray(t *testing.T) {
 		Status: 200, OK: true, Outcome: reqlog.OutcomeSuccess})
 	rec.Close()
 
-	p := New(Config{Version: "test", APIKey: "k", Pool: pool.New(""), RequestLog: rec})
+	// request_logs 是审计面（含 client_ip / UA），不再对客户端 key 豁免（C-01）：
+	// 这里用同一把值当 admin key，测的是归档读取语义，不是门禁。
+	p := New(Config{Version: "test", APIKey: "k", AdminAPIKey: "k", Pool: pool.New(""), RequestLog: rec})
 	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
 	req := httptest.NewRequest("GET", "/panel/api/request_logs?from="+future, nil)
 	req.Header.Set("Authorization", "Bearer k")

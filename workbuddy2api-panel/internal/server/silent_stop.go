@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 )
 
 // forceToolChoiceRequired 把请求改成「必须调工具」（tool_choice=required）。
@@ -27,6 +28,40 @@ import (
 //
 // 第二个返回值为 false 表示改不动 —— 调用方不该为它白跑一次上游。
 func forceToolChoiceRequired(body []byte) ([]byte, bool) {
+	obj, ok := toolChoiceRequiredPatch(body)
+	if !ok {
+		return nil, false
+	}
+	// 不转义 HTML（报告 #11）：Marshal 默认把 < > & 转成 \u003c 等，与客户端原文不一致。
+	out, err := marshalNoEscape(obj)
+	if err != nil {
+		return nil, false
+	}
+	forceToolChoiceMarshal.Add(1) // 仅测试观测：确认预判路径没有整份重序列化
+	return out, true
+}
+
+// canForceToolChoiceRequired 只做「改得动吗」的判定，不构造改写后的 body。
+//
+// W2-09：chatCompletions 在轮转前只需要知道能否用 tool_choice=required 救援
+// （决定 holdFrames），结果本身要等到真的触发救援时才用。旧代码用
+// `_, canForceTools := forceToolChoiceRequired(body)`，白白把整份 body 解一遍
+// 再序列化一遍——十万 token 的请求每轮多一次全量 marshal。这里把解析/判定
+// 抽成共享实现，预判路径不再分配输出 buffer。
+func canForceToolChoiceRequired(body []byte) bool {
+	_, ok := toolChoiceRequiredPatch(body)
+	return ok
+}
+
+// forceToolChoiceMarshal 统计真正执行过整份 body 重序列化的次数。
+//
+// 只是为了能用测试钉住 W2-09 的性能性质（预判不走 marshal）：生产路径每请求
+// 触发一次也只是一个 atomic add，可忽略；测试在进程内串行断言前后差值。
+var forceToolChoiceMarshal atomic.Int64
+
+// toolChoiceRequiredPatch 解析 body 并判断 tool_choice 是否可改为 required；
+// 可改时返回已经打上补丁的对象（调用方决定要不要序列化）。
+func toolChoiceRequiredPatch(body []byte) (map[string]any, bool) {
 	if len(body) == 0 {
 		return nil, false
 	}
@@ -59,12 +94,7 @@ func forceToolChoiceRequired(body []byte) ([]byte, bool) {
 		}
 	}
 	obj["tool_choice"] = "required"
-	// 不转义 HTML（报告 #11）：Marshal 默认把 < > & 转成 \u003c 等，与客户端原文不一致。
-	out, err := marshalNoEscape(obj)
-	if err != nil {
-		return nil, false
-	}
-	return out, true
+	return obj, true
 }
 
 // toolChoiceLabel 把客户端原发 tool_choice 压成一行短标签，供日志判断「是不是客户端

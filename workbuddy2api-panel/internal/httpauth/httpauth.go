@@ -8,6 +8,7 @@ package httpauth
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -25,7 +26,13 @@ const bearerPrefix = "Bearer "
 // 但 fail-open 不该是**不可关闭**的：配置漏填密钥（把 api_key 写成空串、env 覆盖
 // 成空）时，网关会安静地对全世界开放。这里给部署方一个显式闸口：
 //
-//	httpauth.SetAllowEmptyKey(false)  // 之后空 key 一律拒绝（失败关闭）
+//	httpauth.SetAllowEmptyKey(false)  // 之后空 key 只允许回环请求（失败关闭）
+//
+// W5-04：关闭语义是「拒绝所有**非回环**请求」而不是「连本机也拒」——Android 内嵌
+// 形态与单机自托管的所有流量都来自 127.0.0.1，全拒会让「漏配 api_key」直接变成
+// 服务不可用，运维只能把开关改回去，反而更危险。回环判定只看 RemoteAddr
+// （不看 X-Forwarded-For，客户端可伪造）；反代部署下 RemoteAddr 是反代自己，
+// 那正是「本机反代 = 公网入口」的场景，必须在反代层配密钥，不能指望这里放行。
 //
 // 语义只影响「key 为空」这一条分支，非空 key 的比较路径完全不变（仍是
 // SHA-256 + ConstantTimeCompare），因此不存在「关了开关反而更弱」的组合。
@@ -53,7 +60,7 @@ func AllowEmptyKey() bool { return allowEmptyKey.Load() }
 //   - 摘要本身不可逆，即便有侧信道也拿不到密钥原文。
 func VerifyBearer(r *http.Request, key string) bool {
 	if key == "" {
-		return AllowEmptyKey()
+		return AllowEmptyKey() || isLoopbackRequest(r)
 	}
 	authz := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authz, bearerPrefix) {
@@ -76,7 +83,7 @@ func VerifyBearer(r *http.Request, key string) bool {
 // 比较路径，也就没有引入新的侧信道。
 func VerifyDual(r *http.Request, key string) bool {
 	if key == "" {
-		return AllowEmptyKey()
+		return AllowEmptyKey() || isLoopbackRequest(r)
 	}
 	if strings.HasPrefix(r.Header.Get("Authorization"), bearerPrefix) {
 		return VerifyBearer(r, key)
@@ -87,6 +94,26 @@ func VerifyDual(r *http.Request, key string) bool {
 		return VerifyBearer(r, key)
 	}
 	return subtle.ConstantTimeCompare(digest(alt), digest(key)) == 1
+}
+
+// isLoopbackRequest 判断请求是否来自本机（W5-04）。
+//
+// 只看 RemoteAddr：X-Forwarded-For / X-Real-IP 是客户端可写头，拿它当判据等于
+// 「加一行头就绕过鉴权」。RemoteAddr 解析不出来（空串/异常形态）一律按非回环处理，
+// 失效方向必须是拒绝。
+func isLoopbackRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	if host == "" {
+		return false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。

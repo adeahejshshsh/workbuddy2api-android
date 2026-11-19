@@ -1,6 +1,64 @@
 'use strict';
 /* ── 状态 ─────────────────────────────────────────────────────────── */
 const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
+
+/* ── 访问密钥的存放（W3-04）───────────────────────────────────────────
+   此前管理员密钥与下游客户端 key 共用同一槽位，明文写进 localStorage：面板 origin
+   是明文 HTTP，设备 root 或回环抓包就能拿到全池管理员权限，而且永不过期、不轮换。
+   现在分三层，且**不再写 localStorage**：
+     1. 内存变量 authKeyMem —— 最高优先级。宿主 App（MainActivity）可以在页面加载
+        后把密钥注入 window.__WB2A_ADMIN_KEY，刷新也不落盘；
+     2. sessionStorage —— 同标签页刷新还在，关掉页面即消失（可选的便利层）；
+     3. 旧的 localStorage 值只在启动时迁移一次，迁完立刻删除，磁盘上不留明文。
+   所有读写都必须走 authKey()/setAuthKey()，别再直接碰 localStorage 里那把 key。 */
+let authKeyMem = '';
+function injectedAuthKey() {
+  try {
+    const v = (typeof window !== 'undefined') ? window.__WB2A_ADMIN_KEY : '';
+    return typeof v === 'string' ? v.trim() : '';
+  } catch (e) { return ''; }
+}
+function authKey() {
+  if (authKeyMem) return authKeyMem;
+  const inj = injectedAuthKey();
+  if (inj) { authKeyMem = inj; return inj; }
+  try {
+    if (typeof sessionStorage !== 'undefined') return sessionStorage.getItem(LS_KEY) || '';
+  } catch (e) { /* 隐私模式：当作没存 */ }
+  return '';
+}
+function setAuthKey(k) {
+  authKeyMem = k || '';
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      if (authKeyMem) sessionStorage.setItem(LS_KEY, authKeyMem);
+      else sessionStorage.removeItem(LS_KEY);
+    }
+  } catch (e) { /* 隐私模式：只留内存 */ }
+  // 清掉历史版本留下的明文副本（迁移与后续更新都走这里）。
+  try { localStorage.removeItem(LS_KEY); } catch (e) { /* 桩/隐私模式 */ }
+}
+/* 一次性迁移：老版本把 key 存在 localStorage。升级后第一次加载搬到 sessionStorage
+   并删除原值 —— 不然用户会莫名其妙被要求重新输入，而明文副本还留在磁盘上。 */
+function migrateLegacyAuthKey() {
+  try {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(LS_KEY)) return;
+    const legacy = localStorage.getItem(LS_KEY);
+    if (legacy) setAuthKey(legacy);
+  } catch (e) { /* 隐私模式：忽略 */ }
+}
+migrateLegacyAuthKey();
+
+/* 自举令牌（W3-02）：宿主 App 注入到 window.__WB2A_BOOTSTRAP_TOKEN，
+   桌面浏览器则从 <数据目录>/panel_bootstrap_token（0600）复制到弹窗输入框。
+   只读内存，不落任何存储。 */
+function bootstrapToken() {
+  try {
+    const v = (typeof window !== 'undefined') ? window.__WB2A_BOOTSTRAP_TOKEN : '';
+    return typeof v === 'string' ? v.trim() : '';
+  } catch (e) { return ''; }
+}
+
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
@@ -32,6 +90,8 @@ let usageData = null;
    域」「刚领取的任务又变回可领取」「旧窗口的曲线盖掉新窗口」。做法：每次请求自增一份
    序号，回来时只接受序号仍是最新的那一份，旧的直接丢弃（不写 DOM、不写缓存）。 */
 let logsSeq = 0, modelsSeq = 0, tasksSeq = 0, balanceSeq = 0, packagesSeq = 0;
+/* 日志轮询每次拉多少条（W3-15）：后端上限 500、缺省 200。 */
+const LOGS_POLL_LIMIT = 200;
 /* 401 单飞（审查 W4F1-003）：首屏 go() 并发 5+ 请求，全部 401 时 openKey() 会被连调
    多次 —— 重复 openVeil 会反复覆盖 veilOpener（关闭后焦点还原错位），更糟的是密钥
    弹窗已被用户关掉后，后到的 401 又把它弹回来。一轮 401 只弹一次，提交密钥时复位。 */
@@ -86,7 +146,7 @@ const REQ_TIMEOUT_SLOW_MS = 120000;
 const SLOW_API_RE = /^(packages|models|model_probes|balance_history|usage|request_logs|logs\/export|config)(\?|$)/;
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
-  const k = localStorage.getItem(LS_KEY);
+  const k = authKey();
   if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
   const init = Object.assign({}, opts, { headers: h });
@@ -581,8 +641,8 @@ $('btnKey').onclick = async () => {
   if (!v) return;
   // 先存再校验会留下坏值（审查 W4F1-008）：密钥错时坏值已落盘，刷新后 start()
   // 仍带着它跑一轮全量 401。这里记下原值，校验失败就回滚。
-  const prev = localStorage.getItem(LS_KEY);
-  localStorage.setItem(LS_KEY, v);
+  const prev = authKey();
+  setAuthKey(v);
   try {
     await api('overview');
     $('keyErr').hidden = true;
@@ -590,7 +650,7 @@ $('btnKey').onclick = async () => {
     closeVeil('keyVeil');
     start();
   } catch (e) {
-    if (prev == null) localStorage.removeItem(LS_KEY); else localStorage.setItem(LS_KEY, prev);
+    setAuthKey(prev);       // 坏值不留在任何一层存储里（W3-04）
     $('keyErr').hidden = false;
   }
 };
@@ -607,9 +667,20 @@ function syncAdminKeyBar(set) {
   const need = set === false && sessionStorage.getItem(LS_ADMK_DISMISS) !== '1';
   bar.hidden = !need;
 }
+/* 安全现状横幅（W5-03 / W5-04）：只读 overview 里的两个字段渲染，不自己判断。
+   - empty_key_only_loopback：后端「空 key 只放行回环」已经生效（require_api_key=true）；
+   - at_rest_key.builtin：at-rest 用的是源码内置密钥（auth 文件可离线解密）。
+   两条都不是「引导」，是配置现状的风险 —— 因此不给「稍后」按钮，改好才消失。 */
+function renderSecBars(d) {
+  const e = $('emptyKeyBar'), a = $('atRestBar');
+  if (e) e.hidden = !(d && d.empty_key_only_loopback);
+  if (a) a.hidden = !(d && d.at_rest_key && d.at_rest_key.builtin);
+}
 function openAdminKey() {
   const err = $('admkErr');
   if (err) err.hidden = true;
+  // 宿主注入的令牌直接预填（W3-02）：用户只需生成并保存新密钥。
+  if ($('admkToken') && !$('admkToken').value && bootstrapToken()) $('admkToken').value = bootstrapToken();
   // 不清空输入框（issue #172）：用户点了「取消」又回来，框里还留着刚生成的串才有救。
   // 只有「保存成功后的那一次关闭」才需要清（见 resetAdminKeyDialog）。
   const inp = $('admkInput'), inp2 = $('admkInput2');
@@ -630,6 +701,7 @@ function openAdminKey() {
 
 /** 保存成功、用户点「我已保存」之后复位，下次打开是干净的。 */
 function resetAdminKeyDialog() {
+  if ($('admkToken')) { $('admkToken').value = ''; $('admkToken').disabled = false; }
   if ($('admkInput')) { $('admkInput').value = ''; $('admkInput').disabled = false; }
   if ($('admkInput2')) { $('admkInput2').value = ''; $('admkInput2').disabled = false; }
   if ($('admkPlainBox')) $('admkPlainBox').hidden = true;
@@ -657,11 +729,23 @@ async function saveAdminKey() {
   const k2 = ($('admkInput2').value || '').trim();
   const err = $('admkErr');
   err.hidden = true;
-  if (k.length < 16) { err.textContent = '至少 16 位（面板会把它存在浏览器里，太短等于没设）'; err.hidden = false; return; }
+  if (k.length < 16) { err.textContent = '至少 16 位（只在本会话内存里用，太短等于没设）'; err.hidden = false; return; }
   if (k !== k2) { err.textContent = '两次输入不一致'; err.hidden = false; return; }
+  // 自举令牌（W3-02）：POST /panel/api/admin_key 现在要求一次性令牌。宿主 App 通过
+  // window.__WB2A_BOOTSTRAP_TOKEN 注入；桌面浏览器从 <数据目录>/panel_bootstrap_token
+  // （0600，启动时生成）复制到输入框。令牌用后即作废，不会留在任何存储里。
+  const bt = (($('admkToken') && $('admkToken').value) || bootstrapToken()).trim();
+  if (!bt) {
+    err.textContent = '缺少引导令牌：填写启动日志里那串一次性令牌（文件 panel_bootstrap_token），或让宿主 App 注入';
+    err.hidden = false;
+    return;
+  }
   let saved = null;
   try {
-    saved = await api('admin_key', { method: 'POST', body: JSON.stringify({ admin_api_key: k }) });
+    saved = await api('admin_key', {
+      method: 'POST',
+      body: JSON.stringify({ admin_api_key: k, bootstrap_token: bt }),
+    });
   } catch (e) {
     err.textContent = e.message || String(e);
     err.hidden = false;
@@ -669,7 +753,7 @@ async function saveAdminKey() {
   }
   // 保存成功 → 立刻把当前会话切到这把 key。面板此后按 admin key 鉴权，沿用旧客户端
   // key 会让每个敏感接口继续 403（用户会以为「没保存成功」）。
-  localStorage.setItem(LS_KEY, k);
+  setAuthKey(k);                       // 只进内存 / sessionStorage（W3-04）
   sessionStorage.removeItem(LS_ADMK_DISMISS);
   admkPrompting = false;
   syncAdminKeyBar(true);
@@ -679,6 +763,8 @@ async function saveAdminKey() {
   $('admkPlainBox').hidden = false;
   $('admkInput').disabled = true;
   $('admkInput2').disabled = true;
+  if ($('admkToken')) $('admkToken').disabled = true;   // 一次性令牌已作废
+
   if (saved && saved.note) {
     $('admkNote').textContent = saved.note;
     $('admkNote').hidden = false;
@@ -786,7 +872,7 @@ function disabledKind(reason) {
   if (/12153|401|refresh|session dead|登录/i.test(r)) {
     return { label: '登录失效', tone: 'warn', advice: '需重新登录，解冻无效' };
   }
-  if (/11‑-128|11129|channel|通道|鉴权/i.test(r)) {
+  if (/11128|11[-‑]128|11129|channel|通道|鉴权/i.test(r)) {
     return { label: '鉴权失败', tone: 'warn', advice: '检查账号类型与通道' };
   }
   if (/手动|manual/i.test(r)) {
@@ -1125,6 +1211,7 @@ async function loadOverview(quiet) {
     $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
     adminKeySet = d.admin_key_set;
     syncAdminKeyBar(d.admin_key_set);
+    renderSecBars(d);
     const p = $('navPulse');
     p.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
@@ -1606,7 +1693,9 @@ async function loadLogs() {
     const requestLogs = api('request_logs?' + rq.toString())
       .catch(e => { errText = e.message; return { entries: [] }; });
     const [d, metrics, requestRows, errSum] = await Promise.all([
-      api('logs'),
+      // W3-15：5 秒一轮只拉最近 200 条（后端 ?limit= 默认就是 200，这里显式带上
+      // 便于将来调参；全量历史走「导出」而不是每轮全环重渲染）。
+      api('logs?limit=' + LOGS_POLL_LIMIT),
       api('request_metrics').catch(() => ({})),
       requestLogs,
       // 错误汇总失败不该拖垮整页日志（它只是视图之一）：失败按 null 渲染成「—」。
@@ -1898,7 +1987,7 @@ $('btnLogExport').onclick = async () => {
   // 打包几十 MB 要时间：按钮进禁用态并改文案，避免连点叠出多个下载。
   if (b) { b.dataset.label = b.textContent; b.disabled = true; b.textContent = '打包中…'; }
   try {
-    const k = localStorage.getItem(LS_KEY);
+    const k = authKey();
     const resp = await fetch(url, { headers: k ? { Authorization: 'Bearer ' + k } : {} });
     if (!resp.ok) {
       const detail = await resp.text().catch(() => '');
@@ -2247,7 +2336,7 @@ $('cfgForm').onsubmit = async ev => {
     toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
     // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
     const k = $('cfgKey').value.trim();
-    if (k) localStorage.setItem(LS_KEY, k);
+    if (k) setAuthKey(k);
     loadConfig();
     loadOverview(true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
@@ -2386,7 +2475,7 @@ $('btnImportPaste').onclick = async () => {
   const fd = new FormData();
   fd.append('file', new Blob([txt], { type: 'application/json' }), 'pasted.json');
   const h = {};
-  const k = localStorage.getItem(LS_KEY);
+  const k = authKey();
   if (k) h['Authorization'] = 'Bearer ' + k;
   try {
     const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
@@ -2407,7 +2496,7 @@ $('btnImportPaste').onclick = async () => {
 // 「导出 → 复制 → 粘贴/存文件」；下载链接只在桌面浏览器里有用。
 $('btnExportAccounts').onclick = async () => {
   const h = {};
-  const k = localStorage.getItem(LS_KEY);
+  const k = authKey();
   if (k) h['Authorization'] = 'Bearer ' + k;
   $('exportHint').hidden = true; $('exportOut').hidden = true;
   $('btnCopyExport').hidden = true; $('exportDownload').hidden = true;
@@ -2536,7 +2625,7 @@ $('btnImportFiles').onclick = async () => {
     fd.append('file', new Blob([JSON.stringify(merged)], { type: 'application/json' }), 'merged.json');
   }
   const h = {};
-  const k = localStorage.getItem(LS_KEY);
+  const k = authKey();
   if (k) h['Authorization'] = 'Bearer ' + k;
   try {
     const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });

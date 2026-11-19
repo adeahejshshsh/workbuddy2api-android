@@ -880,10 +880,36 @@ func (w *messagesWriter) finish() {
 			}
 			return
 		}
+		// W2-08：零字节时产生的真实 HTTP 错误（首帧否决/上游 4xx/5xx）必须按
+		// 状态码 + Anthropic 错误体返回。此前一律走 emitJSONError → 200 + SSE
+		// error，Claude Code 把 429/400 全当成功流，退避重试根本不会触发。
+		if w.status >= 400 {
+			w.writeJSONError()
+			return
+		}
 		_ = w.emitJSONError()
 		return
 	}
 	w.flushJSON()
+}
+
+// writeJSONError 未开流时把缓冲里的 OpenAI 风格错误转成 Anthropic 错误体，
+// 并保留真实 HTTP 状态码（W2-08）。已开流的错误仍走 SSE error 帧。
+func (w *messagesWriter) writeJSONError() {
+	status := w.status
+	w.Header().Set("Content-Type", "application/json")
+	if len(w.body) == 0 {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	var obj map[string]any
+	if json.Unmarshal(w.body, &obj) == nil {
+		w.ResponseWriter.WriteHeader(status)
+		_, _ = w.ResponseWriter.Write(anthropicErrorBody(status, obj))
+		return
+	}
+	w.ResponseWriter.WriteHeader(status)
+	_, _ = w.ResponseWriter.Write(w.body)
 }
 
 func (w *messagesWriter) flushJSON() {

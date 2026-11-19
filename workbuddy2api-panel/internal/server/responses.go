@@ -1233,6 +1233,17 @@ func (w *responsesWriter) finish() {
 			}
 			return
 		}
+		// W2-08：零字节时的真实 HTTP 错误（首帧否决/上游 4xx/5xx）按状态码 +
+		// JSON 错误体返回。此前 emitJSONErrorAsFailed 会写成 200 + response.failed
+		// SSE，Codex 按状态码做的退避重试全部失效。
+		if w.status >= 400 {
+			w.Header().Set("Content-Type", "application/json")
+			w.ResponseWriter.WriteHeader(w.status)
+			if len(w.body) > 0 {
+				_, _ = w.ResponseWriter.Write(w.body)
+			}
+			return
+		}
 		_ = w.emitJSONErrorAsFailed()
 		return
 	}

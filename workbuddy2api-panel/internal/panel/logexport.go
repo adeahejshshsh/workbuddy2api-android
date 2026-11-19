@@ -16,6 +16,8 @@
 package panel
 
 import (
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -30,6 +32,33 @@ import (
 // 7 天的包在请求体量大时能到几十 MB，浏览器下载体验差。
 const exportDefaultDays = 3
 
+// exportMaxBytes 单次导出的 zip 上限（W3-14）。
+//
+// 5 万行 JSONL 大约 20-30MB，64MB 已经覆盖「保留期全量」的正常形态；再大就说明
+// 要么保留期设得过长，要么有人在刷日志。没有上限时一次导出能把系统临时目录写满
+// （而 Android 上 /data 配额有限，写满的直接后果是所有落盘一起失败）。
+const exportMaxBytes = 64 << 20
+
+// errExportTooLarge 打包中途超过 exportMaxBytes 时的哨兵错误。
+var errExportTooLarge = errors.New("日志导出体积超过上限")
+
+// cappedWriter 给 zip 输出套一层字节闸门：超限立刻返回哨兵错误，
+// 让 zip.Writer 提前中断，而不是先写完几十 GB 再 Stat 一下。
+type cappedWriter struct {
+	w   io.Writer
+	n   int64
+	max int64
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	if c.n+int64(len(p)) > c.max {
+		return 0, errExportTooLarge
+	}
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // logsExportHandler 打包指定区间内的落盘日志。
 func (p *Panel) logsExportHandler(w http.ResponseWriter, r *http.Request) {
 	p.logs.mu.Lock()
@@ -37,6 +66,19 @@ func (p *Panel) logsExportHandler(w http.ResponseWriter, r *http.Request) {
 	p.logs.mu.Unlock()
 	if store == nil {
 		writeErr(w, http.StatusNotImplemented, "日志落盘未启用（检查 logging.panel_log_enabled 与数据目录权限）")
+		return
+	}
+	// 并发闸门（W3-14）：容量 1，抢不到直接 429。
+	//
+	// 为什么用「抢不到就拒」而不是排队：打包本身要读全区间日志文件，排队只会把
+	// 峰值推后；而前端按钮已经置灰，正常运维不会连点。429 让误点/脚本立刻得到
+	// 明确答复，也不会把磁盘 IO 叠成 N 份。
+	select {
+	case p.logExportSem <- struct{}{}:
+		defer func() { <-p.logExportSem }()
+	default:
+		writeErr(w, http.StatusTooManyRequests,
+			"export_in_progress：已有一次日志导出在打包，请等它完成再试")
 		return
 	}
 
@@ -88,8 +130,14 @@ func (p *Panel) logsExportHandler(w http.ResponseWriter, r *http.Request) {
 		os.Remove(tmp.Name())
 	}()
 	p.logs.Flush() // 排队中的行先写下去，导出才含最新的尾巴
-	files, err := store.Export(tmp, from, to)
+	files, err := store.Export(&cappedWriter{w: tmp, max: exportMaxBytes}, from, to)
 	if err != nil {
+		if errors.Is(err, errExportTooLarge) {
+			// 413 而不是 500：这是「要的区间太大」，不是服务故障。
+			writeErr(w, http.StatusRequestEntityTooLarge,
+				"导出体积超过上限（64MB）：请缩小 days 或 from/to 区间后重试")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "打包日志: "+err.Error())
 		return
 	}

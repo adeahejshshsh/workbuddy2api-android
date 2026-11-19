@@ -581,15 +581,20 @@ func (e *entry) pruneExpiredModelCooldowns(now time.Time) {
 		// 但墓碑要有保质期（审查 C5-30）：此前写回的结构**不含任何时间戳**，下次
 		// prune 又命中同一分支写回同一结构 → 墓碑永不消失，每个用过的 (号, 模型)
 		// 永久占一条内存（Hits 恒 >0 所以永不 delete），与函数注释「防止 map 无限
-		// 膨胀」相反；同时 Reason 被抹成空串，ModelBlockedForRealm 的 Reasons 里
-		// 会出现无因条目。现在记 PrunedAt，超过 modelBlockTombstoneTTL 连 Hits 一起删。
+		// 膨胀」相反。
+		//
+		// W4-07 / W4-25：重写时必须保留 Reason —— 11102/11158 的识别**全靠 reason
+		// 前缀**（BlockModelClear、ModelBlockedForRealm 的 Reasons、cooldown.go 里
+		// `strings.HasPrefix(mc.Reason, "11102")` 的判定都按前缀走）。抹成空串后：
+		// 墓碑不再被认作「官方确定的负缓存」，退避历史（Hits 6h→12h→24h）在
+		// 下一次 BlockModel 时从头学起，面板上还会出现无因条目。
 		if mc.PrunedAt.IsZero() {
 			mc.PrunedAt = now
 		} else if now.Sub(mc.PrunedAt) > modelBlockTombstoneTTL {
 			delete(e.modelCooldowns, m)
 			continue
 		}
-		e.modelCooldowns[m] = modelCooldown{Hits: mc.Hits, PrunedAt: mc.PrunedAt}
+		e.modelCooldowns[m] = modelCooldown{Hits: mc.Hits, PrunedAt: mc.PrunedAt, Reason: mc.Reason}
 	}
 }
 

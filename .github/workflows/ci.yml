@@ -16,14 +16,25 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# W6-M-08：不给权限就是给默认权限 —— 仓库默认的 GITHUB_TOKEN 在旧仓设置下可能是
+# read/write，一条被投毒的测试依赖就能用它对 main 推提交、改 Release。
+# 这个 job 只读代码跑 go test，最小权限就是 contents: read。
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: workbuddy2api-panel
     steps:
+      # 版本一律写全 major tag（@v4 / @v5），不用 @main 这类浮动引用：
+      # 浮动引用等于把「跑什么代码」交给上游随时改。
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # 后续步骤不需要 git 凭据，别把它留在 .git/config 里
 
       - uses: actions/setup-go@v5
         with:

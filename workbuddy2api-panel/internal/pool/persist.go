@@ -44,13 +44,12 @@ type StoreSnapshotter interface {
 // 每种情形都打一条对应的恢复来源日志，便于对账。必须在 SyncToDir 之前调用
 // （SyncToDir 只增删不入值：值只能来自本地 load 或本函数采用快照）。
 func (p *Pool) RestoreFromSnapshot() {
-	// 读 store / stateFp 也要持锁（审查 C5-49）：SetStore 在写锁内替换 p.store，
-	// 这里无锁读就是数据竞争（-race 可复现），而且可能读到「store 已换、stateFp 未读」
-	// 的撕裂组合，选错恢复源。两个字段一起在 RLock 内快照。
+	// 读 store / stateFp：store 走 atomic.Pointer（W4-03），stateFp 构造后不再变、
+	// 但仍在 RLock 内读，与 SetStore/其它注入保持同一套「不在锁外裸读字段」的纪律。
 	p.mu.RLock()
-	store := p.store
 	stateFp := p.stateFp
 	p.mu.RUnlock()
+	store := p.storeSnapshot()
 	if store == nil || stateFp == "" {
 		return
 	}
@@ -439,25 +438,29 @@ func (p *Pool) writeSnapshot(raw []byte) error {
 		p.notePersistFail(err)
 		return err
 	}
-	if p.persistFails > 0 {
+	if n := p.persistFails.Load(); n > 0 {
 		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
-		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
-		p.persistFails = 0
+		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", n)
+		p.persistFails.Store(0)
 	}
 	return nil
 }
 
 // mirrorToStore 把快照镜像到 Redis（fire-and-forget，**不加 p.mu**）。
 // 与本地 state.json 并存作恢复备份；锁外做，避免 Redis 客户端抖动传导到账号池。
+//
+// W4-03：store 经 atomic.Pointer 读 —— SetStore 热切换与这里的无锁读并发时，
+// 裸接口字段会读到撕裂值（nil 或旧 store），镜像写丢/写错目标。
 func (p *Pool) mirrorToStore(sf stateFile) {
-	if p.store == nil {
+	store := p.storeSnapshot()
+	if store == nil {
 		return
 	}
 	raw, err := json.Marshal(snapshot{stateFile: sf, SavedAt: time.Now()})
 	if err != nil {
 		return
 	}
-	p.store.SaveState(raw)
+	store.SaveState(raw)
 }
 
 // flushNow 周期性落盘入口（flusher / 退出前）：**只在有变更时**写。
@@ -471,7 +474,20 @@ func (p *Pool) flushNow() {
 // flushNowErr 无条件写一次（保留原 saveLocked 的语义：调用方要的是「现在就落盘」，
 // 例如面板删除账号、热重载剔除、以及直接调它的测试）。错误交给调用方。
 // 锁内只取快照，IO 全在锁外（审查 C5-37）。
+//
+// C-02：整段「取快照 + 落盘 + 镜像」由独立的 flushMu 串行化。只把 p.mu 用在
+// 取快照上（下面的注释解释了为什么不能持 p.mu 做 IO）并不够 —— 两个并发 flush
+// 的快照之间没有全序，旧快照可能后落盘，把 state.json 写回上一版。
 func (p *Pool) flushNowErr() error {
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+	return p.flushLocked()
+}
+
+// flushLocked 是 flushNowErr 的本体；调用方必须已持有 p.flushMu（C-02）。
+// 拆出来是给 Close 用的：Close 要先关 stopCh、再在同一把锁内做最后一次落盘，
+// 不能经由 flushNowErr 二次抢锁（sync.Mutex 不可重入）。
+func (p *Pool) flushLocked() error {
 	p.mu.Lock()
 	p.dirty.Store(false)
 	// 一次取态，两处复用（审查 C5-53）：sf 同时供落盘序列化与 Redis 镜像，
@@ -479,6 +495,11 @@ func (p *Pool) flushNowErr() error {
 	sf := p.stateOverviewLocked()
 	needDisk := p.stateFp != ""
 	p.mu.Unlock()
+	// 测试注入的同步点（C-02 变异验证）：位于「快照已取、尚未落盘」之间。
+	// 生产路径 flushHook 恒 nil，零开销。
+	if hook := p.flushHook.Load(); hook != nil {
+		(*hook)()
+	}
 	var raw []byte
 	if needDisk {
 		b, err := p.snapshotBytes(sf)
@@ -503,12 +524,14 @@ func (p *Pool) flushNowErr() error {
 // 恢复成功的日志由 saveLocked 在成功路径统一打。与 redisstore 三处异步写的
 // "失败仅打日志、不向上抛"范式对齐，但落盘失败对运维是盲区，故多一层节流（notification）。
 func (p *Pool) notePersistFail(err error) {
-	if p.persistFails == 0 {
+	// W4-08：读-改-写一次完成（Load 之后再 Add 会让两条并发失败路径都读到旧值，
+	// 日志节流的「每 N 次」判断失真）。
+	n := p.persistFails.Add(1)
+	if n == 1 {
 		log.Printf("pool: state.json 落盘失败: %v", err)
-	} else if p.persistFails%persistLogEvery == 0 {
-		log.Printf("pool: state.json 连续落盘失败 %d 次: %v", p.persistFails, err)
+	} else if n%persistLogEvery == 0 {
+		log.Printf("pool: state.json 连续落盘失败 %d 次: %v", n, err)
 	}
-	p.persistFails++
 }
 
 // stateOverviewLocked 收集当前内存状态为 stateFile（供落盘 + 快照镜像复用）。调用方必须已持 p.mu。

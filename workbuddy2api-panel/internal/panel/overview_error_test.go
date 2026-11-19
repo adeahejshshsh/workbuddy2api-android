@@ -42,6 +42,8 @@ const ctx = {
   // loadOverview 末尾同步管理员密钥横幅（adminkey.go 的自举入口）；沙箱里给个空实现，
   // 否则「正常路径」会被记成一次渲染异常。
   syncAdminKeyBar: () => {},
+  // W5-03/04：loadOverview 现在还会渲染两条安全横幅，同样在这一层收口。
+  renderSecBars: () => {},
   lastPackages: null,
   overviewData: null,
 };

@@ -8,6 +8,7 @@ package upstream
 
 import (
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -90,17 +91,33 @@ func readDeviceTokenFile(path string) string {
 }
 
 // readTrimmedFile 读文件并 trim 首尾空白，超过 maxLen 返回错误（拒绝过长内容）。
+//
+// 审查 W1-17：原来的 `os.Stat` → `os.ReadFile` 是**两步**，尺寸检查可被绕过：
+//   - 两次系统调用之间文件可被替换（符号链接换指向、宿主写入更大文件），
+//     Stat 看到 1KB、ReadFile 读到 10GB；
+//   - /dev/zero 这类 size=0 的伪文件根本不会触发 `Size() > maxLen`，
+//     ReadFile 会一直读到 OOM。
+//
+// 现在改成「先打开，再在同一个 fd 上 Stat，读的时候再套 io.LimitReader」：
+// Stat 校验的是即将读的那个 inode，LimitReader 保证即使文件在读取途中变长，
+// 内存占用也恒定在 maxLen+1 字节。
 func readTrimmedFile(path string, maxLen int) (string, error) {
-	info, err := os.Stat(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	if info.Size() > int64(maxLen) {
+	defer f.Close()
+	// 打开后 Stat：拿到的是**这个 fd 对应的 inode**，不是路径当时指向的东西。
+	if info, serr := f.Stat(); serr == nil && info.Size() > int64(maxLen) {
 		return "", errDeviceTokenTooLarge
 	}
-	raw, err := os.ReadFile(path)
+	// 多读 1 字节用于判断「是否超限」：正好 maxLen 字节的文件是合法的。
+	raw, err := io.ReadAll(io.LimitReader(f, int64(maxLen)+1))
 	if err != nil {
 		return "", err
+	}
+	if len(raw) > maxLen {
+		return "", errDeviceTokenTooLarge
 	}
 	return strings.TrimSpace(string(raw)), nil
 }

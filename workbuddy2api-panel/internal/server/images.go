@@ -178,12 +178,12 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 						status = http.StatusBadRequest
 					}
 					st.status, st.outcome = status, "http_error"
-					log.Printf("images model=%s realm=%s: 请求级错误 kind=%v，不再换号", bare, realm, ue.Kind)
+					log.Printf("images model=%s realm=%s: 请求级错误 kind=%v，不再换号", logModel(bare), realm, ue.Kind)
 					writeOpenAIError(w, status, "upstream_error", ue.Msg)
 					return
 				}
 			}
-			log.Printf("images %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), bare, attempt+1, err)
+			log.Printf("images %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), logModel(bare), attempt+1, err)
 			continue
 		}
 		lastErr = nil
@@ -207,7 +207,7 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	}
 	st.status = status
 	st.outcome = ""
-	log.Printf("images model=%s realm=%s: 全部尝试失败（%d 个账号）：%v", bare, realm, len(tried), lastErr)
+	log.Printf("images model=%s realm=%s: 全部尝试失败（%d 个账号）：%v", logModel(bare), realm, len(tried), lastErr)
 	writeOpenAIError(w, status, code, lastErr.Error())
 }
 
@@ -306,7 +306,7 @@ func (h *Handler) imageGenerate(ctx context.Context, req map[string]any) ([]byte
 					return nil, ierr
 				}
 			}
-			log.Printf("images %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), bare, attempt+1, ierr)
+			log.Printf("images %s model=%s attempt=%d: %v", logfmt.Label(a.UID, a.Nickname), logModel(bare), attempt+1, ierr)
 			continue
 		}
 		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, req, st.start)
@@ -380,7 +380,7 @@ func recordImageUsage(h *Handler, st *chatStat, realm, uid, bare, modelRate stri
 		imgs = 1
 	}
 	log.Printf("images %s model=%s: 出图 %d 张 credit=%.2f 用时=%s",
-		logfmt.Label(uid, st.nick), bare, imgs, u.Credit, time.Since(start).Round(time.Millisecond))
+		logfmt.Label(uid, st.nick), logModel(bare), imgs, u.Credit, time.Since(start).Round(time.Millisecond))
 	if h.cfg.Usage != nil {
 		h.cfg.Usage.Add(time.Now(), realm, uid, bare, usage.Delta{
 			PromptTokens:    u.InputTokens,
