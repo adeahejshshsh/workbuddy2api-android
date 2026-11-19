@@ -214,6 +214,11 @@ public class GatewayService extends Service {
         if (why != null) reason = why;
     }
     static volatile long startedAt = 0;         // elapsedRealtime，用于算启动宽限
+    /** onStartCommand 是否进过。用来区分「还没开始」和「启动失败」（issue #176 的回归）：
+     *  进程刚起时 status 就是默认的 ST_STOPPED，UI 若把它当失败会误报 ——
+     *  冷启动路径上 Console 1.2s 后就来加载面板，那时网关通常还没开始监听。 */
+    static volatile boolean everStarted = false;
+    public static boolean everStarted() { return everStarted; }
     static volatile PowerManager.WakeLock wake; // 保活：持着它 CPU 才不会睡
 
     Thread reader, waiter, watchdog;
@@ -309,6 +314,7 @@ public class GatewayService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         appCtx = this;
+        everStarted = true;   // 见字段注释：UI 靠它区分「还没开始」与「启动失败」
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {   // 用户主动停：别再自愈
             userStop = true;
             // issue #176①：与 stop(Context) 共用同一处落盘。此前这里只写

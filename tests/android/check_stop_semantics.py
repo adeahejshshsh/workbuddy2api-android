@@ -120,10 +120,26 @@ check("httpUp()" in watch,
       "watchLoop 的 external 分支必须探 httpUp()（否则死端口被当成健康实例）")
 check("extStale" in gw, "GatewayService 必须记录 extStale（复用态不应答轮数）")
 
+# ③ 的回归防线：「还没开始」不许被当成「启动失败」。
+#    进程刚起时 status 就是默认的 ST_STOPPED，而 Console 1.2s 后就来加载面板 ——
+#    只看 statusOf() 会让正常冷启动闪一下「网关启动失败」。
+start_cmd = body(gw, "public int onStartCommand(Intent intent")
+check("everStarted = true" in start_cmd,
+      "onStartCommand 必须置 everStarted（区分「还没开始」与「启动失败」）")
+check("notYetStarted()" in fail_body,
+      "Console.fail 必须用 notYetStarted() 排除冷启动误报")
+check("notYetStarted" in body(console, "void showTerminal(String msg)"),
+      "showTerminal 必须用 notYetStarted() 排除冷启动误报")
+# 用户主动停过时 MainActivity 不 start()，everStarted 永远是 false ——
+# 不排掉这条，「已停止」会被渲染成「还没开始启动」。
+nys = body(console, "private boolean notYetStarted()")
+check("userStopped" in nys,
+      "notYetStarted 必须排除 userStopped（否则「已停止」被说成「还没开始」）")
+
 print()
 if fails:
     print("失败 %d 项" % len(fails))
     for f in fails:
         print("  - %s" % f)
     sys.exit(1)
-print("全部通过（%d 项）" % 15)
+print("全部通过（%d 项）" % 19)
