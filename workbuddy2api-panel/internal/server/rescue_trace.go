@@ -16,6 +16,8 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
+	"time"
 )
 
 // rescueTrace 是否记录救援被哪道闸门挡掉。
@@ -53,4 +55,42 @@ func (r *continueReader) logRescueSkip() {
 	log.Printf("[rescue] acct=%s model=%s finish=%q text=%dB prompt=%s limit_set=%v budget_raised=%v why=%s",
 		r.label(), bareModelOf(r.body), r.finish, r.text.Len(),
 		prompt, r.limitSet, r.budgetWasRaised(), strings.Join(r.rescueWhy, " "))
+}
+
+// 今日各类救援的触发次数（面板概况「今日救援」卡片）。
+//
+// 为什么需要：每条救援都要多打一次上游、多付一遍整段 prompt（issue #273 实测单条
+// 0.2 → 8.58 credits），触发频率此前只在网关日志里能看见，面板上看不出来。计数器让
+// 「今天怎么突然贵了」有个一眼能看到的出口。
+//
+// 进程内计数、跨天归零：它是异常探测器，不是账（重启归零可以接受，真账在用量记录里）。
+var rescueToday struct {
+	mu  sync.Mutex
+	day string
+	n   map[string]int
+}
+
+func noteRescue(kind string) {
+	day := time.Now().Format("2006-01-02")
+	rescueToday.mu.Lock()
+	defer rescueToday.mu.Unlock()
+	if rescueToday.day != day || rescueToday.n == nil {
+		rescueToday.day, rescueToday.n = day, map[string]int{}
+	}
+	rescueToday.n[kind]++
+}
+
+// RescueToday 今日各类救援次数快照（narration/toolonly/starved）；跨天自动归零。
+func RescueToday() map[string]int {
+	day := time.Now().Format("2006-01-02")
+	rescueToday.mu.Lock()
+	defer rescueToday.mu.Unlock()
+	if rescueToday.day != day || rescueToday.n == nil {
+		return map[string]int{}
+	}
+	out := make(map[string]int, len(rescueToday.n))
+	for k, v := range rescueToday.n {
+		out[k] = v
+	}
+	return out
 }

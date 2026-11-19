@@ -79,3 +79,69 @@ func TestNarrationPromiseTailStillRescued(t *testing.T) {
 		t.Fatalf("承诺句收尾应救一次，实际 %d 次", len(*reqs))
 	}
 }
+
+// issue #273 第二条评论（sslnv88，agent 客户端 QwenPaw）：固定结尾格式不含句末标点，
+// 三条尾部原样贴出来，都在「上一轮输出的最后几个字」上被救。收窄判据之后
+// （无标点尾部必须含承诺词）这三条都不该再触发 —— 这里是钉住，不是新增行为。
+func TestNarrationAgentAnchorTailsNotRescued(t *testing.T) {
+	filler := strings.Repeat("读完了三处配置，行号与调用链都核对过。", 40)
+	for _, c := range []struct {
+		size int
+		tail string
+	}{
+		{1160, "掘｜锚点：tools=80、workbuddy provider、不再查⟧"},
+		{350, "入 MEMORY”给是/否｜锚点：未写入、等指令｜"},
+		{1521, "：31965→31966-31968 同秒、零 user、第三次被抓"},
+	} {
+		body := filler
+		for len(body) < c.size {
+			body += "核对完毕，结论记在这里。"
+		}
+		text := body + c.tail
+		raw, _ := json.Marshal(text)
+		seg := `data: {"id":"a1","choices":[{"index":0,"delta":{"content":` + string(raw) + `}}]}` + "\n\n" +
+			`data: {"id":"a1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":106507,"completion_tokens":300,"total_tokens":106807}}` + "\n\n" +
+			"data: [DONE]\n\n"
+		up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyText })
+		r := newToolOnlyReader(t, up, chatBody, seg)
+		if _, err := io.ReadAll(r); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if len(*reqs) != 0 {
+			t.Errorf("agent 固定格式尾部 %q 不该续写，实际 %d 次", c.tail, len(*reqs))
+		}
+	}
+}
+
+// issue #273 第二条评论要的开关：features.narration_enabled=false 时整条救援不发起。
+// 关掉的意义不是省一次调用，而是「网关不再往对话里插 user 消息」—— agent 客户端会把它
+// 当成用户授权去执行。
+func TestNarrationDisabledNoRescue(t *testing.T) {
+	text := strings.Repeat("我把三处改动逐行过了一遍。", 20) + "我将开始修改 internal/server/continue.go"
+	raw, _ := json.Marshal(text)
+	seg := `data: {"id":"d1","choices":[{"index":0,"delta":{"content":` + string(raw) + `}}]}` + "\n\n" +
+		`data: {"id":"d1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":301000,"completion_tokens":500,"total_tokens":301500}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyText })
+	r := newToolOnlyReader(t, up, chatBody, seg)
+	r.narrationOff = true
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("开关关掉后不该续写，实际 %d 次", len(*reqs))
+	}
+}
+
+// 救援指令必须以【】自报是网关消息：它是以 role=user 追加的，不加标记时 agent 分辨不出
+// 它与真实用户输入的区别（issue #273 第二条评论：注入内容被读成「用户批准」）。
+func TestNarrationNudgeMarked(t *testing.T) {
+	for name, nudge := range map[string]string{
+		"narrationNudge":        narrationNudge,
+		"narrationPromiseNudge": narrationPromiseNudge,
+	} {
+		if !strings.HasPrefix(nudge, "【wb2api 网关自动续写") || !strings.Contains(nudge, "非用户消息") {
+			t.Errorf("%s 缺少网关身份前缀：%q", name, nudge[:min(len(nudge), 40)])
+		}
+	}
+}

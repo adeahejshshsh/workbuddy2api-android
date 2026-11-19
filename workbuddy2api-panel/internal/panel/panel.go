@@ -82,6 +82,10 @@ type Config struct {
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
 
+	// RescueToday 今日各类救援次数（narration/toolonly/starved）；nil 时不上报。
+	// 用来把「今天怎么突然多花了钱」变成面板上一眼能看到的数（issue #273）。
+	RescueToday func() map[string]int
+
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
@@ -589,17 +593,27 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"admin_key_set":   panelDedicated,
 		"redis_mode":      p.cfg.RedisMode,
 		"sticky_sessions": sticky,
-		"total":           total,
-		"healthy":         healthy,
-		"cooling":         cooling,
-		"disabled":        disabled,
-		"paused":          paused,
-		"in_flight_full":  inFlightFull,
-		"accounts":        p.cfg.Pool.List(),
+		// 今日救援次数（issue #273）：每条救援都要多打一次上游、重付整段 prompt。
+		"rescue_today":   p.rescueToday(),
+		"total":          total,
+		"healthy":        healthy,
+		"cooling":        cooling,
+		"disabled":       disabled,
+		"paused":         paused,
+		"in_flight_full": inFlightFull,
+		"accounts":       p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
 	})
+}
+
+// rescueToday 今日各类救援次数；未接回调（或跨天归零后）为空对象。
+func (p *Panel) rescueToday() map[string]int {
+	if p.cfg.RescueToday == nil {
+		return map[string]int{}
+	}
+	return p.cfg.RescueToday()
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。

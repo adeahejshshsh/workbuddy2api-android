@@ -38,6 +38,13 @@ type Snapshot struct {
 	// 判据只能看「末条是工具结果 + 正文短」，而 agent 循环里正常收尾也长这样，
 	// 线上实测会把正常结尾当成截断、白打一次上游。需要时必须显式打开。
 	ToolOnlyRescue bool
+	// NarrationOff 预告式收尾救援是否被关闭（features.narration_enabled 取反）。
+	//
+	// 取反是为了让零值 = 开启：没接 livecfg 的裸用/测试路径不必初始化就保持既有行为。
+	// 为什么终于给了开关（issue #273 第二条评论）：这条救援是往对话里插一条 user 消息
+	// 再打一次上游，agent 类客户端分辨不出它与真实用户输入的区别 —— 实测被当成用户
+	// 授权执行了 9 分钟工具调用，且客户端历史里完全查不到这条。
+	NarrationOff bool
 	// RecordContext 请求事件是否记录会话上下文（system + messages / 出图 prompt）。
 	// 比 IP/UA 敏感得多（是用户的实际对话内容），所以单独一个开关、缺省关闭。
 	RecordContext bool

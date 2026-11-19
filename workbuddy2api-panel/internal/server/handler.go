@@ -401,7 +401,12 @@ func isChatEntry(path string) bool {
 		// /tasks 注册的是同一个 h.videos（真扣积分），此前漏在白名单外 —— 该路径
 		// 没有 X-Request-Id、不进 reqlog 归档、也没有 stdout 流水行。
 		"/v1/videos", "/v1/videos/generations", "/v1/videos/tasks",
-		"/v1/3d/generations", "/v1/3d/tasks":
+		"/v1/3d/generations", "/v1/3d/tasks",
+		// 免费端点也进表（issue #275）：准入标准是「任何被代理到上游的 POST」，不是
+		// 「会不会扣积分」。检索/抓取/嵌入不产生 credit 回执（事件里 credit=0），
+		// 不进台账就成了「出问题面板零痕迹」的盲区 —— issue #275 的取证是 8 天
+		// 22573 条归档里 /v1/search 与 /v1/fetch 一条都没有，而同期用户发起了数十次调用。
+		"/v1/search", "/v1/fetch", "/v1/embeddings":
 		return true
 	}
 	return false
@@ -1495,6 +1500,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
 	var modelBlock pool.ModelBlockStatus
+	// noPick 选号失败的成因拆解（issue #276）：15 个号有余额却只看到 no_healthy_account
+	// 时，得能从响应本身看出是谁挡的（保留积分 / 保底 / 在途 / 冷却 / 已试过）。
+	var noPick pool.NoPick
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
@@ -1843,7 +1851,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 在这里取一次快照，供下方错误构造区分；按 realm 统计，否则另一域的
 			// 健康号会把「本域全被模型级冷却挡住」掩盖成还有号可服务。
 			modelBlock = h.cfg.Pool.ModelBlockedForRealm(curModel, realm)
-			h.logNoSelectable(realm, curModel, modelBlock.Blocked)
+			noPick = h.cfg.Pool.NoPickForRealm(curModel, realm, tried)
+			h.logNoSelectable(realm, curModel, modelBlock.Blocked, noPick)
 			break
 		}
 		// 在途名额已在选号时**锁内占好**（PickAcquireExcludingForRealm）：此前是
@@ -2223,6 +2232,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 判据只能依赖「末条是工具结果 + 正文短」，而 agent 循环里正常收尾
 			// 也完全长这样，实测会把正常结尾当截断、白打一次上游。
 			cont.toolOnlyRescue = h.loadLive().ToolOnlyRescue
+			cont.narrationOff = h.loadLive().NarrationOff
 			defer cont.Close()
 			stats := newChatStatsReaderSince(cont, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
@@ -2788,6 +2798,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if realm != "" && h.cfg.Pool != nil && !h.cfg.Pool.ServableForRealm(realm) {
 		hint = fmt.Sprintf("realm %s has no servable account (cn=%v, global=%v); %s",
 			realm, h.cfg.Pool.ServableForRealm("cn"), h.cfg.Pool.ServableForRealm("global"), hint)
+	}
+	// 成因拆解（issue #276）：有号却选不到时，把五类计数直接塞进 gateway_hint —— 用户
+	// 不必登服务器翻日志就知道该充钱（reserve）、调阈值（floor）、提并发（in_flight_full）
+	// 还是等冷却（cooling）。同一件事此前只有一个 no_healthy_account。
+	if code == "no_healthy_account" && noPick.Total > 0 {
+		if hint != "" {
+			hint += "; "
+		}
+		hint += "no_pick{" + noPick.String() + "}"
 	}
 	// 模型规则兜底（上游 8519ea2）：池里有号、号也健康，但本域所有可选账号都被人工
 	// 规则挡住了这个模型。规则不会自愈（与模型级冷却不同），落到 no_healthy_account

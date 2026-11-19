@@ -1111,6 +1111,14 @@ async function loadOverview(quiet) {
     .reduce((a, s) => a + (Number(s.credits_total) > 0 ? Number(s.credits_total) : 0), 0);
   $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
     $('sSticky').textContent = d.sticky_sessions;
+    // 今日救援次数（issue #273）：按类型拼在悬停提示里，卡片上只放合计。
+    if ($('sRescue')) {
+      const rs = d.rescue_today || {};
+      const total = Object.values(rs).reduce((a, n) => a + n, 0);
+      $('sRescue').textContent = total;
+      const parts = Object.keys(rs).sort().map(k => k + ' ' + rs[k]);
+      $('sRescue').title = parts.length ? parts.join(' / ') : 'narration / toolonly / starved';
+    }
     $('navSub').textContent = 'v' + d.version;
     $('navVer').textContent = 'v' + d.version;
     $('navRedis').textContent = d.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存';

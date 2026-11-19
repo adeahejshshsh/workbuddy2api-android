@@ -70,3 +70,36 @@ func TestRescueTraceDefaultFromEnv(t *testing.T) {
 		t.Fatalf("rescueTrace=%v，环境变量给出的默认值是 %v（诊断必须默认关闭）", rescueTrace, want)
 	}
 }
+
+// 今日救援计数（面板概况卡片）：真救一次就 +1，跨天的旧记录不带到今天。
+func TestRescueTodayCounter(t *testing.T) {
+	rescueToday.mu.Lock()
+	rescueToday.day, rescueToday.n = "", nil
+	rescueToday.mu.Unlock()
+
+	// 一条真实的承诺句救援（与 TestNarrationPromiseTailStillRescued 同形态）。
+	text := strings.Repeat("我把三处改动逐行过了一遍。", 20) + "我将开始修改 internal/server/continue.go"
+	raw, _ := json.Marshal(text)
+	seg := `data: {"id":"n1","choices":[{"index":0,"delta":{"content":` + string(raw) + `}}]}` + "\n\n" +
+		`data: {"id":"n1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":301000,"completion_tokens":500,"total_tokens":301500}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	up, reqs := fakeContinueUpstream(t, func(int) (int, string) { return 200, segToolOnlyText })
+	r := newToolOnlyReader(t, up, chatBody, seg)
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("夹具前提不成立：应救一次，实际 %d 次", len(*reqs))
+	}
+	if n := RescueToday()["narration"]; n != 1 {
+		t.Errorf("救了一次，narration 计数应为 1，实际 %d", n)
+	}
+
+	// 跨天：把计数日改成昨天，读出来必须是空（也不该把昨天的数算进今天）。
+	rescueToday.mu.Lock()
+	rescueToday.day = "2000-01-01"
+	rescueToday.mu.Unlock()
+	if n := RescueToday(); len(n) != 0 {
+		t.Errorf("跨天后应归零，实际 %v", n)
+	}
+}

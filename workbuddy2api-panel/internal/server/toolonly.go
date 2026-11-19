@@ -250,6 +250,7 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 		return r.skip("toolonly", "body_build_failed")
 	}
 	r.toolOnlyTried = true
+	noteRescue("toolonly")
 	// 首段的终态帧先存起来：续写段如果只给正文，要原样回放这一份。
 	r.origFinish, r.origTail = r.finish, r.tail
 	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
