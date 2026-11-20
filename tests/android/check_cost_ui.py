@@ -106,6 +106,14 @@ check("AlertDialog" not in build and "Sheet." not in build,
       "提示条必须是内联文字，不是开屏弹窗/Sheet")
 check("常驻网关会阻止设备休眠" in build,
       "文案必须说清「阻止设备休眠」这件事")
+# 裸 View（圆点）的 LayoutParams 必须是固定 dp 尺寸。WRAP_CONTENT 的 View 会取满
+# 父容器的 AT_MOST 尺寸 —— 6dp 圆点会被拉成铺满整页的巨大椭圆（用户实测截图）。
+check(re.search(r"LinearLayout\.LayoutParams dlp = new LinearLayout\.LayoutParams\(\s*"
+                r"Theme\.dp\(a, 6\),\s*Theme\.dp\(a, 6\)\)", build) is not None,
+      "提示条的圆点必须用固定 6dp（WRAP_CONTENT 会把它拉成整页椭圆）")
+# 只钉「圆点那一处」：同一方法里 TextView/胶囊用 WRAP_CONTENT 是正常的，不能一刀切。
+check("box.addView(dot, dlp)" in build,
+      "圆点必须用显式 dlp 挂上去（不能让它自己 WRAP_CONTENT 撑满）")
 check("PREF_COST_BANNER" in console,
       "关闭状态必须落 SharedPreferences（关一次永久生效）")
 refresh = body(console, "void refreshCostBanner")
@@ -122,4 +130,4 @@ if fails:
     for f in fails:
         print("  - %s" % f)
     sys.exit(1)
-print("全部通过（%d 项）" % 17)
+print("全部通过（%d 项）" % 19)
