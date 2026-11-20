@@ -616,6 +616,9 @@ func main() {
 		// 日预算 + 两道快速闸（0 = 关闭）。
 		DailyBudget:      cfg.Budget.DailyBudget,
 		BudgetStateFile:  cfg.BudgetStateFile,
+		// 11128 的出站体快照（每次最终失败一份，最多留 3 份）：这条错误是上游按
+		// 连续原文指纹判的，只换提示词/摘工具描述都不够时，必须看实际发出去的字节。
+		BlockedDumpDir: filepath.Join(filepath.Dir(*cfgPath), "data", "blocked"),
 		BurstCreditLimit: cfg.Budget.BurstCreditLimit,
 		CacheLowRate:     cfg.Budget.CacheLowRate,
 		// 模型降级路由表：读 live 快照（支持面板热更，改完即生效、无需重启）。

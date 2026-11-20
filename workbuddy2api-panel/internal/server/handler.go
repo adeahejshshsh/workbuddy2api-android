@@ -59,6 +59,10 @@ type Config struct {
 	// BudgetStateFile 积分闸累计值的落盘路径；空 = 只存内存（测试/旧行为）。
 	// 落盘解决的是「单实例重启清零」：崩溃循环下唯一的成本止损线等于不存在。
 	BudgetStateFile  string
+	// BlockedDumpDir 11128（content_blocked）最终失败时落一份出站请求体的目录。
+	// 空 = 不落盘（测试/嵌入用法）。这条错误是上游按「连续原文指纹」判的，
+	// 只换提示词、摘工具描述还不够时必须看实际发出去的字节才能定位。
+	BlockedDumpDir string
 	BurstCreditLimit float64
 	CacheLowRate     float64
 	// MaxBodyMB 所有入站读体端点的请求体上限（MB）。**0 = 用 32MB 安全上限**，
@@ -2115,6 +2119,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if kind == upstream.ErrContentBlocked {
+				// 所有抢救阶梯都试过了仍然被拦 → 落一份**出站体快照**再去回错误。
+				// 没有这一步，用户只能拿到一句 "Illegal API invocation from an unapproved
+				// channel"，而真正命中的那一段原文此刻只存在于发出去的字节里。
+				// 路径写进日志，排障时直接按时间戳找。
+				if dumpPath := h.dumpBlockedBody(bareModel, string(body)); dumpPath != "" {
+					log.Printf("content-blocked: 已把出站请求体存到 %s（最多保留 3 份，含 prompt 原文，注意隐私）", dumpPath)
+				}
 				// 内容命中网关内容防火墙：立即回客户端，**不轮转**——换任何账号都会撞同一
 				// 审核，轮转纯属浪费时间。不罚账号（ErrContentBlocked 分支无冷却/熔断/NoteError）。
 				// error-passthrough：message 装上游 body 原文（code/msg/requestId 原样），
