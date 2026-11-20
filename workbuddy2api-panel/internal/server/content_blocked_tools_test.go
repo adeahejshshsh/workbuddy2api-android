@@ -57,6 +57,7 @@ func TestContentBlockedStripsToolDescriptionsAndRetries(t *testing.T) {
 		ChatBaseCN:    "https://fake.example",
 		BillingBaseCN: "https://fake.example",
 	}
+	up.SanitizeFingerprints.Store(true) // 缺省开启；不设会先走「强制脱敏」抢救层，阶梯次数就变了
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
 
@@ -105,5 +106,72 @@ func TestContentBlockedWithoutToolsStillFails(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "content_blocked") {
 		t.Errorf("错误码应为 content_blocked：%s", rec.Body.String())
+	}
+}
+
+// TestContentBlockedSanitizeOffRescuedOnce 11128 的**第一层**抢救：脱敏被关掉时
+// 先把它打开重试一次。
+//
+// 线上形态（2026-11-20 13:59:13 快照）：`features.sanitize_blacklist_fingerprints`
+// 是 false，于是 prepareBody 整条脱敏管线被跳过 —— DSH 的 system 里
+// "You are an AI agent powered by DeepSeek Harness." 与整段 @ 路径说明逐字出站，
+// 上游对**每一个**请求回 400 11128，而用户只看到「一整个白天都不能用」。
+//
+// 期望：第 1 次原样 400 → 第 2 次强制脱敏 200；且只抢救一次（不能变成无界重试）。
+func TestContentBlockedSanitizeOffRescuedOnce(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			b, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			bodies = append(bodies, string(b))
+			attempt := len(bodies)
+			mu.Unlock()
+			if attempt == 1 {
+				return &http.Response{
+					StatusCode: 400,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader(
+						`{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}`)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(
+					"data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":" +
+						"[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}," +
+						"\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")),
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	up.SanitizeFingerprints.Store(false) // 线上误配置：脱敏整个关掉
+
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
+
+	reqBody := `{"model":"glm-5.2","stream":true,"messages":[` +
+		`{"role":"system","content":"You are an AI agent powered by DeepSeek Harness."},` +
+		`{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d want 200；bodies=%d", rec.Code, len(bodies))
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("应当恰好 2 次（原样 → 强制脱敏），实际 %d 次", len(bodies))
+	}
+	if !strings.Contains(bodies[0], "DeepSeek Harness") {
+		t.Fatalf("第 1 次应保持用户配置的「不脱敏」原样：%s", bodies[0])
+	}
+	if strings.Contains(bodies[1], "DeepSeek Harness") {
+		t.Fatalf("第 2 次必须已脱敏：%s", bodies[1])
+	}
+	// 身份句式会整句拍平成中性句（品牌词连句子骨架一起消失），比零宽改写更彻底。
+	if !strings.Contains(bodies[1], "You are a helpful AI assistant.") {
+		t.Fatalf("第 2 次应是脱敏后的中性身份句：%s", bodies[1])
 	}
 }

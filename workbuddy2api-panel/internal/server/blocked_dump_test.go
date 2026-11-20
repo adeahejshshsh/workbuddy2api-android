@@ -13,7 +13,7 @@ func TestDumpBlockedBodyBoundedAndPrunes(t *testing.T) {
 	h := &Handler{cfg: Config{BlockedDumpDir: dir}}
 	big := strings.Repeat("x", blockedDumpMaxBytes+1024)
 	for i := 0; i < 5; i++ {
-		p := h.dumpBlockedBody("glm-5.2", "outbound", big)
+		p := h.dumpBlockedBody("glm-5.2", "outbound", big, true)
 		if p == "" {
 			t.Fatalf("第 %d 次快照写入失败", i)
 		}
@@ -45,12 +45,15 @@ func TestDumpBlockedBodyBoundedAndPrunes(t *testing.T) {
 	if !strings.Contains(string(raw), `"kind": "outbound"`) {
 		t.Errorf("信封必须标 kind=outbound")
 	}
+	if !strings.Contains(string(raw), `"sanitize": true`) {
+		t.Errorf("信封必须标 sanitize 实际取值（11128 的第一嫌疑）")
+	}
 }
 
 // TestDumpBlockedBodyNoDir 未配置目录（测试/嵌入）时不落盘、不 panic。
 func TestDumpBlockedBodyNoDir(t *testing.T) {
 	h := &Handler{cfg: Config{}}
-	if p := h.dumpBlockedBody("m", "inbound", "{}"); p != "" {
+	if p := h.dumpBlockedBody("m", "inbound", "{}", true); p != "" {
 		t.Fatalf("未配置目录不应写文件，got %s", p)
 	}
 }

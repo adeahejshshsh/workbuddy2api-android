@@ -30,7 +30,7 @@ const blockedDumpKeep = 3
 // 方便对应到请求日志里那一行。
 //
 // 目录：<配置目录>/data/blocked/。返回写入路径（失败返回空串，调用方只管记日志）。
-func (h *Handler) dumpBlockedBody(model, kind, body string) string {
+func (h *Handler) dumpBlockedBody(model, kind, body string, sanitize bool) string {
 	dir := h.blockedDumpDir()
 	if dir == "" {
 		return ""
@@ -53,6 +53,10 @@ func (h *Handler) dumpBlockedBody(model, kind, body string) string {
 	env := map[string]any{
 		"captured_at": time.Now().Format(time.RFC3339),
 		"model":       model,
+		// sanitize：出站指纹脱敏开关的实际取值。这是 11128 排障的第一嫌疑：
+		// false = 客户端指纹逐字出站，几乎必然 400（线上 2026-11-20 就是这么被
+		// 误配置关掉的）。写进信封，看一眼就知道该查哪。
+		"sanitize": sanitize,
 		// kind：outbound = 真正发出去的（prepareBody 之后）；inbound = 客户端原文。
 		// 有这张标签，才不会再出现「快照里有指纹、上游照样 400」那种自相矛盾的判断。
 		"kind":      kind,

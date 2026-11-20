@@ -309,6 +309,15 @@ func main() {
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints.Store(cfg.Features.SanitizeBlacklistFingerprints)
+	// 把实际生效值打出来：这一行是 11128 排障的第一现场。关掉脱敏 =
+	// DSH 系客户端的 system 指纹逐字出站 = 每个请求都 400 11128，
+	// 而界面上只显示「请求被拦截」，看不出是配置被关了（线上 2026-11-20 实例）。
+	if !cfg.Features.SanitizeBlacklistFingerprints {
+		log.Printf("WARN: 出站指纹脱敏已关闭（features.sanitize_blacklist_fingerprints=false）：" +
+			"DSH / Claude Code 这类客户端的身份句会逐字出站，上游会按「非官方渠道」整单拒绝（11128）")
+	} else {
+		log.Printf("出站指纹脱敏: 开启（brand_scope=%s）", cfg.Features.SanitizeBrandScope)
+	}
 	// 身份类规则作用域（features.sanitize_brand_scope，缺省 all = 旧行为）。
 	up.SanitizeBrandIdentityOnly.Store(cfg.Features.SanitizeBrandScope == "identity")
 	// 出站 UA 与归属头（issue #42 + 上游同步）：

@@ -1746,6 +1746,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// toolStripApplied 11128 的最后一层抢救只做一次（见 ErrContentBlocked 分支）：
 	// 摘掉 tools[].function.description 再试一个来回，避免无界重试。
 	toolStripApplied := false
+	// sanitizeRescueApplied 11128 的**第一层**抢救（见 ErrContentBlocked 分支）：
+	// 出站脱敏被关（features.sanitize_blacklist_fingerprints=false）时，DSH 系客户端
+	// 的 system 里必然带着上游拉黑的指纹，逐字出站就是确定性 400。只对本次请求
+	// 强制脱敏重试一次，不写回配置、不改全局开关。
+	sanitizeRescueApplied := false
 	// 身份首句替换必须先于模式分支（吸收 qcgzxw `a7f10ad1`）：只动客户端原始身份句，
 	// 降级期整体换成 Degraded 时不保留。custom 模式没有客户端身份句，开关不生效。
 	if h.cfg.PromptIdentityOverrideEnabled &&
@@ -2088,6 +2093,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			// 11128 第一层抢救：出站脱敏被关掉时先把它打开重试一次。
+			//
+			// 为什么会走到这里：`features.sanitize_blacklist_fingerprints=false` 是
+			// 文档化的开关（要「字节完全还原」的部署会关），但 DSH 系客户端的 system
+			// 提示里必然包含上游按连续原文拉黑的指纹（身份句 / @ 路径说明段），关掉
+			// 脱敏等于让每个请求都带着指纹出门 —— 线上表现就是**所有**请求 11128，
+			// 而用户只看到「一整个白天都不能用」。这一层只在本次请求内强制脱敏，
+			// 不写回配置、不动全局开关：下一次请求仍然按用户配置来。
+			if kind == upstream.ErrContentBlocked && !sanitizeRescueApplied &&
+				!h.cfg.Upstream.SanitizeFingerprints.Load() {
+				if nb := upstream.PrepareBodyOpt(body, true); !bytes.Equal(nb, body) {
+					body = nb
+					sanitizeRescueApplied = true
+					delete(tried, acct.UID)
+					failKeepBinding(acct.UID)
+					log.Printf("content-blocked: 出站指纹脱敏未开启，本次请求强制脱敏后重试一次（建议把 features.sanitize_blacklist_fingerprints 打开）")
+					i--
+					continue
+				}
+			}
 			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append
 			// 降级重试同样退化为 replace——原文在场只会确定性再撞 400）。
@@ -2142,7 +2167,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if len(lastOutbound) > 0 {
 					dumpBody, dumpKind = lastOutbound, "outbound"
 				}
-				if dumpPath := h.dumpBlockedBody(bareModel, dumpKind, string(dumpBody)); dumpPath != "" {
+				if dumpPath := h.dumpBlockedBody(bareModel, dumpKind, string(dumpBody), h.cfg.Upstream.SanitizeFingerprints.Load()); dumpPath != "" {
 					log.Printf("content-blocked: 已把 %s 请求体存到 %s（最多保留 3 份，含 prompt 原文，注意隐私）", dumpKind, dumpPath)
 				}
 				// 内容命中网关内容防火墙：立即回客户端，**不轮转**——换任何账号都会撞同一

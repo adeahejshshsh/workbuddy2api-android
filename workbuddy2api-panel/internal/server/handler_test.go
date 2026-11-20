@@ -45,7 +45,7 @@ const sseOK = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"
 // fake 依据 Authorization 头决定行为。
 func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body string, isStream bool)) *upstream.Client {
 	t.Helper()
-	return &upstream.Client{
+	c := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			authz := r.Header.Get("Authorization")
 			status, body, isStream := behavior(authz)
@@ -62,6 +62,11 @@ func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body 
 		ChatBaseCN:    "https://fake.example",
 		BillingBaseCN: "https://fake.example",
 	}
+	// 与线上缺省一致（features.sanitize_blacklist_fingerprints 默认 true）。
+	// 零值 false 会让「11128 且脱敏未开 → 强制脱敏重试」那层先吃掉一次重试，
+	// 与这些用例想验证的降级/摘描述阶梯串味。
+	c.SanitizeFingerprints.Store(true)
+	return c
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -1411,6 +1416,7 @@ func TestContentBlockedTriggersDegradedRetry(t *testing.T) {
 		})},
 		ChatBaseCN: "https://fake.example",
 	}
+	up.SanitizeFingerprints.Store(true) // 缺省开启；关掉会先走「强制脱敏」那层抢救
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
 
