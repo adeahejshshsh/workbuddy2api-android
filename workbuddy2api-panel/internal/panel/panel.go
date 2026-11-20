@@ -671,6 +671,15 @@ func panelCrossSiteDenyReason(r *http.Request) string {
 // 明确拒绝 text/plain 与 application/x-www-form-urlencoded —— 它们与 multipart 一样
 // 都是 CORS「简单请求」，能在不预检的情况下跨站发出；挡掉前两个最常见的形态，
 // 再叠加同源校验，就不存在「网页直接写管理接口」的路径了。
+//
+// 唯一的例外见下方：**零长度 body** 的表单编码放行。原因是 Android 的
+// HttpURLConnection 会给「没有 body 的 POST」自己补一个
+// `Content-Type: application/x-www-form-urlencoded` —— OkHttp 的 HttpEngine 只要
+// hasRequestBody() 为真就补默认类型，而 HttpURLConnectionImpl 对 POST 恒挂一个
+// EMPTY_REQUEST_BODY，于是「没有 body」在线上被写成「表单编码的空 body」。
+// 空 body 不携带任何字段，跨站表单能做的事和「没有 body 的 POST」完全一样，
+// 同源闸门（Origin/Referer/Sec-Fetch-Site）照旧是前置条件；不放行这条，
+// 只是把每一台原生客户端（签到 / 刷额度 / 一键完成）全部打成 415。
 func panelContentTypeDenyReason(r *http.Request) string {
 	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
 	if ct == "" {
@@ -683,7 +692,22 @@ func panelContentTypeDenyReason(r *http.Request) string {
 	case "application/json", "multipart/form-data":
 		return ""
 	}
-	return "unsupported_media_type：面板写接口只接受 application/json 或 multipart/form-data，收到 " + ct
+	if ct == "application/x-www-form-urlencoded" && requestHasNoBody(r) {
+		return ""
+	}
+	// 收到什么类型放在最前面：壳里的 toast 会把长文案截断，把真正有用的
+	// 「到底收到的是哪个类型」留在可见区。
+	return "unsupported_media_type：收到 " + ct +
+		"（面板写接口只接受 application/json 或 multipart/form-data）"
+}
+
+// requestHasNoBody：请求确实没有任何字节的 body（Content-Length: 0 且非分块）。
+// ContentLength == -1（分块或未知）一律算「有 body」，走严格判定。
+func requestHasNoBody(r *http.Request) bool {
+	if r.ContentLength != 0 {
+		return false
+	}
+	return len(r.TransferEncoding) == 0
 }
 
 // withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；

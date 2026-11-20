@@ -94,8 +94,17 @@ final class PanelApi {
         req(c, "GET", path, null, false, cb);
     }
 
+    /**
+     * 写请求。body 传 null = 无参数动作（签到这类），传输层会补一个 `{}` 并声明
+     * application/json —— 别把「没有参数」做成「没有 Content-Type」，见 req() 里的注释。
+     */
     static void post(Context c, String path, JSONObject body, Cb cb) {
         req(c, "POST", path, body, false, cb);
+    }
+
+    /** 只有读方法才允许不带 body：GET/HEAD 由 HttpURLConnection 自己收尾。 */
+    private static boolean isReadMethod(String method) {
+        return "GET".equals(method) || "HEAD".equals(method) || "OPTIONS".equals(method);
     }
 
     /** 长动作（一键完成等）：单独通道 + 长读超时，期间普通请求不受影响。 */
@@ -120,10 +129,22 @@ final class PanelApi {
                     String k = key(ctx);
                     if (!k.isEmpty()) conn.setRequestProperty("Authorization", "Bearer " + k);
                     conn.setRequestProperty("Accept", "application/json");
-                    if (body != null) {
+                    // 写请求**一律**自己声明 application/json，包括「没有参数」的那种
+                    //（签到 / 刷额度 / 探封号 / 领取全部 / 一键完成）。
+                    //
+                    // 这不是洁癖：body 为 null 时旧代码既不 setDoOutput 也不设 Content-Type，
+                    // 而 Android 的 HttpURLConnection 会给 POST 自动补一个
+                    // `Content-Type: application/x-www-form-urlencoded`（OkHttp 的 HttpEngine
+                    // 见 hasRequestBody() 为真就补；HttpURLConnectionImpl 对 POST 恒挂一个
+                    // EMPTY_REQUEST_BODY，所以「没 body」也算有 body）。服务端 W3-03 的跨站写
+                    // 闸门把表单编码当成 CORS 简单请求直接 415，用户看到的就是
+                    // 「签到失败：HTTP 415：unsupported_media_type」。
+                    // 空 body 也要发一个 `{}`：类型自己说清楚，别让平台替我们猜。
+                    if (!isReadMethod(method)) {
+                        JSONObject payload = body == null ? new JSONObject() : body;
                         conn.setDoOutput(true);
                         conn.setRequestProperty("Content-Type", "application/json");
-                        byte[] raw = body.toString().getBytes("UTF-8");
+                        byte[] raw = payload.toString().getBytes("UTF-8");
                         conn.setFixedLengthStreamingMode(raw.length);
                         OutputStream os = conn.getOutputStream();
                         os.write(raw);
