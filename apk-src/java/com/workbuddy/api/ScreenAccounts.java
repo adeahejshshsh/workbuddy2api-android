@@ -98,6 +98,19 @@ final class ScreenAccounts {
         row.addView(Theme.kpi(a, String.valueOf(o.disabled), "禁用", Theme.BAD),
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         hero.addView(row);
+        // 积分合计（issue #197）：另起一行，不塞进上面四个 weight=1f 的格子 ——
+        // 五列在竖屏会被挤成两位数折行。
+        String[] creditSum = creditsSummary(o.accounts);
+        if (creditSum != null) {
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, Theme.dp(a, 0.6f)));
+            dlp.topMargin = Theme.dp(a, Theme.S3);
+            dlp.bottomMargin = Theme.dp(a, Theme.S2);
+            View line = new View(a);
+            line.setBackgroundColor(Theme.LINE);
+            hero.addView(line, dlp);
+            hero.addView(Theme.kpi(a, creditSum[0], creditSum[1], Theme.INK));
+        }
         col.addView(hero, Theme.cardLp(a, Theme.S4));
         expiryCard(col, o.accounts);
 
@@ -107,6 +120,59 @@ final class ScreenAccounts {
             for (PanelService.Account acc : o.accounts) col.addView(accountCard(acc));
         }
         refresh(col);
+    }
+
+    /**
+     * 积分合计（issue #197）：口径逐条对照网页端 app.js 的 sCredits —— 同一个池子
+     * 两个界面各算各的，迟早对不上。
+     *
+     * 网页端原文：
+     * <pre>
+     *   const isUnlimited = s =&gt; Number(s.credits_total) === -1 || Number(s.credits) &gt;= 1e12;
+     *   remSum = Σ credits         （仅 !isUnlimited）
+     *   totSum = Σ credits_total   （仅 !isUnlimited 且 credits_total &gt; 0）
+     * </pre>
+     *
+     * 三条口径必须一起抄：
+     *   1. **不限量哨兵要排除**：credits_total == -1 或 credits >= 1e12 视为不限量，
+     *      既不进分子也不进分母 —— 漏掉这条，一个不限量号就能把总额撑成天文数字；
+     *   2. 分母只累加 credits_total &gt; 0 —— 0 是「未知」，不是「零额」；
+     *   3. 禁用号的 credits / credits_total 本来就是 0（封号前的快照在 CreditsRaw），
+     *      所以自然进不了分子分母，与 state.go 里「面板积分合计」同口径。
+     *
+     * 与网页端唯一的措辞差异：分子上钳了 Math.max(0, credits)。网页端是
+     * `Number(s.credits) || 0`，负值会原样累加；上游不会给负数，这里只是防脏数据
+     * 让合计变小 —— 出现负值时宁可显示 0，也不要让「合计」比单号还小。
+     *
+     * 返回 {数值, 标签}；没有可展示的内容返回 null（渲染方据此整行不画）。
+     * 全部账号都是不限量时给「不限量」而不是「0」—— 0 会被读成「一分不剩」。
+     */
+    static String[] creditsSummary(java.util.List<PanelService.Account> accs) {
+        if (accs == null || accs.isEmpty()) return null;
+        long rem = 0, tot = 0;
+        int counted = 0, unlimited = 0;
+        for (PanelService.Account s : accs) {
+            if (isUnlimited(s)) {
+                unlimited++;
+                continue;
+            }
+            rem += Math.max(0, s.credits);
+            if (s.creditsTotal > 0) tot += s.creditsTotal;
+            counted++;
+        }
+        if (counted == 0) {
+            return unlimited > 0 ? new String[]{"不限量", "积分合计"} : null;
+        }
+        String value = tot > 0 ? rem + " / " + tot : String.valueOf(rem);
+        String label = tot > 0 ? "积分剩余 / 总额" : "积分剩余";
+        // 有号被排除时必须说出来：否则「合计」和用户自己加起来的数对不上，会被当成算错。
+        if (unlimited > 0) label += "（不含 " + unlimited + " 个不限量）";
+        return new String[]{value, label};
+    }
+
+    /** 不限量哨兵（网页端 isUnlimited 的同口径实现；credits=1e12 是上游约定的「无限」）。 */
+    static boolean isUnlimited(PanelService.Account s) {
+        return s == null || s.creditsTotal == -1 || s.credits >= 1000000000000L;
     }
 
     // ── 积分到期提醒（issue #167 第 3 条） ──────────────────────────────────
