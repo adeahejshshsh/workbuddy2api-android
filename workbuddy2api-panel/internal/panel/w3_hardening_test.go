@@ -177,6 +177,50 @@ func TestNonGetUsesRefererAndSecFetchSite(t *testing.T) {
 	}
 }
 
+// postPanelBody 同 postPanel，但由调用方决定 body（用来区分「空 body」与「有字段」）。
+func postPanelBody(t *testing.T, ct, body string) int {
+	t.Helper()
+	p := New(Config{Version: "test"})
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/not_registered", strings.NewReader(body))
+	if ct != "" {
+		req.Header.Set("Content-Type", ct)
+	}
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// TestNonGetAllowsEmptyBodyFormEncoding：Android 的 HttpURLConnection 会给「没有 body
+// 的 POST」自动补 application/x-www-form-urlencoded（OkHttp HttpEngine 的
+// hasRequestBody() 对 POST 恒为真），原生控制台的签到 / 刷额度 / 一键完成全是空 body
+// 的 POST —— 线上症状是「签到失败：HTTP 415：unsupported_media_type」。
+//
+// 边界必须两边都钉住：**空 body** 放行、**带字段的表单体**照旧 415。
+func TestNonGetAllowsEmptyBodyFormEncoding(t *testing.T) {
+	const form = "application/x-www-form-urlencoded"
+	if code := postPanelBody(t, form, ""); code != http.StatusNotFound {
+		t.Fatalf("空 body + 表单编码 code=%d want 404（放行，等同无 body 的 POST）", code)
+	}
+	for _, body := range []string{"{}", "a=1", "file=@x"} {
+		if code := postPanelBody(t, form, body); code != http.StatusUnsupportedMediaType {
+			t.Errorf("表单编码 body=%q code=%d want 415", body, code)
+		}
+	}
+	// text/plain 不放宽：fetch(mode:'no-cors') 用它发简单请求，是最典型的跨站形态。
+	if code := postPanelBody(t, "text/plain", ""); code != http.StatusUnsupportedMediaType {
+		t.Errorf("空 body + text/plain code=%d want 415（不放宽）", code)
+	}
+	// 分块（ContentLength=-1）也算「有 body」，不能被空 body 例外捞出来。
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/not_registered", strings.NewReader(""))
+	req.ContentLength = -1
+	req.Header.Set("Content-Type", form)
+	rec := httptest.NewRecorder()
+	New(Config{Version: "test"}).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("分块 + 表单编码 code=%d want 415", rec.Code)
+	}
+}
+
 // TestNonGetRejectsSimpleContentTypes：text/plain / 表单编码是 CORS「简单请求」，
 // 浏览器不预检就能跨站发出 —— 明确 415。multipart 留给导入上传。
 func TestNonGetRejectsSimpleContentTypes(t *testing.T) {
