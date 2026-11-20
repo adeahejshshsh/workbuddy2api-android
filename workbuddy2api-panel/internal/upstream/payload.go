@@ -105,6 +105,11 @@ func prepareBodyOptFull(src []byte, sanitize bool, efforts map[string][]string, 
 	//      cleanup 又因两侧 id 都在判「配对完整」，倒置就一路带到上游撞 11148。
 	//   ③ repack 早于 cleanup：先把自己插进结果区的非 tool 消息挪后，再删孤儿，两侧同口径。
 	if msgs, ok := obj["messages"].([]any); ok {
+		// ⓪ 先合并相邻身份消息，**必须早于 sanitize**（sanitize 在本函数更后面执行）：
+		// DSH 0.2.2 起把系统提示拆成一句一条 system 消息，段级脱敏正则跨不了消息边界，
+		// 整段 DSH 指纹会逐字出站 → 400 11128。合并后同一段重新落在一个字符串里，
+		// 既有 sanitizeDshPathsRe 才匹配得到（详见 identity_merge.go）。
+		msgs, _ = mergeAdjacentIdentityMessages(msgs)
 		msgs, _ = mergeAdjacentToolCalls(msgs)
 		msgs, _ = reorderEarlyToolResults(msgs)
 		msgs, _ = repackToolResultBlocks(msgs)

@@ -1826,6 +1826,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	// 11128 取证：记下**真正出站**的那份 body（prepareBody 之后）。
+	//
+	// 此前快照拿的是入站 body，于是「快照里明明有那段指纹」和「上游照样 400」
+	// 能同时成立 —— 实际发出去的东西早就被合并/脱敏改过。排障时按快照删段会
+	// 一路删空也删不掉（blocked-20261120-134043.620.json 就是这么误判的）。
+	// 只在同一个请求的协程内写、循环结束后读，无需加锁。
+	var lastOutbound []byte
+	chatMeta.OnOutbound = func(b []byte) {
+		lastOutbound = append(lastOutbound[:0], b...)
+	}
+
 	// 静默回合救援（issue #44）：客户端声明了 tools，模型却只回一句 stop —— agent
 	// 回合就此静默结束，用户只能手动再催一句（2026-10-24 线上：82 个 tools、
 	// finish_reason=stop、零 tool_calls）。
@@ -2123,8 +2134,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 没有这一步，用户只能拿到一句 "Illegal API invocation from an unapproved
 				// channel"，而真正命中的那一段原文此刻只存在于发出去的字节里。
 				// 路径写进日志，排障时直接按时间戳找。
-				if dumpPath := h.dumpBlockedBody(bareModel, string(body)); dumpPath != "" {
-					log.Printf("content-blocked: 已把出站请求体存到 %s（最多保留 3 份，含 prompt 原文，注意隐私）", dumpPath)
+				// 优先落**出站**字节（prepareBody 之后、与发出去的一致）；回调没触发
+				// （例如准备阶段就失败）才退回入站 body —— 宁可留一份「不是最终形态」
+				// 的证据，也不要因为拿不到而出空文件。
+				dumpBody := body
+				dumpKind := "inbound"
+				if len(lastOutbound) > 0 {
+					dumpBody, dumpKind = lastOutbound, "outbound"
+				}
+				if dumpPath := h.dumpBlockedBody(bareModel, dumpKind, string(dumpBody)); dumpPath != "" {
+					log.Printf("content-blocked: 已把 %s 请求体存到 %s（最多保留 3 份，含 prompt 原文，注意隐私）", dumpKind, dumpPath)
 				}
 				// 内容命中网关内容防火墙：立即回客户端，**不轮转**——换任何账号都会撞同一
 				// 审核，轮转纯属浪费时间。不罚账号（ErrContentBlocked 分支无冷却/熔断/NoteError）。
