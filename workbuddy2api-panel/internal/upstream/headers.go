@@ -442,6 +442,17 @@ type ChatMeta struct {
 	// 对话的模型调用（面板自动任务、夜猫子、工具侧探测）填 auxiliary。真机另有
 	// compaction / subagent / team 三档，网关没有对应路径，故不预留假值。
 	AgentType string
+	// OnOutbound 出站请求体回调（可选，仅取证用）：真正发出去的那份 JSON 字节。
+	//
+	// 为什么需要：11128 的落盘快照此前拿的是**入站** body（handler 手里的那份），
+	// 而脱敏/合并/摘描述全在 prepareBody 里做 —— 快照与线上实际字节不是同一份，
+	// 于是「快照里明明有指纹」和「上游仍然 400」可以同时成立，排障时按快照删段
+	// 会一路删空也删不掉那个（其实早被改写的）指纹。线上真出过这次误判
+	// （blocked-20261120-134043.620.json：快照 69 条消息、四条 system 分片，
+	// 实际出站已被合并与改写）。
+	//
+	// 约束：回调在发送协程内同步执行，必须只做拷贝、不阻塞、不改写字节。
+	OnOutbound func([]byte)
 }
 
 // X-Agent-Type 的服务层取值（ChatMeta.AgentType 用）：空串等价 AgentTypeMain。

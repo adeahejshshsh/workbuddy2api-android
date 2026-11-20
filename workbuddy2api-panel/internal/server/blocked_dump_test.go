@@ -13,7 +13,7 @@ func TestDumpBlockedBodyBoundedAndPrunes(t *testing.T) {
 	h := &Handler{cfg: Config{BlockedDumpDir: dir}}
 	big := strings.Repeat("x", blockedDumpMaxBytes+1024)
 	for i := 0; i < 5; i++ {
-		p := h.dumpBlockedBody("glm-5.2", big)
+		p := h.dumpBlockedBody("glm-5.2", "outbound", big)
 		if p == "" {
 			t.Fatalf("第 %d 次快照写入失败", i)
 		}
@@ -40,12 +40,17 @@ func TestDumpBlockedBodyBoundedAndPrunes(t *testing.T) {
 	if !strings.Contains(string(raw), `"truncated": true`) {
 		t.Errorf("截断时必须标 truncated=true")
 	}
+	// kind 是排障的第一手信息：入站快照里带着脱敏前的指纹，出站快照才是真正发出去
+	// 的那份。没有这张标签，就会重演「快照里有指纹、上游照样 400」的误判。
+	if !strings.Contains(string(raw), `"kind": "outbound"`) {
+		t.Errorf("信封必须标 kind=outbound")
+	}
 }
 
 // TestDumpBlockedBodyNoDir 未配置目录（测试/嵌入）时不落盘、不 panic。
 func TestDumpBlockedBodyNoDir(t *testing.T) {
 	h := &Handler{cfg: Config{}}
-	if p := h.dumpBlockedBody("m", "{}"); p != "" {
+	if p := h.dumpBlockedBody("m", "inbound", "{}"); p != "" {
 		t.Fatalf("未配置目录不应写文件，got %s", p)
 	}
 }

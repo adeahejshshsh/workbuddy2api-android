@@ -22,11 +22,15 @@ const blockedDumpKeep = 3
 // （"Illegal API invocation from an unapproved channel"）无法定位 —— 必须看
 // 实际发出去的字节。
 //
-// 落盘内容是**已经过网关清洗的出站 body**，不含账号凭据（Authorization 是头，
-// 不在 body 里）。文件名带时间戳与模型，方便对应到请求日志里那一行。
+// 落盘内容默认是**已经过网关清洗的出站 body**（kind=outbound，来自 ChatMeta.OnOutbound
+// 回调，与真正发出去的明文 JSON 逐字节一致）；回调不可用时退回入站原文
+// （kind=inbound），并在信封里如实标注 —— 两者的差别是排障的关键：入站里还带着
+// 脱敏前的指纹，照着它删段会一路删空也删不掉已经不存在的那段。
+// 不含账号凭据（Authorization 是头，不在 body 里）。文件名带时间戳与模型，
+// 方便对应到请求日志里那一行。
 //
 // 目录：<配置目录>/data/blocked/。返回写入路径（失败返回空串，调用方只管记日志）。
-func (h *Handler) dumpBlockedBody(model, body string) string {
+func (h *Handler) dumpBlockedBody(model, kind, body string) string {
 	dir := h.blockedDumpDir()
 	if dir == "" {
 		return ""
@@ -43,11 +47,17 @@ func (h *Handler) dumpBlockedBody(model, body string) string {
 	stamp := time.Now().Format("20060102-150405.000")
 	name := filepath.Join(dir, "blocked-"+stamp+".json")
 	// 包一层信封：原文 + 元信息。直接写裸 body 的话，事后分不清是哪个模型/是否截断。
+	if kind == "" {
+		kind = "outbound"
+	}
 	env := map[string]any{
 		"captured_at": time.Now().Format(time.RFC3339),
 		"model":       model,
-		"truncated":   truncated,
-		"body":        string(raw),
+		// kind：outbound = 真正发出去的（prepareBody 之后）；inbound = 客户端原文。
+		// 有这张标签，才不会再出现「快照里有指纹、上游照样 400」那种自相矛盾的判断。
+		"kind":      kind,
+		"truncated": truncated,
+		"body":      string(raw),
 	}
 	buf, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {

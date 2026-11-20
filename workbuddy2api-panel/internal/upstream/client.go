@@ -1697,6 +1697,12 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// 请求体编码：5.9.3 真机 chat body 是 **gzip 压缩**的（头 `Content-Encoding: gzip`
 	// + body 以 1f 8b 开头）。旧实现发明文 JSON，body 字节与编码头两处都与客户端不同
 	// —— 是 11140 指纹面之一。小 body 不压（收益为负，客户端亦非一律压）。
+	// 取证回调（11128 快照）：交付**压缩前的明文 JSON**——与 prepareBody 的输出逐字节
+	// 一致，gzip 只是传输编码，不影响「哪段原文被发出去」。同一请求可能因轮转/重试
+	// 多次出站，调用方按「最后一次」留档即可。
+	if meta.OnOutbound != nil {
+		meta.OnOutbound(prepared)
+	}
 	outBody := prepared
 	gzipped := false
 	if len(outBody) >= gzipMinChatBody {
