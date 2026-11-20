@@ -263,9 +263,14 @@ final class Console {
         box.setBackgroundColor((Theme.WARN & 0x00FFFFFF) | 0x1A000000);
         box.setVisibility(View.GONE);
 
+        // 尺寸必须写死 dp。踩过的坑：`Theme.dot()` 自己设了 6dp 的 LayoutParams，但
+        // `addView(v, lp)` 会用传入的 lp **覆盖**它；而 WRAP_CONTENT 的裸 View 在
+        // `View.getDefaultSize()` 下会取满父容器的 AT_MOST 尺寸 —— 于是一个 6dp 的
+        // 圆点被拉成铺满整页的巨大椭圆（WARN 色，看着像整页被橙色糊住），
+        // 还顺带把底部导航挤出屏幕。
         View dot = Theme.dot(a, Theme.WARN, 6);
         LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                Theme.dp(a, 6), Theme.dp(a, 6));
         dlp.rightMargin = Theme.dp(a, Theme.S2);
         box.addView(dot, dlp);
 
