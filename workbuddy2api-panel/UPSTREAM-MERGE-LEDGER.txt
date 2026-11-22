@@ -1201,3 +1201,53 @@ agent 类客户端分辨不出它与真实输入的区别，实测被当成「�
 
 变异验证 3 组：去掉 `no_pick` 拼接 / 去掉 `narrationOff` 闸门 / （台账由
 `TestFreeEndpointsRecordedInPanel` 正面钉住）。19 个包全绿，gofmt 干净。
+
+### 第二十六批（上游 2026-11-20 → 11-21：`d40d4b8` → `e2d0eb6`，24 条）
+
+上游这一批的主线是**语音端点**（官方 TTS/ASR，issue #277）、**11102/11103/11133/15053
+的请求级分流**（issue #280）、**加号绑定号池出口**（登录本身走代理）与一批视频/检索形状修正。
+
+| 上游提交 | 处置 | 本仓落点 |
+|---|---|---|
+| `923dbec` `d5ce7de` `08cb935` `269b92e` `c405254` `026f9c0` `e1280ca` `b8a704b` `56c826c` `d582d70`（#277 语音全家桶） | 搬 | 新增 `internal/server/audio.go` + `internal/upstream/speech.go`（`/v1/audio/speech`、`/v1/audio/transcriptions`，`features.tts_enabled` / `asr_enabled` 缺省关、关着回 403）；3MB 入口硬限（413 `audio_too_large`）、裸 PCM 的 15053 归请求级、未知音色 500 归请求级、TTS 的 Accept 在 ChatHeaders 之后设 |
+| `d629a8c` `b35a8d0`（#280 分类） | 搬 | 新增 `ErrModelMissing`（11102/14401 请求级、不轮转）、11103 → `ErrModelParamInvalid`、15021/15022 边缘级不喂连败；`IsModelBlocked` 预检补 11158，`IsModelMissing` 与它分开处置 |
+| `abed839`（#276 工具 schema 正则） | 搬 | `re2Pattern`：`\_` 去反斜杠 + `\uXXXX` 译成 `\x{XXXX}`，仍编不过就删该 pattern |
+| `937fef2` `b902132` `e2d0eb6` `c27d731`（文档/夹具） | 搬 | README 语音与嵌入两行、参考素材形状说明；videos 的 `reference_*` 补成上游对象数组 |
+| `6ef2450`（#278 加号出口） | 搬（部分） | `panel.Config.ProxyPool` + `login_route`（`DoPinned`/`NodeLabel`/`Bind`）已落地，登录三端点共用一条出口并在落盘后写固定绑定。**本仓 main 尚未构造 proxypool Manager**，故该开关当前为惰性（nil = 直连），等代理池接线后再生效 |
+| `676f9da`（#279 `/v1/tools/search|fetch` 别名） | 搬 | 别名走 DeepSeek 兼容形状、不看 UA；`isDeepSeekToolsPath` |
+| `9ad206b`（PR #281 同轮助手文字与工具调用合并回放） | 搬 | `responses.go` + `responses_tool_history_test.go` |
+| `be99749` `5b40d46` `0eeeb1e` `c84b6f2` | 搬 | 跨账号前缀缓存探针（`internal/probe/crossacct.go`）、README、过期时间夹具改成相对当前时间 |
+
+**合并方式**：`git apply -3` 逐文件三方合并（本仓模块路径 `linguo2625469`，上游是
+`misakano7545`，且本仓有 review 批次的自有改动），18 个文件出现冲突，逐个手工取并集：
+
+- `handler.go` 11 处：配置/快照结构取并集（保留 `AdminAPIKey`、`ToolOnlyRescue`、`RecordContext`），
+  新路由（`/v1/audio/*`、`/v1/tools/*`、`search`/`fetch`）整段接收；`Classify`/`applyErrorPolicy`
+  取上游的请求级分流（11102/11103/11133/15053/15021）。
+- `client.go` 3 处：`IsModelMissing`/`modelBlockFields` 用上游实现；本仓的 14003「模型繁忙」
+  与 11151「空段」分支保留。事后补了两处拼缝：`11151` 缺一个 `}`、`IsModelBlocked` 预检
+  漏 `11158`（`TestClassify` 的 400+11158 用例当场变红）。
+- `login.go`：上游版本整体替换（本仓旧版只是更早的上游 + 自研 `consumed` 认领；上游的
+  `processing` 是同一件事），并把上游的 `StartNewAccountTasks` 换成本仓的
+  `postImportActivate`；`loginMaxSessions` 硬上限（W2-LG-01）补回 `loginStart` 入口。
+- `livecfg`/`config.go`/`main.go`：快照结构取并集（含 `LoginBindOff`/`TTSEnabled`/`ASREnabled`），
+  默认值补 `login_bind_proxy=true`。模型白名单（`models.allowed`）本仓未落地强制，
+  快照里传 `nil/false` 保持「全部放行」，避免半实现。
+- `fetch.go`：取上游的 `isFetchEdgeFault`（15021/15022），**保留本仓的 `fetchURLGuard`
+  SSRF 护栏**（80/443 + 私网/元数据拒绝）。
+- `search.go`/`search_test.go`：别名路径判定用上游；两侧用例都保留（本仓的
+  `TestSearchDeepRoutesToAgentic` + 上游的 `TestDeepSeekToolsAliasEndpoint`）。
+
+**删除的上游文件（本仓无法运行/已过时）**：
+- `internal/upstream/zz_live_ws_test.go`（依赖 `golang.org/x/net/websocket`，本机无模块代理，
+  `go.sum` 无法补）、`zz_live_277_test.go`、`zz_live_speech_test.go`（依赖上游专属
+  `loadProbeAuth` 与三参 `c.do`）——三者都是 `t.Skip` 保护的真号探针，CI 从不执行。
+- `internal/loginsite/audit_round2_test.go`（断言旧 `DecorateAuthURL` 语义，上游实现已改，
+  由上游 `loginsite_test.go` 覆盖）、`internal/panel/login_fatal_test.go`（旧 `loginEndpointsFn`
+  API，由上游 `login_poll_test.go` 覆盖）。
+
+**环境适配**：`TestAppJSPollLoginResilience` 需要可执行的 `node`（Android 私有目录 exec 被
+SELinux 拒）→ 前置探测失败即 `t.Skip`，不把环境限制当回归。
+
+**验证**：24/24 包全绿（`tests/run.sh all`），gofmt 干净；合并后补了三处本仓夹具
+（`requestErrorCodes` 8 项、`cr.n` int64、`loginSession` 值类型）。

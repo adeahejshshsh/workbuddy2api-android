@@ -152,7 +152,7 @@ func TestProbeOnceStopsOnRequestLevelError(t *testing.T) {
 func TestRequestErrorCodesCoversHTTPBranch(t *testing.T) {
 	for _, k := range []string{
 		"content_blocked", "prompt_too_long", "image_invalid", "tool_call_mismatch",
-		"bad_params", "model_param_invalid", "empty_content",
+		"bad_params", "model_param_invalid", "empty_content", "model_unavailable",
 	} {
 		found := false
 		for _, code := range requestErrorCodes {
@@ -165,8 +165,8 @@ func TestRequestErrorCodesCoversHTTPBranch(t *testing.T) {
 			t.Errorf("请求级表缺 %s（HTTP ≥400 分支会即刻 400，首帧路径却当账号故障）", k)
 		}
 	}
-	if len(requestErrorCodes) != 7 {
-		t.Errorf("requestErrorCodes 有 %d 项，want 7（新增项须同时确认 HTTP 分支口径）", len(requestErrorCodes))
+	if len(requestErrorCodes) != 8 {
+		t.Errorf("requestErrorCodes 有 %d 项，want 8（新增项须同时确认 HTTP 分支口径）", len(requestErrorCodes))
 	}
 }
 

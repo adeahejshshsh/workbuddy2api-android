@@ -3,15 +3,19 @@
 // 非对话端点，与 images 同一套取号与失败处置：单次取号、失败换号上限 3、
 // 请求级错误（参数/内容/模型）fail-fast 不烧全池。回程默认把上游原文原样写出
 // （{query,type,provider,results,total_results,response_time_ms}），不做二次包装；
-// 仅当请求来自 DSH（UA 含 deepseek-harness）时，额外补成 DeepSeek Search API
-// 需要的形状：date:null / title/snippet 字符串、空 url 的卡片改写为等价检索链接，
-// 并接受 count 作为条数。
+// 仅当请求「要 DeepSeek 形状」时——DSH（UA 含 deepseek-harness）或别名路径
+// /v1/tools/search——额外补成 DeepSeek Search API 需要的形状：date:null /
+// title/snippet 字符串、空 url 的卡片改写为等价检索链接，并接受 count 作为条数。
+// 判定的理由见 isDeepSeekToolsPath：路径本身就是形状声明，UA 只是老路径的识别手段。
 //
 // 选号域：请求可带 "model":"cn:x" 只用其 realm 前缀，或直接 "realm":"global"；都没有 → cn。
 //
-//	POST /v1/search
+//	POST /v1/search        或  POST /v1/tools/search（DeepSeek 官方形状的别名）
 //	{"query": "玉林 电梯 维保 新规", "max_results": 5}
 //	{"query": "...", "deep": true}   ← 综述式（agentic_search），单次 40~66s
+//
+// DeepSeek 官方的 need_content / ori_question / localization 有意忽略（不报错、
+// 不生效），理由见 compatDeepSeekSearch 的注释。
 package server
 
 import (
@@ -58,6 +62,19 @@ func deepSeekSearchClient(ua string) bool {
 	return strings.Contains(strings.ToLower(ua), "deepseek-harness")
 }
 
+// isDeepSeekToolsPath DeepSeek 官方形状的别名路径（/v1/tools/search、/v1/tools/fetch）。
+//
+// 用这个路径的调用方，按定义就是「要 DeepSeek 形状」的那批：他们照官方文档填 base、
+// 按官方 schema 解析，能不能用不该取决于一个与协议无关的 header。UA 在真实世界里
+// 不可靠——HTTP 代理会改写它、自研脚本不设它、各家 SDK 的 UA 五花八门
+// （OpenAI/Python、python-requests、curl…），按 UA 判定会让别名时灵时不灵。
+//
+// 反过来，把兼容层挂到路径上不会伤到任何既有调用方：/v1/search 的 UA 门控一字未改，
+// 非 DSH 客户端打老路径仍然逐字节透传。
+func isDeepSeekToolsPath(p string) bool {
+	return p == "/v1/tools/search" || p == "/v1/tools/fetch"
+}
+
 // cardSearchBase 卡片改写落点。
 //
 // 上游 /agenttool/v1/search 会把「网页」和「结构化卡片」混在同一个 results 里：卡片
@@ -81,7 +98,13 @@ var cardSearchBase = "https://cn.bing.com/search?q="
 //     **缺失**（undefined）会直接抛 invalidResponse（"invalid response body"）。
 //  3. title/snippet 缺失或为 null 时补空串：DSH 要求是 string，空串合法。
 //
-// 调用方只在 deepSeekSearchClient(UA) 为真时走到这里；其余客户端逐字节透传。
+// 调用方只在 deepSeekSearchClient(UA) 或 isDeepSeekToolsPath(路径) 为真时走到这里；
+// 其余客户端逐字节透传。
+//
+// 官方的 need_content / ori_question / localization 三个字段有意不接：上游 agenttool
+// 的 snippet 接口没有正文开关（同 allowed_domains / freshness，见
+// internal/upstream/search.go 的实测边界），传了也无处可用，故静默丢弃、由 README
+// 说明；要整页正文走 deep:true（agentic_search，实测 40~66s）。
 func compatDeepSeekSearch(raw []byte) []byte {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -263,9 +286,11 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		realm = "cn"
 	}
 
-	// DeepSeek Search API 兼容层只服务 DSH：按 UA 判定。其余客户端保持上游原文
-	// 逐字节透传、条数只认 max_results（行为与兼容层加入前完全一致）。
-	dshClient := deepSeekSearchClient(r.UserAgent())
+	// DeepSeek Search API 兼容层只服务「要 DeepSeek 形状」的请求：DSH 按 UA 判定，
+	// 别名路径（/v1/tools/search）按路径判定。其余客户端保持上游原文逐字节透传、
+	// 条数只认 max_results（行为与兼容层加入前完全一致）。
+	// 兼容层内含「空 url 卡片 → 等价检索链接」的改写，见 compatDeepSeekSearch。
+	dshClient := deepSeekSearchClient(r.UserAgent()) || isDeepSeekToolsPath(r.URL.Path)
 
 	tried := map[string]bool{}
 	// 条数：优先 max_results；DSH 的 deepseek-search-api 只发 count，回落它
@@ -337,18 +362,4 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("search realm=%s: 全部尝试失败（%d 个账号）：%v", realm, len(tried), lastErr)
 	writeOpenAIError(w, status, code, lastErr.Error())
-}
-
-// requestLevelFailFastKind 报告该类上游错误是否与账号无关（换号必然同样失败）。
-// search 与 images 共用：检索/出图的域级模型路由（14401 route config not found）、
-// 审核与参数错误都是请求本身的属性，换号只会打满全池。chat 侧另有一套（各账号的
-// 模型权限可能不同）。
-func requestLevelFailFastKind(kind upstream.ErrKind) bool {
-	switch kind {
-	case upstream.ErrBadParams, upstream.ErrPromptTooLong, upstream.ErrImageInvalid,
-		upstream.ErrModelParamInvalid, upstream.ErrEmptyContent,
-		upstream.ErrContentBlocked, upstream.ErrModelBlocked:
-		return true
-	}
-	return false
 }

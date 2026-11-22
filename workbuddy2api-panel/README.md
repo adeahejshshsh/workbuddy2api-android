@@ -53,6 +53,15 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 CodeBuddy 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
+## 合作伙伴
+
+<a href="https://www.ipwo.net/?ref=githubworkbuddy2apipanel"><img width="5120" height="601" alt="30f235b8d74c22bdf31db956230949a6" src="https://github.com/user-attachments/assets/e74e1c0a-d60f-46df-ae2f-84cbfb796db2" /></a>
+
+IPWO 住宅代理：为全球 API 连接提供灵活的网络支持。
+覆盖 195+ 个国家和地区的 9000 万+ 住宅 IP 资源，支持 HTTP(S)、SOCKS5 协议，以及国家和城市级定位。适用于 API 接入、跨境开发、网络连接测试及数据采集等场景。动态支持免费测试，静态IP低至9.9元/月/条。90折扣码：`0200`
+
+注册地址：https://www.ipwo.net/?ref=githubworkbuddy2apipanel
+
 ## 核心能力
 
 | 能力 | 说明 |
@@ -652,6 +661,22 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 - 失败隔离：单账号失败只跳过该账号当趟；401 不强刷（token 刷新交保活时点）
 
 ## API 端点
+
+| 端点 | 说明 |
+|---|---|
+| `POST /v1/chat/completions` | 对话主入口（OpenAI 形状）。 |
+| `POST /v1/messages`、`POST /messages` | Anthropic Messages 形状（Claude Code 等），另有 `/count_tokens`。 |
+| `POST /v1/responses` | Responses 形状；同轮助手文字与工具调用会合并回放（PR #281）。 |
+| `POST /v1/search`、`POST /v1/fetch` | 官方 agenttool 检索/抓页透传；`/v1/tools/search`、`/v1/tools/fetch` 是 DeepSeek 官方形状的**别名**（同一份实现，不看 UA）。 |
+| `POST /v1/audio/speech` | 官方语音合成：`{input, voice?, response_format?}` → `audio/wav`（24kHz 单声道）。开关 `features.tts_enabled`，**缺省关闭**（关着回 403，不是 404）。`voice` 只有 `f191_female_cn_tts2.5_flash` 可用（省略即用它），传 OpenAI 音色名上游回 500 + code 10000，网关按请求级错误透传并提示省掉 `voice`。 |
+| `POST /v1/audio/transcriptions` | 官方语音识别：multipart（字段 `file` 或 `audio`）→ `{text}`。开关 `features.asr_enabled`，缺省关闭。音频上限 **3MB**（上游硬限，超限本地 413 `audio_too_large`，不打上游），必须是 WAV/WebM 等带容器头的格式——裸 PCM 上游回 502 + code 15053，网关按请求级透传并提示换容器。 |
+| `POST /v1/images/*`、`POST /v1/videos/*`、`POST /v1/3d/*`、`POST /mcp` | 出图/改图、出视频、3D、MCP 工具面（各自有独立开关）。 |
+
+**上游错误的请求级分流**（同一 body 换任何账号都是同一句，故不轮转、不罚号）：
+11102/14401 模型 id 不存在 → `model_unavailable`；11103 后端未启用、11133 参数被模型供应商拒绝、
+11101 请求体解析失败 → `bad_params` / `model_param_invalid`；11148 工具配对断裂 → `tool_call_mismatch`；
+11151 空 text 段 → `empty_content`；15053 音频识别失败、音色未配置、15021/15022 域名/边缘级失败
+→ 请求级透传并附 `gateway_hint`（`/v1/fetch` 另有跨域兜底）。
 
 **余额后台刷新**（`schedule.balance_refresh_enabled`，缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「立即刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。
 

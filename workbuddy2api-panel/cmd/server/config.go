@@ -379,13 +379,32 @@ type Config struct {
 		//               （实测 user 里的品牌词不触发上游 11‑-128，改它只是不可见的
 		//                数据损坏）。
 		SanitizeBrandScope string `json:"sanitize_brand_scope"`
-		// WatermarkStripEnabled 去水印（裁白边）端点与 MCP 工具的总开关。缺省 false。
-		// 默认关的理由：这条链路要把成品图回读、解码、再 base64 回传（1024x1536 PNG 约
-		// 2.5MB → base64 3.4MB），只在真要彻底去水印时划算；而且它依赖提示词真的留出
-		// 白边（实测模型只肯给 25~38%），不适合当默认行为。热生效。
-		// EmbeddingsEnabled 实验特性 /v1/embeddings 总开关。默认**关**：上游嵌入只注册了
-		// bge-m3 一个模型（1024 维），可用性随账号/租户变化；默认放开等于把实验端点
-		// 暴露给所有客户端。关着回 403 embeddings_disabled（不是 404）。
+
+		// LoginBindProxy 加号（OAuth 登录）是否绑定号池出口，缺省 true。
+		//
+		// true = 登录请求本身也从号池里挑一条启用节点出网，账号落盘后写成该号的
+		// 固定绑定；false = 保持旧行为（登录直连，账号未绑定前一切出站按 realm 默认）。
+		//
+		// 为什么值得默认开：登录那一刻 uid 还不存在，绑定表里没有可查的键，旧行为
+		// 必然直连机房 IP；而「先在这个 IP 上注册、之后换成代理用」本身就是风控眼里
+		// 的强关联信号，且事后查不出这号是哪个出口注册的。开着它，加号与后续任务
+		// 走同一条出口。池里没有任何启用节点时仍回落直连（不能让没配代理的部署
+		// 因此加不了号）。热生效（livecfg 快照，取反成 LoginBindOff）。
+		LoginBindProxy bool `json:"login_bind_proxy"`
+
+		// ProxyExitLookup 代理健康探测时经该代理查一次出口画像（国家 / 住宅或机房 / ISP，
+		// proxypool/intel.go），缺省 false，热生效。每个节点每 6 小时一次第三方请求
+		// （ip-api 免费档仅明文 HTTP）。
+		ProxyExitLookup bool `json:"proxy_exit_lookup"`
+
+		// TTSEnabled / ASREnabled 官方语音端点（/v1/audio/speech、/v1/audio/transcriptions）
+		// 的总开关，缺省 false。
+		//
+		// 为什么默认关：这两个端点是官方独立端点、不在 /v1/models 目录里，协议来自
+		// 官方桌面端包的静态反查（issue #277）—— 关闭时端点仍在，回 403（不是 404），
+		// 打开开关即热生效。
+		TTSEnabled bool `json:"tts_enabled"`
+		ASREnabled bool `json:"asr_enabled"`
 
 		// BusyRetry 6020/6021 渠道排队时，先在网关内按上游 retry_after 等一轮再试一次，
 		// 避免把「等 40 秒就好」的排队当成不可重试错误甩给客户端（默认 true）。
@@ -698,6 +717,10 @@ func Default() *Config {
 	// 缺省等一轮（60s 上限），避免把上游明说「40 秒后再来」的排队秒变成客户端可见失败。
 	c.Features.BusyRetry = true
 	c.Features.BusyWaitSeconds = 60
+	// 加号绑定号池出口缺省开启：登录也走代理，落盘后钉成该号的固定绑定。
+	// 显式 false 回到「登录直连」，供出口不支持登录域名的部署（如只放行 workbuddy.cn
+	// 的线路登录 codebuddy.ai 站点会 503）按需关掉。
+	c.Features.LoginBindProxy = true
 	// 3D 临时凭证自动签发缺省 true：打开 three_d_enabled 即开箱可用，无须手工收集
 	// ck_t_。显式 false 退回「只用手工凭证表」。
 	c.Features.ThreeDAutoToken = true

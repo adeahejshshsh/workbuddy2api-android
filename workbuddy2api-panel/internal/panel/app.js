@@ -62,7 +62,7 @@ function bootstrapToken() {
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
-let logPin = true, loginState = null, loginTimer = null;
+let logPin = true, loginState = null, loginTimer = null, loginStartAt = 0;
 /* 添加账号（浏览器登录）的轮询状态（审查 W4F1-027/028）：
    loginGen   —— 弹窗代数：关窗/重开都自增，在途请求回来时代数不符就整段作废。
                  否则「请求在途时点关闭」之后 .then 落地仍会把 3s 轮询复活，
@@ -820,6 +820,10 @@ $('keyInput').addEventListener('keydown', e => {
    是因为 go() 的初始调用就会触发首页卡片的渲染，必须先于它就位。 */
 let lastPackages = null;
 let lastPackagesAt = 0;
+// invalidatePackages 账号/凭据/余额变更后作废积分构成与到期明细缓存：
+// 重新登录换的是凭据，缓存里的旧行（尤其 401 那一行）必须立刻失效，
+// 否则用户点「检查」看到的还是登录前的失败结果。
+function invalidatePackages() { lastPackages = null; lastPackagesAt = 0; }
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
@@ -2385,6 +2389,7 @@ function startAddLogin() {
   api('login/start', { method: 'POST', body: JSON.stringify({ realm }) }).then(r => {
     if (gen !== loginGen) return;   // 弹窗已关/已重开：这次结果作废
     loginState = r.state;
+    loginStartAt = Date.now();   // 90s 未完成时给一次可操作提示（见 pollLogin）
     $('addUrl').textContent = r.url;
     $('addPick').hidden = true; // 选域锁定（会话已按该域发起）
     $('addLoad').hidden = true; $('addReady').hidden = false;
@@ -2409,6 +2414,10 @@ function stopPoll() {
   if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
   if (closeAddTimer) { clearTimeout(closeAddTimer); closeAddTimer = null; }
 }
+// pollFails 连续查询失败计数：网络抖动不该让用户以为「重新登录没用」。OAuth 可能已经在
+// 浏览器侧完成，只是这次没收到结果——停掉轮询账号就永远不入池。
+let pollFails = 0;
+const POLL_MAX_FAILS = 20;
 async function pollLogin() {
   if (!loginState) return;
   // 单飞（审查 W4F1-028）：上游慢于 3s 时 setInterval 会让请求叠加，同一个 state
@@ -2420,6 +2429,16 @@ async function pollLogin() {
   try {
     const r = await api('login/poll?state=' + encodeURIComponent(state));
     if (gen !== loginGen) return;   // 弹窗已关/已换：结果作废（finally 仍会解锁）
+    pollFails = 0;
+    if (r.fatal) {
+      // 上游许可类终态（席位满 / 许可证过期 / 试用到期）：重试无意义，直接把上游
+      // 原话给用户（官方 SignLicenseError 行为）。
+      stopPoll();
+      $('addReady').hidden = true;
+      $('addErr').hidden = false;
+      $('addErr').textContent = r.message || '登录被上游拒绝';
+      return;
+    }
     if (r.done) {
       stopPoll();
       $('addReady').hidden = true;
@@ -2431,15 +2450,39 @@ async function pollLogin() {
         : (typeof r.credits === 'number' && r.credits >= 0
           ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '')
           : '');
-      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + credTxt + '，账号已载入池中';
+      // 余额校验失败必须回显：凭据落盘了但上游仍拒 billing，用户只会看到「已添加」
+      // 却继续 401，误以为重新登录没用（Q1 复测反馈）。
+      const warn = r.balance_error ? '；但余额校验失败：' + r.balance_error : '';
+      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + credTxt + '，账号已载入池中' + warn;
+      invalidatePackages(); // 凭据换新：缓存里的旧 401 行必须作废
       closeAddTimer = setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
+      return;
+    }
+    // 浏览器侧一旦显示「登录失败」，这边只会一直 pending 到 15 分钟 TTL，用户盯着
+    // 「等待中」不知道要不要重来。90s 后给一次可操作提示，别让他空等。
+    if (loginStartAt && Date.now() - loginStartAt > 90000 && $('addErr').hidden) {
+      $('addErr').hidden = false;
+      $('addErr').textContent = '仍在等待浏览器完成登录。若浏览器已显示「登录失败」，请关闭本窗口重新获取授权链接（链接 15 分钟内有效）。';
     }
   } catch (e) {
     if (gen !== loginGen) return;
-    stopPoll();
-    $('addReady').hidden = true;
+    if (e.status === 404 || e.status === 410) {
+      stopPoll();
+      $('addReady').hidden = true;
+      $('addErr').hidden = false;
+      $('addErr').textContent = '登录会话已过期，请关闭后重新添加';
+      return;
+    }
+    pollFails++;
+    if (pollFails >= POLL_MAX_FAILS) {
+      stopPoll();
+      $('addReady').hidden = true;
+      $('addErr').hidden = false;
+      $('addErr').textContent = '连续 ' + POLL_MAX_FAILS + ' 次查询失败，已停止轮询：' + e.message + '（授权可能已完成，可关闭后重新添加）';
+      return;
+    }
     $('addErr').hidden = false;
-    $('addErr').textContent = e.message + '（关闭后重新添加）';
+    $('addErr').textContent = '网络中断，自动重试中（' + pollFails + '/' + POLL_MAX_FAILS + '）：' + e.message;
   } finally {
     loginBusy = false;
   }

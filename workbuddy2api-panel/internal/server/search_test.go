@@ -274,6 +274,96 @@ func TestSearchDeepRoutesToAgentic(t *testing.T) {
 	}
 }
 
+// TestDeepSeekToolsAliasEndpoint POST /v1/tools/search：DeepSeek 官方形状的别名。
+//
+// 别名存在的理由不是「风格冗余」：dsh-free-search 的 deepseekToolsEndpoint() 会把
+// 用户填的 .../v1 强制改写成 .../v1/tools/search（无法靠配置绕开），照官方文档填
+// base 的客户端同样只会打这个路径。所以它必须与 /v1/search 等价，且**不看 UA**——
+// 用这个路径的调用方按定义就是要 DeepSeek 形状，UA 会被代理改写、自研脚本不设 UA。
+func TestDeepSeekToolsAliasEndpoint(t *testing.T) {
+	// ① 别名 + 非 DSH UA（curl）：兼容层必须照样介入。
+	// 卡片改写、date:null、count 回落三件事一件都不能少——否则别名返回的仍然不是
+	// 官方形状，"别名"就只是换了个 404 之外的状态码。
+	f := &searchFake{status: 200, body: searchCardBody}
+	h := NewHandler(Config{
+		Pool: testPoolWith(
+			&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		),
+		Upstream: f.client(),
+	})
+	req := httptest.NewRequest("POST", "/v1/tools/search",
+		strings.NewReader(`{"query":"宁德时代 股价","count":3}`))
+	req.Header.Set("User-Agent", "curl/8.23.0")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("别名 code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	assertDSHAcceptsResults(t, rec.Body.Bytes()) // 官方形状：url 非空 / title,snippet string / date 存在
+	if got := rec.Body.String(); got == searchCardBody {
+		t.Fatal("别名必须走兼容层，不能逐字节透传上游原文")
+	}
+	var sent map[string]any
+	_ = json.Unmarshal([]byte(f.bodies[0]), &sent)
+	if sent["max_results"] != float64(3) {
+		t.Fatalf("别名的 count 应回落为 max_results: %v", sent)
+	}
+
+	// ② 别名 + DSH UA：与 ① 同一条路径，行为不得因为多了一个 header 而变化
+	f2 := &searchFake{status: 200, body: searchCardBody}
+	h2 := NewHandler(Config{
+		Pool: testPoolWith(
+			&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		),
+		Upstream: f2.client(),
+	})
+	req2 := httptest.NewRequest("POST", "/v1/tools/search",
+		strings.NewReader(`{"query":"宁德时代 股价","count":3}`))
+	req2.Header.Set("User-Agent", dshUA)
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, req2)
+	if rec2.Code != 200 || rec2.Body.String() != rec.Body.String() {
+		t.Fatalf("别名不应因 UA 不同而改变响应：\n无 UA: %s\nDSH : %s",
+			rec.Body.String(), rec2.Body.String())
+	}
+
+	// ③ 老路径 /v1/search + 非 DSH UA：仍然逐字节透传（别名不得改变既有行为）
+	f3 := &searchFake{status: 200, body: searchCardBody}
+	h3 := NewHandler(Config{
+		Pool: testPoolWith(
+			&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		),
+		Upstream: f3.client(),
+	})
+	req3 := httptest.NewRequest("POST", "/v1/search",
+		strings.NewReader(`{"query":"宁德时代 股价","count":3}`))
+	req3.Header.Set("User-Agent", "curl/8.23.0")
+	rec3 := httptest.NewRecorder()
+	h3.ServeHTTP(rec3, req3)
+	if got := rec3.Body.String(); got != searchCardBody {
+		t.Fatalf("/v1/search 的非 DSH 行为不得被别名改动，得到 %s", got)
+	}
+}
+
+// TestIsDeepSeekToolsPath 别名路径判定：只认官方那两条，其余一律否（含相近但不
+// 相等的路径——判宽了会让老路径的透传行为被意外改写）。
+func TestIsDeepSeekToolsPath(t *testing.T) {
+	for _, p := range []string{"/v1/tools/search", "/v1/tools/fetch"} {
+		if !isDeepSeekToolsPath(p) {
+			t.Errorf("%q 应识别为 DeepSeek 别名路径", p)
+		}
+	}
+	for _, p := range []string{
+		"", "/v1/search", "/v1/fetch", "/v1/tools", "/v1/tools/",
+		"/v1/tools/search/", "/v1/tool/search", "/v2/tools/search",
+		"/v1/tools/agentic_search",
+	} {
+		if isDeepSeekToolsPath(p) {
+			t.Errorf("%q 不应识别为 DeepSeek 别名路径", p)
+		}
+	}
+}
+
 // searchCardBody 复刻线上实测响应：第 2 条是上游「结构化卡片」——有标题、有摘要
 // （表格）、有 site/favicon，唯独 url 是空串。DSH 官方插件对每条硬校验 url 非空，
 // 一条不合规整包作废（"DeepSeek returned an invalid response body"）。

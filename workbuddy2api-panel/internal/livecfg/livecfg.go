@@ -19,10 +19,15 @@ type Snapshot struct {
 	APIKey string // 网关/面板共同鉴权密钥；空 = 不鉴权
 	// AdminAPIKey 面板专用门禁（admin_api_key）：与发给下游的 APIKey 分开，
 	// 避免「客户端 key 即全池管理员」。面板敏感接口要求它非空（见 panel/panel.go）。
-	AdminAPIKey          string
-	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
-	SanitizeFingerprints bool          // 出站请求体指纹脱敏
-	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
+	AdminAPIKey  string
+	SoftCooldown time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
+	// SanitizeFingerprints 出站请求体指纹脱敏（features.sanitize_blacklist_fingerprints）。
+	// 关掉 = 客户端身份句逐字出站 = DSH 系客户端每个请求都被上游按「非官方渠道」拒。
+	SanitizeFingerprints bool
+	RecordClientInfo     bool // 请求日志是否记录调用来源（客户端 IP / UA）
+	// RecordContext 请求事件是否记录会话上下文（system + messages / 出图 prompt）。
+	// 比 IP/UA 敏感得多（是用户的实际对话内容），所以单独一个开关、缺省关闭。
+	RecordContext bool
 	// WatermarkStripEnabled 去水印（裁白边）端点与 MCP 工具的总开关
 	// （features.watermark_strip_enabled，缺省 false）。热生效。
 	WatermarkStripEnabled bool
@@ -30,6 +35,10 @@ type Snapshot struct {
 	// 缺省 false）。热生效：关着时端点回 403 embeddings_disabled——不是 404，
 	// 「功能存在、只是没开」与「上游没有这个协议」必须能区分开。
 	EmbeddingsEnabled bool
+	// TTSEnabled / ASREnabled 官方语音端点开关（features.tts_enabled / asr_enabled）；
+	// 默认 false，关着时回 403（不是 404）。
+	TTSEnabled bool
+	ASREnabled bool
 	// ThreeDEnabled 混元 3D 生成总开关（features.three_d_enabled）；默认 false。
 	// 关着时端点回 403 three_d_disabled，不碰上游、不签发凭证。
 	ThreeDEnabled bool
@@ -45,9 +54,10 @@ type Snapshot struct {
 	// 再打一次上游，agent 类客户端分辨不出它与真实用户输入的区别 —— 实测被当成用户
 	// 授权执行了 9 分钟工具调用，且客户端历史里完全查不到这条。
 	NarrationOff bool
-	// RecordContext 请求事件是否记录会话上下文（system + messages / 出图 prompt）。
-	// 比 IP/UA 敏感得多（是用户的实际对话内容），所以单独一个开关、缺省关闭。
-	RecordContext bool
+	// LoginBindOff 加号（OAuth 登录）是否**不**绑定号池出口（features.login_bind_proxy
+	// 取反）。取反是为了让零值 = 绑定：没接 livecfg 的裸用/测试路径不必初始化就保持
+	// 默认行为（登录经号池出口，落盘后钉成该号的固定绑定）。
+	LoginBindOff bool
 	// ModelFallback 模型降级路由表（pool.model_fallback）：6004 模型级限流时改用
 	// 的等价模型（裸名 → 裸名）。nil = 不降级，且不写持久状态。
 	ModelFallback map[string]string
@@ -57,6 +67,11 @@ type Snapshot struct {
 	// HiddenModels models.hidden 的归一化集合（键 "realm:裸名"）。面板「下游可见」
 	// 开关据此显示当前状态；nil = 不隐藏任何模型。
 	HiddenModels map[string]struct{}
+	// AllowedModels 模型白名单（config models.allowed，issue #68）：已归一化为
+	// "cn:x"/"global:x" 全量形式的精确 id 集合；nil = 未启用（默认放行所有模型）。
+	AllowedModels map[string]struct{}
+	// AllowlistEnabled 白名单是否启用（归一化结果非空即启用）；false = 全部放行。
+	AllowlistEnabled bool
 	// Thinking* 网关思考档位策略（config thinking 节）的只读镜像。出站改写由
 	// upstream.Client 自己持有 EffortPolicy；这里只给面板「网关档位」列算**当前生效值**，
 	// 让模型列表与真实注入口径一致（含按模型覆盖 model_defaults 的域精确键）。

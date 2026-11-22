@@ -19,9 +19,9 @@ import (
 // 说明触发点不在 messages，而在客户端自带的 tools 描述里。
 //
 // 期望的抢救阶梯：
-//   1. 第 1 次 → 11128 → 触发降级（中性提示词）并重试；
-//   2. 第 2 次 → 仍然 11128（降级无效）→ 摘掉 tools[].function.description 再试；
-//   3. 第 3 次 → 200。
+//  1. 第 1 次 → 11128 → 触发降级（中性提示词）并重试；
+//  2. 第 2 次 → 仍然 11128（降级无效）→ 摘掉 tools[].function.description 再试；
+//  3. 第 3 次 → 200。
 //
 // 并且降级锁存必须被解除 —— 否则这个客户端一整个白天都在用中性提示词陪跑。
 func TestContentBlockedStripsToolDescriptionsAndRetries(t *testing.T) {

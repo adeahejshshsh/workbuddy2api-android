@@ -688,7 +688,7 @@ func TestLoginStartRejectsWhenSessionTableFull(t *testing.T) {
 	p := New(Config{Pool: pool.New("")})
 	p.loginMu.Lock()
 	for i := 0; i < loginMaxSessions; i++ {
-		p.logins["state-"+string(rune('a'+i%26))+string(rune('a'+i/26))] = &loginSession{created: time.Now(), realm: "cn"}
+		p.logins["state-"+string(rune('a'+i%26))+string(rune('a'+i/26))] = loginSession{created: time.Now(), realm: "cn"}
 	}
 	p.loginMu.Unlock()
 	if len(p.logins) < loginMaxSessions {

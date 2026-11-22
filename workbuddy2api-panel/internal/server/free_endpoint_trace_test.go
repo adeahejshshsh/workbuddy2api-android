@@ -18,6 +18,10 @@ func TestFreeEndpointsRecordedInPanel(t *testing.T) {
 	cases := []struct{ path, body, up string }{
 		{"/v1/search", `{"query":"玉林 电梯 维保","max_results":2}`, searchOKBody},
 		{"/v1/fetch", `{"url":"https://x.example/1"}`, `{"url":"https://x.example/1","content":"正文"}`},
+		// DeepSeek 官方形状的别名打的是同一份实现，同样必须在台账里：
+		// 漏掉它们等于给同一能力留一个「面板查不到」的后门。
+		{"/v1/tools/search", `{"query":"玉林 电梯 维保","max_results":2}`, searchOKBody},
+		{"/v1/tools/fetch", `{"url":"https://x.example/1"}`, `{"url":"https://x.example/1","content":"正文"}`},
 	}
 	for _, c := range cases {
 		f := &searchFake{status: 200, body: c.up}

@@ -33,6 +33,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/proxypool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -41,8 +42,11 @@ import (
 
 // Config 面板依赖（main 装配注入）。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	// ProxyPool 号池出口（可选）。非 nil 时「加号」登录本身也走代理，并在账号
+	// 落盘后钉成该号的固定绑定（features.login_bind_proxy，缺省开）。
+	ProxyPool *proxypool.Manager
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
@@ -154,7 +158,7 @@ type Panel struct {
 	loginMu sync.Mutex
 	// 注意必须是**指针** map：loginSession 带可变字段（consumed），值类型 map 里
 	// 取出来的是副本，改副本不会回写 —— 防重入标记会永远失效（review H1）。
-	logins map[string]*loginSession
+	logins map[string]loginSession
 
 	// softRateMu/softRateUntil 上游软限流（429）的账号级冷却截止：撞过一次就记下来，
 	// 同一轮里后续任务动作直接快失败，不每个动作都再睡一遍 —— 一轮全量任务有几十个
@@ -267,15 +271,21 @@ const loginMaxSessions = 64
 type loginSession struct {
 	created time.Time
 	realm   string // "cn" / "global"，缺省 cn
-	// consumed 已被一路 poll 认领：完成路径要走 4 次上游调用（各 30s 超时），
-	// 前端 setInterval 3s 轮询没有重入保护，慢一次就会叠出第二个 poll，
-	// 两个都通过「state 还在」的检查 → Pool.Add / SaveAtomic / 签到 / 余额刷新
-	// 各跑两遍。认领标记让第二路直接退出，完成（delete）或失败时复位。
-	consumed bool
-	// lastPollResult 上一次 pending 轮询的结果串，用于「只在变化时记一行」。
-	// 逐轮记会淹掉日志（3s 一轮、15 分钟 TTL = 300 行）；完全不记则「登录卡住」
-	// 时没有任何证据可查（上游 issue #93）。只在 loginMu 内读写。
-	lastPollResult string
+	// site 登录站点（cn/intl/workbuddy，对齐官方域表）。决定 poll 用哪套端点：
+	// 国际域 codebuddy.ai 与 workbuddy.ai 同后端不同主机，混用会把请求打到非签发域。
+	// 空 = 老会话/未指定，按 cn 处理（siteOrDefault 归一）。
+	site string
+	// proxyID 本次登录出站钉住的号池节点（空 = 直连）。登录开始时选一次、poll 的
+	// 三个端点都用它，账号落盘后再写成该号的固定绑定（见 bindLoginProxy）：加号用的
+	// 出口与之后做任务用的出口必须是同一条，否则「先在这条 IP 上注册、再换一条用」
+	// 本身就是风控眼里的强关联信号，也查不出这号是哪个出口注册的。
+	proxyID string
+	// processing 该 state 正在落盘（含签到/余额校验等副作用）。前端每 3s 轮询，而成功
+	// 分支的副作用可能耗时数秒：没有这个闸门，第二个并发 poll 会把整段流程再跑一遍。
+	processing bool
+	// lastMsg 上一次落日志的上游结果。前端每 3s 一轮、最长 loginTTL，逐轮记日志会
+	// 把 15 分钟刷成 300 行，真正的一次性错误反被淹掉；只在结果变化时记一行。
+	lastMsg string
 }
 
 // New 构建面板。
@@ -288,7 +298,7 @@ func New(cfg Config) *Panel {
 		mux:     http.NewServeMux(),
 		started: time.Now(),
 		logs:    NewRing(500),
-		logins:  map[string]*loginSession{},
+		logins:  map[string]loginSession{},
 		// 热重载的缺席计数表：nil map 上写会 panic（重载首轮就写）。
 		reloadMissing:       map[string]int{},
 		reloadDeleteConfirm: 2,

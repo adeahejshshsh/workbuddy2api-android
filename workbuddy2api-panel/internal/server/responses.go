@@ -721,6 +721,7 @@ func decodeCompactionSummary(blob string) string {
 func convertInputItems(items []any, meta *responsesMeta) []any {
 	var out []any
 	var pending []any
+	var toolTurnText map[string]any
 	// pendingReasoning 暂存 reasoning 项提取出的思考文本，等它所属的 assistant 内容
 	// （正文消息或工具调用批次）落地时挂上去。
 	var pendingReasoning string
@@ -741,14 +742,20 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 		if len(pending) == 0 {
 			return
 		}
-		msg := map[string]any{"role": "assistant", "content": "", "tool_calls": pending}
+		// Codex can emit text and calls as separate items of one turn; replaying two assistant turns can make Kimi stop after a progress line.
+		msg := toolTurnText
+		if msg == nil {
+			msg = map[string]any{"role": "assistant", "content": ""}
+			out = append(out, msg)
+		}
+		msg["tool_calls"] = pending
 		if pendingReasoning != "" {
 			// 工具调用前的思考段挂在同一批 assistant 上：思考与调用本是同一轮决策，
 			// 拆开会让该轮在多轮校验里裸奔。
-			msg["reasoning_content"] = pendingReasoning
+			msg["reasoning_content"] = appendVisibleReasoning(asString(msg["reasoning_content"]), pendingReasoning)
 			pendingReasoning = ""
 		}
-		out = append(out, msg)
+		toolTurnText = nil
 		pending = nil
 	}
 	for idx, it := range items {
@@ -757,6 +764,7 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			// 非 dict 项（纯字符串等）按 user 侧边界处理：没等到归属的过期思考就地
 			// 丢弃，绝不跨轮泄漏到不相关的对话里。
 			pendingReasoning = ""
+			toolTurnText = nil
 			continue
 		}
 		typ, _ := m["type"].(string)
@@ -809,6 +817,7 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			// system 消息保留在回放历史里；解码不出内容则跳过，不造空消息。
 			flush()
 			pendingReasoning = ""
+			toolTurnText = nil
 			if summary := decodeCompactionSummary(asString(m["encrypted_content"])); strings.TrimSpace(summary) != "" {
 				out = append(out, map[string]any{
 					"role":    "system",
@@ -823,6 +832,7 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			flush()
 			// 工具结果属于 user 侧回应：其前未归属的思考已被 flush 消费或就此过期。
 			pendingReasoning = ""
+			toolTurnText = nil
 			if id := asString(m["call_id"]); id != "" {
 				txt, imgs := splitToolImages(m["output"])
 				msg := map[string]any{
@@ -859,12 +869,14 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			// 来自其他任务（子代理）的消息：按用户指令注入，别伪装成工具结果。
 			flush()
 			pendingReasoning = ""
+			toolTurnText = nil
 			if txt := asContentString(m["content"]); strings.TrimSpace(txt) != "" {
 				out = append(out, map[string]any{"role": "user", "content": agentMessagePrefix + txt})
 			}
 			continue
 		}
 		flush()
+		toolTurnText = nil
 		role, _ := m["role"].(string)
 		if role == "" {
 			role = "user"
@@ -883,6 +895,8 @@ func convertInputItems(items []any, meta *responsesMeta) []any {
 			}
 			if tcs, ok := m["tool_calls"].([]any); ok && len(tcs) > 0 {
 				msg["tool_calls"] = tcs
+			} else if asString(msg["content"]) != "" && m["phase"] != "final_answer" {
+				toolTurnText = msg
 			}
 		} else {
 			// user/system 边界：没等到归属的过期思考就地丢弃，绝不跨轮泄漏。
