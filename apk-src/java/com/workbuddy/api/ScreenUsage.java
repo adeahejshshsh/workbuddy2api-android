@@ -113,13 +113,23 @@ final class ScreenUsage {
         usageSection(list, "按模型", u.byModel);
     }
 
-    // ── 时间分布柱状图（issue #167 第 2 条） ────────────────────────────────
+    // ── 时间分布柱状图（issue #167 第 2 条 / 修 #205） ──────────────────────
     //
-    // 数据源是 /panel/api/usage 的 series（后端早就在返回，日桶 + 小时桶拼成一条）。
-    // 两个必须遵守的细节：
-    //   ① 24H 只取 scope=hour、其余只取 scope=day —— 混着画会把同一段画两遍；
-    //   ② 小时桶只保留 7 天（审查 U3），所以 30D 区间里本来就没有小时点，正好是
-    //      「24H→小时、其余→天」这个期望，不需要额外兜底。
+    // 数据源是 /panel/api/usage 的 series（日桶升序 + 小时桶升序拼成一条）。
+    //
+    // 旧实现在这里错了两次（issue #205）：
+    //   ① 按 scope 二选一（24H 取 hour、其余取 day）且没有回落 —— 而**日桶只由满 7 天
+    //      的小时桶折叠产生**（internal/usage 的 hourlyKeep=7d），3D/7D 窗口永远够不到，
+    //      于是除 24H 外全是空图；数据其实都在 series 里，只是被筛掉了；
+    //   ② 空状态文案把这件事描述成设计（「更早的区间按天统计」），把 bug 说成预期。
+    //
+    // 现在的口径（见 applyChart）：
+    //   · ≤24H：直接用小时点；
+    //   · >24H：先把窗口内的小时点按**日期**聚合成日柱，再用服务端日桶覆盖同一天
+    //     （日桶是权威聚合，且覆盖 7 天以前的历史）→ 3D 三根、7D 七根；
+    //   · 聚合后只剩一天（刚装几小时）：退回实际存在的**小时点**，让用户看到那几根，
+    //     而不是一根或空图；
+    //   · 两者都没有才进空状态，文案改成中性的「暂无数据」。
     private int chartMetric = 0;                                   // 0 请求 / 1 TOKENS / 2 积分
     private static final String[] CHART_METRICS = {"请求", "TOKENS", "积分"};
 
@@ -175,27 +185,33 @@ final class ScreenUsage {
     }
 
     private void applyChart(BarChart chart, TextView note, PanelService.Usage u) {
-        boolean wantHour = usageHours <= 24;
-        java.util.List<PanelService.Usage.Point> pts = new java.util.ArrayList<PanelService.Usage.Point>();
+        // 取点规则全在 UsageBuckets（issue #205）：那里可被宿主 JVM 直接测，
+        // 这里只负责把 PanelService 的点转过去、把结果画出来。
+        java.util.List<UsageBuckets.Pt> in = new java.util.ArrayList<UsageBuckets.Pt>();
         for (PanelService.Usage.Point p : u.series) {
-            if (wantHour ? "hour".equals(p.scope) : "day".equals(p.scope)) pts.add(p);
+            in.add(new UsageBuckets.Pt(p.t, p.scope, p.requests, p.tokens, p.credits));
         }
-        float[] v = new float[pts.size()];
-        String[] lb = new String[pts.size()];
-        for (int i = 0; i < pts.size(); i++) {
-            PanelService.Usage.Point p = pts.get(i);
+        UsageBuckets.Result res = UsageBuckets.bucket(in, usageHours);
+        float[] v = new float[res.pts.size()];
+        String[] lb = new String[res.pts.size()];
+        for (int i = 0; i < res.pts.size(); i++) {
+            UsageBuckets.Pt p = res.pts.get(i);
             v[i] = chartMetric == 0 ? p.requests
                     : chartMetric == 1 ? p.tokens
                     : (float) p.credits;
-            lb[i] = shortLabel(p.t, wantHour);
+            lb[i] = shortLabel(p.t, res.hourly);
         }
         chart.setData(v, lb, chartMetric == 0 ? "" : chartMetric == 1 ? "tok" : "");
-        if (pts.isEmpty()) {
-            note.setText("该区间没有时间点（小时桶只保留 7 天，更早的区间按天统计）");
-        } else {
-            note.setText("共 " + pts.size() + " 个" + (wantHour ? "小时" : "天") + " · "
-                    + (wantHour ? "粒度 1 小时" : "粒度 1 天"));
+        if (res.pts.isEmpty()) {
+            // 不再把「日桶要等 7 天」说成设计：真正的空只有两种 —— 这个窗口没产生流量，
+            // 或者数据已超出保留期（小时桶 7 天 / 日桶 90 天）。
+            note.setText("该区间暂无数据（窗口内没有请求，或已超出保留期）");
+            return;
         }
+        String unit = res.hourly ? "小时" : "天";
+        String grain = res.hourly ? "粒度 1 小时" : "粒度 1 天";
+        String extra = (!res.hourly && res.aggregated) ? " · 由小时点按日聚合" : "";
+        note.setText("共 " + res.pts.size() + " 个" + unit + " · " + grain + extra);
     }
 
     /** "2026-11-16T13" → "13时"；"2026-11-16" → "11-16"。 */

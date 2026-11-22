@@ -241,6 +241,10 @@ if [ -f "$AJ" ]; then
   # 宿主 JVM 直接跑 —— 判据漂开会让同一条日志在网页标红、在 App 里不标。
   javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$WS"/tests/android/LogLevelSelfCheck.java
   java -cp "$AJ:classes:test-out" LogLevelSelfCheck
+  # 用量柱状图取点自检（issue #205）：3D/7D 恒空白的根因是「按 scope 二选一」，
+  # 规则已抽到 UsageBuckets（纯数据变换），宿主 JVM 直接跑聚合/回落/覆盖三种形态。
+  javac --release 11 -encoding UTF-8 -cp "$AJ:classes" -d test-out "$WS"/tests/android/UsageBucketsSelfCheck.java
+  java -cp "$AJ:classes:test-out" UsageBucketsSelfCheck
   # 源码级语义断言（W6 那批）：check_*.py 是纯文本检查，不需要 JDK，跑得很快。
   # 全部挂到构建闸门上 —— 这些断言存在的意义就是「改坏了构建就红」，
   # 只放在仓库里靠人手跑，等于没有（W6-H-01 就是这么漏的：注释写了续期、
