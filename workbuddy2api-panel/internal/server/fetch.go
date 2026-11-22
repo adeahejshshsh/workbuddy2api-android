@@ -3,8 +3,14 @@
 // DSH 的 Search / Fetch 共用一份 baseURL（默认 https://api.deepseek.com/v1/tools，
 // 追加 /search 与 /fetch）。把 baseURL 指向网关时：
 //
-//	POST /v1/search  {"query":"...", "count":3}      → 见 search.go
-//	POST /v1/fetch   {"url":"https://example.com"}   → 本文件
+//	POST /v1/search        {"query":"...", "count":3}      → 见 search.go
+//	POST /v1/fetch         {"url":"https://example.com"}   → 本文件
+//	POST /v1/tools/search  {"query":"...", "count":3}      → 别名，同 search.go
+//	POST /v1/tools/fetch   {"url":"https://example.com"}   → 别名，同本文件
+//
+// 四条路径同一份实现：官方形状（/v1/tools/*）与本网关的自有形状（/v1/*）并存，
+// 差别只在 search 侧是否补 DeepSeek 字段（见 search.go 的 isDeepSeekToolsPath）；
+// fetch 侧没有可补的字段，故两边行为天然一致。
 //
 // 期望响应是 JSON {"content":"<markdown>"}（DSH 只校验 content 是 string）；
 // 上游 agenttool/v1/webfetch 返回 {url,title,content}，这里原字段透传，缺
@@ -99,8 +105,10 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 	// global 域同域名正常。DSh 这类客户端不传 realm、缺省走 CN，于是「抓 Google 文档」
 	// 在默认配置下必失败。
 	//
-	// 只对 15021 跨域：两域积分/账号互不相通，5xx / 限流跨域没有意义。
-	if fetchDomainRejected(lastErr) {
+	// 只对边缘级失败（15021 域名被拒 / 15022 连不上）跨域：两域积分/账号互不相通，
+	// 5xx / 限流跨域没有意义。DSH 不传 realm、缺省走 CN，于是「抓 Google 文档」在
+	// 默认配置下必失败，这条兜底让它在用户无感的情况下用 global 账号拿到正文。
+	if lastErr != nil && isFetchEdgeFault(lastErr) {
 		alt := "global"
 		if realm == "global" {
 			alt = "cn"
@@ -163,21 +171,15 @@ func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, r
 			return nil, true
 		}
 		lastErr = ferr
-		// 15021 判定放在**任何类型分支之前**：它不是账号的错（域名级判定），既不该
-		// 换号重试，也不该喂连败计数 —— 「连抓几个 Google 文档把单域池逐个降到出池」
-		// 就是上游 #130 的实案。用字符串判据（不依赖 error 类型的 Kind 归类），
-		// 因为 15021 会以 Kind=client + 403 的形态出现，走的是请求级 fail-fast 那条路。
-		if fetchDomainRejected(ferr) {
-			// 直接收工交给跨域兜底（审查 W3C8-31）：注释一直写「不换号」，代码却是 continue
-			// → 下一轮 PickAcquire 换**另一个**账号再抓同一个域名，把 searchAttempts 个号
-			// 全部白烧一遍（每次都是同一个域名级 403），账号的在途槽位也被无谓占用。
-			log.Printf("fetch realm=%s: 域名被路由策略拒绝（15021），不记账号失败、不换号", realm)
-			return lastErr, false
-		}
 		var ue *upstream.Error
 		if errors.As(ferr, &ue) {
 			// 与 search/images 同一套失败处置（冷却/熔断/模型负缓存/12153 计数）。
 			h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, "", ue)
+			// 域名/边缘级错误换号必然复现，立刻交回调用方（跨域兜底只在那一层做）。
+			if isFetchEdgeFault(ferr) {
+				log.Printf("fetch realm=%s: 域名/边缘级错误，不再换号: %v", realm, ferr)
+				return ferr, false
+			}
 			// 请求级错误（参数/内容/模型，及 400+ErrClient 的 url 校验失败）换号
 			// 必然同样被拒，直接透传上游原文。
 			if requestLevelFailFastKind(ue.Kind) ||
@@ -195,17 +197,6 @@ func (h *Handler) fetchInRealm(w http.ResponseWriter, r *http.Request, target, r
 	}
 
 	return lastErr, false
-}
-
-// fetchDomainRejected 判定「域名被上游路由策略拒绝」（code 15021）。
-//
-// 这是**域名级**判定而不是账号级：同一个 URL 换遍全池的 CN 号都是同一个 403，
-// 所以既不该换号重试（白烧），也不该喂连败计数。
-//
-// 用错误串判断而不是 error 类型：15021 以 Kind=client + status 403 的形态出现，
-// 走的是「请求级 fail-fast」那条路 —— 按 Kind 判会把它和普通的 url 校验失败混在一起。
-func fetchDomainRejected(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "15021")
 }
 
 // fetchURLGuard 拒绝「不该由网关代取」的目标（审查 W1A4-10 / W3C8-29）。
@@ -261,6 +252,21 @@ func fetchIPBlocked(ip net.IP) bool {
 		return true
 	}
 	return false
+}
+
+// isFetchEdgeFault 上游 edgebrowser 的**域名/边缘**级失败，与账号健康无关：
+//   - 15021「domain rejected by via routing policy」：域名被上游路由策略拒绝；
+//   - 15022「net::ERR_CONNECTION_REFUSED」：上游浏览器连不上目标站。
+//
+// 两个 code 都是「同一个 URL 换任何账号结果一致」的判定（issue #280 实测：一次请求
+// 轮了 3 个 CN 号，三行的 code 与文案完全相同）。换号只是白烧名额、给健康号喂连败，
+// 所以命中即退出本域，由 fetch() 决定是否换域再试（不同域的出口不同，15022 换域有救）。
+func isFetchEdgeFault(err error) bool {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return upstream.HasCodeMarker(ue.Msg, "15021") || upstream.HasCodeMarker(ue.Msg, "15022")
 }
 
 // normalizeFetchResponse 确保响应是 DSH 需要的 {"content": "<markdown>"} 形状。

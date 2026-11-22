@@ -30,6 +30,21 @@ import (
 // ErrBadParams 皆有可能（Classify 词表不含 11133），hint 层自带判定（hint 是补充
 // 说明非权威分类，误判代价只是多一条中性补充说明）；其余走 Kind 一对一映射。
 func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
+	// 11103「Backend [x] is not supported」：模型的上游后端没启用/配置不全。上游自带的
+	// displayTips 就是「请换其他模型」，但客户端看到的那份在工作区里、日志里只剩一句
+	// 英文；这里点名「换号无用」，省掉一轮全池轮转与「账号是不是挂了」的误判。
+	if hasBusinessCode(msg, "11103") || codeMarker(strings.ToLower(msg), "11103") {
+		return "this model's backend is not enabled upstream (11103); switching accounts will not help — switch model"
+	}
+	// 音色未配置（TTS）：上游 500 + code 10000，与账号无关。必须排在 ErrBadParams
+	// 的通用文案之前，否则客户端只会看到「参数被拒」而不知道该省掉 voice。
+	if strings.Contains(strings.ToLower(msg), "get voice config failed") {
+		return `voice is not configured upstream (not an account problem); omit "voice" to use the default ` + TTSDefaultVoice
+	}
+	// 15053 ASR recognition failed：上游解不出这段音频（裸 PCM 无容器头必现，实测）。
+	if codeMarker(strings.ToLower(msg), "15053") {
+		return "upstream could not recognise this audio (15053); send a WAV or WebM container — bare PCM has no header to sniff"
+	}
 	// 11133 model_param_invalid 家族（图片回归实测：不支持图片的模型传图，或任意
 	// 参数被模型供应商拒绝）。只有请求确实带图、且目录能对该模型做出「不支持图片」
 	// 的判定时才给「换模型」指向，否则退中性参数形态（可能是任意参数问题，不点名图片）。
@@ -63,16 +78,6 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 活动未开启，跳过），积分只能靠充值/订阅恢复。旧文案对 global 号的持有者
 		// 是一个永远不会兑现的承诺（issue #191 的延伸）。
 		return "account credits exhausted at upstream; CN accounts recover via the next daily check-in, global accounts need a top-up"
-	case ErrModelBlocked:
-		return "upstream has no such model on this backend; switch model or retry on another account"
-	case ErrEmptyContent:
-		// 11151 空段：上游对「某条消息的 text 段是空串」判硬 400。出站前网关已补位，
-		// 客户端能做的是把那条空消息删掉或换新会话——重试必然复现。
-		return "request history contains an empty text block; upstream rejects it as-is — drop that message or start a new conversation"
-	case ErrToolMismatch:
-		// 11148 工具配对断裂：请求内容的问题（会话历史里的 tool_calls 与 tool 结果对不上），
-		// 换号/重试都不会好，只能新建会话。
-		return "tool calls and tool results do not match in the conversation history; retrying will not help — start a new conversation/thread"
 	case ErrUpstreamBusy:
 		// 11134 供应商过载：同属容量信号，但不是排队——换个模型是有效出路，说「队列满」
 		// 会把人引去查排队。
@@ -82,6 +87,22 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 6020/6021 queue.full：渠道级容量满载。措辞明确「不是账号问题、换号无意义」，
 		// 指引客户端短等待后重试（SDK 指数退避天然适配）。
 		return "upstream admission queue is full (channel-level capacity, not an account problem); retry after a short wait"
+	case ErrToolMismatch:
+		// 11148 配对断裂：请求内容（会话历史里的 tool_calls / tool 结果）本身对不上，
+		// 上游明示「直接重试无效，请新建任务」。措辞指向「开新会话」而不是「换个账号
+		// 重试」——换号/重试都必然同样失败。
+		return "request tool-call history is broken (call/result mismatch); upstream rejects this request as-is — start a new conversation instead of retrying"
+	case ErrEmptyContent:
+		// 11151 空段：上游对「某条消息的 text 段是空串」判硬 400。出站前网关已补位，
+		// 客户端能做的是把那条空消息删掉或换新会话——重试必然复现。
+		return "request history contains an empty text block; upstream rejects it as-is — drop that message or start a new conversation"
+	case ErrModelMissing:
+		// 11102：模型 id 在上游不存在（id 大小写敏感，display name 也算不存在——实测
+		// "DeepSeek-V4.1-Flash" 全池 11102，id "deepseek-v4.1-flash" 立刻 200）。
+		// 点名「换号无用」，否则客户端会以为换个号能过。
+		return "model id does not exist upstream (ids are case-sensitive); copy the id from /v1/models — switching accounts will not help"
+	case ErrModelBlocked:
+		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrContentBlocked:
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
@@ -145,6 +166,8 @@ var frameRequestCodes = []struct {
 }{
 	{"11115", ErrPromptTooLong},
 	{"11129", ErrBadParams},
+	// 11103 后端未启用：请求级（换号无用），与 Classify 的 400 分支同口径。
+	{"11103", ErrModelParamInvalid},
 	// 11152 工具名不合规/重名：与 11129 同类（错在客户端声明的 tools），不登记就会滑到
 	// 通用 4xx → 喂连败 + 轮转全池 + 末端 503（2026-11-18 真机实测）。
 	{"11152", ErrBadParams},

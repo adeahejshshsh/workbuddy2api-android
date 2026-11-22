@@ -58,11 +58,11 @@ type Config struct {
 	DailyBudget float64
 	// BudgetStateFile 积分闸累计值的落盘路径；空 = 只存内存（测试/旧行为）。
 	// 落盘解决的是「单实例重启清零」：崩溃循环下唯一的成本止损线等于不存在。
-	BudgetStateFile  string
+	BudgetStateFile string
 	// BlockedDumpDir 11128（content_blocked）最终失败时落一份出站请求体的目录。
 	// 空 = 不落盘（测试/嵌入用法）。这条错误是上游按「连续原文指纹」判的，
 	// 只换提示词、摘工具描述还不够时必须看实际发出去的字节才能定位。
-	BlockedDumpDir string
+	BlockedDumpDir   string
 	BurstCreditLimit float64
 	CacheLowRate     float64
 	// MaxBodyMB 所有入站读体端点的请求体上限（MB）。**0 = 用 32MB 安全上限**，
@@ -133,7 +133,12 @@ type Config struct {
 	// 来自 logging.request_archive_context（缺省 false）：比 IP/UA 敏感得多——那是
 	// 用户的实际对话内容，所以缺省不开。
 	RecordContext bool
-	// EmbeddingsEnabled /v1/embeddings 总开关（features.embeddings_enabled），缺省关闭。
+
+	// TTSEnabled / ASREnabled 官方语音端点的静态回退（features.tts_enabled / asr_enabled）。
+	TTSEnabled bool
+	ASREnabled bool
+	// EmbeddingsEnabled 实验特性 /v1/embeddings 开关的静态回退（features.embeddings_enabled）。
+	// Live 非 nil 时以热快照为准；裸用/单测路径用本字段。
 	EmbeddingsEnabled bool
 	// ToolOnlyRescue 「说一句就收尾」的安全续写（features.tool_only_rescue），缺省关闭。
 	ToolOnlyRescue bool
@@ -181,13 +186,14 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		APIKey: h.cfg.APIKey,
 		// W2-01：fallback 结构必须带上 AdminAPIKey。漏了它时 withAdminAuth 每请求
 		// 都读到空串，配了 admin_api_key 的裸用路径（Live == nil）会退回客户端 key。
-		AdminAPIKey:      h.cfg.AdminAPIKey,
-		SoftCooldown:     h.cfg.SoftCooldown,
-		RecordClientInfo: h.cfg.RecordClientInfo,
-		RecordContext:    h.cfg.RecordContext,
-
-		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
+		AdminAPIKey:           h.cfg.AdminAPIKey,
+		SoftCooldown:          h.cfg.SoftCooldown,
+		RecordClientInfo:      h.cfg.RecordClientInfo,
+		RecordContext:         h.cfg.RecordContext,
 		EmbeddingsEnabled:     h.cfg.EmbeddingsEnabled,
+		TTSEnabled:            h.cfg.TTSEnabled,
+		ASREnabled:            h.cfg.ASREnabled,
+		WatermarkStripEnabled: h.cfg.WatermarkStripEnabled,
 		ToolOnlyRescue:        h.cfg.ToolOnlyRescue,
 		ThreeDEnabled:         h.cfg.ThreeDEnabled,
 	}
@@ -319,12 +325,24 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
 	// Anthropic Messages 入站（Claude Code 等只认这套协议），/messages 为官方无前缀别名。
 	// 鉴权走 withAnthropicAuth：官方 SDK 用 x-api-key，不是 Bearer。
+	// 实验特性：水印裁切（features.watermark_strip_enabled，默认关闭；关着时回 403）。
+	// 实验特性：官方语音端点（features.tts_enabled / asr_enabled，默认关闭；关着时回 403）。
+	// 协议来自官方桌面端包的静态反查（见 upstream/speech.go 文件头），已用真号跑通 TTS→ASR。
+	h.mux.HandleFunc("POST /v1/audio/speech", h.withAuth(h.speech))
+	h.mux.HandleFunc("POST /v1/audio/transcriptions", h.withAuth(h.transcriptions))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))
 	h.mux.HandleFunc("POST /messages", h.withAnthropicAuth(h.messages))
 	// count_tokens：Claude Code 上下文将满时先调它决定要不要压缩；上游没有计数接口，
 	// 只能本地估算。缺这个端点客户端直接报错。
 	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAnthropicAuth(h.countTokens))
 	h.mux.HandleFunc("POST /messages/count_tokens", h.withAnthropicAuth(h.countTokens))
+	// DeepSeek 官方形状的别名：官方文档的端点是 {base}/v1/tools/search 与
+	// {base}/v1/tools/fetch，与上面两条同一份实现（形状差异见 search.go 的兼容层）。
+	// 别名不是「风格冗余」：dsh-free-search 的 deepseekToolsEndpoint() 会把用户填的
+	// .../v1 强制改写成 .../v1/tools/search，用户无法靠配置绕开；照官方文档填 base
+	// 的客户端同样只会打这个路径。缺了它，这些调用方只能靠「粘贴完整端点」绕。
+	h.mux.HandleFunc("POST /v1/tools/search", h.withAuth(h.search))
+	h.mux.HandleFunc("POST /v1/tools/fetch", h.withAuth(h.fetch))
 	// POST /v2/chat/busy：官方客户端的「模型忙」预检（国区上游 200、国际版上游 404，
 	// 见 busy.go 文件头）。本地按池台账算，不打上游。
 	h.mux.HandleFunc("POST /v2/chat/busy", h.withAuth(h.chatBusy))
@@ -371,10 +389,13 @@ func panelRootRedirect(w http.ResponseWriter, r *http.Request) {
 
 // traceFinalStatus 请求出口的记账状态码（W1A3-05）。
 //
-// obsStatus 是已写出的 HTTP 状态（0 = 一个字节都没写）。两种「未写响应」必须分开：
-//   - 调用方先走了（CDN 回源超时、用户点停止）：handler 侧已显式置
-//     outcome=interrupted 并 return，这不是网关的错 → 499 + 不打 WARN；
-//   - 真的 panic / 漏写响应 → 500 + WARN。
+// 进表的标准是「**任何被代理到上游的 POST**」，不是「会不会扣积分」：出图/出视频/3D
+// 按上游回执扣积分，不进台账等于面板拿不到这笔钱（issue #249）；检索/抓取/嵌入不扣
+// 积分，但同样是一次真实的出网调用，不进台账就成了「出问题面板零痕迹」的盲区
+// （issue #275：8 天 22573 条归档里 /v1/search 与 /v1/fetch 一条都没有，免费检索
+// 的调用量、失败率、耗时、来源 IP/UA 全部不可见）。这两类只是 credit 记 0，不影响
+// 任何记账口径。DeepSeek 形状的别名（/v1/tools/search、/v1/tools/fetch）打的是同一
+// 份实现，同样在表内——漏掉它们等于给同一能力留一个「查不到」的后门。
 //
 // 此前一律记 500，把中断率统计成 5xx、把排障引向「漏写/panic」。
 // 返回 (status, 是否要打 WARN)。
@@ -409,11 +430,8 @@ func isChatEntry(path string) bool {
 		// 没有 X-Request-Id、不进 reqlog 归档、也没有 stdout 流水行。
 		"/v1/videos", "/v1/videos/generations", "/v1/videos/tasks",
 		"/v1/3d/generations", "/v1/3d/tasks",
-		// 免费端点也进表（issue #275）：准入标准是「任何被代理到上游的 POST」，不是
-		// 「会不会扣积分」。检索/抓取/嵌入不产生 credit 回执（事件里 credit=0），
-		// 不进台账就成了「出问题面板零痕迹」的盲区 —— issue #275 的取证是 8 天
-		// 22573 条归档里 /v1/search 与 /v1/fetch 一条都没有，而同期用户发起了数十次调用。
-		"/v1/search", "/v1/fetch", "/v1/embeddings":
+		"/v1/search", "/v1/fetch", "/v1/tools/search", "/v1/tools/fetch", "/v1/embeddings",
+		"/v1/audio/speech", "/v1/audio/transcriptions":
 		return true
 	}
 	return false
@@ -2267,6 +2285,36 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			// 请求级参数拒绝（11101 请求体解析失败 / 11133 模型供应商拒绝参数 / 11151 空 text 段 /
+			// 11102 模型 id 不存在）：与 11115 / 图片无效同一哲学——同一 body 换任何账号都是同样的
+			// 拒绝，轮转只会放大无效请求（每号一次上游调用 + rotateBackoff 占用在途名额）。更要紧的
+			// 是：继续轮转后末端会落到「其余保持 503」，把确定失败的请求伪装成
+			// "账号不可用、稍后再试"，客户端于是对必然失败的请求无限重试。立即透传
+			// 上游原文回 400。（11101 吸收上游 fd5c5a6；11133 见 payload.go 实测
+			// 「全号轮转同样被拒」；11151 的空段本该在出站前就补掉，走到这里是兜底；
+			// 11102 见 issue #280：模型 id 不存在时三个号 4.1s 一字不差）
+			if kind == upstream.ErrBadParams || kind == upstream.ErrModelParamInvalid || kind == upstream.ErrEmptyContent || kind == upstream.ErrModelMissing {
+				code, fallback := "bad_params", "chat request body was rejected by upstream"
+				switch kind {
+				case upstream.ErrModelParamInvalid:
+					code, fallback = "model_param_invalid", "request parameters were rejected by the upstream model provider"
+				case upstream.ErrEmptyContent:
+					code, fallback = "empty_content", "a message in the request history has empty content"
+				case upstream.ErrModelMissing:
+					code, fallback = "model_unavailable", "upstream does not have this model id"
+				}
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = fallback
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, code, msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -3053,11 +3101,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				code = "waf_ip_blocked"
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
-		case upstream.ErrModelBlocked:
-			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
-			// code 此前停在默认的 no_healthy_account —— 那是"服务端过载"的语义，
-			// 客户端据此会不断重试（#81 里就是 503 → 客户端自动重试 5 次），而真正
-			// 该做的是换个模型。用 400 + 明确的 code 把不可重试的性质讲清楚。
+		case upstream.ErrModelMissing, upstream.ErrModelBlocked:
+			// 11102「该模型 id 上游不存在」：上游原文（下方统一透传）已经写清了原因，
+			// 换号无用（模型级，实测全池一字不差）；11158 是「该账号类型无权限」，
+			// 也走同一 code。两种情况都不该给 no_healthy_account —— 那是"服务端过载"
+			// 的语义，客户端据此会不断重试（#81 里就是 503 → 客户端自动重试 5 次），
+			// 而真正该做的是换个模型（11102）或换个有权限的号（11158）。
+			// 用 400 + 明确的 code 把不可重试的性质讲清楚。（吸收上游 44d6e04）
 			code = "model_unavailable"
 			status = http.StatusBadRequest
 		case upstream.ErrContentBlocked, upstream.ErrPromptTooLong,
@@ -3412,6 +3462,7 @@ var requestErrorCodes = map[upstream.ErrKind]string{
 	upstream.ErrBadParams:         "bad_params",
 	upstream.ErrModelParamInvalid: "model_param_invalid",
 	upstream.ErrEmptyContent:      "empty_content",
+	upstream.ErrModelMissing:      "model_unavailable",
 }
 
 // vetoStatusForKind 首帧否决时该回的 HTTP 状态码（W2-08）。
@@ -3469,7 +3520,13 @@ func vetoStatusForKind(kind upstream.ErrKind) int {
 //   - ErrImageInvalid → 图片格式/数据无效：请求的问题不是账号的问题（同一 body
 //     换任何号都会得到相同的解析错误）。零动作（不冷却/不熔断/不 NoteError、
 //     不喂连败），chatCompletions 已直接透传原文返回不轮转。
-//   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102 负缓存避让。
+//   - ErrBadParams → 11101：不罚账号，且与 ErrPromptTooLong/ErrImageInvalid 同待遇：
+//     不冷却/不熔断/不 NoteError/不喂连败；换号必然同样失败，故 chatCompletions
+//     在轮转循环内即刻 400 透传上游原文终止（吸收上游 fd5c5a6）。
+//   - ErrModelParamInvalid → 11133：同上（请求级），零动作 + 循环内即刻 400 终止。
+//   - ErrModelMissing → 零动作：11102/14401「该模型 id 上游不存在」是模型级（换遍全池同一句），
+//     循环内即刻 400 终止。
+//   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11158 负缓存避让（换到有权限的号仍可成功）。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
 //   - 其他（default：ErrClient/ErrNone）→ 只换号不罚（防雪崩），不喂熔断；ErrClient
@@ -3681,16 +3738,26 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 换号换模型都救不了。零动作（不冷却/不熔断/不 NoteError），只 fail-fast 回 400。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
-		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换了账号照样 400，
-		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）；chatCompletions
-		// 已 fail-fast 400 透传原文、终止轮转——「换号可能有不同模型权限」属 11102
-		// （ErrModelBlocked）的分类域，与本类无关。
+		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换上任何账号照样 400，
+		// 故零动作（无冷却/熔断/NoteError/连败喂养）；终止轮转与 400 透传原文由
+		// chatCompletions 的 ErrBadParams 分支负责（吸收上游 fd5c5a6）。
+	case upstream.ErrModelParamInvalid:
+		// 11133「参数被模型供应商拒绝」（缺/空 messages、模型不支持图片等）：请求级
+		// 错误，与 ErrBadParams/ErrPromptTooLong/ErrImageInvalid 同待遇——零动作
+		// （不冷却/不熔断/不 NoteError/**不喂连败计数**：连败降权是 ErrClient 这种
+		// 「不知道原因的失败」的兜底，有权威分类的请求级错误不该重复计罚）。
+		// 终止轮转与 400 透传原文由 chatCompletions 的请求级参数分支负责。
+	case upstream.ErrModelMissing:
+		// 11102/14401「该模型 id 在上游不存在」：模型级而非账号级——换遍全池是同一句
+		// （issue #280 实测三号一字不差），轮转只会白打号、并把该号该模型刷进负缓存。
+		// 零动作（不冷却/不熔断/不 NoteError/不喂连败），终止轮转与 400 透传原文由
+		// chatCompletions 的请求级分支负责。
 	case upstream.ErrModelBlocked:
-		// 11102「该后端无此模型」/ 11158「该模型不允许当前账号类型」：(账号, 模型)
-		// 负缓存避让。复用 modelCooldowns 机制（与 6004 同域），选号侧 healthyForModel
-		// 对该账号自动避开该模型。立即换号（本轮 continue）。
-		// reason 分开记：11158 是"等级不够"，末端据此给出精确 code 与文案，不再混成
-		// 一句 no_healthy_account 的 503（用户实测："你改成 503 了"）。
+		// 11158「该账号类型无此模型权限」（不是 11102——那个走上面的请求级分支）：
+		// (账号, 模型) 负缓存避让。复用 modelCooldowns 机制（与 6004 同域），
+		// 选号侧 healthyForModel 对该账号自动避开该模型。
+		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开——换到有权限的
+		// 账号（如 Pro 号）真能成功，故这里保留轮转。
 		reason := upstream.ModelBlockReason
 		if upstream.IsModelNotAllowedForUserType(body) {
 			reason = upstream.ModelNotAllowedReason
@@ -3702,6 +3769,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 账号临时出池（NoteFailures 达阈降权），单次/偶发不罚（不误伤）。ErrNone
 		// 到这里属防御路径（status>=400 但分类成功），语义不明不喂。
 		if kind == upstream.ErrClient {
+			// 15021 = edgebrowser 的**域名路由策略**拒绝（"domain rejected by via
+			// routing policy"），15022 = 上游浏览器连不上目标站（ERR_CONNECTION_REFUSED）：
+			// 两者都是域名/边缘级判定，同一 URL 的所有账号返回完全一致的报文，与账号
+			// 健康无关。喂连败会让「连续抓几个 Google 文档」把整个 CN 池逐个降到出池
+			// （5 次达阈）——这不是账号的问题，故与 ErrContentBlocked 同待遇：
+			// 零动作（/v1/fetch 另有换域兜底，见 fetch.go）。
+			if upstream.HasCodeMarker(body, "15021") || upstream.HasCodeMarker(body, "15022") {
+				return
+			}
 			h.cfg.Pool.NoteFailures(uid)
 		}
 	}

@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/json"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -331,6 +332,52 @@ func TestNormalizeToolPatterns(t *testing.T) {
 		}
 		// 同 schema 的兄弟字段不受影响
 		if got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "query", "type"); got != "string" {
+			t.Fatalf("sibling field disturbed: %q", got)
+		}
+	})
+
+	// issue #276：REA 6.9.0 的路径 pattern 是 JS 的 \u 转义形态
+	// （^[^\uD800-\uDFFF]*$）。上游按 RE2 解析没有 \u → 400/11129 整个 tools 被拒。
+	// 出站前译成等价的 \x{...}；译不动就丢掉这条 pattern（放宽一条正则好过整包工具作废）。
+	t.Run("js \\u escape translated to re2", func(t *testing.T) {
+		bs := string(byte(92))
+		body := `{"messages":[],"tools":[{"type":"function","function":{"name":"t","parameters":{"properties":{"path":{"type":"string","pattern":"^[^` + bs + bs + `uD800-` + bs + bs + `uDFFF]*$"}}}}}]}`
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "path", "pattern")
+		want := `^[^` + bs + `x{D800}-` + bs + `x{DFFF}]*$`
+		if got != want {
+			t.Fatalf("pattern = %q, want %q", got, want)
+		}
+		if _, err := regexp.Compile(got); err != nil {
+			t.Fatalf("译后的 pattern 必须能被 RE2 编译: %v", err)
+		}
+	})
+
+	// 对照：单层转义（JSON 里的 "\ud800"）在解码时就被 Go 换成 U+FFFD，出站时是一条
+	// 合法且可编译的 pattern——这条路径不需要任何修复，只是「为什么 REA 的 pattern
+	// 经本网关不会 11129」的机制证据（issue #276 回复里引用了它）。
+	t.Run("single-escaped surrogate already neutralized", func(t *testing.T) {
+		bs := string(byte(92))
+		body := `{"messages":[],"tools":[{"type":"function","function":{"name":"t","parameters":{"properties":{"path":{"type":"string","pattern":"^[^` + bs + `uD800-` + bs + `uDFFF]*$"}}}}}]}`
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "path", "pattern")
+		if got == "" || strings.Contains(got, bs+`u`) {
+			t.Fatalf("单层转义应被 JSON 解码正常化（不再是 \\u 字面量），得到 %q", got)
+		}
+		if _, err := regexp.Compile(got); err != nil {
+			t.Fatalf("正常化后的 pattern 必须可编译: %v", err)
+		}
+	})
+
+	t.Run("untranslatable pattern dropped", func(t *testing.T) {
+		bs := string(byte(92))
+		// 译完仍编不过（括号不配对）→ 丢掉 pattern，其余字段保留。
+		body := `{"messages":[],"tools":[{"type":"function","function":{"name":"t","parameters":{"properties":{"q":{"type":"string","pattern":"a` + bs + bs + `uD800("}}}}}]}`
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		if got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "q", "pattern"); got != "" {
+			t.Fatalf("编不过的 pattern 应被丢弃，得到 %q", got)
+		}
+		if got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "q", "type"); got != "string" {
 			t.Fatalf("sibling field disturbed: %q", got)
 		}
 	})

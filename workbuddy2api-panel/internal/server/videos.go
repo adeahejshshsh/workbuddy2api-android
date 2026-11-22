@@ -722,6 +722,7 @@ func videoRequest(raw []byte) (map[string]any, error) {
 //
 //	model 换裸名；prompt/seconds/negative_prompt/watermark 留在顶层；
 //	image → image_url、last_image → last_image_url（图生视频 / 首尾帧）；
+//	reference_images / reference_videos / reference_audios 由字符串数组转成上游的对象数组；
 //	resolution / enable_audio / aspect_ratio 收进 extra_parameters
 //	（客户端直接给 extra_parameters 时以它为准，再补顶层同名字段）；
 //	wait / timeout_seconds 是网关自己的开关，不下发；
@@ -751,6 +752,28 @@ func videoUpstreamBody(req map[string]any, bare string) (map[string]any, error) 
 	}
 	if s, _ := req["last_image"].(string); s != "" {
 		out["last_image_url"] = s
+	}
+	// 参考素材上游要对象数组（[]*v2.ReferenceImages），客户端习惯给字符串数组。
+	// 已真号实测（2026-11-21，cn 池）：字符串数组直发上游 → 400 code 11101
+	// 「cannot unmarshal string into Go struct field CreateVideoRequest.reference_images」，
+	// 转换后同一张图 200 提交并出片。转不了的（不是数组、条目既非字符串也无 URL 键）
+	// 直接丢掉：宁可少一条素材，也不要因为形状猜错整单失败；丢掉前必须 delete，
+	// 否则尾部透传会把原样甩给上游。
+	for client, urlKey := range map[string]string{
+		"reference_images": "image_url",
+		"reference_videos": "video_url",
+		"reference_audios": "audio_url",
+	} {
+		raw, ok := req[client]
+		if !ok || raw == nil {
+			continue
+		}
+		delete(req, client)
+		if items, ok := raw.([]any); ok {
+			if conv := referenceItems(items, urlKey); len(conv) > 0 {
+				out[client] = conv
+			}
+		}
 	}
 	// OpenAI Videos 的入参形态：参考图在 input_reference.image_url，时长是字符串 "4"，
 	// 尺寸是 "1280x720"。上游要的是顶层 image_url + 数字秒 + aspect_ratio。
@@ -790,6 +813,29 @@ func videoUpstreamBody(req map[string]any, bare string) (map[string]any, error) 
 		out["extra_parameters"] = extra
 	}
 	return out, nil
+}
+
+// referenceItems 把参考素材数组统一成上游的对象数组：字符串条目 → {urlKey: url}；
+// 已经是对象的优先取 urlKey、退一步取 url；两样都取不到的丢这一条（不猜）。
+func referenceItems(items []any, urlKey string) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		var url string
+		switch v := it.(type) {
+		case string:
+			url = v
+		case map[string]any:
+			if s, _ := v[urlKey].(string); s != "" {
+				url = s
+			} else if s, _ := v["url"].(string); s != "" {
+				url = s
+			}
+		}
+		if url != "" {
+			out = append(out, map[string]any{urlKey: url})
+		}
+	}
+	return out
 }
 
 // aspectFromSize "1280x720"（宽 x 高）→ "16:9"。认不出的尺寸返回空串（不猜）。

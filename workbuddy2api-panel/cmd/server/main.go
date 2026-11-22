@@ -437,20 +437,28 @@ func main() {
 
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
-		APIKey:                 cfg.APIKey,
-		AdminAPIKey:            cfg.AdminAPIKey,
-		SoftCooldown:           cfg.SoftRateDur,
-		SanitizeFingerprints:   cfg.Features.SanitizeBlacklistFingerprints,
-		EmbeddingsEnabled:      cfg.Features.EmbeddingsEnabled,
-		WatermarkStripEnabled:  cfg.Features.WatermarkStripEnabled,
-		ThreeDEnabled:          cfg.Features.ThreeDEnabled,
-		ToolOnlyRescue:         cfg.Features.ToolOnlyRescue,
-		NarrationOff:           !cfg.Features.NarrationEnabled,
-		RecordClientInfo:       cfg.Logging.RequestClientInfo,
-		RecordContext:          cfg.Logging.RequestArchiveContext,
+		APIKey:                cfg.APIKey,
+		AdminAPIKey:           cfg.AdminAPIKey, // 本仓新增：面板与运维面的独立门禁
+		SoftCooldown:          cfg.SoftRateDur,
+		SanitizeFingerprints:  cfg.Features.SanitizeBlacklistFingerprints,
+		EmbeddingsEnabled:     cfg.Features.EmbeddingsEnabled,
+		TTSEnabled:            cfg.Features.TTSEnabled,
+		ASREnabled:            cfg.Features.ASREnabled,
+		NarrationOff:          !cfg.Features.NarrationEnabled,
+		LoginBindOff:          !cfg.Features.LoginBindProxy,
+		WatermarkStripEnabled: cfg.Features.WatermarkStripEnabled,
+		ThreeDEnabled:         cfg.Features.ThreeDEnabled,
+		ToolOnlyRescue:        cfg.Features.ToolOnlyRescue, // 本仓新增
+		RecordClientInfo:      cfg.Logging.RequestClientInfo,
+		RecordContext:         cfg.Logging.RequestArchiveContext,
+		HiddenModels:          livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
+		// 模型白名单（models.allowed）：本仓尚未在选号/端点侧落地白名单强制，
+		// 这里保持「不启用」（nil / false）= 全部放行，与合并前的行为一致。
+		AllowedModels:    nil,
+		AllowlistEnabled: false,
+		ModelAliases:     livecfg.NormalizeModelAliases(cfg.Models.Aliases),
+		// 模型降级路由表（pool.model_fallback）：6004 限流时同账号改用等价模型。
 		ModelFallback:          cfg.Pool.ModelFallback,
-		ModelAliases:           livecfg.NormalizeModelAliases(cfg.Models.Aliases),
-		HiddenModels:           livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
 		ThinkingEnabled:        cfg.Thinking.Enabled,
 		ThinkingDefaultEffort:  cfg.Thinking.DefaultEffort,
 		ThinkingClientPriority: cfg.Thinking.ClientPriority,
@@ -605,6 +613,8 @@ func main() {
 		AdminEnabled:                  cfg.Admin.Enabled,
 		AdminAPIKey:                   cfg.AdminAPIKey,
 		WatermarkStripEnabled:         cfg.Features.WatermarkStripEnabled,
+		TTSEnabled:                    cfg.Features.TTSEnabled,
+		ASREnabled:                    cfg.Features.ASREnabled,
 		ThreeDEnabled:                 cfg.Features.ThreeDEnabled,
 		EmbeddingsEnabled:             cfg.Features.EmbeddingsEnabled,
 		ToolOnlyRescue:                cfg.Features.ToolOnlyRescue,
@@ -623,11 +633,11 @@ func main() {
 		PromptIdentityOverrideEnabled: cfg.Prompt.IdentityOverrideEnabled,
 		PromptIdentityOverrideText:    cfg.Prompt.IdentityOverrideText,
 		// 日预算 + 两道快速闸（0 = 关闭）。
-		DailyBudget:      cfg.Budget.DailyBudget,
-		BudgetStateFile:  cfg.BudgetStateFile,
+		DailyBudget:     cfg.Budget.DailyBudget,
+		BudgetStateFile: cfg.BudgetStateFile,
 		// 11128 的出站体快照（每次最终失败一份，最多留 3 份）：这条错误是上游按
 		// 连续原文指纹判的，只换提示词/摘工具描述都不够时，必须看实际发出去的字节。
-		BlockedDumpDir: filepath.Join(filepath.Dir(*cfgPath), "data", "blocked"),
+		BlockedDumpDir:   filepath.Join(filepath.Dir(*cfgPath), "data", "blocked"),
 		BurstCreditLimit: cfg.Budget.BurstCreditLimit,
 		CacheLowRate:     cfg.Budget.CacheLowRate,
 		// 模型降级路由表：读 live 快照（支持面板热更，改完即生效、无需重启）。
@@ -996,10 +1006,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		SoftCooldown:          newCfg.SoftRateDur,
 		SanitizeFingerprints:  newCfg.Features.SanitizeBlacklistFingerprints,
 		EmbeddingsEnabled:     newCfg.Features.EmbeddingsEnabled,
+		TTSEnabled:            newCfg.Features.TTSEnabled,
+		ASREnabled:            newCfg.Features.ASREnabled,
+		NarrationOff:          !newCfg.Features.NarrationEnabled,
+		LoginBindOff:          !newCfg.Features.LoginBindProxy,
 		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
 		ThreeDEnabled:         newCfg.Features.ThreeDEnabled,
 		ToolOnlyRescue:        newCfg.Features.ToolOnlyRescue,
-		NarrationOff:          !newCfg.Features.NarrationEnabled,
 		RecordClientInfo:      newCfg.Logging.RequestClientInfo,
 		RecordContext:         newCfg.Logging.RequestArchiveContext,
 		// review #3：这两个表是 handler 每次请求从 live 快照读的，漏填等于「保存任意

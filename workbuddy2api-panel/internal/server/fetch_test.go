@@ -49,6 +49,46 @@ func TestFetchEndpoint(t *testing.T) {
 	}
 }
 
+// TestFetchToolsAlias POST /v1/tools/fetch：DeepSeek 官方形状的别名，与 /v1/fetch
+// 同一份实现（fetch 侧没有可补的字段，故两边响应必须完全一致）。
+func TestFetchToolsAlias(t *testing.T) {
+	const upstreamBody = `{"url":"https://example.com/a","title":"示例","content":"# 标题\n\n正文"}`
+	var bodies []string
+	f := &searchFake{status: 200, body: upstreamBody}
+	p := testPoolWith(
+		&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "c2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: f.client()})
+	call := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", path, strings.NewReader(`{"url":"https://example.com/a"}`))
+		// 刻意用非 DSH UA：别名不该依赖 UA（fetch 侧本来就没有 UA 门控）
+		req.Header.Set("User-Agent", "python-requests/2.31.0")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	alias := call("/v1/tools/fetch")
+	if alias.Code != 200 {
+		t.Fatalf("别名 code=%d body=%s", alias.Code, alias.Body.String())
+	}
+	plain := call("/v1/fetch")
+	if plain.Code != 200 {
+		t.Fatalf("/v1/fetch code=%d body=%s", plain.Code, plain.Body.String())
+	}
+	if alias.Body.String() != plain.Body.String() {
+		t.Fatalf("别名与 /v1/fetch 响应必须一致：\n别名: %s\n原路径: %s",
+			alias.Body.String(), plain.Body.String())
+	}
+	bodies = f.bodies
+	if len(bodies) != 2 || bodies[0] != bodies[1] {
+		t.Fatalf("两次出站请求体应一致: %v", bodies)
+	}
+	if len(f.paths) != 2 || f.paths[0] != "/agenttool/v1/webfetch" {
+		t.Fatalf("落点应为 webfetch: %v", f.paths)
+	}
+}
+
 // TestFetchValidation 本地先拦：缺 url / 非 http(s) 一律 400 且不打上游。
 func TestFetchValidation(t *testing.T) {
 	f := &searchFake{status: 200, body: `{"content":"x"}`}

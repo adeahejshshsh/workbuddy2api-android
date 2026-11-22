@@ -77,10 +77,16 @@ func TestClassify(t *testing.T) {
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},
-		// 11102「该后端无此模型」：确定性答复，归 ErrModelBlocked（(账号,模型) 负缓存避让）。
-		{404, `{"code":11102,"msg":"model [deepseek-v3-2-volc] service info not found"}`, ErrModelBlocked},
-		{400, `{"error":{"code":"11102","message":"model service info not found"}}`, ErrModelBlocked},
-		{400, `{"msg":"service info not found"}`, ErrModelBlocked},
+		// 11102「该模型 id 上游不存在」：模型级确定性答复（换遍全池同一句）→ 请求级
+		// ErrModelMissing：不轮转、不罚号（issue #280 实测三号一字不差）。
+		{404, `{"code":11102,"msg":"model [deepseek-v3-2-volc] service info not found"}`, ErrModelMissing},
+		{400, `{"error":{"code":"11102","message":"model service info not found"}}`, ErrModelMissing},
+		{400, `{"msg":"service info not found"}`, ErrModelMissing},
+		// 11158 是账号类型级模型权限拒绝：同一模型换有权限的账号仍可能成功，
+		// 按 (账号, 模型) 避让；不能落入 ErrClient 轮转后误报 503。
+		{400, `{"code":11158,"msg":"model [gpt-5.6-sol] is not allowed for user type [personal_free_user]"}`, ErrModelBlocked},
+		{400, `{"error":{"code":"11158","message":"model is not allowed for user type"}}`, ErrModelBlocked},
+		{429, `{"code":11158,"msg":"model is not allowed for user type"}`, ErrSoftRate},
 		// 11102 撞在 requestId 上不算（不得误避让可用模型）。
 		{404, `{"requestId":"11102","msg":"ok"}`, ErrNotFound},
 		// 429 + 11102 → 限流语义（ErrSoftRate），不是模型不存在。

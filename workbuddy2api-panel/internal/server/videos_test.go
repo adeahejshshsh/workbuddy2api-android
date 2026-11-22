@@ -162,6 +162,37 @@ func TestVideoUpstreamBody(t *testing.T) {
 	}
 }
 
+// TestVideoUpstreamReferenceMaterials 参考素材必须是对象数组（上游 []*v2.ReferenceImages）：
+// 字符串条目补成 {image_url|video_url|audio_url}，已是对象的取对应键或 url，
+// 转不出来的条目丢掉——但原始字段不能漏到尾部透传里。
+func TestVideoUpstreamReferenceMaterials(t *testing.T) {
+	var req map[string]any
+	body := `{"prompt":"x","reference_images":["https://a/1.png",{"image_url":"https://a/2.png"},""],
+	          "reference_videos":["https://a/1.mp4",{"url":"https://a/2.mp4"},{"audio_url":"错键"}],
+	          "reference_audios":"https://a/1.wav","seed":7}`
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("bad fixture: %v", err)
+	}
+	got, err := videoUpstreamBody(req, "m")
+	if err != nil {
+		t.Fatalf("videoUpstreamBody: %v", err)
+	}
+	imgs, _ := got["reference_images"].([]map[string]any)
+	if len(imgs) != 2 || imgs[0]["image_url"] != "https://a/1.png" || imgs[1]["image_url"] != "https://a/2.png" {
+		t.Fatalf("reference_images 应转成 2 条对象（空串丢掉）：%v", got["reference_images"])
+	}
+	vids, _ := got["reference_videos"].([]map[string]any)
+	if len(vids) != 2 || vids[1]["video_url"] != "https://a/2.mp4" {
+		t.Fatalf("video_url 认键失败或错键条目没丢：%v", got["reference_videos"])
+	}
+	if _, ok := got["reference_audios"]; ok {
+		t.Fatalf("非数组的 reference_audios 必须丢掉，不能原样透传：%v", got["reference_audios"])
+	}
+	if got["seed"] != float64(7) {
+		t.Fatalf("未知字段仍应透传：%v", got)
+	}
+}
+
 // TestVideosSubmitAsync 提交 + wait=false：一次上游调用、正确落点、正确 body，立刻回 task id。
 func TestVideosSubmitAsync(t *testing.T) {
 	f := &videoFake{on: func(c videoCall) (int, string) {

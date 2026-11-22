@@ -59,6 +59,14 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if err := json.Unmarshal(raw, &example); err != nil {
 		t.Fatal(err)
 	}
+	// 加号绑定号池出口默认开：示例里必须看得见，否则用户不知道登录本身也走代理池。
+	if !c.Features.LoginBindProxy {
+		t.Error("features.login_bind_proxy 示例值应为 true（默认开启）")
+	}
+	// features.three_d_enabled：3D 默认关闭，示例必须显式体现。
+	if c.Features.ThreeDEnabled {
+		t.Error("features.three_d_enabled 示例值应为 false（默认关闭）")
+	}
 	if _, ok := example.Features["repair_deferred_tool_args"]; !ok {
 		t.Error("features.repair_deferred_tool_args 示例键缺失")
 	}

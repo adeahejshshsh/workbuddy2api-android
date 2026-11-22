@@ -323,6 +323,19 @@ func (h *Handler) imageGenerate(ctx context.Context, req map[string]any) ([]byte
 	return nil, lastErr
 }
 
+// requestLevelFailFastKind 报告该类上游错误是否与账号无关（换号必然同样失败）。
+// images 与 search 共用：出图/检索的域级模型路由（14401）、审核与参数错误都是
+// 请求本身的属性，换号只会打满全池。chat 侧另有一套（各账号模型权限可能不同）。
+func requestLevelFailFastKind(kind upstream.ErrKind) bool {
+	switch kind {
+	case upstream.ErrBadParams, upstream.ErrPromptTooLong, upstream.ErrImageInvalid,
+		upstream.ErrModelParamInvalid, upstream.ErrEmptyContent,
+		upstream.ErrContentBlocked, upstream.ErrModelBlocked, upstream.ErrModelMissing:
+		return true
+	}
+	return false
+}
+
 // imageMode 流水行的 mode 列。
 func imageMode(edit bool) string {
 	if edit {

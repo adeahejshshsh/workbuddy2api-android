@@ -56,12 +56,12 @@ func TestStripToolDescriptionsRemovesOnlyDescription(t *testing.T) {
 // TestStripToolDescriptionsNoop 没有可摘的东西时必须返回 false，调用方据此避免无意义重试。
 func TestStripToolDescriptionsNoop(t *testing.T) {
 	cases := map[string]string{
-		"没有 tools":  `{"model":"m","messages":[]}`,
-		"tools 为空":  `{"model":"m","tools":[]}`,
-		"工具无描述":    `{"tools":[{"type":"function","function":{"name":"a"}}]}`,
+		"没有 tools":   `{"model":"m","messages":[]}`,
+		"tools 为空":   `{"model":"m","tools":[]}`,
+		"工具无描述":      `{"tools":[{"type":"function","function":{"name":"a"}}]}`,
 		"tools 不是数组": `{"tools":{"x":1}}`,
-		"空 body":    ``,
-		"非法 JSON":   `{not json`,
+		"空 body":     ``,
+		"非法 JSON":    `{not json`,
 	}
 	for name, body := range cases {
 		if _, ok := StripToolDescriptions([]byte(body)); ok {
