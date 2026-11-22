@@ -47,6 +47,18 @@ const ctx = {
   loginState: 'st1',
   loginTimer: 7,
   loginStartAt: 0,
+  // 本仓 app.js 的模块级状态（上游那版没有这三个名字）：轮询重入闸门 loginBusy、
+  // 代次 loginGen、失败计数 pollFails。缺了它们，eval 出来的 pollLogin 直接 ReferenceError。
+  loginBusy: false,
+  loginGen: 0,
+  pollFails: 0,
+  closeAddTimer: null,
+  credTxt: { textContent: '' },
+  addReady: { hidden: false },
+  addDone: { hidden: false, textContent: '' },
+  addErr: { hidden: false, textContent: '' },
+  login: {},
+  poll: {},
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + '\nthis.pollLogin = pollLogin; this.getFails = () => pollFails; this.getTimer = () => loginTimer;', ctx);
