@@ -112,6 +112,7 @@ final class ScreenAccounts {
             hero.addView(Theme.kpi(a, creditSum[0], creditSum[1], Theme.INK));
         }
         col.addView(hero, Theme.cardLp(a, Theme.S4));
+        lockCard(col, o);
         expiryCard(col, o.accounts);
 
         if (o.accounts.isEmpty()) {
@@ -173,6 +174,154 @@ final class ScreenAccounts {
     /** 不限量哨兵（网页端 isUnlimited 的同口径实现；credits=1e12 是上游约定的「无限」）。 */
     static boolean isUnlimited(PanelService.Account s) {
         return s == null || s.creditsTotal == -1 || s.credits >= 1000000000000L;
+    }
+
+    // ── 模型锁池（issue #206 第 1 条：原生端此前完全看不到） ──────────────────
+    //
+    // 数据来自 /panel/api/overview 的 model_locks[]（Go 侧 pool.ModelLockRow），口径与
+    // 选号/ModelBlocked 严格一致：只看参与选号的号、只看真正拦路由的冷却、已过期不算。
+    //
+    // 为什么必须显示：上游按 (账号, 模型) 记限流。某个模型被全池锁住时，聊天只回
+    // no_healthy_account —— 用户分不清「这个模型不能用」还是「号都挂了」，于是去重登、
+    // 去换号，全都没用。网页面板早就有这张表，原生端一直缺。
+    private void lockCard(LinearLayout col, PanelService.Overview o) {
+        LinearLayout card = Theme.card(a);
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(Theme.label(a, "模型锁池"),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        int n = o.modelLocks == null ? 0 : o.modelLocks.size();
+        head.addView(Theme.text(a, n == 0 ? "全部可选" : n + " 个模型受限",
+                11.5f, n == 0 ? Theme.INK3 : Theme.WARN, 0));
+        card.addView(head);
+
+        if (n == 0) {
+            // 空态也要画出来：用户抱怨的就是「看不到」，直接不画等于还是看不到。
+            TextView ok = Theme.text(a, "当前没有模型级限流，所有模型都能选到号", 12f, Theme.INK3, 0);
+            ok.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+            card.addView(ok);
+            col.addView(card, Theme.cardLp(a, Theme.S3));
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        int shown = Math.min(n, 8);
+        for (int i = 0; i < shown; i++) {
+            PanelService.ModelLock m = o.modelLocks.get(i);
+            int color = "locked".equals(m.state) ? Theme.BAD
+                    : "starved".equals(m.state) ? Theme.WARN : Theme.INFO;
+
+            LinearLayout line = new LinearLayout(a);
+            line.setOrientation(LinearLayout.HORIZONTAL);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setPadding(0, Theme.dp(a, Theme.S2), 0, 0);
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                    Theme.dp(a, 7), Theme.dp(a, 7));
+            dlp.rightMargin = Theme.dp(a, Theme.S2);
+            line.addView(Theme.dot(a, color, 7), dlp);
+            TextView name = Theme.text(a, m.model, 13f, Theme.INK, 2);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            line.addView(name, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            line.addView(Theme.tag(a, m.stateText(), color));
+            TextView avail = Theme.num(a, "可用 " + m.servable + "/" + m.total, 11.5f, Theme.INK3);
+            avail.setPadding(Theme.dp(a, Theme.S2), 0, 0, 0);
+            line.addView(avail);
+            card.addView(line);
+
+            // 第二行：何时解锁 + 上游原文（原因常常就是「该模型限流」这类，看一眼就知道
+            // 该等还是该换模型）。
+            String when = unlockText(m.unlockAt, now);
+            StringBuilder sb = new StringBuilder();
+            if (!when.isEmpty()) sb.append("最早 ").append(when);
+            if ("locked".equals(m.state)) {
+                String full = unlockText(m.fullyUnlockAt, now);
+                if (!full.isEmpty()) sb.append(sb.length() > 0 ? " · " : "").append("全部 ").append(full);
+            }
+            if (!TextUtils.isEmpty(m.reason)) {
+                sb.append(sb.length() > 0 ? " · " : "").append(m.reason);
+            }
+            if (sb.length() > 0) {
+                TextView why = Theme.text(a, sb.toString(), 11f, Theme.INK3, 0);
+                why.setSingleLine(true);
+                why.setEllipsize(TextUtils.TruncateAt.END);
+                why.setPadding(Theme.dp(a, 15), Theme.dp(a, 2), 0, 0);
+                card.addView(why);
+            }
+            if (i < shown - 1) card.addView(Theme.divider(a));
+        }
+        if (n > shown) {
+            card.addView(Theme.text(a, "另有 " + (n - shown) + " 个模型受限", 11f, Theme.INK3, 0));
+        }
+        card.addView(Theme.text(a, "锁定 = 上游按（账号, 模型）限流；换模型立刻可用，换号通常没用",
+                11f, Theme.INK3, 0));
+        col.addView(card, Theme.cardLp(a, Theme.S3));
+    }
+
+    /** "MM-dd HH:mm 解锁（约 N 分钟后）"；无有效时刻返回空串。 */
+    private static String unlockText(String rfc3339, long nowMs) {
+        long ms = rfc3339Ms(rfc3339);
+        if (ms <= 0) return "";
+        long leftMin = Math.max(0, (ms - nowMs + 59999) / 60000);
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        cal.setTimeInMillis(ms);
+        String hhmm = String.format(java.util.Locale.US, "%02d:%02d",
+                cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE));
+        boolean sameDay = cal.get(java.util.Calendar.YEAR) == nowCal(nowMs, java.util.Calendar.YEAR)
+                && cal.get(java.util.Calendar.DAY_OF_YEAR) == nowCal(nowMs, java.util.Calendar.DAY_OF_YEAR);
+        String stamp = sameDay ? hhmm
+                : String.format(java.util.Locale.US, "%02d-%02d %s",
+                        cal.get(java.util.Calendar.MONTH) + 1, cal.get(java.util.Calendar.DAY_OF_MONTH), hhmm);
+        return leftMin <= 0 ? stamp + " 解锁（即将）" : stamp + " 解锁（约 " + leftMin + " 分钟后）";
+    }
+
+    private static int nowCal(long ms, int field) {
+        java.util.Calendar c = java.util.Calendar.getInstance();
+        c.setTimeInMillis(ms);
+        return c.get(field);
+    }
+
+    /**
+     * RFC3339 → 毫秒；无效返回 -1。
+     *
+     * 手写解析而不是 SimpleDateFormat：Go 的 time.Time 序列化带**数字时区偏移**
+     * （+08:00）和可选小数秒，SimpleDateFormat 的 Z 模式对这两种形态都挑剔；而这里
+     * 只需要「年-月-日 时:分:秒" + 偏移」。年份 < 2000 一律当无效（Go 零值 0001-01-01）。
+     */
+    private static long rfc3339Ms(String s) {
+        if (s == null || s.length() < 19) return -1;
+        try {
+            int y = Integer.parseInt(s.substring(0, 4));
+            if (y < 2000) return -1;
+            int mo = Integer.parseInt(s.substring(5, 7));
+            int d = Integer.parseInt(s.substring(8, 10));
+            int h = Integer.parseInt(s.substring(11, 13));
+            int mi = Integer.parseInt(s.substring(14, 16));
+            int sec = Integer.parseInt(s.substring(17, 19));
+            int i = 19;
+            if (i < s.length() && s.charAt(i) == '.') {
+                i++;
+                while (i < s.length() && Character.isDigit(s.charAt(i))) i++;
+            }
+            int offMin = 0;
+            if (i < s.length()) {
+                char c = s.charAt(i);
+                if ((c == '+' || c == '-') && s.length() >= i + 6) {
+                    int oh = Integer.parseInt(s.substring(i + 1, i + 3));
+                    int om = Integer.parseInt(s.substring(i + 4, i + 6));
+                    offMin = (oh * 60 + om) * (c == '-' ? -1 : 1);
+                }
+            }
+            java.util.Calendar cal = java.util.Calendar.getInstance(
+                    java.util.TimeZone.getTimeZone("UTC"));
+            cal.set(y, mo - 1, d, h, mi, sec);
+            cal.set(java.util.Calendar.MILLISECOND, 0);
+            return cal.getTimeInMillis() - offMin * 60000L;
+        } catch (Throwable t) {
+            return -1;
+        }
     }
 
     // ── 积分到期提醒（issue #167 第 3 条） ──────────────────────────────────
@@ -368,15 +517,19 @@ final class ScreenAccounts {
         name.setEllipsize(TextUtils.TruncateAt.END);
         head.addView(name, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        if ("global".equals(s.realm)) head.addView(Theme.tag(a, "国际", Theme.INFO));
+        // 可用性用**标签**而不是只有一个小圆点：色弱/强光下圆点几乎看不出区别，
+        // 而「这个号现在能不能用」是打开账号页最想确认的一件事。
+        head.addView(Theme.tag(a, s.statusText(), dotColor));
         if (s.enterprise) head.addView(Theme.tag(a, "企业", Theme.WARN));
         if (s.apiKey) head.addView(Theme.tag(a, "KEY", Theme.INK3));
         if ("personal".equals(s.override)) head.addView(Theme.tag(a, "强制个人", Theme.ACCENT));
         if ("enterprise".equals(s.override)) head.addView(Theme.tag(a, "强制企业", Theme.WARN));
         card.addView(head);
 
-        // 第二行：uid + 状态
-        TextView sub = Theme.text(a, s.uid + "  ·  " + s.statusText(), 11.5f, Theme.INK3, 0);
+        // 第二行：uid（状态已上移成标签；禁用原因比状态更值得占位置）
+        String subText = s.uid;
+        if (s.disabled && !TextUtils.isEmpty(s.disabledReason)) subText += "  ·  " + s.disabledReason;
+        TextView sub = Theme.text(a, subText, 11.5f, Theme.INK3, 0);
         sub.setPadding(0, Theme.dp(a, 3), 0, 0);
         card.addView(sub);
 
