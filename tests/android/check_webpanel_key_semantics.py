@@ -94,11 +94,40 @@ check("PanelTrust.verify" in verify,
 check("injectKey(" in verify, "verifyThenInject 在校验通过后调 injectKey")
 check(re.search(r"if\s*\(!ok\)", verify) is not None,
       "verifyThenInject 必须有 if (!ok) 分支")
-check(re.search(r"if\s*\(!ok\)[\s\S]{0,400}?return;", verify) is not None,
+check(re.search(r"if\s*\(!ok\)[\s\S]{0,500}?return;", verify) is not None,
       "校验失败分支必须在注入前 return（失败关闭）")
 check("PanelTrust.message" in verify, "失败时要按原因提示用户（不能静默）")
-check(panel.count("injectKey(") == 2,
-      "injectKey 只允许「定义 + verifyThenInject 里调用」两处引用，别处出现即绕过校验")
+# 注入入口点必须是**受控的**：校验通过分支、用户显式确认分支、以及 injectKey
+# 内部的重试自调用。把这三个函数体剥掉后若还有 injectKey( 调用，就是绕过校验的后门。
+stripped = panel
+for sig in ("private void verifyThenInject(final WebView v)",
+            "private void confirmTrustAndInject()",
+            "private void injectKey(WebView v)",
+            "private void injectKey(final WebView v, final int attempt)"):
+    b = body(stripped, sig)
+    if b:
+        stripped = stripped.replace(sig + " " + b, "void removed_" + str(len(sig)) + "() {}", 1)
+check("injectKey(" not in stripped,
+      "injectKey 只允许在 verifyThenInject / confirmTrustAndInject / 自身重试里被调用")
+check("injectKey(" in body(panel, "private void confirmTrustAndInject()"),
+      "手动放行必须走 confirmTrustAndInject（带确认对话框），而不是直接注入")
+check("AlertDialog.Builder" in body(panel, "private void confirmTrustAndInject()"),
+      "手动放行前必须弹确认框（把风险讲清楚，用户自己决定）")
+
+# 写入必须**回读确认**：旧实现在写入前就置 injected=true，写失败与成功长得一样，
+# 表现就是「每次打开都要手输密钥」。
+inj = body(panel, "private void injectKey(final WebView v, final int attempt)")
+check("onReceiveValue" in inj and "got.contains(key)" in inj,
+      "注入后必须回读 sessionStorage 确认写入成功（bug-04 同口径）")
+check("v.reload()" in inj, "确认成功后才 reload")
+check(not re.search(r"injected\s*=\s*true;[\s\S]{0,200}?evaluateJavascript", inj),
+      "不许在 evaluateJavascript 之前就置 injected=true")
+check("attempt < 2" in inj, "写入未确认时要重试（不是弹一次 toast 就放弃）")
+
+# 状态 chip：把「有没有自动登录」写在界面上，而不是只弹一次 toast。
+check("statusChip" in panel and "已自动登录" in panel,
+      "顶栏必须常驻显示「已自动登录 / 未自动登录」状态")
+check("未自动登录" in panel, "失败态要给出原因并指引手动放行")
 
 # ③ 判定本体：必须比对 instance_id，且不跟随重定向、不把自己的 id 发出去。
 check("InstanceId.matches(expect" in trust,

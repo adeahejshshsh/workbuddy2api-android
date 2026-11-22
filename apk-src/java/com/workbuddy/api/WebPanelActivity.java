@@ -40,6 +40,8 @@ public class WebPanelActivity extends Activity {
     private WebView web;
     /** 已经注入过（避免 reload → onPageFinished → 再注入的死循环）。 */
     private boolean injected;
+    /** 顶部状态 chip：已注入 / 未注入（原因），点一下可重试。 */
+    private TextView statusChip;
     /** 正在做实例校验（用户连点刷新时别叠出一堆并发探测）。 */
     private boolean verifying;
 
@@ -73,12 +75,16 @@ public class WebPanelActivity extends Activity {
         });
         bar.addView(back);
 
-        TextView title = new TextView(this);
-        title.setText("网页面板（进阶页）");
-        title.setTextSize(12f);
-        title.setTextColor(0xFF6E7683);
-        title.setGravity(Gravity.END);
-        bar.addView(title, new LinearLayout.LayoutParams(0,
+        // 状态 chip：把「有没有自动登录」直接写在标题位上。
+        // 此前注入失败只弹一次 toast（几秒就没了），用户看到的是密钥输入框，
+        // 于是以为「每次都得输」——真实原因是注入被实例校验拦下了，而那行提示早消失了。
+        statusChip = new TextView(this);
+        statusChip.setText("正在确认网关身份…");
+        statusChip.setTextSize(11.5f);
+        statusChip.setTextColor(0xFF6E7683);
+        statusChip.setGravity(Gravity.END);
+        statusChip.setPadding(dp(6), dp(6), dp(6), dp(6));
+        bar.addView(statusChip, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView reload = new TextView(this);
@@ -167,6 +173,7 @@ public class WebPanelActivity extends Activity {
                 if (!ok) {
                     injected = false;      // 允许用户点「刷新」重试（端口占用解除后即可）
                     toast(PanelTrust.message(reason));
+                    offerManualInject(reason);
                     return;
                 }
                 if (v != null) injectKey(v);
@@ -174,20 +181,36 @@ public class WebPanelActivity extends Activity {
         });
     }
 
-    private void injectKey(WebView v) {
-        String key = PanelApi.key(this);
+    private void injectKey(WebView v) { injectKey(v, 0); }
+
+    /**
+     * 写密钥 + **回读确认**，成功才 reload。
+     *
+     * 旧实现在 evaluateJavascript 之前就把 injected 置 true、reload 也写在 JS 里，
+     * 于是「写入没成功」和「成功」长得一模一样：页面刷新回来还是没有 key，面板弹密钥门，
+     * 而 onPageFinished 因为 injected==true 不再重试 —— 用户看到的就是「每次都要输」。
+     * 现在与 MainActivity 同一口径（bug-04）：回读 sessionStorage 命中才算成功，
+     * 失败最多重试 3 次，未成功则保持 injected=false，下次页面加载还会再来。
+     */
+    private void injectKey(final WebView v, final int attempt) {
+        if (v == null) return;
+        String k = PanelApi.key(this);
+        if (k.isEmpty()) {
+            // config.json 里没有可用密钥：让面板自己生成一把（幂等），再读一次。
+            try { AdminKey.ensure(this); } catch (Throwable ignored) {}
+            k = PanelApi.key(this);
+        }
+        final String key = k;
         if (key.isEmpty()) {
             injected = false;
+            setChip("未自动登录 · 读不到 admin_api_key（去「全部配置」检查）", 0xFFE0A030, null);
             toast("读不到 config.json 里的 admin_api_key / api_key");
             return;
         }
-        injected = true;   // 先置位：下面 evaluateJavascript 会触发 reload → onPageFinished
-        // W3-04（面板侧契约）：密钥不再写 localStorage —— 面板 origin 是明文 HTTP，
+        // W3-04（面板侧契约）：密钥不写 localStorage —— 面板 origin 是明文 HTTP，
         // localStorage 是落盘明文、永不过期。改为：
         //   ① window.__WB2A_ADMIN_KEY —— 面板 authKey() 的最高优先级来源；
-        //   ② sessionStorage —— 仅内存/单标签页生命周期，扛得住下面这次 reload；
-        // 两个都写是因为 reload 会丢掉 window 变量，而 sessionStorage 在同一浏览
-        // 上下文里跨 reload 保留。localStorage 一个字节都不碰。
+        //   ② sessionStorage —— 仅内存/单标签页生命周期，扛得住下面这次 reload。
         StringBuilder js = new StringBuilder("try{");
         js.append("window.__WB2A_ADMIN_KEY=").append(quote(key)).append(';');
         js.append("sessionStorage.setItem('").append(MainActivity.LS_KEY).append("',")
@@ -198,8 +221,29 @@ public class WebPanelActivity extends Activity {
             // 令牌文件 0600、启动时生成、用后即删 —— 面板弹窗读这个变量即可。
             js.append("window.__WB2A_BOOTSTRAP_TOKEN=").append(quote(tok)).append(';');
         }
-        js.append("location.reload();}catch(e){}");
-        v.evaluateJavascript(js.toString(), null);
+        js.append("sessionStorage.getItem('").append(MainActivity.LS_KEY).append("');}catch(e){null}");
+        v.evaluateJavascript(js.toString(), new android.webkit.ValueCallback<String>() {
+            public void onReceiveValue(String got) {
+                // evaluateJavascript 把字符串结果再包一层 JSON：带引号才算真写进去。
+                if (got != null && got.contains(key)) {
+                    injected = true;
+                    setChip("已自动登录（无需输入密钥）", 0xFF4CAF7D, null);
+                    v.reload();
+                    return;
+                }
+                if (attempt < 2) {
+                    v.postDelayed(new Runnable() {
+                        public void run() { injectKey(v, attempt + 1); }
+                    }, 400);
+                    return;
+                }
+                injected = false;   // 保持 false：下次 load 仍会自动重试
+                setChip("未自动登录 · 写入密钥被拒（点此强制注入）", 0xFFE0A030,
+                        new View.OnClickListener() {
+                            public void onClick(View x) { confirmTrustAndInject(); }
+                        });
+            }
+        });
     }
 
     /** JS 字符串字面量（与 MainActivity.quote 同口径，避免两处转义漂移）。 */
@@ -210,6 +254,64 @@ public class WebPanelActivity extends Activity {
     private int dp(int v) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
                 getResources().getDisplayMetrics());
+    }
+
+    /** 校验失败时把 chip 变成可点的「强制注入」入口（默认失败关闭，注入要用户确认一次）。 */
+    private void offerManualInject(String reason) {
+        setChip("未自动登录 · " + shortReason(reason) + "（点此强制注入）", 0xFFE0A030,
+                new View.OnClickListener() {
+                    public void onClick(View x) { confirmTrustAndInject(); }
+                });
+    }
+
+    /** 状态 chip 的统一样式入口（null 监听 = 只显示）。 */
+    private void setChip(final String text, final int color, View.OnClickListener click) {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                if (statusChip == null) return;
+                statusChip.setText(text);
+                statusChip.setTextColor(color);
+            }
+        });
+        if (statusChip != null) statusChip.setOnClickListener(click);
+    }
+
+    /** 校验失败的短文案（chip 放不下 PanelTrust 的整句）。 */
+    private static String shortReason(String reason) {
+        if (reason == null) return "未确认端口归属";
+        if (reason.startsWith(PanelTrust.HTTP_ERROR)) return "实例接口异常";
+        if (PanelTrust.OLD_GATEWAY.equals(reason)) return "网关版本较旧";
+        if (PanelTrust.NO_CONN.equals(reason)) return "连不上网关";
+        if (PanelTrust.NO_ID.equals(reason)) return "读不到实例标识";
+        if (PanelTrust.MISMATCH.equals(reason)) return "端口被其他应用占用";
+        return "未确认端口归属";
+    }
+
+    /**
+     * 实例校验没过、但用户明确确认「这就是本机网关」时的手动放行（默认 fail-closed）。
+     *
+     * 为什么给这个口子：W6-H-02 的校验是为了不把 admin_api_key 交给占位进程；但它的
+     * 失败模式（instance 文件丢失 / 网关是旧版本 / 端口刚被自家网关抢回）在真机上
+     * 都会发生，而后果是**每次打开面板都要手输 32 位密钥**。这里把选择权交给用户：
+     * 弹一次确认，确认后本次会话直接注入；不会写进配置、也不改 fail-closed 默认。
+     */
+    private void confirmTrustAndInject() {
+        final String port = String.valueOf(GwConfig.port(this));
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("确认这是本应用的网关？")
+                .setMessage("实例校验没通过（" + port + " 端口）。\n\n"
+                        + "如果你确认这个端口上跑的就是本应用的网关（例如刚升级、"
+                        + "或网关刚被看门狗拉起），可以强制注入管理密钥，之后就不必"
+                        + "每次手输。\n\n"
+                        + "如果这个端口可能被别的应用占用，请点「取消」——注入等于把"
+                        + "管理员密钥交给对方。")
+                .setPositiveButton("强制注入", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        if (web != null) injectKey(web);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private void toast(String s) {

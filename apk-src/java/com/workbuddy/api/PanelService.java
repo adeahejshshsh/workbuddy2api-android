@@ -68,6 +68,37 @@ final class PanelService {
         boolean authRequired;
         long uptimeSec;
         final List<Account> accounts = new ArrayList<Account>();
+        final List<ModelLock> modelLocks = new ArrayList<ModelLock>();
+    }
+
+    /**
+     * 模型锁池的一行（/panel/api/overview 的 model_locks[]，Go 侧 pool.ModelLockRow）。
+     *
+     * 为什么原生端需要它：上游按 (账号, 模型) 记限流，一个模型被全池锁住时，聊天只会
+     * 回 no_healthy_account —— 用户看不出「是这个模型不能用」还是「号都挂了」。
+     * 网页面板早就有这张表（视图「账号池 → 模型锁池」），原生端此前完全没有。
+     */
+    static final class ModelLock {
+        /** 模型 id（不带 realm 前缀）。 */
+        String model = "", realm = "";
+        /** 参与选号的账号数（禁用/暂停号不计，与 ModelBlocked 同口径）。 */
+        int total, servable, locked;
+        /** locked（全被模型冷却挡住）/ starved（没有号空闲，等一会就好）/ partial（部分被锁）。 */
+        String state = "";
+        /** 最早 / 全部解锁时刻（RFC3339；零值会是 0001-01-01，判定看年份）。 */
+        String unlockAt = "", fullyUnlockAt = "";
+        /** 上游原文（取最早解锁那个号的冷却原因）。 */
+        String reason = "";
+
+        /** 能否此刻服务该模型：有号、且不是 locked/starved。 */
+        boolean usable() { return servable > 0; }
+
+        String stateText() {
+            if ("locked".equals(state)) return "全部锁定";
+            if ("starved".equals(state)) return "无号空闲";
+            if ("partial".equals(state)) return "部分锁定";
+            return state;
+        }
     }
 
     static final class Usage {
@@ -239,6 +270,22 @@ final class PanelService {
                     a.apiKey = s.optBoolean("api_key");
                     a.disabledReason = s.optString("disabled_reason");
                     v.accounts.add(a);
+                }
+                JSONArray locks = o.optJSONArray("model_locks");
+                for (int i = 0; locks != null && i < locks.length(); i++) {
+                    JSONObject s = locks.optJSONObject(i);
+                    if (s == null) continue;
+                    ModelLock m = new ModelLock();
+                    m.model = s.optString("model");
+                    m.realm = s.optString("realm");
+                    m.total = s.optInt("total");
+                    m.servable = s.optInt("servable");
+                    m.locked = s.optInt("locked");
+                    m.state = s.optString("state");
+                    m.unlockAt = s.optString("unlock_at");
+                    m.fullyUnlockAt = s.optString("fully_unlock_at");
+                    m.reason = s.optString("reason");
+                    v.modelLocks.add(m);
                 }
                 cb.ok(v);
             }
