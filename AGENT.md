@@ -167,6 +167,25 @@ denied`，表现为「一半包 PASS、一半包编译失败」，很容易误�
 
 ## 三、打 APK
 
+### 0. 只改版本号时的降级构建（`WB2API_SKIP_GO=1`）
+
+环境重置会同时抹掉 Go 工具链与 `$GOROOT/src/runtime/asm_arm64.s.orig-dsh`（rt0 补丁原件），
+这时连 `bash patches/build_apk.sh` 的第 1 步都跑不起来。而**只改 `VERSION` / 清单 /
+`CHANGELOG` 的发行版没有任何 Go 或 Java 改动**，重编只会引入不确定性。
+
+于是脚本支持 `WB2API_SKIP_GO=1`：直接从 `$OUTDIR/WorkBuddy2API.apk` 取
+`lib/arm64-v8a/libwb2api.so`，并用 `.go-src-hash`（`**.go` + `go.mod` + `go.sum` 的 md5）
+跨构建比对 Go 源码 —— 变过就硬失败。默认关，不带它时行为完全不变。
+
+配合已有的两条降级路径（缺 aapt2 → 复用清单/资源；缺 `android.jar` → 复用 `classes.dex`），
+「只发版本号」的发行可以在一台刚被重置、没有任何 SDK 的手机上重建出**同内容**的包。
+
+代价与守卫（必须自己核对，脚本无法代替）：
+- `classes.dex` 与 `.so` 都是上一版的原件 → **本次必须无 Java / Go 改动**；
+  用 `git diff --name-only <上一版提交>..HEAD -- 'apk-src/**/*.java' 'workbuddy2api-panel/**/*.go'`
+  确认为空。
+- 产物里 `classes.dex` / `libwb2api.so` 的 zip 时间戳仍是上一版的（正常）。
+
 ### 1. aapt2 与仓库的 abseil/protobuf ABI 不匹配
 
 `aapt2` 报 `cannot locate symbol ...ZeroCopyInputStream::ReadCord...` 直接崩。
