@@ -92,6 +92,33 @@ done
 mkdir -p "$B/jni/lib/arm64-v8a" "$OUTDIR"
 
 echo "== 1/6 生成 App 用的服务端二进制（未打 rt0 补丁） =="
+# 环境降级开关（WB2API_SKIP_GO=1）：直接从上一版 APK 复用 libwb2api.so。
+#
+# 为什么需要：本仓库构建宿主机是手机自身（Termux），环境重置会同时抹掉 GOROOT 的
+# rt0 补丁文件（asm_arm64.s.orig-dsh / patched-dsh）与 Go 工具链；而**只改 VERSION /
+# 清单 / CHANGELOG 的发行版**根本没有 Go 改动，重编一份与上一版逐字节无关的二进制
+# 只会引入风险。开关默认关：不带它时行为与以前完全一致。
+#
+# 守卫：Go 源码指纹（**.go / go.mod / go.sum）在同一构建目录里跨构建比对，不一致直接失败；
+# 首次走这条路没有基线，只写入并告警（与 aapt2 降级路径的 res 指纹同口径）。
+if [ "${WB2API_SKIP_GO:-0}" = "1" ]; then
+  PREV_APK="$OUTDIR/WorkBuddy2API.apk"
+  [ -f "$PREV_APK" ] || { echo "❌ WB2API_SKIP_GO=1 但没有上一版 APK（$PREV_APK）可复用"; exit 1; }
+  GO_HASH_FILE="$B/.go-src-hash"
+  CUR_GO=$( {
+    find "$REPO" -name '*.go' -not -path '*/vendor/*' -print0 | sort -z | xargs -0 cat
+    cat "$REPO/go.mod" 2>/dev/null; cat "$REPO/go.sum" 2>/dev/null
+  } | md5sum | cut -d' ' -f1)
+  if [ -f "$GO_HASH_FILE" ] && [ "$(cat "$GO_HASH_FILE")" != "$CUR_GO" ]; then
+    echo "❌ Go 源码在两次构建之间变过（$(cat "$GO_HASH_FILE") → $CUR_GO），不能复用旧二进制"
+    exit 1
+  fi
+  echo "$CUR_GO" > "$GO_HASH_FILE"
+  unzip -p "$PREV_APK" lib/arm64-v8a/libwb2api.so > "$B/jni/lib/arm64-v8a/libwb2api.so"
+  [ -s "$B/jni/lib/arm64-v8a/libwb2api.so" ] || { echo "❌ 从上一版 APK 取 libwb2api.so 失败"; exit 1; }
+  echo "  ⚠ 已跳过 Go 构建，复用 $PREV_APK 的服务端二进制"
+  echo "    sha256=$(sha256sum "$B/jni/lib/arm64-v8a/libwb2api.so" | cut -d' ' -f1)  go-src=$CUR_GO"
+else
 # GOROOT 源码会被临时换成「未打 rt0 补丁」的版本，还原必须做成退出钩子而不是顺序
 # 语句：构建中途被 Ctrl-C / 休眠 / OOM 打断，或 .orig-dsh 缺失导致 set -e 直接退出时，
 # 顺序还原永远走不到，GOROOT 就永久停在未打补丁状态 —— 之后所有 run.sh/rebuild.sh
@@ -117,6 +144,7 @@ cp "$GOROOT/src/runtime/asm_arm64.s.orig-dsh" "$ASM"
     -o "$B/jni/lib/arm64-v8a/libwb2api.so" ./cmd/server )
 restore_asm
 trap - EXIT INT TERM HUP
+fi
 
 echo "== 2/6 资源 =="
 cd "$B"
