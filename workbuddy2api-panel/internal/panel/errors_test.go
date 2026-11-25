@@ -200,6 +200,11 @@ func TestErrorSummaryEndpoint(t *testing.T) {
 	if got.Scanned != 1 || len(got.Rows) != 1 || got.Rows[0].Kind != "模型限流(6004)" || got.UpdatedAt == "" {
 		t.Fatalf("端点输出不合契约：%+v", got)
 	}
+	// last_unix 是前端「标为已读」的比较基准（issue #288）：缺了它只能退回时分秒，
+	// 跨天就分不清新旧。
+	if got.Rows[0].LastUnix == 0 {
+		t.Fatalf("rows 缺 last_unix：%+v", got.Rows[0])
+	}
 }
 
 // 截断必须按 rune（中文样本不得切出半截 UTF-8）；且样本里换行被压平。

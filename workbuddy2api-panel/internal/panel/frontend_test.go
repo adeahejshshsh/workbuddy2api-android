@@ -1697,3 +1697,128 @@ catch (e) { console.log('LOAD FAIL: ' + (e && e.stack ? e.stack : e)); process.e
 		t.Fatalf("导出落盘未通过:\n%s", out)
 	}
 }
+
+// 「每日变化」柱状图：每根柱子必须自带 <title> 子节点。
+// 挂在 <svg> 根下（兄弟节点）时浏览器把它当整图说明，所有柱子共用第一条 ——
+// 表现是「悬停任意柱子永远是同一行」（issue #289）。空 <g> 包裹同样没有可悬停几何。
+// 故断言：标题数 == 柱子数、互不相同、且全部出现在 <rect> 开闭标签之间。
+func TestAppJSDailyBarsTitlePerBar(t *testing.T) {
+	nodeBin(t)
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+// 按函数名切片：本仓库 app.js 里这些 helper 的定义顺序与上游不同（bhIsDead 在
+// disabledAge 之后），所以不能按固定区间切，只能逐个取「定义到下一条 function 之前」。
+function sliceFn(name) {
+  const i = src.indexOf('function ' + name + '(');
+  if (i < 0) throw new Error('missing function ' + name);
+  const j = src.indexOf('\nfunction ', i + 1);
+  return src.slice(i, j < 0 ? src.length : j);
+}
+const helpers = ['esc', 'ago', 'disabledAge', 'acctStateOf', 'bhIsDead', 'bhColorOf', 'measureWidth', 'lineWidthFor', 'fmtNum', 'fmtTokens', 'renderDailyBars']
+  .map(sliceFn).join('\n');
+const host = { innerHTML: '', clientWidth: 760 };
+const legendHost = { innerHTML: '' };
+const ctx = {
+  Date, Number, String, Math, RegExp, isNaN, Set, Map, Array, Object, Infinity, JSON,
+  CHART_FALLBACK_W: 760,
+  BH_COLORS: ['#111', '#222', '#333'],
+  overviewData: { accounts: [] },
+  getComputedStyle: () => ({ paddingLeft: '0', paddingRight: '0' }),
+  document: { getElementById: id => (id === 'bhDailyLegend' ? legendHost : host) },
+  $: id => (id === 'bhDailyLegend' ? legendHost : host),
+};
+vm.createContext(ctx);
+vm.runInContext("'use strict';\n" + helpers + '\nthis.renderDailyBars=renderDailyBars;', ctx);
+ctx.renderDailyBars([
+  { uid: 'a', name: 'A', daily: [{ day: '2026-11-16', change: -455, full: false }, { day: '2026-11-17', change: 0, full: true }] },
+  { uid: 'b', name: 'B', daily: [{ day: '2026-11-16', change: 120, full: true }, { day: '2026-11-17', change: -30, full: true }] },
+]);
+const svg = host.innerHTML;
+const titles = [...svg.matchAll(/<title>([\s\S]*?)<\/title>/g)].map(m => m[1]);
+process.stdout.write(JSON.stringify({
+  barCount: (svg.match(/<rect/g) || []).length,
+  closedRects: (svg.match(/<\/rect>/g) || []).length,
+  titleCount: titles.length,
+  uniqueTitles: new Set(titles).size,
+  aTitles: titles.filter(x => x.startsWith('A ')).length,
+  bTitles: titles.filter(x => x.startsWith('B ')).length,
+  incompleteWarn: titles.filter(x => x.includes('采样不完整')).length,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "daily-bars-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("daily bars node test failed: %v\n%s", err, out)
+	}
+	// 4 根柱（含 A 的零值底痕）各一条自己的标题；不完整日只有 A/11-16 那一条带警告。
+	const want = `{"barCount":4,"closedRects":4,"titleCount":4,"uniqueTitles":4,` +
+		`"aTitles":2,"bTitles":2,"incompleteWarn":1}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("daily bars=%s\nwant %s", out, want)
+	}
+}
+
+// 错误汇总「已读」（issue #288）：标记存本机 localStorage，按 last_unix 比较
+// （last 只有 HH:MM:SS，跨天不可比）。断言：标记之前的行带 is-read 前缀、
+// 之后的保持原样、note 里报出已读条数、隐藏已读时整行收起来。
+func TestAppJSErrorSummaryReadMark(t *testing.T) {
+	nodeBin(t)
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const start = src.indexOf('function renderErrorSummary');
+const end = src.indexOf('function renderEventContext');
+if ([escStart, escEnd, start, end].some(v => v < 0)) throw new Error('error summary region not found');
+const els = {};
+const store = { 'wb2api.errReadAt': '1700000000' };
+const ctx = {
+  String, Math, Number,
+  localStorage: { getItem: k => (k in store ? store[k] : null) },
+  $: id => (els[id] = els[id] || { innerHTML: '', textContent: '' }),
+};
+vm.createContext(ctx);
+vm.runInContext("'use strict';\n" + src.slice(escStart, escEnd) + src.slice(start, end) +
+  '\nthis.renderErrorSummary=renderErrorSummary;', ctx);
+ctx.renderErrorSummary({ scanned: 2, updated_at: '12:00:00', rows: [
+  { sev: 'warn', kind: 'k1', count: 1, sample: 'old', last_unix: 1699999999 },
+  { sev: 'warn', kind: 'k2', count: 1, sample: 'new', last_unix: 1700000001 },
+]});
+const body = els.errBody.innerHTML;
+const note1 = els.errNote.textContent;
+store['wb2api.errHideRead'] = '1';
+ctx.renderErrorSummary({ scanned: 2, updated_at: '12:00:00', rows: [
+  { sev: 'warn', kind: 'k1', count: 1, sample: 'old', last_unix: 1699999999 },
+  { sev: 'warn', kind: 'k2', count: 1, sample: 'new', last_unix: 1700000001 },
+]});
+process.stdout.write(JSON.stringify({
+  readDimmed: body.includes('class="is-read lv-w"') && body.split('is-read').length === 2,
+  freshUntouched: body.includes('class="lv-w"'),
+  notedReadCount: note1.includes('已读 1'),
+  hiddenKeepsFresh: els.errBody.innerHTML.includes('new') && !els.errBody.innerHTML.includes('old'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "errsum-read-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := nodeCmd(f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("error summary read-mark node test failed: %v\n%s", err, out)
+	}
+	const want = `{"readDimmed":true,"freshUntouched":true,"notedReadCount":true,"hiddenKeepsFresh":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("read-mark=%s\nwant %s", out, want)
+	}
+}

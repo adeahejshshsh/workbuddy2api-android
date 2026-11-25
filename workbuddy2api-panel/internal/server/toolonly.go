@@ -200,6 +200,10 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 		return r.skip("toolonly", "err_frame")
 	case r.toolSeen:
 		return r.skip("toolonly", "tool_seen")
+	case r.browserIncomplete:
+		return r.skip("toolonly", "browser_incomplete")
+	case r.browserCompleteTried:
+		return r.skip("toolonly", "browser_complete_tried")
 	case r.clientGone():
 		return r.skip("toolonly", "client_gone")
 	case r.outputCapped():

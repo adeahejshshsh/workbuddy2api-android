@@ -140,8 +140,11 @@ func TestNarrationNudgeMarked(t *testing.T) {
 		"narrationNudge":        narrationNudge,
 		"narrationPromiseNudge": narrationPromiseNudge,
 	} {
-		if !strings.HasPrefix(nudge, "【wb2api 网关自动续写") || !strings.Contains(nudge, "非用户消息") {
-			t.Errorf("%s 缺少网关身份前缀：%q", name, nudge[:min(len(nudge), 40)])
+		// 前缀由 internalNudgeText 在发送点统一加（常量里不再写死，避免把网关项目名
+		// 透给上游 —— 见 continue.go 的 internalNudgePrefix）。
+		sent := internalNudgeText(nudge)
+		if !strings.HasPrefix(sent, internalNudgePrefix) || !strings.Contains(sent, "非用户输入") {
+			t.Errorf("%s 缺少网关身份前缀：%q", name, sent[:min(len(sent), 40)])
 		}
 	}
 }

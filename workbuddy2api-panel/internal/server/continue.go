@@ -86,6 +86,16 @@ const continueThinkingShare = 0.5
 // continueNudge 续写指令：线上实测该措辞能让模型从断点无缝接续（不重头、不道歉）。
 const continueNudge = "你上一条回复因达到输出长度上限被截断。请从中断处继续输出剩余内容；不要重复已输出过的部分，不要道歉或解释，直接继续。"
 
+// internalNudgePrefix 给「网关自己塞进去的续写指令」打标记，但不暴露网关项目名。
+// 角色仍是 user——上游 chat API 只接受这个形状——但模型能把它与真实用户输入区分开。
+// 此前各条 nudge 把【wb2api 网关自动续写·非用户消息】写死在字符串里，等于把项目名
+// 透给上游；统一由 internalNudgeText 加前缀（上游 2e2358c 的做法）。
+const internalNudgePrefix = "【内部续写指令·非用户输入】"
+
+func internalNudgeText(nudge string) string {
+	return internalNudgePrefix + nudge
+}
+
 // keepaliveEvery 客户端可见静默的最大间隔：超时就向流里补一条 SSE 注释帧
 // （": keepalive"），只喂活连接不带语义。≤0 = 每条被吞帧都补（测试确定性用）。
 var keepaliveEvery = 10 * time.Second
@@ -137,6 +147,17 @@ type continueReader struct {
 	// toolOnlyRescue 该功能的总开关（features.tool_only_rescue，缺省关闭）。
 	// 由 handler 在构造后写入：默认零值 = 关，避免「正常收尾」被判成截断。
 	toolOnlyRescue bool
+
+	// browserHold buffers a possible leading ::browser-complete directive until
+	// the brace closes or the prefix is disproved.
+	browserHold string
+	// browserCompleteSeen reports a complete standalone directive was consumed.
+	browserCompleteSeen bool
+	// browserCompleteTried limits the special continuation to one attempt.
+	browserCompleteTried bool
+	// browserIncomplete reports a partial candidate was flushed verbatim; other
+	// narration/tool-only rescues must not reinterpret that text.
+	browserIncomplete bool
 	// toolOnly 当前段处于「只采纳工具调用」模式：帧全部改道 toolOnlyFrame，裁决前客户端什么都收不到。
 	toolOnly bool
 	// toolOnlyFailed 当前 toolOnly 段出现过 error 帧 / 流内失败帧 / 非法帧（整段回滚）。
@@ -411,6 +432,7 @@ func (r *continueReader) frame(payload string) {
 		hasUsage = true
 	}
 	deltaNonEmpty := false
+	hiddenContentOnly := false
 	rebuilt := false
 	if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
 		if c, ok := chs[0].(map[string]any); ok {
@@ -436,8 +458,20 @@ func (r *continueReader) frame(payload string) {
 					deltaNonEmpty = true
 				}
 				if s, ok := d["content"].(string); ok && s != "" {
+					visible, hidden := r.filterBrowserContent(s)
 					r.text.WriteString(s)
-					deltaNonEmpty = true
+					if hidden {
+						hiddenContentOnly = visible == ""
+						if hiddenContentOnly {
+							delete(d, "content")
+						} else {
+							d["content"] = visible
+						}
+						rebuilt = true
+					}
+					if visible != "" {
+						deltaNonEmpty = true
+					}
 				}
 				if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
 					r.toolSeen = true
@@ -472,6 +506,10 @@ func (r *continueReader) frame(payload string) {
 	}
 	if hasUsage && !deltaNonEmpty {
 		return // 纯 usage 帧（已入账）：不再下发
+	}
+	if hiddenContentOnly && !deltaNonEmpty && r.finish == "" {
+		r.maybeKeepalive()
+		return
 	}
 	r.emit(payload)
 }
@@ -704,6 +742,9 @@ func (r *continueReader) endSegment(sawDone bool) {
 	if r.cur != nil {
 		r.cur.Close()
 	}
+	// A candidate that was cut before its closing brace must be returned to the
+	// client verbatim; otherwise the filtering layer would swallow normal text.
+	r.flushBrowserHold()
 	// 本段 usage 计入记账合计：必须在任何换段（救援、续写、盲重试）之前。
 	r.flushSegUsage()
 	// 安全续写段的裁决：拿到工具调用就采纳（继续正常收尾），否则回滚到首段终态。
@@ -713,10 +754,11 @@ func (r *continueReader) endSegment(sawDone bool) {
 
 // 段结束后的换段决策链，按优先级排列（decideNext 依次判）。
 const (
-	switchStarved   = iota // 空截断救援（tryStarvedRetry）
-	switchToolOnly         // 安全续写（tryToolOnlyRescue）
-	switchNarration        // 预告式收尾救援（tryNarrationRetry）
-	switchContinue         // length 截断续写 / 断流盲重试（canContinue）
+	switchStarved         = iota // 空截断救援（tryStarvedRetry）
+	switchBrowserComplete        // 浏览器完成控制标记误收尾
+	switchToolOnly               // 安全续写（tryToolOnlyRescue）
+	switchNarration              // 预告式收尾救援（tryNarrationRetry）
+	switchContinue               // length 截断续写 / 断流盲重试（canContinue）
 )
 
 // decideNext 从第 from 条开始依次判换段，命中就异步发起；都不命中就收尾。
@@ -729,6 +771,10 @@ func (r *continueReader) decideNext(sawDone bool, from int) {
 	// 前面几条已经判过（失败回调里另有日志），清空免得把两轮的码混进同一行。
 	r.rescueWhy = r.rescueWhy[:0]
 	if from <= switchStarved && r.tryStarvedRetry() {
+		return
+	}
+	// 浏览器控制标记不是最终答案：不把它透给客户端，补发一次真正的续写。
+	if from <= switchBrowserComplete && r.tryBrowserCompleteRescue() {
 		return
 	}
 	// 安全续写（只采纳工具调用）：模型刚看完工具结果却只写一句就收尾。
@@ -1017,7 +1063,7 @@ func (r *continueReader) continuationBodyWithNudge(nudge string) ([]byte, error)
 	if rc := r.reason.String(); rc != "" {
 		asst["reasoning_content"] = rc
 	}
-	msgs = append(msgs, asst, map[string]any{"role": "user", "content": nudge})
+	msgs = append(msgs, asst, map[string]any{"role": "user", "content": internalNudgeText(nudge)})
 	obj["messages"] = msgs
 	// 续写段至少带上本轮档位的输出预算下限：这一层是从原始 body 重建的，拿不到首段
 	// 被 upstream 抬过的 max_tokens（见 newContinueReaderWithFloor 的说明）。

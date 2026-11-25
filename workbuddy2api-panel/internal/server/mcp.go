@@ -535,6 +535,19 @@ func (h *Handler) mcpTools() []map[string]any {
 						"description": "图生视频的首帧：公网图片 URL 或 data URL；给了就是 image-to-video",
 					},
 					"last_image": map[string]any{"type": "string", "description": "尾帧图（首尾帧模式，可选）"},
+					"reference_images": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "参考图 URL 数组（风格/主体参考）。上游自己拉图，必须是它取得到的公网 CDN/OSS——githubusercontent 这类挡机房的域名会回 2013 media url unreachable",
+					},
+					"reference_videos": map[string]any{
+						"type": "array", "items": map[string]any{"type": "string"},
+						"description": "参考视频 URL 数组（动作/运镜参考），同上必须是上游取得到的公网地址",
+					},
+					"reference_audios": map[string]any{
+						"type": "array", "items": map[string]any{"type": "string"},
+						"description": "参考音频 URL 数组（配乐/音色参考），同上必须是上游取得到的公网地址",
+					},
 					"model": map[string]any{
 						"type":        "string",
 						"description": "cn:minimax-video-h3（默认、快）或 cn:kling-video-v3（慢、贵）",

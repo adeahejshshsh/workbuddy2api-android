@@ -626,8 +626,18 @@ func (h *Handler) videos(w http.ResponseWriter, r *http.Request) {
 			lastErr = err
 			var ue *upstream.Error
 			if errors.As(err, &ue) {
-				h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, bare, ue)
-				if requestLevelFailFastKind(ue.Kind) {
+				// 提交阶段 4xx（除 401/403/429）= 上游在**建任务之前**退回请求：
+				// 任务没创建、积分没扣，同一 body 换任何号都是同一句（实测 14407
+				// 时长越界）。落 ErrClient 的代价是每个号白打一次并各记一笔连败，
+				// 连着写错参数就把健康号喂出池，故按状态归请求级、零动作。
+				rejected := ue.Status >= 400 && ue.Status < 500 &&
+					ue.Status != http.StatusUnauthorized &&
+					ue.Status != http.StatusForbidden &&
+					ue.Status != http.StatusTooManyRequests
+				if !rejected {
+					h.applyErrorPolicy(a.UID, ue.Kind, ue.Msg, bare, ue)
+				}
+				if rejected || requestLevelFailFastKind(ue.Kind) {
 					status := ue.Status
 					if status < 400 {
 						status = http.StatusBadRequest

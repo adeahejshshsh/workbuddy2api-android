@@ -330,11 +330,15 @@ func TestVideosFailedTaskReturns502(t *testing.T) {
 	}
 }
 
-// TestVideosBadDurationFailsFast 上游 400（时长越界）是请求级错误：只打一次上游、
-// 原样回 400，不换号、不记账号惩罚。
+// TestVideosBadDurationFailsFast 提交阶段 4xx 是上游在建任务之前退回：任务没创建、
+// 积分没扣（实测 14407 时长越界）。池里必须有两个 cn 号才看得出「不换号」，
+// 而且两个号都不能被记连败——否则客户端连着写错参数就把健康号喂出池。
 func TestVideosBadDurationFailsFast(t *testing.T) {
 	f := &videoFake{on: func(c videoCall) (int, string) { return 400, videoBadDuration }}
-	p := imagePool()
+	p := testPoolWith(
+		&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+		&auth.Auth{UID: "c2", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"},
+	)
 	h := NewHandler(Config{Pool: p, Upstream: f.client()})
 	rec := postVideo(t, h, `{"prompt":"x","seconds":1}`)
 	if rec.Code != 400 {
@@ -345,6 +349,16 @@ func TestVideosBadDurationFailsFast(t *testing.T) {
 	}
 	if n := f.count("/v2/videos/generations"); n != 1 {
 		t.Fatalf("请求级错误不该换号重试，实际打了 %d 次", n)
+	}
+	for _, uid := range []string{"c1", "c2"} {
+		st, ok := p.Status(uid)
+		if !ok {
+			t.Fatalf("%s 不在池里", uid)
+		}
+		if st.Cooling || st.Disabled || st.ErrTotal != 0 || st.BreakerFails != 0 ||
+			st.ConsecutiveFails != 0 || !st.DegradeUntil.IsZero() {
+			t.Fatalf("%s 被处罚了：%+v", uid, st)
+		}
 	}
 }
 

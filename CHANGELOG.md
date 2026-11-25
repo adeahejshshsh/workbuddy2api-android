@@ -1,5 +1,60 @@
 # 变更记录
 
+## 未发布（上游 2026-11-25 批次）
+
+> 同步 `misakano7545/workbuddy2api-panel` 的 `e2d0eb6..b1233f0`（10 条提交、25 个文件、
+> 其中 5 个新增）。本仓与上游在 `handler.go` / `continue.go` / `app.js` 等处早已分叉，
+> 所以逐条按「改动意图」合入而不是整文件覆盖；`go build ./...` + `bash tests/run.sh all`
+> 24/24 通过。未递增 `VERSION`（发版单独一轮）。
+
+### 服务端
+
+- **浏览器完成标记不再当正文透传**（上游 #285：`6dc02b3` / `f60c68d` / `2e2358c`）：
+  新增 `internal/server/browser_complete.go`。上游浏览器工具收尾时单独发一条
+  `::browser-complete{...}`，透给 Codex 会被判「回合完成」而任务其实没做完。现在流式在
+  正文帧里识别**独立**标记、吞掉并补发一次真正续写（`tryBrowserCompleteRescue`，
+  插在空截断救援之后、安全续写之前）；非流式在聚合体上做同样保护。闸门与预告式救援
+  共用：同段一次（`browserCompleteTried`）、候选被截断按原文回吐（`browserIncomplete`）、
+  这两条都会挡住 narration / tool-only 救援对同一段正文的二次解读。
+- **合成续写指令改用中性前缀**（`2e2358c`，本仓适配）：`continueNudge` / 三条救援指令
+  此前各自把 `【wb2api 网关自动续写·非用户消息】` 写死在常量里，等于把项目名随请求发给
+  上游。改为 `internalNudgePrefix`（`【内部续写指令·非用户输入】`）+ `internalNudgeText()`，
+  在发送点统一加前缀；`narrationNudge` / `narrationPromiseNudge` / `browserCompleteNudge`
+  常量本身不再带前缀（测试改为断言发送态）。
+- **同域同名优惠模型补标签**（`d221c72`，issue #286）：`disambiguatePromoNames` —— 一个 0 分、
+  一个 x0.03 的两条同名条目在只认 `name` 的客户端里分不清，选了免费那行可能实际发出付费 id。
+- **视频提交阶段 4xx 不罚号不换号**（`4221f2b`）：提交阶段除 401/403/429 外的 4xx 是上游在
+  建任务之前退回请求（实测 14407 时长越界），任务没建、积分没扣，同一 body 换号也是同一句。
+  按请求级归零动作，不再把健康号记成连败。
+- **`generate_video` 暴露三个参考素材参数**（`24e59f8`）：`reference_images` /
+  `reference_videos` / `reference_audios`（必须是上游取得到的公网地址）。
+- **模型目录降级 WARN 每种只报一次**（`392f8ac`，issue #283）：`degradedWarnOnce(key, …)`
+  按 key 去重；企业端点永续 500 时每轮 warm model rates 都重打一行、4 天 49 次，把真故障淹掉。
+  本仓 `probeGlobalModels` 仍是「单路降级取另一路」的旧版签名，只合入了 WARN 去重这一层。
+
+### 面板
+
+- **错误汇总可标为已读**（`53fbd2e`，issue #288）：后端 `ErrStat` 增 `last_unix`；前端把
+  「已读时刻」存 `localStorage`，按 `last_unix` 比较（`last` 只有 HH:MM:SS，跨天不可比），
+  已读行压到 45% 透明，可「隐藏已读」整行收起。**不动日志环** —— 日志是排查证据。
+- **「每日变化」柱状图标题归位**（`b1233f0`，issue #289）：`<title>` 挂在 `<svg>` 根下时
+  浏览器把它当整图说明，于是任意柱子悬停都显示第一条；本仓此前用空 `<g>` 包一层，
+  同样没有可悬停几何。改为作为 `<rect>` 的子节点输出（零值底痕也补上提示）。
+
+### 未合入（本仓已有等价实现，避免两套并存）
+
+- 上游 `GET /panel/api/accounts/export`（`p.accountsExport`，`53fbd2e`）：本仓早有
+  `GET /panel/api/export/accounts`（`internal/panel/export.go`，字段更全、带观测字段、
+  同样与 cockpit 导入同构），故不新增第二个导出端点，相关路由 / handler / README 段落一并跳过。
+
+### 测试
+
+- 新增 `browser_complete_test.go`、`model_name_dedupe_test.go`、`degraded_warn_test.go`
+  （均按本仓模块路径与 API 适配）。
+- `frontend_test.go` 增两个 node+vm 用例：`TestAppJSDailyBarsTitlePerBar`（柱子自带标题、
+  4 条互不相同）、`TestAppJSErrorSummaryReadMark`（已读行降透明、新行不受影响、隐藏已读生效）。
+  本仓 app.js 里 helper 定义顺序与上游不同，测试按函数名切片而不是固定区间。
+
 ## v1.35.22（2026-11-22）
 
 > 1.35.21 之后的 12 个合并（#195 ~ #209）。主线是 **11‑-128 的归因闭环** 与
