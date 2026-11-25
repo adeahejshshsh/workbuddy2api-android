@@ -140,7 +140,17 @@ check("PanelTrust.rememberKey" in body(panel, "private void askKeyOverride(final
 inj = body(panel, "private void injectKey(final WebView v, final int attempt)")
 check("onReceiveValue" in inj and "got.contains(key)" in inj,
       "注入后必须回读 sessionStorage 确认写入成功（bug-04 同口径）")
-check("v.reload()" in inj, "确认成功后才 reload")
+# reload 现在发生在两阶段校验之后：JS 写入回读确认 → 服务端确认这把 key 被接受。
+# 关键不变量是「写入确认成功之前不许 reload」；reload 本身挪进了 confirmKeyAccepted。
+check("confirmKeyAccepted" in inj,
+      "写入确认成功后必须再走服务端 key 校验（不能只凭 JS 写入就当登录成功）")
+confirm_src = body(panel, "private void confirmKeyAccepted(final WebView v, final String key)")
+check("keyAccepted" in confirm_src and "v.reload()" in confirm_src,
+      "只有服务端确认接受 key 之后才 reload（否则端口上是另一个实例时照样弹密钥门）")
+check("keyRejected" in confirm_src,
+      "服务端明确拒绝 key 时不能 reload，要引导用户填该实例自己的密钥")
+check("PanelTrust.keyOverride" in body(panel, "private void injectKey(final WebView v, final int attempt)"),
+      "注入密钥必须用 keyOverride（用户为该实例手输的那份），不能只用 config.json")
 check(not re.search(r"injected\s*=\s*true;[\s\S]{0,200}?evaluateJavascript", inj),
       "不许在 evaluateJavascript 之前就置 injected=true")
 check("attempt < 2" in inj, "写入未确认时要重试（不是弹一次 toast 就放弃）")

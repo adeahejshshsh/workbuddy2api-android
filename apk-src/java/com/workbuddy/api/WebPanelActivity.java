@@ -237,8 +237,12 @@ public class WebPanelActivity extends Activity {
                 // evaluateJavascript 把字符串结果再包一层 JSON：带引号才算真写进去。
                 if (got != null && got.contains(key)) {
                     injected = true;
-                    setChip("已自动登录（无需输入密钥）", 0xFF4CAF7D, null);
-                    v.reload();
+                    // 写入成功只说明 JS 收下了字符串；面板首屏要的是**服务端接受**这把
+                    // key。端口上是另一个实例时（SAME_KIND），本应用 config.json 里的
+                    // 密钥它不认 —— 于是「注入成功」之后照样 401、照样弹密钥门，
+                    // 用户看到的就是「点了信任还是要填密钥」。所以这里必须再验一次。
+                    setChip("正在确认密钥是否被网关接受…", 0xFF6E7683, null);
+                    confirmKeyAccepted(v, key);
                     return;
                 }
                 if (attempt < 2) {
@@ -257,6 +261,53 @@ public class WebPanelActivity extends Activity {
                         });
             }
         });
+    }
+
+    /**
+     * 注入完成后向服务端确认这把 key 真的能用（不是只看 JS 写入）。
+     *
+     * <p>三种结果：
+     * <ul>
+     *   <li><b>200</b> → 真登录了：reload 一次把首屏拉出来；</li>
+     *   <li><b>401/403</b> → 这把钥匙对面不认。不 reload（reload 只会再弹一次密钥门），
+     *       直接把 chip 变成可点的「填该实例的密钥」；</li>
+     *   <li><b>连不上/其它</b> → 不能断言 key 错（可能是网关刚重启、接口超时），
+     *       按「先放行」处理：照常 reload，让页面自己说话。</li>
+     * </ul>
+     */
+    private void confirmKeyAccepted(final WebView v, final String key) {
+        final int port = GwConfig.port(this);
+        new Thread(new Runnable() {
+            public void run() {
+                final int code = PanelTrust.keyStatus(port, key);
+                runOnUiThread(new Runnable() {
+                    public void run() {
+                        if (v == null) return;
+                        if (PanelTrust.keyAccepted(code)) {
+                            setChip("已自动登录（无需输入密钥）", 0xFF4CAF7D, null);
+                            v.reload();
+                            return;
+                        }
+                        if (PanelTrust.keyRejected(code)) {
+                            injected = false;
+                            setChip("未自动登录 · 网关不接受这把密钥（点此填写）", 0xFFE0A030,
+                                    new View.OnClickListener() {
+                                        public void onClick(View x) {
+                                            askKeyOverride(PanelTrust.trustedInstanceId(
+                                                    WebPanelActivity.this, GwConfig.port(WebPanelActivity.this)));
+                                        }
+                                    });
+                            toast("网关不接受这把 admin_api_key（HTTP " + code
+                                    + "）—— 两个实例的密钥通常不同，请填它的");
+                            return;
+                        }
+                        // 未知（0 / 5xx）：不阻断，让页面自己决定。
+                        setChip("已注入密钥（未能确认，HTTP " + code + "）", 0xFF8A93A6, null);
+                        v.reload();
+                    }
+                });
+            }
+        }, "wb2api-key-check").start();
     }
 
     /** JS 字符串字面量（与 MainActivity.quote 同口径，避免两处转义漂移）。 */
@@ -347,6 +398,13 @@ public class WebPanelActivity extends Activity {
                 .setMessage(msg)
                 .setPositiveButton("信任这个实例", new android.content.DialogInterface.OnClickListener() {
                     public void onClick(android.content.DialogInterface d, int w) {
+                        // 只信任、不给钥匙 = 一定 401（两个实例的 admin_api_key 不同）。
+                        // 所以「信任」在还没有该实例密钥时必须直接转去填密钥，
+                        // 否则用户点完信任回到面板，看到的还是密钥门 —— 本轮要修的就是这个。
+                        if (PanelTrust.keyOverride(WebPanelActivity.this).isEmpty()) {
+                            askKeyOverride(actualId);
+                            return;
+                        }
                         if (sameKind) PanelTrust.rememberTrust(WebPanelActivity.this,
                                 GwConfig.port(WebPanelActivity.this), actualId);
                         if (web != null) injectKey(web);
@@ -377,14 +435,53 @@ public class WebPanelActivity extends Activity {
                 .setView(input)
                 .setPositiveButton("保存并重试", new android.content.DialogInterface.OnClickListener() {
                     public void onClick(android.content.DialogInterface d, int w) {
-                        String v = input.getText() == null ? "" : input.getText().toString().trim();
-                        if (v.isEmpty()) PanelTrust.forgetKey(WebPanelActivity.this);
-                        else PanelTrust.rememberKey(WebPanelActivity.this, v);
-                        if (actualId != null && !actualId.isEmpty()) {
-                            PanelTrust.rememberTrust(WebPanelActivity.this,
-                                    GwConfig.port(WebPanelActivity.this), actualId);
+                        final String v = input.getText() == null ? "" : input.getText().toString().trim();
+                        if (v.isEmpty()) {
+                            // 留空 = 清掉已记住的密钥（并忘掉信任：没有钥匙的信任没有意义）
+                            PanelTrust.forgetKey(WebPanelActivity.this);
+                            PanelTrust.forgetTrust(WebPanelActivity.this);
+                            toast("已清除记住的密钥");
+                            return;
                         }
-                        if (web != null) injectKey(web);
+                        // 先验再记：存一把对面不认的钥匙，下次照样弹密钥门，
+                        // 而且用户会以为「填过了怎么还问」。
+                        final int port = GwConfig.port(WebPanelActivity.this);
+                        setChip("正在验证这把密钥…", 0xFF6E7683, null);
+                        new Thread(new Runnable() {
+                            public void run() {
+                                final int code = PanelTrust.keyStatus(port, v);
+                                runOnUiThread(new Runnable() {
+                                    public void run() {
+                                        if (PanelTrust.keyAccepted(code)) {
+                                            PanelTrust.rememberKey(WebPanelActivity.this, v);
+                                            String id = actualId;
+                                            if (id == null || id.isEmpty()) {
+                                                id = PanelTrust.trustedInstanceId(WebPanelActivity.this, port);
+                                            }
+                                            if (id != null && !id.isEmpty()) {
+                                                PanelTrust.rememberTrust(WebPanelActivity.this, port, id);
+                                            }
+                                            toast("密钥已保存，下次打开面板自动登录");
+                                            if (web != null) injectKey(web);
+                                            return;
+                                        }
+                                        if (PanelTrust.keyRejected(code)) {
+                                            setChip("未自动登录 · 密钥被网关拒绝（点此重填）", 0xFFE0A030,
+                                                    new View.OnClickListener() {
+                                                        public void onClick(View x) {
+                                                            askKeyOverride(actualId);
+                                                        }
+                                                    });
+                                            toast("网关拒绝这把密钥（HTTP " + code + "），未保存");
+                                            return;
+                                        }
+                                        // 连不上/其它：不阻断，先记住并注入，让页面自己说话。
+                                        PanelTrust.rememberKey(WebPanelActivity.this, v);
+                                        if (web != null) injectKey(web);
+                                    }
+                                });
+                            }
+                        }, "wb2api-key-save").start();
                     }
                 })
                 .setNegativeButton("取消", null)
