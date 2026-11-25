@@ -206,15 +206,42 @@ denied`，表现为「一半包 PASS、一半包编译失败」，很容易误�
   确认为空。
 - 产物里 `classes.dex` / `libwb2api.so` 的 zip 时间戳仍是上一版的（正常）。
 
-### 1. aapt2 与仓库的 abseil/protobuf ABI 不匹配
+### 1. aapt2：**2026-11-25 起已修好**，降级路径不再是常态
 
-`aapt2` 报 `cannot locate symbol ...ZeroCopyInputStream::ReadCord...` 直接崩。
-所以 `build_apk.sh` 探测 `aapt2 version`，失败就走**降级路径**：
-复用上一版 APK 的清单与资源，只重编 `classes.dex` + 换 `.so`，并把 AXML 字符串池里的
-`versionName` 按 UTF-16LE **等长就地改写**。
+历史症状：`aapt2` 报 `cannot locate symbol ...ZeroCopyInputStream::ReadCord...` 直接崩 ——
+那是 `.um-toolchain` 里那份 **x86-64 ELF** 的 build-tools 二进制，架构就不对；
+另有一版 Termux 的 `aapt2` 与仓库自带的 abseil/protobuf 版本不匹配。
+所以 `build_apk.sh` 一直探测 `aapt2 version`，失败就走**降级路径**（复用上一版清单与
+资源 + AXML 等长就地改写 versionName / 原地改 versionCode）。
 
-后果：**二进制清单的 `versionCode` 改不了**（只能改 versionName），系统里的版本号不会递增。
-要真正改清单，得先找到与当前 abseil 兼容的 aapt2。
+**修法**（aarch64 Termux 官方包 + 五个依赖，全部 `dpkg-deb -x` 解包，不碰 dpkg 数据库）：
+
+```bash
+P=$PREFIX; cd $HOME
+for p in aapt2 fmt libpng protobuf libprotobuf abseil-cpp; do apt-get download $p; done
+rm -rf $HOME/depstage && mkdir -p $HOME/depstage
+for d in aapt2_*.deb "fmt_1%3a12.2.1_aarch64.deb" libpng_*.deb "protobuf_2%3a36.2-1_aarch64.deb" \
+         "libprotobuf_2%3a36.2-1_aarch64.deb" abseil-cpp_*.deb; do dpkg-deb -x "$d" $HOME/depstage; done
+cp -a $HOME/depstage/data/data/com.termux/files/usr/{lib,bin,include,share}/. $P/  # 分四次拷，见下
+aapt2 version     # → Android Asset Packaging Tool (aapt) 2.20-android-16.0.0_r4
+```
+
+要点：
+- **`libprotobuf` 与 `protobuf` 是两个包**。只装 `protobuf` 会缺 `libprotobuf.so`
+  （它只带 `libprotobuf-lite.so` + `libprotoc.so`），报 `library "libprotobuf.so" not found`。
+- 依赖链按报错逐个补：`libfmt.so` → `libprotobuf.so` → `libabsl_*.so`（`abseil-cpp` 带）
+  → `libpng16.so` / `libexpat.so.1`（已在）。
+- **`android.jar` 要 API 36**（见 §3.1 的说明：`GatewayService.onTimeout(int,int)` 是 API 36 的
+  `Service` 方法）。`curl -sSL -o platform-36.zip https://dl.google.com/android/repository/platform-36_r02.zip`
+  → 取 `android-36/android.jar` 放进 `$PREFIX/lib/wbapi-tools/android.jar`（27,768,026 B）。
+
+修好之后 `build_apk.sh` 会走**完整路径**：`aapt2 compile/link` → `javac`（+4 个 SelfCheck）
+→ `d8` → 组装 → `apksigner`。产物与降级路径的差异（同版本号对照过）：
+`AndroidManifest.xml` 字符串池完全一致（就地改写是忠实的），但 `resources.arsc` 真编、
+`classes.dex` 由 d8 重新脱糖（lambda 变成 `$$ExternalSyntheticLambda`，比旧 r8 产物少 6 个类）。
+
+降级路径仍然保留，但**只在 aapt2 又坏掉时**才会命中；`tests/android/check_build_hygiene.py`
+照旧守住它。
 
 ### 2. AXML 版本串必须按 UTF-16LE 匹配
 
