@@ -63,6 +63,29 @@
 `check_webpanel_key_semantics.py` 的 reload 断言改成两阶段：写入回读确认后必须再
 经 `confirmKeyAccepted` 的服务端校验才 reload。
 
+### 续修 2：真机截图显示探测报空、填对密钥仍被拦
+
+截图：`本应用记录的实例 4c9b9400…` 与端口实际返回**完全一致**，但面板探测
+`该端口报出的实例：—`，判成 MISMATCH。根因两条：
+
+- `verify` 把 instance 探测当唯一身份判据，探测偶发报空（时序/并发）就拦；
+- 失败分支直接 `return`、从不注入，用户填对并记住的 `panel_key` 永远没机会被用。
+
+改动：
+
+1. **`verify` 改以「服务端接受密钥」为主判据**：手上有 key（keyOverride 或 config.json）
+   且 `keyStatus==200` 直接放行。能接受这把 32-hex admin key 的只能是自家网关，
+   比 instance 探测更强；instance 降级为辅助显示。
+2. **按端口记忆信任**：新增 `hasTrustedKey()`，用户为某端口填过并验证过密钥后，
+   即使探测报空也放行（注入后 `confirmKeyAccepted` 会再验，密钥失效会引导重填）。
+3. **补写信任标记的断点**：探测报空时 `actualId` 为空，`sameKind=false`，填密钥成功
+   后原本不写 `rememberTrust` → `hasTrustedKey` 永远 false。现在无条件写，id 用本机
+   `InstanceId` 兜底（标记里的 id 只用于显示，门禁靠 keyOverride 非空）。
+4. **修 `rememberKey` 的 AtomicFile bug**：`startWrite()` 用了新建的实例、
+   `finishWrite()` 却在另一个实例上 —— 写入会走 `failWrite`，密钥根本没存上。
+
+`check_webpanel_key_semantics.py` 新增六条断言覆盖以上路径。
+
 
 ## v1.35.23（2026-11-25）
 

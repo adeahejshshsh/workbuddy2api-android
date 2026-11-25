@@ -63,42 +63,65 @@ final class PanelTrust {
     /**
      * 后台线程探测，结果切回主线程。
      *
-     * <p><b>信任记忆</b>：若此前用户明确确认过「这个端口上那个实例就是我自己的」，
-     * 且对面现在报的 id 与当初确认的**完全一致**，直接判 OK。判据是 id 而不是端口 ——
-     * 端口可能换主，id 换不了（换了就说明是另一个实例，要重新确认）。
-     * 这样「强制注入一次」不再只是本次会话有效，不会每次打开面板都重来一遍。
+     * <p><b>主判据是「密钥被服务端接受」，不是 instance_id 比对</b>。原因（真机反馈）：
+     * 本应用记录的实例与端口实际返回明明一致，面板探测却拿到空串 —— 探测受时序、
+     * WebView 网络占用影响偶发失败，一旦把它当唯一判据，用户填对密钥也会被拦在门外，
+     * 而且 verify 失败时压根不注入，记住的密钥永远没机会被用，表现就是「每次都要填」。
+     *
+     * <p>能接受这把 32-hex admin key 的只可能是本项目的网关（key 只存在本 App 私有
+     * 目录与网关 config.json），所以「keyStatus==200」是比 instance 探测更强的身份证明。
+     * instance_id 降级为**辅助信息**（chip 上显示指纹），不再单独决定是否放行。
+     *
+     * <p>判定顺序：
+     * <ol>
+     *   <li>手上有 key（keyOverride 或 config.json）且服务端接受 → OK，直接注入；</li>
+     *   <li>否则按 instance 探测给原因：连不上 / 旧网关 / id 匹配 / 信任记忆命中；</li>
+     *   <li>都不命中 → SAME_KIND 或 MISMATCH，交给用户判断（不自动注入）。</li>
+     * </ol>
      */
     static void verify(final Context c, final Cb cb) {
         if (c == null || cb == null) return;
         final int port = GwConfig.port(c);
         final String expect = InstanceId.read(c);
         final String trustedId = trustedInstanceId(c, port);
+        // 注入用的同一把 key：用户为「另一个实例」手输的优先，回落 config.json。
+        String k = keyOverride(c);
+        if (k.isEmpty()) k = PanelApi.key(c);
+        final String key = k;
         new Thread(new Runnable() {
             public void run() {
                 final String reason;
                 String actual = "";
-                if (expect.isEmpty()) {
+                Probe p = probe(port);
+                actual = p.code == 200 ? InstanceId.parseId(p.body) : "";
+
+                // ① 密钥被对面接受 = 自家网关，直接放行（最强判据，绕开探测时序问题）。
+                //    只有 keyStatus 明确 200 才算；401/403/连不上都不算，继续走下面的
+                //    instance 判据，避免把「对面恰好也认这把 key」当成万能通行证。
+                if (!key.isEmpty() && keyAccepted(keyStatus(port, key))) {
+                    reason = OK;
+                } else if (expect.isEmpty()) {
                     reason = NO_ID;
+                } else if (p.code == 0) {
+                    // 连不上：网关没起、或被别的进程占着但不 HTTP 应答。
+                    reason = NO_CONN;
+                } else if (p.code == 404) {
+                    reason = OLD_GATEWAY;
+                } else if (p.code != 200) {
+                    reason = HTTP_ERROR + ":" + p.code;
+                } else if (InstanceId.matches(expect, actual)) {
+                    reason = OK;
+                } else if (!actual.isEmpty() && actual.equals(trustedId)) {
+                    // 用户确认过这个实例：它的密钥是「密钥覆盖」里那份（见 WebPanelActivity）
+                    reason = OK;
+                } else if (hasTrustedKey(c, port) && !key.isEmpty()) {
+                    // 用户为这个端口确认并保存过密钥（探测偶尔报空，不能让它反复拦人）。
+                    // 注入后 confirmKeyAccepted 会再验一次；若密钥失效会引导重填。
+                    reason = OK;
                 } else {
-                    Probe p = probe(port);
-                    actual = p.code == 200 ? InstanceId.parseId(p.body) : "";
-                    if (p.code == 0) {
-                        // 连不上：网关没起、或被别的进程占着但不 HTTP 应答。
-                        reason = NO_CONN;
-                    } else if (p.code == 404) {
-                        reason = OLD_GATEWAY;
-                    } else if (p.code != 200) {
-                        reason = HTTP_ERROR + ":" + p.code;
-                    } else if (InstanceId.matches(expect, actual)) {
-                        reason = OK;
-                    } else if (!actual.isEmpty() && actual.equals(trustedId)) {
-                        // 用户确认过这个实例：它的密钥是「密钥覆盖」里那份（见 WebPanelActivity）
-                        reason = OK;
-                    } else {
-                        // 能解析出合法 32 hex = 对面是本项目的另一个实例（见 SAME_KIND）；
-                        // 解析不出 = 应答形状不对，按「身份不明的占用者」处理（更严）。
-                        reason = actual.isEmpty() ? MISMATCH : SAME_KIND;
-                    }
+                    // 能解析出合法 32 hex = 对面是本项目的另一个实例（见 SAME_KIND）；
+                    // 解析不出 = 应答形状不对，按「身份不明的占用者」处理（更严）。
+                    reason = actual.isEmpty() ? MISMATCH : SAME_KIND;
                 }
                 final String actualOut = actual;
                 new Handler(Looper.getMainLooper()).post(new Runnable() {
@@ -170,7 +193,14 @@ final class PanelTrust {
         return new File(new File(c.getFilesDir(), "gateway/data"), "panel_trust.json");
     }
 
-    /** 该端口上被用户确认过的实例标识；没有或读不出返回空串。 */
+    /**
+     * 该端口上被用户确认过的实例标识；没有或读不出返回空串。
+     *
+     * <p>注意：探测偶尔报空（真机反馈：本应用记录的 id 与端口返回一致，探测却拿到空）。
+     * 所以「有没有确认过」的权威判据是 {@link #keyOverride} 是否非空 —— 用户填过并通过
+     * 服务端验证的密钥已经记住了，那这个端口就是用户点过头的。这里返回的 id 只用于
+     * chip 显示与「id 一致」的快速路径，不作为唯一门禁。
+     */
     static String trustedInstanceId(Context c, int port) {
         String txt = readSmall(trustFile(c), 4096);
         if (txt.isEmpty()) return "";
@@ -181,6 +211,11 @@ final class PanelTrust {
         } catch (Throwable t) { return ""; }
         Matcher id = Pattern.compile("\"instance_id\"\\s*:\\s*\"([0-9a-f]{32})\"").matcher(txt);
         return id.find() ? id.group(1) : "";
+    }
+
+    /** 用户是否已经为某端口确认并保存了密钥（不依赖 instance 探测）。 */
+    static boolean hasTrustedKey(Context c, int port) {
+        return !keyOverride(c).isEmpty() && !trustedInstanceId(c, port).isEmpty();
     }
 
     /** 记住「这个端口的这个实例我认了」。写不进去只影响下次要不要再问，不影响本次注入。 */
@@ -233,7 +268,7 @@ final class PanelTrust {
         AtomicFile af = new AtomicFile(f);
         FileOutputStream os = null;
         try {
-            os = new AtomicFile(f).startWrite();
+            os = af.startWrite();
             os.write(k.getBytes("UTF-8"));
             os.flush();
             af.finishWrite(os);

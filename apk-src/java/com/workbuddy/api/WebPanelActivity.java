@@ -454,13 +454,15 @@ public class WebPanelActivity extends Activity {
                                     public void run() {
                                         if (PanelTrust.keyAccepted(code)) {
                                             PanelTrust.rememberKey(WebPanelActivity.this, v);
+                                            // 必须写信任标记：verify 里的「按端口记忆」
+                                            // 靠它，缺了就还是每次都拦。探测报空时 actualId
+                                            // 也为空，这时用本机记录的 id 兜底 —— 标记里的
+                                            // id 只用于 chip 显示，门禁靠 keyOverride 非空。
                                             String id = actualId;
                                             if (id == null || id.isEmpty()) {
-                                                id = PanelTrust.trustedInstanceId(WebPanelActivity.this, port);
+                                                id = InstanceId.read(WebPanelActivity.this);
                                             }
-                                            if (id != null && !id.isEmpty()) {
-                                                PanelTrust.rememberTrust(WebPanelActivity.this, port, id);
-                                            }
+                                            PanelTrust.rememberTrust(WebPanelActivity.this, port, id);
                                             toast("密钥已保存，下次打开面板自动登录");
                                             if (web != null) injectKey(web);
                                             return;

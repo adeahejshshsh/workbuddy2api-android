@@ -135,6 +135,22 @@ check(inj_src.index("PanelTrust.keyOverride") < inj_src.index("PanelApi.key"),
 check("PanelTrust.rememberKey" in body(panel, "private void askKeyOverride(final String actualId)"),
       "手输的密钥必须落盘记住（否则「填了也只对本次会话有效」）")
 
+# 真机反馈：本应用记录的 id 与端口返回一致，但探测拿到空串 → 用户填对密钥仍被
+# verify 拦在门外（失败分支直接 return，从不 injectKey），记住的 key 永远用不上。
+pt = (ROOT / "apk-src/java/com/workbuddy/api/PanelTrust.java").read_text(encoding="utf-8")
+check("keyAccepted(keyStatus" in pt,
+      "verify 必须以「服务端接受密钥」为主判据（instance 探测偶发报空时不能误拦）")
+check("hasTrustedKey" in pt,
+      "用户为端口保存过密钥时要有不依赖 instance 探测的信任判据")
+check("keyOverride" in pt and "keyOverrideFile" in pt,
+      "密钥必须持久化到 panel_key（用户填一次之后不再问）")
+check("os = af.startWrite()" in pt,
+      "panel_key 写入必须用同一个 AtomicFile 实例 startWrite/finishWrite")
+# 填密钥成功后必须无条件写信任标记（探测报空时 actualId 为空也要记）
+ask = body(panel, "private void askKeyOverride(final String actualId)")
+check(ask.count("rememberTrust") >= 1,
+      "填密钥成功后必须写信任标记（否则按端口记忆永远命中不了）")
+
 # 写入必须**回读确认**：旧实现在写入前就置 injected=true，写失败与成功长得一样，
 # 表现就是「每次打开都要手输密钥」。
 inj = body(panel, "private void injectKey(final WebView v, final int attempt)")
