@@ -6,9 +6,15 @@
 workbuddy2api-panel/data/
 workbuddy2api-panel/auths/
 workbuddy2api-panel/config.json
-# 编译产物（cmd/signin 的 10MB 二进制，2026-10-23 误提交过一次）
+# 编译产物（cmd/* 的二进制曾多次被误提交：signin 10MB、trial 12.5MB）
 workbuddy2api-panel/signin
+workbuddy2api-panel/trial
+workbuddy2api-panel/login
+workbuddy2api-panel/credit
 workbuddy2api-panel/backups/
+
+# 维护者台账（合并记录 / 审查清单）：属于本地工作笔记，不进公开仓库
+workbuddy2api-panel/*LEDGER*.txt
 
 # 密钥与签名
 apk-src/wb2api.keystore
@@ -37,13 +43,13 @@ build/
 *.pid
 data/
 docs/*.tmp
+*.sh
 
 # 文档：一律不进库，只放行本来就有的这几份
 # （和 workbuddy2api-panel/.gitignore 同一套写法：审查报告/缺陷清单随手丢在根目录，
 #   tar 会把整个工作区带走 —— 默认全挡，白名单放行）
 *.md
 !README.md
-!AGENT.md
 !CHANGELOG.md
 !NOTICE.md
 !docs/LAYOUT.md

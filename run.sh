@@ -1,15 +1,16 @@
-#!/data/data/com.dsharnessmobile.shell/files/usr/bin/bash
-# workbuddy2api 启停脚本（Android / DeepSeek Harness 移植版）
+#!/usr/bin/env bash
+# workbuddy2api 启停脚本（Android 客户端命令行侧）
 #   用法: bash run.sh [start|stop|restart|status|log|panel]
+#   环境变量: PREFIX（二进制安装前缀，默认 $HOME/.local）/ APP_DIR（数据目录）/ PORT
 set -u
 # SELF 绝对路径（bug #9）：restart 里原本用 bash "$0"，而 $0 是**调用时的相对路径**
 # （如 run.sh），从别的目录执行（cd /tmp && bash ~/run.sh restart）就会找不到脚本，
 # restart 静默只跑一半。
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
-PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
-# 工作目录 = 脚本所在仓库根的 panel 子目录（相对定位；此前硬编码 /sdcard 绝对路径，
-# 改名/换机就起不来）。可用 APP_DIR=… 覆盖。
+PREFIX="${PREFIX:-$HOME/.local}"
+# 工作目录 = 脚本所在仓库根的 panel 子目录（相对定位，改名/搬目录都不受影响）。
+# 可用 APP_DIR=… 覆盖。
 APP_DIR="${APP_DIR:-$(cd "$(dirname "$SELF")" && pwd)/workbuddy2api-panel}"
 BIN_DIR="$PREFIX/lib/workbuddy2api"
 BIN="$BIN_DIR/server"
@@ -66,10 +67,10 @@ case "${1:-start}" in
     # 只取一次 pid（报告 #25）：两次调用之间进程可能退出，会打印空的 pid。
     CUR_PID="$(running_pid)"
     if [ -n "$CUR_PID" ]; then echo "已在运行 (pid $CUR_PID)"; exit 0; fi
-    [ -x "$BIN" ] || { echo "缺少二进制: $BIN （先跑 rebuild.sh）"; exit 1; }
+    [ -x "$BIN" ] || { echo "缺少二进制: $BIN （先 go build ./cmd/server 再装到该路径）"; exit 1; }
     mkdir -p "$APP_DIR/data" "$APP_DIR/auths"
     cd "$APP_DIR" || exit 1
-    # 注意: 二进制必须在可执行分区($PREFIX); 工作区 /sdcard 是 noexec
+    # 二进制必须落在允许执行的目录（$PREFIX），不要放在被挂载为 noexec 的卷上
     nohup "$BIN" -config config.json >>"$LOG" 2>&1 &
     echo $! > "$PIDF"
     sleep 2
@@ -131,8 +132,8 @@ PYWAIT
       rm -f "$PIDF"   # 残留 pid 文件：清掉
     fi
     ;;
-  # 必须用 bash 起子进程（bug #1）：工作区在 sdcard（noexec）且脚本本身没有 x 位，
-  # 直接执行 "$0" 会报 command not found / Permission denied，stop 和 start 都没跑。
+  # 必须用 bash 起子进程（bug #1）：脚本可能没有 x 位，直接执行 "$0" 会报
+  # command not found / Permission denied，stop 和 start 都没跑。
   restart) bash "$SELF" stop; sleep 1; bash "$SELF" start ;;
   status)
     p=$(running_pid)

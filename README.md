@@ -138,20 +138,44 @@ API Key  : 客户端 key（「复制密钥」里的 API Key 那一行）
 
 ### 4. 从源码构建
 
-**APK**（不需要 Android Studio / Gradle）：
+本仓库只分发**源码**。可安装的 APK 请直接取 [Releases](https://github.com/adeahejshshsh/workbuddy2api-android/releases)
+里的产物，不需要自己编译。
+
+要自己出包，需要一条完整的 Android 构建链：
+
+| 组件 | 用途 |
+|---|---|
+| JDK 17（`javac` / `keytool`） | 编译 App 的 Java 源码、签名 |
+| Android SDK：`android.jar`（**platform 36**） | 编译期 stub。`GatewayService` 用到 API 36 的 `Service.onTimeout(int,int)`，platform 34/35 会编译失败 |
+| `aapt2`（16.0.0.4 及以上） | 编译 `res/`、链接清单 |
+| `d8`（随 `r8.jar`） | Java 字节码 → dex |
+| `apksigner` | 签名 APK |
+| 自备 keystore | 仓库不含签名密钥；口令通过 `WB2API_KS_PASS` 环境变量传入 |
+
+构建分两步：先 `go build ./cmd/server`，把产物改名为 `libwb2api.so` 放进 APK 的
+`lib/arm64-v8a/`（Android 只允许从 `nativeLibraryDir` 执行原生二进制，这是唯一可行
+的位置），再走上面这套 Android 工具链把 `apk-src/` 打成 APK。
+
+**服务端**（Go 1.21+）：
 
 ```bash
-bash patches/build_apk.sh      # 产出 dist/WorkBuddy2API.apk
+cd workbuddy2api-panel
+go build ./cmd/server     # 主网关
+go build ./cmd/login      # 登录辅助
+go build ./cmd/credit     # 额度查询
 ```
 
-需要 `aapt2`、`javac`（17）、`android.jar`、`d8`（在 `r8.jar` 里）、`apksigner`、`zip`、`keytool`，
-以及自备 keystore（仓库不含签名密钥，口令走 `WB2API_KS_PASS` 环境变量）。
+面板资源（`internal/panel/*.html|js|css`）通过 `go:embed` 编进二进制，改完必须重新
+`go build`。`patches/panel-mobile.css` 是手机端的样式覆盖，需要在构建前追加进
+`internal/panel/index.html` 的 `<style>` 块末尾（文件里按屏幕宽度分档，与桌面样式
+共用同一套 CSS 变量）。
 
-**服务端**（Go）：
+**测试**：
 
 ```bash
-bash rebuild.sh                      # 编 cmd/* 到 $PREFIX/lib/workbuddy2api/
-bash patches/apply_panel_mobile.sh   # 改了面板 CSS 之后要重跑（面板 go:embed 进二进制）
+cd workbuddy2api-panel && go test ./...            # 全部 Go 单测
+WB2A_PARITY=1 go test ./internal/upstream -run TestOfficialParity   # 上游协议对齐
+python3 tests/android/check_*.py                    # 源码级回归断言（纯文本，不需要 JDK）
 ```
 
 ---
@@ -161,11 +185,9 @@ bash patches/apply_panel_mobile.sh   # 改了面板 CSS 之后要重跑（面板
 ```
 VERSION                  版本唯一来源
 apk-src/                 App 源码（无 Gradle：AndroidManifest + java + res + assets + test）
-patches/                 构建与移植脚本（build_apk.sh / apply_panel_mobile.sh / patch_*.sh）
+patches/                 打包与移植辅助（panel-mobile.css / zip_align.py / make_icons.py）
 workbuddy2api-panel/     上游服务端源码（Go，含手机端 CSS 补丁）
-run.sh / rebuild.sh      命令行侧：起停服务 / 重编服务端
-watchdog.sh              命令行侧看门狗（外部实例只提示、不抢端口）
-AGENT.md                 踩过的坑与本机环境要点（给 AI / 维护者看）
+tests/                   源码级回归断言（android/check_*.py）
 CHANGELOG.md             变更记录
 ```
 

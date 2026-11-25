@@ -6,9 +6,9 @@
 
 | 路径 | 是什么 | 怎么跑 |
 |---|---|---|
-| `run.sh` | Go 单测入口（按包挑或全量），外加面板前端 JS 冒烟 | `bash tests/run.sh [all\|pkg…]` |
-| `android/WatchdogSelfCheck.java` | 看门狗退避序列自检（宿主 JVM，不需要真机） | `patches/build_apk.sh` 会编进来跑 |
-| `android/GwConfigSelfCheck.java` | 网关配置摘要自检（同上） | 同上 |
+| `android/check_*.py` | 源码级回归断言（纯文本 + 标准库，不需要 JDK） | `python3 tests/android/check_*.py` |
+| `android/*SelfCheck.java` | 纯逻辑自检（看门狗退避序列、日志分级、用量分桶、网关配置摘要） | 与 App 源码一起 `javac` 编译后跑 main |
+| Go 单测 | 跟着包走，见下节 | `cd workbuddy2api-panel && go test ./...` |
 
 ## Go 单测为什么不在这里
 
@@ -31,5 +31,5 @@ Go 工具链有一条硬约束：**`xxx_test.go` 必须和被它测试的包在�
 ## 新增测试往哪放
 
 - 测 Go 代码 → 跟着包走，`internal/<pkg>/*_test.go`；
-- 测 App（Java）里的纯逻辑 → `tests/android/`，并在 `patches/build_apk.sh` 的自检步骤里挂上；
-- 测脚本/构建流程 → `tests/` 下新增 `*.sh`，从 `run.sh` 里调用。
+- 测 App（Java）里的纯逻辑 → `tests/android/*SelfCheck.java`，与 App 源码一起编译运行；
+- 测源码级配置/约定（清单属性、注释口径、字符串契约）→ `tests/android/check_*.py`。

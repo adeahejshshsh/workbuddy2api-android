@@ -1,4 +1,4 @@
-#!/data/data/com.dsharnessmobile.shell/files/usr/bin/bash
+#!/usr/bin/env bash
 # CLI 侧看门狗（run.sh 那套用）：
 #   · 7863 有人正常服务（本脚本起的，或外部实例如 App 里那份）→ 不插手
 #   · 进程在但 /healthz 连续 MAXFAIL 次不通 → 判僵死，杀掉重拉

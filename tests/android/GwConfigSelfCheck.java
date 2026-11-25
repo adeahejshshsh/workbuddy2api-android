@@ -4,11 +4,11 @@
 // 解析错了就是「改端口后 App 面板打不开、看门狗反复杀健康网关」。
 //
 // 跑法（需要 android.jar 与同目录的 GwConfig.java）：
-//   T=$PREFIX/tmp/gwtest; mkdir -p $T/src/com/workbuddy/api $T/out
+//   T=$(mktemp -d); mkdir -p $T/src/com/workbuddy/api $T/out
 //   cp apk-src/java/com/workbuddy/api/GwConfig.java $T/src/com/workbuddy/api/
 //   cp patches/gwconfig_selftest.java $T/src/com/workbuddy/api/GwSelfTest.java
-//   javac -cp $PREFIX/lib/wbapi-tools/android.jar -d $T/out $T/src/com/workbuddy/api/*.java
-//   java -cp $T/out:$PREFIX/lib/wb2api-tools/android.jar com.workbuddy.api.GwSelfTest
+//   javac -cp android.jar -d $T/out $T/src/com/workbuddy/api/*.java
+//   java -cp $T/out:android.jar com.workbuddy.api.GwSelfTest
 package com.workbuddy.api;
 
 public class GwSelfTest {

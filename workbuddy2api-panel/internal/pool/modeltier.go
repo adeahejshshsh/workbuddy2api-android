@@ -79,7 +79,7 @@ func (p *Pool) loadTierLocked() {
 // marshalTierLocked 把等级事实序列化（纯内存，不碰磁盘）。调用方持 p.mu。
 //
 // 拆出这一步是为了把 fsync 挪出锁（审查 C5-68）：saveTierLocked 走
-// auth.ReplaceAtomic（写 + fsync + rename），在 /sdcard 上是十毫秒量级，而
+// auth.ReplaceAtomic（写 + fsync + rename），在慢速（FUSE 等）卷上是十毫秒量级，而
 // NoteModelTierDenied 是**持池写锁**执行的 —— 首轮扫模型/账号期间每个新事实都会让
 // pick / /status / /healthz 一起排队。现在锁内只 marshal，写盘在锁外做。
 func (p *Pool) marshalTierLocked() []byte {

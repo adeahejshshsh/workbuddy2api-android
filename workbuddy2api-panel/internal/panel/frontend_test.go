@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// nodeExec / nodePrefix 决定「怎么跑 node」：本机（Android app 私有目录）是 noexec，
+// nodeExec / nodePrefix 决定「怎么跑 node」：受限环境里私有目录可能禁止直接 exec，
 // 任何二进制/脚本都不能直接 exec，必须由 /system/bin/linker64 代跑。
-// 此前这里直接 skip —— 于是**所有**前端检查在这台机器上长期静默跳过，
+// 此前这里直接 skip —— 于是**所有**前端检查长期静默跳过，
 // v1.27.6 引入的 reqErr 作用域 bug 就是这么漏出去的。
 var (
 	nodeExec   = "node"
@@ -27,7 +27,7 @@ func nodeCmd(args ...string) *exec.Cmd {
 	full := append(append([]string{}, nodePrefix...), args...)
 	cmd := exec.Command(nodeExec, full...)
 	// 钉死时区：面板按**浏览器本地时区**渲染时间，而 node 进程默认可能是 UTC。
-	// 不钉的话「本地时间 → epoch」的断言会随宿主时区漂 8 小时（本机实测过）。
+	// 不钉的话「本地时间 → epoch」的断言会随宿主时区漂 8 小时（实测过）。
 	cmd.Env = append(os.Environ(), "TZ=Asia/Shanghai")
 	return cmd
 }
@@ -1171,7 +1171,7 @@ const ctx = {
   rateCell: () => '<td></td>',
   outCell: () => '<td></td>',
   // mdRowHtml 里还会调这两个（1017 版本徽标、上游可用性标签），定义在切片区间之外。
-  // 本机 node 跑不起来时这些用例会 skip，于是缺桩一直没暴露 —— 2026-10-31 CI 首跑抓到。
+  // node 跑不起来时这些用例会 skip，于是缺桩一直没暴露 —— 2026-10-31 CI 首跑抓到。
   is1017Model: () => false,
   mdAvailabilityTag: () => '',
 };
@@ -1200,7 +1200,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	// node 在本机（Android）可能找得到但**执行不了**（私有目录 exec 受限）：
+	// node 可能找得到但**执行不了**（受限环境里私有目录 exec 被拒）：
 	// 与其他 JS 用例同口径，先真跑一次 --version 再决定跳过。
 	if _, err := exec.Command(node, "--version").Output(); err != nil {
 		t.Skipf("node 不可执行（%v）; JS checks skipped", err)
@@ -1273,7 +1273,7 @@ console.log('ok');
 // 判据是行为而非字面：在 node + DOM 桩里调用绑上去的处理函数，看它有没有按当前窗口值
 // 去取数据，而不是 grep 源码里有没有那两行。
 func TestAppJSBalanceWindowFilterWired(t *testing.T) {
-	nodeBin(t) // 本机需要 linker64 代跑，nodeBin 会把 nodeExec/nodePrefix 配好
+	nodeBin(t) // 需要 linker 代跑时，nodeBin 会把 nodeExec/nodePrefix 配好
 	harness := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
