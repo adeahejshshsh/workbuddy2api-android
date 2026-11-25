@@ -101,7 +101,7 @@ const out = {};
 		t.Fatal(err)
 	}
 	f.Close()
-	// 宿主没有可执行的 node（Android/Termux 下私有目录 exec 被 SELinux 拒）时跳过：
+	// 宿主没有可执行的 node（受限环境里私有目录 exec 被拒）时跳过：
 	// 这条用例验的是 app.js 的浏览器侧逻辑，缺 node 属环境限制而不是回归。
 	if vout, verr := exec.Command(node, "--version").CombinedOutput(); verr != nil {
 		t.Skipf("node 不可执行（%v）：%s", verr, vout)

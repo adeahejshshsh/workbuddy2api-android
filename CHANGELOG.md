@@ -4,7 +4,7 @@
 
 > 同步 `misakano7545/workbuddy2api-panel` 的 `e2d0eb6..b1233f0`（10 条提交、25 个文件、
 > 其中 5 个新增）。本仓与上游在 `handler.go` / `continue.go` / `app.js` 等处早已分叉，
-> 所以逐条按「改动意图」合入而不是整文件覆盖；`go build ./...` + `bash tests/run.sh all`
+> 所以逐条按「改动意图」合入而不是整文件覆盖；`go build ./...` + 全量测试
 > 24/24 通过。版本 `1.35.22` → `1.35.23`（versionCode `13522` → `13523`）。
 
 ### 服务端
@@ -227,12 +227,12 @@ pool 的「合并而非换指针」修复按 `ExpiresAt` 比较新旧凭据，�
 
 ### 构建与门禁
 
-- `tests/run.sh` 改**动态发现**：补上 `balance` / `safefile` / `livecfg` / `logfmt` /
+- 测试入口 改**动态发现**：补上 `balance` / `safefile` / `livecfg` / `logfmt` /
   `cmd/trial` 五个**从来没进过全量门禁**的包 —— 这是「全量一直漏跑」的根因。
-  `bash tests/run.sh all` 从 19 个包变成 **24 个包**。
+  全量测试 从 19 个包变成 **24 个包**。
 - CI 加最小权限 `contents: read`、action 固定 `@v4`/`@v5`、`persist-credentials: false`。
 - `tests/android/check_*.py` 从 2 个扩到 **9 个**（22 + 9 + 19 + 17 + 14 + 23 + 31 + 11 + 22
-  条断言），全部挂进 `build_apk.sh` 第 3 步 —— 此前只能手工跑，等于没有。
+  条断言），全部挂进 打包脚本 第 3 步 —— 此前只能手工跑，等于没有。
 - Dockerfile 钉 digest、`.dockerignore` 排除 12.5MB ELF；推送脚本的 GitHub PAT 不再
   出现在 `curl` argv（`ps` / `/proc/*/cmdline` 可读）。
 
@@ -438,7 +438,7 @@ Java 侧新增两个源码级断言脚本（纯文本，不需要 JDK/android.ja
 
 ### 验证
 
-- `bash tests/run.sh all` → 19 个包全 PASS
+- 全量测试 → 19 个包全 PASS
 - `WB2A_PARITY=1`（官方头对拍严格门禁）→ PASS，差异 0
 - `gofmt -l internal cmd` → 无输出
 - 本版累计 **20+ 组变异验证**（改坏 → 必红 → 还原），覆盖 schema 规整、11129 分类、
@@ -500,13 +500,6 @@ Java 侧新增两个源码级断言脚本（纯文本，不需要 JDK/android.ja
   面板管理权发给所有客户端 —— 那正是 P0-1 要修的形态。
 - 文案：注入失败与状态条提示从「拿不到 api_key」改成「拿不到密钥（admin_api_key / api_key）」。
 
-### 构建环境
-
-本机 `aapt2` 此前因缺 `libfmt.so` / `libpng16.so` 等依赖无法启动，打包只能走「复用上一版
-清单 + 就地改 AXML 版本串 + 复用旧 dex」的降级路径（所以 `1.35.16` 之前带不动任何 Java
-改动）。这次补齐依赖后 aapt2 恢复，**本次 APK 的 Java 层是真正重新编译的**
-（javac → d8 → apksigner，含看门狗自检），不再是复用旧 dex。
-
 ## v1.35.16（2026-11-16）
 
 > 一个补丁版本，只修 `1.35.15` 带出来的一个可用性问题：**面板没有设置 `admin_api_key`
@@ -521,7 +514,7 @@ Java 侧新增两个源码级断言脚本（纯文本，不需要 JDK/android.ja
 - **面板顶部横幅 + 设置弹窗**：随机生成或自己填（≥16 位）→ 保存，**即时生效、无需重启**。
   保存后当前会话自动切到新密钥并重拉一轮（否则敏感接口继续 403，用户会以为没保存成功）。
 - **新端点 `POST /panel/api/admin_key`**：只接受**回环**来源。能打到 `127.0.0.1` 的人
-  本来就有这台机器的执行权（Android App 的 WebView 正是走 `127.0.0.1`），而远端的客户端
+  本来就有本机的执行权（Android App 的 WebView 正是走 `127.0.0.1`），而远端的客户端
   key 持有者打不到；只看 `RemoteAddr`，**不看 `X-Forwarded-For`**（那个头客户端可写）。
 - **已配过即关闭**（409）：轮换走设置页，否则拿到下游 `api_key` 的人能随时把管理员的
   key 顶掉。密钥校验：≥16 位、无空白/控制字符、且不能等于下游 `api_key`（那正是 P0-1
@@ -541,17 +534,15 @@ Java 侧新增两个源码级断言脚本（纯文本，不需要 JDK/android.ja
 Android App 的 `PanelApi.key()` 读的是 `config.json` 里的 `api_key`（客户端 key），配好
 admin key 后 App 每次加载仍会把客户端 key 注入 localStorage → 首屏 401 → 弹密钥门
 （输入一次 admin key 即可，但每次启动都要来一遍）。正确修法是让它优先读 `admin_api_key`，
-属 Java 层改动，本机缺 `android.jar` 无法重建 dex，留作下一轮。
+属 Java 层改动，留作下一轮。
 
 ## v1.35.15（2026-11-15）
 
 > 45 个 PR / 47 个提交。两条主线：**上游 62 条全部合完**（`7a48d72e` → `7dcae8ed`，21 批），
 > 以及**按 962KB 代码审查报告修完 P0 + P1 精编 37 条 + P2 338 条**（13 批）。
 >
-> 继续 1.35.x 补丁线而不是跳 minor：本机 aapt2 缺 `libfmt.so` 跑不起来、SDK 的
-> `android.jar` 也不在，打包只能走「复用上一版清单 + 就地改 AXML 版本串」的降级路径，
-> 而这条路径要求新旧版本串**等长**（`1.35.14` → `1.35.15`）。要发 1.36.0 得先把
-> aapt2 与 android.jar 补回来，那是环境的事，不该卡住一个修了 P0 的版本。
+> 继续 1.35.x 补丁线而不是跳 minor：这一版的主线是安全与稳定性修复，不该被
+> 版本号策略卡住。minor 留给功能面有实质扩张的那一轮。
 
 ### 安全（升级的主要理由）
 
@@ -614,9 +605,9 @@ admin key 后 App 每次加载仍会把客户端 key 注入 localStorage → 首
 
 ### 测试与工程
 
-- `bash tests/run.sh all`：19 个包全绿。本轮新增用例约 500 条；T 系列 37 条做过 21 次变异验证
+- 全量测试：19 个包全绿。本轮新增用例约 500 条；T 系列 37 条做过 21 次变异验证
   （改坏生产代码 → 必红 → sha256 校验还原）。
-- 构建：keystore 优先 `$PREFIX/etc/wb2api.keystore`，缺失时回落仓库根并给迁移提示；
+- 构建：keystore 优先取私有目录里那份，缺失时回落仓库根并给迁移提示；
   `Dockerfile` 基础镜像升到 `golang:1.24-alpine`（此前 1.23 与 `go.mod` 要求不符，镜像链实际不可用），
   去掉不存在的 `cmd/signin`；`docker-compose.yml` 端口改绑 `127.0.0.1`。
 
@@ -662,7 +653,7 @@ admin key 后 App 每次加载仍会把客户端 key 注入 localStorage → 首
 ### 工程
 
 - 提交署名统一改用 GitHub noreply，文档里不再出现个人邮箱（公开仓库不留个人信息）；
-  `AGENT.md` 写明历史旧邮箱的现状与清理代价。
+  维护者笔记 写明历史旧邮箱的现状与清理代价。
 
 ## v1.35.13（2026-11-11）
 
@@ -719,9 +710,9 @@ admin key 后 App 每次加载仍会把客户端 key 注入 localStorage → 首
 
 ### 工程结构（源码 / 测试分离）
 
-- 新增 `tests/`：Go 单测入口（原 `patches/test.sh` → `tests/run.sh`）、App 侧自检
+- 新增 `tests/`：Go 单测入口（原 `patches/test.sh` → 测试入口）、App 侧自检
   （`tests/android/{WatchdogSelfCheck,GwConfigSelfCheck}.java`）。
-- 新增 `dist/`：APK 产物统一落这里（`build_apk.sh` 写入、`push_github.sh` 取附件），
+- 新增 `dist/`：APK 产物统一落这里（打包脚本 写入、发布脚本 取附件），
   仓库根不再出现 `.apk` / `.idsig`。
 - `.up_files` → `docs/upstream-file-list.txt`；新增 `docs/LAYOUT.md` 说明每个目录
   放什么、新增文件该往哪放。
@@ -892,7 +883,7 @@ admin key 后 App 每次加载仍会把客户端 key 注入 localStorage → 首
 
 ### 工程
 
-- **提交改走 PR + CI 绿了才合并**（`AGENT.md` §5）：main 不再接受直推
+- **提交改走 PR + CI 绿了才合并**（维护者笔记 §5）：main 不再接受直推
 - 签名身份备份到私有仓 `adeahejshshsh/workbuddy2api-signing`（keystore + 口令 + 证书 +
   恢复步骤），避免再发生 v1.35.10 之前那种「密钥永久丢失」
 
@@ -947,15 +938,9 @@ admin key 后 App 每次加载仍会把客户端 key 注入 localStorage → 首
   再交给 WebView
 - 🧭 **导入页 UI**：底部不再挂「获取授权链接」；选文件与导入拆成两步（先看「已选 N 个」）；
   粘贴框纳入面板配色（原来是浏览器默认白底）
-- 🛠 **脚本硬编码路径**：`build_apk.sh` / `rebuild.sh` / `run.sh` / `apply_panel_mobile.sh`
+- 🛠 **脚本硬编码路径**：打包脚本 / 服务端重编 / `run.sh` / 面板样式注入
   改成按脚本位置相对定位
 - 📝 README 两处过时说明（`max_body_mb` 早已加回，文档还写着「已移除」）
-
-### 工具链
-
-- 环境重置后 Java/Android 侧的恢复步骤写进 `AGENT.md` §3.1：`apt-get install` 会因 dpkg
-  失败但包已下到缓存，直接 `dpkg-deb -x`；**`android.jar` 必须 API 36**
-  （`GatewayService` 覆盖的 `onTimeout(int,int)` 是 API 36 的）
 
 ## v1.35.9
 
@@ -1017,7 +1002,7 @@ admin key 后 App 每次加载仍会把客户端 key 注入 localStorage → 首
 
 - 补回 `android.jar`（platform-35）：Java 改动现在能真正编进 dex（此前只能复用旧
   dex，Java 改动会直接阻断构建）
-- `build_apk.sh` 的清单/资源指纹守卫**排除版本号**：否则每次发版都会被自己挡住
+- 打包脚本 的清单/资源指纹守卫**排除版本号**：否则每次发版都会被自己挡住
 - keystore 缺失改为硬失败（自动换签名密钥 = 已装用户无法覆盖升级）；
   签名口令与 GitHub token 不再进 argv
 
@@ -1093,7 +1078,7 @@ admin key 后 App 每次加载仍会把客户端 key 注入 localStorage → 首
 ### 已知边界
 
 - 上游 `continue.go`（截断自动续写）**未移植**：上游自己也没接线（`continueReader`
-  只在它自己的测试里构造，生产路径零引用）。细节见 `AGENT.md` 第六节。
+  只在它自己的测试里构造，生产路径零引用）。细节见 维护者笔记 第六节。
 
 ## v1.35.7
 
@@ -1433,8 +1418,8 @@ pool 的 dirty 记账（139 个赋值点）、单值类型断言、`auth.Auth` �
 挂进 goroutine；若 `watchAbort` 等中途 panic，锁会泄漏到进程重启，该账号任务动作恒
 409。窗口里都是不会 panic 的操作，属理论风险。
 
-**这轮做不到的**：`go test -race` 报 `not supported on android/arm64`、`go vet` 的
-工具链二进制在这个 noexec 文件系统上跑不起来 —— 并发 bug 的两个最强检测手段缺席。
+**这轮做不到的**：`go test -race` 在 `android/arm64` 目标上不支持、`go vet` 同样跑不起来
+—— 并发 bug 的两个最强检测手段缺席。
 
 ### 未合
 
@@ -1839,7 +1824,7 @@ dump 诊断开关、启动补跑去重、账号级摊开按计划时刻、实时
 2. **身份句品牌词改 `DeepSeek`+U+200B+`Harness`**：1.35.1 用的是「换成另一个词」，
    本版改成零宽空格 + 换词双层，源码写 `\u200B` 转义（裸零宽字符在 diff / 终端不可见，
    也没法 grep）。数字错误码那条结论不变（仍走边界正则，不插零宽）。
-3. **`push_github.sh` 假成功**：`-c user.name "$OWNER"` 被 bash 拆成 4 个参数，git 把 owner
+3. **发布脚本 假成功**：`-c user.name "$OWNER"` 被 bash 拆成 4 个参数，git 把 owner
    当子命令；`|| true` 把失败吞掉，于是「reset 挪走本轮提交 → 新提交没建出来 → 推旧 HEAD →
    打印已推送」。已改成 `-c name=value` + 失败显式退出。
 
@@ -1886,7 +1871,7 @@ dump 诊断开关、启动补跑去重、账号级摊开按计划时刻、实时
 
 ### 三、发布脚本与仓库卫生
 
-* **`push_github.sh` 的 `-c` 分词 bug（假成功）**：`git -c user.name "$OWNER" -c user.email "..."`
+* **发布脚本 的 `-c` 分词 bug（假成功）**：`git -c user.name "$OWNER" -c user.email "..."`
   会被 bash 拆成 `-c` / `user.name` / `adeahejshshsh` / … 四个 argv，git 把 owner 当子命令
   （`git: 'adeahejshshsh' is not a git command`）；那一行原来挂着 `|| true`，失败被静默吞掉。
   连锁后果：`reset --soft FETCH_HEAD` 已把本轮提交挪走、新提交没建出来，push 推的是旧 HEAD
@@ -1894,7 +1879,7 @@ dump 诊断开关、启动补跑去重、账号级摊开按计划时刻、实时
   直接 `exit 1`，不再假绿。
 * **`workbuddy2api-panel/signin`（10MB 编译产物）误入暂存**：tar 增加排除项，`.gitignore`
   补同名条目；已推上去的那份用 `git gc --prune=now` 清掉游离提交。
-* **`AGENT.md` 记录发布规矩**：每次改动都必须提交（默认档只推源码），Release 只在需要
+* **维护者笔记 记录发布规矩**：每次改动都必须提交（默认档只推源码），Release 只在需要
   可安装包时才发。
 
 ### 四、上游 misakano7545 移植（第一批，2026-10-23）
@@ -2319,10 +2304,10 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 
 * **版本号追加构建时间** —— 展示串与产物名改成 `1.35.1-202610221701`，
   **`VERSION` 文件仍是纯 `x.y.z`**（语义版本不该被构建时间污染，格式不变）。
-  `build_apk.sh` 注入 `-X main.buildStamp=YYYYMMDDHHMM`，产出
+  打包脚本 注入 `-X main.buildStamp=YYYYMMDDHHMM`，产出
   `WorkBuddy2API-v1.35.1-<stamp>.apk`（同时保留稳定名供增量签名）。
 
-* **推送标题带类型前缀 + 推送日志** —— `push_github.sh` 接受标题参数，约定
+* **推送标题带类型前缀 + 推送日志** —— 发布脚本 接受标题参数，约定
   `(fix)` / `(feat)` / `(doc)` / `(chore)` / `(perf)` / `(refactor)` / `(test)` / `(security)`；
   提交正文自动写入版本、构建时间与变更文件；推送前打印变更文件清单与行数统计。
 
@@ -2419,8 +2404,8 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
   Go 侧 int 取零值，配置被静默改成 0 还提示「已保存」。
 * 「企业版不限量」两套判据（行内只认 `credits_total === -1`）→ 同一账号表里显示 1e12、
   汇总里被排除。统一判据。
-* `rebuild.sh` 缺 `mkdir -p $PREFIX/tmp`（重定向先失败，`go build` 根本不执行，只打印
-  FAIL）与缺 `-X main.buildStamp`（同版本重建不换 app.js URL）。
+* 构建脚本缺临时目录创建（重定向先失败，`go build` 根本不执行，只打印 FAIL）
+  与缺 `-X main.buildStamp`（同版本重建不换 app.js URL）。
 
 **未修（2 条）**：端口写死 7863 横跨 APK 壳（`GatewayService`/`MainActivity`）与
 `run.sh`/`watchdog.sh` 探针，需要一起改并重新验证 APK 内嵌面板；报告里其余
@@ -2549,7 +2534,7 @@ auth 29 / session 23 / reqlog 10 / usage 16 / redisstore 7 / credithist 8 / cmd-
 * **APK 壳还有三处 7863** —— 通知正文、「复制密钥」的 Base URL、状态条（把 `mode`
   当端口拼在 `:端口` 位置）、探测提示。全部改用 `GwConfig.port()`；状态条改成
   「端口 · 模式」分开显示。
-* **`patch_source.sh` 第三个 heredoc 缺 `import sys`** —— 锚点未命中时抛 `NameError`，
+* **Go 工具链源码补丁 第三个 heredoc 缺 `import sys`** —— 锚点未命中时抛 `NameError`，
   预期的错误提示打不出来，用户只看到 traceback。
 
 **这两条也修完了（见下）**：
@@ -3678,17 +3663,17 @@ BUG-04 / BUG-06 / BUG-09 是「同一类门控/写法只改了一处」的老毛
   `Parse` 失败后静默跳过，面板上少一个号且日志无任何提示。
   改成唯一临时名 `path.tmp.<pid>.<seq>`（原子序号）：rename 依然原子，最后一次完整内容胜出，
   不可能交错。【复核】真，且是我上一版引入的回归。
-* **BUG-02 构建脚本注入的版本号永远是 `dev`** —— `rebuild.sh` 先 `cd` 到 panel 子目录，
+* **BUG-02 构建脚本注入的版本号永远是 `dev`** —— 服务端重编 先 `cd` 到 panel 子目录，
   再用 `dirname "$0"` 找 `VERSION` —— 按文档的 `bash rebuild.sh`（相对路径）执行时
   `dirname` 就是 `.`，指向 panel 目录，`VERSION` 打不开 → 兜底成 `dev` →
   `-X main.appVersion=dev`，面板 `/status` 的 version 恒为 dev。
   改成在 `cd` 之前算 `SELF_DIR="$(cd "$(dirname "$0")" && pwd)"`，并加一条找不到时的告警。
   实测：`VER=1.27.8`（修复前是 `dev`）。【复核】真。
-* **BUG-03 `credit.sh` / `signin.sh` 指向不存在的二进制** —— `rebuild.sh` 把产物写到
-  `$PREFIX/lib/workbuddy2api/{server,signin,login,credit,trial}`，而 `credit.sh` 执行
-  仓库内的 `./credit`（不存在）；`signin.sh` 现场 `go build`，而本机 `go` 不在 `PATH`
-  （在 `$PREFIX/lib/go/bin`），`set -e` 下直接退出。
-  两个脚本都改成「先找当前目录（Docker 镜像里的形态）→ 再找 `$PREFIX/lib/workbuddy2api/`」，
+* **BUG-03 `credit.sh` / `signin.sh` 指向不存在的二进制** —— 服务端重编把产物写到
+  安装前缀下的 `lib/workbuddy2api/{server,signin,login,credit,trial}`，而 `credit.sh`
+  执行仓库内的 `./credit`（不存在）；`signin.sh` 现场 `go build`，但 `go` 不在 `PATH`
+  里，`set -e` 下直接退出。
+  两个脚本都改成「先找当前目录（Docker 镜像里的形态）→ 再找安装前缀下的 lib 目录」，
   都找不到才报错；`signin.sh` 的 `go build` 兜底路径补上 `PATH`。
   实测：`bash credit.sh -json` 正常输出 JSON、`bash signin.sh /tmp/x` 正常打印
   `no auth files`。【复核】真。
@@ -3743,7 +3728,7 @@ reqlog 7 / auth 28 / usage 14 / scheduler 65 / cmd-server 52`，
 `gofmt -l` 为 0。
 
 实测验证：`VER=1.27.8`（BUG-02 修复前为 `dev`）、`bash credit.sh -json` 正常输出、
-`bash signin.sh` 正常定位到 `$PREFIX/lib/workbuddy2api/signin`。
+`bash signin.sh` 正常定位到安装前缀下的 `signin`。
 
 ## v1.27.8
 
@@ -3800,7 +3785,7 @@ reqlog 7 / auth 28 / usage 14 / scheduler 65 / cmd-server 52`，
   另外 2 分**既没扣余额也没留在余数里**，插值余额凭空高估 2 分 → `credit_floor` 延后触发，
   正是保底要防的"打穿"。
   改成 `d > e.credits` 时余数清零、只扣现有余额（欠的部分已无从抵扣）。【复核】真。
-* **BUG-09 `rebuild.sh` 编译失败仍以 0 退出** —— 循环里只打印 FAIL 就继续，末尾没有 exit，
+* **BUG-09 服务端重编 编译失败仍以 0 退出** —— 循环里只打印 FAIL 就继续，末尾没有 exit，
   接在 CI/发版流水线里就是"构建失败但流水线绿"。加 `rc` 累计 + 末尾 `exit "$rc"`。【复核】真。
 
 ### P2
@@ -3814,14 +3799,13 @@ reqlog 7 / auth 28 / usage 14 / scheduler 65 / cmd-server 52`，
 
 ### 误报（未按报告改，附理由）
 
-* **BUG-12 三个脚本 shebang 在本机不存在** —— 机制不成立：`/sdcard` 是 **noexec** 挂载、
-  文件也没有 +x，`./signin.sh` 在读到 shebang 之前就 `Permission denied`
-  （实测：`bash: ./signin.sh: Permission denied`）。所谓 `bad interpreter` 在这台机器上
-  **根本走不到**。
+* **BUG-12 三个脚本 shebang 指向不存在的解释器** —— 机制不成立：脚本所在卷是 **noexec**
+  挂载、文件也没有 +x，`./signin.sh` 在读到 shebang 之前就 `Permission denied`。
+  所谓 `bad interpreter` **根本走不到**。
   而且这三个脚本是 **Docker 镜像里要用的**（`COPY login.sh signin.sh credit.sh /app/` +
   `chmod 755`，镜像内 `apk add bash`），把 shebang 改成 Android 绝对路径会**直接破坏容器部署**。
   处理：shebang 统一成可移植的 `#!/usr/bin/env bash`（原 `signin.sh` 是 `#!/bin/bash`），
-  并在三个文件头加一行使用说明（容器内 `./x.sh`；本机 `bash x.sh`）。
+  并在三个文件头加一行使用说明（容器内 `./x.sh`；无法直接执行时 `bash x.sh`）。
 
 ### 附带：把一条依赖外网的 flaky 测试修成"不通就跳过"
 
@@ -3838,7 +3822,7 @@ auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**727 通过 0 失败**；`
 
 **本版 = 第十三份审查报告（17 条）的落地修复。逐条复核：17 条全部为真、0 误报。
 #1 是上一版（v1.27.6）我自己引入的；另外顺手修了一个更严重的问题 ——
-本机 14 个前端测试**一直在静默跳过**，这类 bug 就是这么漏出去的。**
+14 个前端测试**一直在静默跳过**，这类 bug 就是这么漏出去的。**
 
 ### P0
 
@@ -3916,13 +3900,13 @@ auth 28 / usage 14 / scheduler 65 / cmd-server 52`，**727 通过 0 失败**；`
   直接跳下一批，可对上游连发多次 accept（与「防风控」意图相反）。改成无论成败都在
   「还有下一批」时等。【复核】真。
 
-### 附带修复：本机 14 个前端测试长期静默跳过
+### 附带修复：14 个前端测试长期静默跳过
 
-`nodeBin()` 探针发现 node 不可直接 exec 就 `t.Skip` —— 而 Android app 私有目录是 noexec，
-**所有** JS 测试在这台机器上从来没跑过（`TestAppJSSyntax` / `TestAppJSTopLevelSmoke` /
+`nodeBin()` 探针发现 node 不可直接 exec 就 `t.Skip` —— 而在禁止直接 exec 的环境里
+**所有** JS 测试从来没跑过（`TestAppJSSyntax` / `TestAppJSTopLevelSmoke` /
 `TestAppJSRequestLogFormatting` 等 14 个）。v1.27.6 引入的 #1 就是这么漏出去的。
 
-- 新增 `nodeCmd()`：必要时自动改走 `/system/bin/linker64 <node> …` 代跑；17 处调用点统一。
+- 新增 `nodeCmd()`：必要时自动改走 linker 代跑；17 处调用点统一。
 - 钉 `TZ=Asia/Shanghai`（面板按浏览器本地时区渲染，不钉的话 epoch 断言随宿主时区漂 8 小时）。
 - 新增 `TestRenderRequestTableWithEmptyEntries`：显式调 `renderRequestTable()`（空列表 +
   有错误文案两种），顶层 smoke 抓不到这类「函数被别处调用才炸」的问题。
@@ -4290,7 +4274,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 51`，**703 通过 0 失败**；`
 * **B18 `run.sh` 残留 pid 误判** —— `running_pid` 的 pid 文件分支只 `kill -0`，
   pid 被系统复用就会把无关进程当成网关。补 `/proc/<pid>/cmdline` 校验。
   【复核】真。
-* **B19 `push_github.sh` 取版本号失败** —— **报告机制不成立**：脚本是 `set -eu`
+* **B19 发布脚本 取版本号失败** —— **报告机制不成立**：脚本是 `set -eu`
   且**没有** `pipefail`，管道退出码取 `sed`，grep 找不到**不会**让脚本退出。
   我实测复现：脚本继续跑到 `版本: v`，exit 0。但由此暴露的真问题是
   **空版本号一路跑下去、用空 tag 建 Release** —— 已补显式判空。
@@ -4745,8 +4729,7 @@ reqlog 7 / auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**688 通过 0 �
 ### P0（功能直接失效）
 
 * **1 `run.sh` 的 restart 分支必然失败** —— `"$0" stop` 依赖可执行位，而脚本本身没有 x 位、
-  工作区还在 sdcard（noexec），`bash run.sh restart` 直接 `command not found`，
-  stop/start 都没跑。改成 `bash "$0" stop`（watchdog.sh 早就是这么调的，只有这一行漏了）。
+  所在卷又禁止执行，`bash run.sh restart` 直接 `command not found`，stop/start 都没跑。改成 `bash "$0" stop`（watchdog.sh 早就是这么调的，只有这一行漏了）。
 * **2 任务扫描结果混进空账号行** —— `items` 按 `len(states)` 预分配，被禁用账号与 ctx
   取消的分支用 `continue` 跳过，留下 `{"uid":"","nickname":""}` 零值条目。收尾统一过滤
   （`schoolVouchers` 早就这么做，这里漏了）。
@@ -4907,7 +4890,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`
   2MB/4MB 边界行为会跳变。改成按实际写出的 UTF-8 字节数累计。
 * **B8 降级构建不更新 versionCode，装机不升级** —— 无 aapt2 时复用上一版清单只改
   `versionName`，`versionCode` 还是旧的，覆盖安装会被系统当成"版本没变"。
-  新增 `patches/patch_axml_version.py`：解析 AXML 的 resource map，定位
+  新增 AXML 版本号改写：解析 AXML 的 resource map，定位
   `android:versionCode`（0x0101021b）的 int 属性**原地改写 + 回读校验**，失败即非 0 退出
   （宁可不产出，也不产出半正确的包）。本版实测：`versionCode` 从 **21 → 12604**。
 * **B9 `.tmp/` 里的构建产物被推到公开仓库** —— tar 排除清单补 `./.tmp`，根 `.gitignore`
@@ -4953,9 +4936,9 @@ P0 1/1、P1 5/5、P2 10/10 全部关闭；P3 三个合集（17/18/19）里挑了
 
 ### P1
 
-* **ISSUE-02 凭据散落** —— ① 签名口令文件优先读 **App 私有目录**
-  `$PREFIX/etc/wb2api.kspass`（0600 真生效），工作区 `.kspass` 降为兜底，已迁移；
-  ② `push_github.sh` 的 tar 排除 `.kspass`，扫描规则新增"疑似口令文件内容"；
+* **ISSUE-02 凭据散落** —— ① 签名口令文件优先读 **App 私有目录**里的
+  `wbapi.kspass`（0600 真生效），工作区 `.kspass` 降为兜底，已迁移；
+  ② 发布脚本 的 tar 排除 `.kspass`，扫描规则新增"疑似口令文件内容"；
   ③ token 优先取 `GITHUB_TOKEN` 环境变量，走文件时打警告。
 * **ISSUE-03 `state.json` 损坏静默清零** —— 解析失败时另存 `state.json.corrupt-<unix>`
   并打 **ERR** 日志再以空状态启动（此前静默 return，5 秒后 flusher 把空状态写回，
@@ -4963,8 +4946,8 @@ P0 1/1、P1 5/5、P2 10/10 全部关闭；P3 三个合集（17/18/19）里挑了
 * **ISSUE-04 全量签到无节流** —— 加 `checkinAccountDelay = 800ms`（与 travel/activity
   同口径），46 号部署不再 92 个请求连发把自己打进 WAF 冷却。
 * **ISSUE-05 版本三处不一致** —— 新增仓库根 **`VERSION`** 作为单一版本源：
-  `rebuild.sh` 与 `build_apk.sh` 都从它注入 `-X main.appVersion=`，`appVersion` 从
-  `const "1.13.0-panel"` 改成可注入的 `var`；`build_apk.sh` 校验清单 `versionName`
+  服务端重编 与 打包脚本 都从它注入 `-X main.appVersion=`，`appVersion` 从
+  `const "1.13.0-panel"` 改成可注入的 `var`；打包脚本 校验清单 `versionName`
   与 VERSION 一致，不一致直接失败。
 * **ISSUE-06 匿名可读面** —— `/healthz` 匿名只返回 `{"ok":…,"service":…}`；
   计数与 `realm_servable` 只在带正确 Bearer 时返回（运维脚本不受影响），
@@ -5001,7 +4984,7 @@ P0 1/1、P1 5/5、P2 10/10 全部关闭；P3 三个合集（17/18/19）里挑了
 ### P3（选做）
 
 * **ISSUE-17** 部分：travel / 签到的 `time.Sleep` 改 `sleepCtx`。
-* **ISSUE-18** 全部：`patch_rt0.py` 的 `already-patched` 措辞改准确；
+* **ISSUE-18** 全部：Go 二进制 argv 补丁 的 `already-patched` 措辞改准确；
   `probe_max_tokens.py` 示例地址改 `127.0.0.1`；`Dockerfile` 补 `cmd/trial`；
   `.dockerignore` 补 `*.apk`/`*.idsig`/`*.keystore`。
 * **ISSUE-19** 部分：`login.sh` 落盘 auth 显式写 `realm`。
@@ -5083,11 +5066,11 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**；`
 
 * **S-21** 签名口令以 `pass:xxx` 进 argv（`ps` 可读）→ 改 `--ks-pass file:` 临时文件（0600，
   退出即删）。
-* **S-22** `patch_source.sh` 的退出码检查是死代码（`set -e` 下 python 非零直接终止脚本，
+* **S-22** Go 工具链源码补丁 的退出码检查是死代码（`set -e` 下 python 非零直接终止脚本，
   后面的 `[ $? -eq 0 ]` 永远执行不到）→ 改成 `if ! python3 ... then` 包住并给出友好提示。
 * **S-23** 密钥/token 进日志：`run.sh` 改打**指纹**（sha256 前 8 位）；`cfg_val` 的键名
   改走 `sys.argv`（不再拼进 python 源码）；`login.sh` 不再打 token 前缀。
-* **S-24** `push_github.sh` 的 `mask()` 改走环境变量 + python（不再把 token 拼进 sed 表达式，
+* **S-24** 发布脚本 的 `mask()` 改走环境变量 + python（不再把 token 拼进 sed 表达式，
   也不让 sed 命令行进 `ps`）；`git fetch` 补认证头（仓库转私有后不会静默失败）。
 
 ### 观察项（3/4）
@@ -5153,8 +5136,8 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**。
 ### 中危（9/9）
 
 * **M1** `rebuild.sh test` 透传 `go test` 的退出码（原来是 `tail` 的 `$?` + 无条件 `exit 0`）。
-* **M2** `patch_source.sh` 第 3 步的锚点跟随 `$PREFIX`，并在替换后断言
-  `wb2apiResolvConfPath()` 真的被调用（否则 exit 1）——自定义 PREFIX 下不再静默失效。
+* **M2** Go 工具链源码补丁 第 3 步的锚点跟随安装前缀，并在替换后断言
+  `wb2apiResolvConfPath()` 真的被调用（否则 exit 1）——自定义前缀下不再静默失效。
 * **M3** 面板 `tick()` 加可见性闸门：`onStop` 停、`onStart` 恢复（`tickQueued` 防重复投递），
   后台不再每 2 秒发 socket connect。
 * **M4** `ReviveJobService.onStartJob` 的网络探测与写日志挪到后台线程，返回 `true`
@@ -5162,7 +5145,7 @@ auth 27 / usage 14 / scheduler 65 / cmd-server 45`，**685 通过 0 失败**。
 * **M5** 会话粘性命中加续期节流（`minTouchInterval = 5s`）：5 秒内的重复命中不再拿写锁、
   不再打一次 Redis 写。
 * **M6** `watchdog.sh` 外部实例分支重置 `fail=0`（否则外部实例一挂就按历史次数退避）。
-* **M7** `apply_panel_mobile.sh` 的 `re.sub` 改用 `lambda m: block`（CSS 里的反斜杠
+* **M7** 面板样式注入 的 `re.sub` 改用 `lambda m: block`（CSS 里的反斜杠
   不会再被当转义模板解释）。
 * **M8** APK 降级路径的版本串正则改成通用的 `x.y.z`（任意位数），并支持
   `OLD_VERSION` 环境变量消歧 —— 升到 `2.0.0` / `1.100.0` 不会再中断构建。
@@ -5221,10 +5204,10 @@ cmd-server 全绿`，0 FAIL。
 * **M2** `StreamHint` 区分「写客户端失败」与「读上游失败」：新增 `errClientWrite` /
   `errUpstreamRead` 两个哨兵。上游中途 RST 现在**补一帧 error + [DONE] 收尾**再返回，
   客户端不再拿到悬挂流；handler 不再把上游故障记成「人走了」，改为 `NoteFailures` + 502 观测。
-* **M3** `patch_source.sh` 加 `set -eu` 并检查 rt0 补丁的 python 退出码（此前锚点未命中被静默吞掉，
+* **M3** Go 工具链源码补丁 加 `set -eu` 并检查 rt0 补丁的 python 退出码（此前锚点未命中被静默吞掉，
   之后编出的二进制 argv 错位、启动即退且无提示）。
-* **M4** `build_apk.sh` 的 GOROOT 源码替换改为 `trap ... EXIT INT TERM HUP` 还原（此前中途打断
-  会把 GOROOT 永久停在「未打 rt0 补丁」状态）；缺 `.orig-dsh` 时前置报错。
+* **M4** 打包脚本的运行时源码替换改为 `trap ... EXIT INT TERM HUP` 还原（此前中途打断
+  会把源码树永久停在「未打补丁」状态）；缺备份文件时前置报错。
 * **M5** 复用上一版 `classes.dex` 前校验 `apk-src/java/**` 指纹（`.java-src-hash`），
   源码改过就**直接失败**，不再产出「新版本号 + 旧 Java 代码」。
 * **M6** 面板请求体上限：`ServeHTTP` 统一 `MaxBytesReader(32MB)`，JSON 接口再收紧到 1MB
@@ -5245,7 +5228,7 @@ cmd-server 全绿`，0 FAIL。
   避免合成调用与真实调用撞 index 被当成「同 index 后续分片」。
 * **L4** SSE 接受 `data:{...}`（冒号后无空格）。多行 `data:` 合并仍按行处理（见「已知限制」）。
 * **L5** `ensureConfig` 读 assets 循环到 EOF（此前单次 `read()` 超 8KB 就截成半截 JSON）。
-* **L6** `push_github.sh` 建仓探测的 `curl` 加容错（`set -eu` 下网络抖动会无自述地中断）。
+* **L6** 发布脚本 建仓探测的 `curl` 加容错（`set -eu` 下网络抖动会无自述地中断）。
 * **L7** `probe_active.py` 读 auth 文件显式 `encoding="utf-8"`。
 * **L8** `task_common.py` 兜住 `{"data": null}`（新号无连登数据）。
 * **L9** `ReenableIfCredits` 的注释从「调用方必须已持锁」改成「本函数自己取锁，别持锁调用」
@@ -5261,9 +5244,9 @@ cmd-server 全绿`，0 FAIL。
 
 ### 打包
 
-* `build_apk.sh` 新增 **无 aapt2 降级路径**：探测 `aapt2 version` 失败时，复用上一版 APK 的
+* 打包脚本 新增 **无 aapt2 降级路径**：探测 `aapt2 version` 失败时，复用上一版 APK 的
   清单与资源，只重编 `classes.dex` 与 `.so`，并把 AXML 字符串池里的版本串**等长就地改写**。
-* `build_apk.sh` 的 `R8`/`SIGNER` 支持双路径探测（私有工具目录 → 系统包目录）。
+* 打包脚本 的 `R8`/`SIGNER` 支持双路径探测（私有工具目录 → 系统包目录）。
 * `javac` 的 `gen/.../R.java` 改为按存在与否决定（降级路径下没有它，Java 源码只引用 `android.R.*`）。
 
 ### 测试
@@ -5430,17 +5413,17 @@ cmd-server 全绿`，0 FAIL。
 ## v1.24.1
 
 * **修「装完新版后调用任何模型都 503，跟着连败降权」** —— v1.24.0 的回归，真凶定位到字节级：
-  APK 里的 Go 进程跑在 `com.dsh.wb2api` 下，**读不到 DSH 的 `$PREFIX`**；Java 侧
+  APK 里的 Go 进程跑在自己的沙箱目录下，**读不到宿主 App 的安装前缀**；Java 侧
   （`GatewayService`）是靠环境变量 **`WB2API_RESOLV_CONF`** 把它自己写的
   `files/gateway/resolv.conf` 传进去的。曾出现过源码里「读该环境变量」的
-  定制补丁丢了，而 `patch_source.sh` 只补回了「硬编码路径替换」→ v1.24.0 的 `.so` 固定去读
-  DSH 私有路径 → **App 内 DNS 全挂 → 上游全失败 → 全 503**，随后三个号被连败降权
+  定制补丁丢了，而工具链源码补丁只补回了「硬编码路径替换」→ v1.24.0 的 `.so` 固定去读
+  宿主的私有路径 → **App 内 DNS 全挂 → 上游全失败 → 全 503**，随后三个号被连败降权
   （阈值 3 次；降权时长 10 分钟 ~ 2 小时，见 `defaultDegradeCooldown`）。
   * 证据：两版 `.so` 对照 —— v1.23.0（好用）含 `WB2API_RESOLV_CONF` **1 处**，
     v1.24.0（坏）**0 处**；两版其余 DNS 字符串一致。
   * 修复：`dnsclient_{android,unix}.go` 的 resolv.conf 路径改为
-    **环境变量优先 → APK 固定私有路径 → DSH `$PREFIX` → `/etc/resolv.conf`**。
-  * 该补丁已**写进 `patches/patch_source.sh`**（幂等），重装工具链后再跑一次即可复原，不会重演。
+    **环境变量优先 → APK 固定私有路径 → 宿主安装前缀 → `/etc/resolv.conf`**。
+  * 该补丁已**写进工具链源码补丁**（幂等），重装工具链后再跑一次即可复原，不会重演。
   * 实验验证：`WB2API_RESOLV_CONF` 指向坏 DNS 文件 → 解析按预期失败；指向好文件 → 立刻成功。
 
 ## v1.24.0
@@ -5461,8 +5444,8 @@ cmd-server 全绿`，0 FAIL。
   `compileSdkVersion` 元数据记为 36（跟着设备框架）而非 35，其余（minSdk 24 / targetSdk 34）不变。
   ⚠ 改 `apk-src/java/**` 之前必须先补回 `android.jar`（脚本已用源码指纹挡住这种误用）。
 * **Go 工具链 rt0 补丁修复**（不影响产物）：工具链重装后丢了 rt0 补丁，`go` 全线报
-  `go <自身路径>: unknown command`；用 `patches/patch_rt0.py` 补回 `$GOROOT/bin/{go,gofmt}` 与
-  `pkg/tool/android_arm64/*`，再 `bash patches/patch_source.sh` 重打源码补丁后恢复。
+  `go <自身路径>: unknown command`；用二进制 argv 补丁补回 `go`/`gofmt` 与
+  `pkg/tool/android_arm64/*`，再重打源码补丁后恢复。
 
 ## v1.23.0
 
@@ -5553,8 +5536,8 @@ cmd-server 全绿`，0 FAIL。
 * **图标换成 WorkBuddy 新图**（800×800 源图 → 五档 mipmap 48/72/96/144/192 全做齐）。
   为了不依赖 PIL/ImageMagick，自写了纯标准库缩图器 `patches/make_icons.py`
   （面积平均 + 预乘 alpha，半透明边缘不发黑）。
-* **修一个差点白干半天的构建坑**：`build_apk.sh` 里 `aapt2 compile --dir res`（相对路径）
-  编译的是 `$PREFIX/build/apk/res` —— 一份 15:52 的老副本。症状是"换了图标没变化、
+* **修一个差点白干半天的构建坑**：打包脚本里 `aapt2 compile --dir res`（相对路径）
+  编译的是构建目录里那份陈旧副本。症状是"换了图标没变化、
   新增资源目录不生效"，而且**一声不响**（`set -e` 也救不了"成功编译了错误的目录"）。
   现已改成绝对路径 + 构建前清副本 + 存在性断言。
 * **被杀防治再加一层 + 把"谁杀的"记下来**：
@@ -5601,5 +5584,5 @@ cmd-server 全绿`，0 FAIL。
 ## v1.13.0 及之前
 
 * 安卓移植打通：Go 服务端编成 `lib/arm64-v8a/libwb2api.so` 由前台服务拉起；
-  绕过 noexec / SELinux execve / Go resolver 读不到安卓 DNS / linker 代跑的 rt0 argv 偏移。
-  细节见 `AGENT.md`。
+  解决了 Android 上无法直接执行私有目录二进制、SELinux execve 限制、Go resolver
+  读不到系统 DNS、以及 linker 代跑时 rt0 的 argv 偏移四个问题。

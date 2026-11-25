@@ -21,7 +21,7 @@ import (
 // ww_device_nonce 时 207 字节（v9）。v7+ 还多了版本信息块（BCH(6,18)），且
 // 对齐图案的中心会落在贯穿线上 —— 这两处都是 v6 之前不存在的代码路径。
 func TestAppJSQRMatrix(t *testing.T) {
-	nodeBin(t) // 不可执行（Termux 下需 linker64 代跑）时按 helper 的规则 skip
+	nodeBin(t) // 不可执行（需 linker 代跑）时按 helper 的规则 skip
 	script := `const fs = require('fs'), vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('/* ── 精简 QR 编码器');

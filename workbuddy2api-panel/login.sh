@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # 用法：服务器/容器内可直接 ./login.sh（Docker 镜像里 chmod 755 后执行）；
-#      本机（Android）请用 `bash login.sh` —— /sdcard 是 noexec 挂载，
-#      直接 ./ 执行会在读 shebang 之前就 Permission denied。
-#      shebang 保持 /usr/bin/env bash 是为了 Docker（alpine + apk add bash）可用。
+#      脚本所在卷禁止执行时请用 `bash login.sh`（否则 ./ 会在读 shebang 之前就
+#      Permission denied）。shebang 保持 /usr/bin/env bash 以便 Docker 可用。
 # login.sh — WorkBuddy CN OAuth 登录 → 落盘 auth 文件
 #
 # 用法:
@@ -22,10 +21,10 @@ CONTAINER="workbuddy2api"
 mkdir -p "$AUTH_DIR"
 
 # login 工具：不存在才编译（源码改动后手动 go build -o login ./cmd/login）
-# Go 必须加进 PATH（BUG-11）：本机（Android / Termux 壳）go 在 $PREFIX/lib/go/bin，
-# 不在默认 PATH 里；signin.sh / credit.sh 早就补了这一行，login.sh 漏了 ——
+# Go 必须加进 PATH（BUG-11）：Go 装在 $PREFIX/lib/go/bin 这种非默认位置时
+# 不在 PATH 里；signin.sh / credit.sh 早就补了这一行，login.sh 漏了 ——
 # 在 set -euo pipefail 下直接 `go: command not found` 退出。
-PREFIX="${PREFIX:-/data/data/com.dsharnessmobile.shell/files/usr}"
+PREFIX="${PREFIX:-$HOME/.local}"
 if [[ -d "$PREFIX/lib/go/bin" ]]; then
     export PATH="$PREFIX/lib/go/bin:$PATH"
 fi
