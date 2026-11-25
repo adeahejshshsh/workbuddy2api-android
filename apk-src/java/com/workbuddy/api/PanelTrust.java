@@ -108,6 +108,53 @@ final class PanelTrust {
         }, "wb2api-instance-check").start();
     }
 
+    // ---------- 密钥是否真的被对面接受 ----------
+
+    /**
+     * 用一个**指定**密钥去打一个需要鉴权的只读接口，判断这把钥匙对面认不认。
+     *
+     * <p>为什么必须有这一步：注入成功 ≠ 登录成功。注入只证明「JS 把字符串写进了
+     * sessionStorage」，而面板首屏要的是「服务端接受这把 key」。当端口上跑的是
+     * {@link #SAME_KIND}（同一项目的另一个实例）时，本 App config.json 里的密钥
+     * 它根本不认 —— 于是「写入成功」之后照样 401、照样弹密钥门，用户看到的就是
+     * 「点了信任还是要填密钥」。
+     *
+     * <p>端点选 {@code /panel/api/error_summary}：只读、聚合已有日志环、不触发上游
+     * 请求，比 {@code /overview} 轻。它不在免鉴权表里，所以 401/403 就是「key 不对」。
+     *
+     * @return HTTP 状态码；0 = 连不上（此时不能断言 key 错，调用方按「未知」处理）
+     */
+    static int keyStatus(int port, String key) {
+        if (key == null || key.isEmpty()) return 401;
+        HttpURLConnection conn = null;
+        try {
+            URL u = new URL("http://127.0.0.1:" + port + "/panel/api/error_summary");
+            conn = (HttpURLConnection) u.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(1500);
+            conn.setReadTimeout(2500);
+            conn.setInstanceFollowRedirects(false);
+            conn.setUseCaches(false);
+            conn.setRequestProperty("Authorization", "Bearer " + key);
+            conn.setRequestProperty("Accept", "application/json");
+            return conn.getResponseCode();
+        } catch (Throwable t) {
+            return 0;
+        } finally {
+            if (conn != null) try { conn.disconnect(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 状态码 → 结论：true 只有一种，401/403 是明确的「不认这把钥匙」。 */
+    static boolean keyAccepted(int code) {
+        return code >= 200 && code < 300;
+    }
+
+    /** 明确的「密钥不对」（区别于「连不上/网关没起」）。 */
+    static boolean keyRejected(int code) {
+        return code == 401 || code == 403;
+    }
+
     // ---------- 信任记忆 + 密钥覆盖（都在应用私有目录，0600） ----------
 
     /**

@@ -896,6 +896,11 @@ public class MainActivity extends Activity {
      * 密钥发给所有客户端。
      */
     String readPanelKey() {
+        // 用户在网页面板为「另一个实例」填过的密钥优先（PanelTrust.keyOverride）——
+        // 否则从网页面板返回后，原生内嵌面板又把 config.json 里那份旧 key 注进去，
+        // 对面不认 → 又弹密钥门。这与 WebPanelActivity.injectKey 同一口径。
+        String override = PanelTrust.keyOverride(this);
+        if (!override.isEmpty()) return override;
         String txt = readAll(new File(getFilesDir(), "gateway/config.json"));
         Matcher m = Pattern.compile("\"admin_api_key\"\\s*:\\s*\"([^\"]*)\"").matcher(txt);
         if (m.find()) {
