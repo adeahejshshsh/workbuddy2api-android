@@ -607,6 +607,8 @@ body.veil-open { overflow: hidden; }
   .acc.req th, .acc.req td { padding: 8px 10px; }
   .acc.req tbody tr { cursor: default; }
   .acc.req td.sample { max-width: 380px; overflow: hidden; text-overflow: ellipsis; }
+  /* 错误汇总「已读」（issue #288）：只压低不隐藏，颜色仍能分辨严重度 */
+  table.acc tr.is-read td { opacity: .45; }
   /* 请求记录最多可读 1000 条，不限高会把下面的「运行日志」推到很远的地方。
      限高 + 表头吸顶：滚动区域内始终能看到列名。 */
   .req-wrap { max-height: 460px; overflow: auto; }
@@ -1780,6 +1782,9 @@ body.veil-open { overflow: hidden; }
           <h3>错误汇总</h3>
           <div class="hint">日志环里的 WARN/ERR 按「账号 × 错误类型」聚合——原始日志里几十行同质告警，人眼抓不到真正重要的差异。</div>
           <span class="grow"></span>
+          <!-- 「已读」只记在本机（issue #288），不清日志环：清空会把还没处理的真故障一起删掉。 -->
+          <button class="xs" id="btnErrRead" title="把当前表里的行记成已读（之后新出现的仍然正常显示）">标为已读</button>
+          <button class="xs" id="btnErrHideRead">隐藏已读：关</button>
           <span class="note" id="errNote">—</span>
         </header>
         <div class="tbl-wrap">

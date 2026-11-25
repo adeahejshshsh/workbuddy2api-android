@@ -2101,10 +2101,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	if v3.err != nil {
 		// /v3 失败降级：不拖累企业端点结果（降级仅企业端点 + warn）。
-		log.Printf("WARN: [upstream] fetch models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
+		degradedWarnOnce("fetch-models/v3", "WARN: [upstream] fetch models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
 	}
 	if enterprise.err != nil {
-		log.Printf("WARN: [upstream] fetch models: enterprise endpoint failed (v3/config only): %v", enterprise.err)
+		degradedWarnOnce("fetch-models/enterprise", "WARN: [upstream] fetch models: enterprise endpoint failed (v3/config only): %v", enterprise.err)
 	}
 	out := mergeModelInfos(v3.infos, enterprise.infos)
 	if len(out) == 0 {

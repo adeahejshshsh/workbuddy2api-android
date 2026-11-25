@@ -68,12 +68,32 @@ linker64 的栈布局与直接 exec 不同：Go runtime 读到的 `argc` 多 1�
 环境会莫名重置（`$GOROOT`、`$PREFIX/bin/*`、`lib/jvm`、`aapt2`、`d8` 全部消失）。修法：
 
 ```bash
-# Go：解包 deb（不要 apt-get，本机 dpkg 会报 'sh' not found in PATH）
-dpkg-deb -x golang_3:1.27.2_aarch64.deb /tmp/g
-cp -a /tmp/g/data/data/com.termux/files/usr/* $PREFIX/
-python3 patches/patch_rt0.py        # 给 go/gofmt/全部 pkg/tool/android_arm64/* 打补丁
-bash patches/patch_source.sh        # 打源码补丁
+# Go：解包 deb（不要 apt-get install，也不要 dpkg -i）
+#   ① apt 的 dpkg 子进程会报 'sh' not found in PATH；
+#   ② 更硬的坑：deb 里的 preinst/postinst 写死 #!/data/data/com.termux/files/usr/bin/sh，
+#      而本机 prefix 是 .../com.dsharnessmobile.shell/...，/data/data/com.termux 不存在
+#      且无 root 建不了 → dpkg -i 必然 'unable to execute preinst'。
+#   ③ deb 内的路径带 ./data/data/com.termux/ 前缀，解到 staging 再拷进 $PREFIX。
+ST=$HOME/gostage; mkdir -p $ST
+dpkg-deb -x golang_3:1.27.2_aarch64.deb $ST
+cp -a $ST/data/data/com.termux/files/usr/{lib/go,bin/,share/} $PREFIX/ 2>/dev/null || {
+  cp -a $ST/data/data/com.termux/files/usr/lib/go $PREFIX/lib/
+  cp -a $ST/data/data/com.termux/files/usr/bin/.  $PREFIX/bin/
+  cp -a $ST/data/data/com.termux/files/usr/share/. $PREFIX/share/
+}
+# patch_rt0.py 没有「自动扫描 GOROOT」模式：不带参数只打印用法并 exit 1，必须显式传文件。
+python3 patches/patch_rt0.py \
+  $PREFIX/lib/go/bin/go $PREFIX/lib/go/bin/gofmt \
+  $PREFIX/lib/go/pkg/tool/android_arm64/*
+bash patches/patch_source.sh        # 打源码补丁（同时生成 build_apk.sh 依赖的 .orig-dsh）
 ```
+
+打完之后 `go version` 应输出 `go1.27.4 android/arm64`。**验证时不要再手工套
+`/system/bin/linker64 $GOROOT/bin/go`**：本机 shell 的 exec 本身已经是 linker 代跑，
+再套一层等于把栈顶多顶一格，症状是 `go: cannot find GOROOT directory: 'go' binary is
+trimmed and GOROOT is not set`（看起来像 GOROOT 没设，其实是 argv 又错位了）。
+`-toolexec=/system/bin/linker64` 只交给 go 去跑 compile/asm/link，`tests/run.sh` 与
+`build_apk.sh` 已带，不用手加。
 
 Java 侧同理用 `dpkg-deb -x` 解 openjdk-17，并手动补 `libandroid-shmem` 与
 `$PREFIX/bin/{java,javac,keytool,jar,javap,jarsigner}` 软链。

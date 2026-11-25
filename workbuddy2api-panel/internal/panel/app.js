@@ -1862,10 +1862,20 @@ function renderRequestTable() {
    只渲染，不在这里再算。severity 决定行配色（bad 红 / warn 黄 / info 常规）。 */
 function renderErrorSummary(d) {
   const rows = (d && d.rows) || [];
+  // 「已读」标记存本机 localStorage（issue #288）：按 last_unix 比较而不是 last（HH:MM:SS
+  // 跨天不可比）。历史错误一直挂在表里时，靠它把「这次新增的」挑出来。
+  let readAt = 0, hideRead = false;
+  try {
+    readAt = Number(localStorage.getItem('wb2api.errReadAt')) || 0;
+    hideRead = localStorage.getItem('wb2api.errHideRead') === '1';
+  } catch (e) { /* 隐私模式 / 无 localStorage：一律当未读，全部显示 */ }
+  const isRead = r => readAt > 0 && r.last_unix > 0 && r.last_unix <= readAt;
+  const readN = rows.filter(isRead).length;
+  const show = hideRead ? rows.filter(r => !isRead(r)) : rows;
   const tb = $('errBody');
   if (tb) {
-    tb.innerHTML = rows.length ? rows.map(r =>
-      '<tr class="' + (r.sev === 'bad' ? 'lv-e' : r.sev === 'warn' ? 'lv-w' : '') + '">' +
+    tb.innerHTML = show.length ? show.map(r =>
+      '<tr class="' + (isRead(r) ? 'is-read ' : '') + (r.sev === 'bad' ? 'lv-e' : r.sev === 'warn' ? 'lv-w' : '') + '">' +
       '<td>' + esc(r.account || '—') + '</td>' +
       '<td>' + esc(r.kind) + '</td>' +
       '<td>' + esc(r.code || '—') + '</td>' +
@@ -1876,12 +1886,16 @@ function renderErrorSummary(d) {
       '<td>' + esc(r.last || '—') + '</td>' +
       '<td>' + esc(r.until || '—') + '</td>' +
       '<td class="sample" title="' + esc(r.sample_full || r.sample || '') + '">' + esc(r.sample || '') + '</td></tr>'
-    ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">窗口内没有 WARN/ERR</td></tr>';
+    ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">' +
+      (readN ? '没有未读错误（' + readN + ' 条已读被隐藏）' : '窗口内没有 WARN/ERR') + '</td></tr>';
   }
   const note = $('errNote');
   if (note) {
     note.textContent = d
-      ? '扫描 ' + (d.scanned || 0) + ' 行 · ' + rows.length + ' 类 · 截至 ' + (d.updated_at || '—')
+      ? '扫描 ' + (d.scanned || 0) + ' 行 · ' + rows.length + ' 类' +
+        (readN ? ' · 已读 ' + readN : '') +
+        (hideRead ? ' · 隐藏已读' : '') +
+        ' · 截至 ' + (d.updated_at || '—')
       : '—';
   }
 }
@@ -2023,6 +2037,26 @@ $('btnLogPin').onclick = () => {
   logPin = !logPin;
   $('btnLogPin').textContent = '自动滚动：' + (logPin ? '开' : '关');
 };
+
+/* 错误汇总「已读」（issue #288）：标记存本机，不动日志环——日志是排查证据，清空等于
+   把还没处理的故障也删了。标为已读后新出现的行 last_unix 更大，仍然正常显示。 */
+$('btnErrRead').onclick = () => {
+  try { localStorage.setItem('wb2api.errReadAt', String(Math.floor(Date.now() / 1000))); }
+  catch (e) { toast('本机存储不可用，标为已读未生效', 'err'); return; }
+  loadOverview(true);
+};
+$('btnErrHideRead').onclick = () => {
+  let on = false;
+  try {
+    on = localStorage.getItem('wb2api.errHideRead') === '1';
+    localStorage.setItem('wb2api.errHideRead', on ? '0' : '1');
+  } catch (e) { /* 隐私模式：翻转无效，下次渲染仍读不到标记 */ }
+  $('btnErrHideRead').textContent = '隐藏已读：' + (on ? '关' : '开');
+  loadOverview(true);
+};
+try {
+  if (localStorage.getItem('wb2api.errHideRead') === '1') $('btnErrHideRead').textContent = '隐藏已读：开';
+} catch (e) { /* 隐私模式 */ }
 
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
@@ -5131,10 +5165,15 @@ function renderDailyBars(series) {
       const x = gx + (groupW - (bw * nAcc + gap * (nAcc - 1))) / 2 + si * (bw + gap);
       const y0 = Math.min(zeroY, Y(v)), h = Math.max(1, Math.abs(Y(v) - zeroY));
       const incomplete = fullMap.get(s.uid + '|' + day);
+      // <title> 必须挂在柱子自己身上（issue #289）：作为 <svg> 根的直接子节点时浏览器把
+      // 它当整图说明，于是**所有柱子共用第一条**；包进空的 <g> 也没有可悬停的几何，
+      // 同样不生效。token 图（renderUsageChart）早在 <rect> 里写子节点。
+      const tip = '<title>' + esc(s.name || s.uid.slice(0, 8)) + '  ' + esc(day) + '\n' +
+        (v > 0 ? '+' : '') + fmtNum(v) + (incomplete ? '\n⚠️ 该日采样不完整（当天未结束或中途启用）' : '') + '</title>';
       // 零值画一条中性底痕（与 buka 规范一致：0 值也要可见）
       if (v === 0) {
         out += '<rect x="' + x.toFixed(1) + '" y="' + (zeroY - 1).toFixed(1) + '" width="' + bw.toFixed(1) +
-          '" height="2" fill="var(--line)" rx="1"/>';
+          '" height="2" fill="var(--line)" rx="1">' + tip + '</rect>';
       } else {
         // 离群点（超出裁剪后的轴范围）：柱子贴边 + 顶部三角标记，
         // 让读者一眼看出「这根比轴还高」，而不是误以为它只有这么高。
@@ -5142,7 +5181,7 @@ function renderDailyBars(series) {
         out += '<rect x="' + x.toFixed(1) + '" y="' + y0.toFixed(1) + '" width="' + bw.toFixed(1) +
           '" height="' + h.toFixed(1) + '" fill="' + (v > 0 ? 'var(--ok)' : 'var(--bad)') + '"' +
           (incomplete ? ' opacity=".38" stroke="' + color + '" stroke-width="1" stroke-dasharray="2 2"' : '') +
-          ' rx="1.5"/>';
+          ' rx="1.5">' + tip + '</rect>';
         if (clippedHi || clippedLo) {
           const ty = clippedHi ? PT : PT + ih;
           out += '<path d="M' + (x + bw / 2).toFixed(1) + ' ' + (clippedHi ? ty : ty - 5).toFixed(1) +
@@ -5150,10 +5189,6 @@ function renderDailyBars(series) {
             '<title>超出纵轴范围（已裁剪），实际 ' + (v > 0 ? '+' : '') + fmtNum(v) + '</title></path>';
         }
       }
-      // title 必须包进 <g>（review #8）：直接挂在 <svg> 下时浏览器只认根节点的
-      // 第一个 <title>，所有柱子都会显示第一根的数据。renderUsageChart 已是这个写法。
-      out += '<g><title>' + esc(s.name || s.uid.slice(0, 8)) + '  ' + esc(day) + '\n' +
-        (v > 0 ? '+' : '') + fmtNum(v) + (incomplete ? '\n⚠️ 该日采样不完整（当天未结束或中途启用）' : '') + '</title></g>';
     });
     // x 轴日期标签（稀疏）
     // 与上方「积分水位」图同一口径（天数 / 3 + 1，夹在 2~10 之间），保证可纵向对照。

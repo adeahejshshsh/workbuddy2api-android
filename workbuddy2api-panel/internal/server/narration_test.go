@@ -350,7 +350,7 @@ func TestNarrationMidTextYieldMarkerStillRescued(t *testing.T) {
 	obj := reqBody(t, (*reqs)[0])
 	msgs, _ := obj["messages"].([]any)
 	last, _ := msgs[len(msgs)-1].(map[string]any)
-	if got, _ := last["content"].(string); got != narrationPromiseNudge {
+	if got, _ := last["content"].(string); got != internalNudgeText(narrationPromiseNudge) {
 		t.Fatalf("承诺句形态应带 narrationPromiseNudge，实际：%q", got)
 	}
 }

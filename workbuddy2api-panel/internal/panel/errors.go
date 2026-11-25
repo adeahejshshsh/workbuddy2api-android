@@ -18,15 +18,18 @@ import (
 
 // ErrStat 单条「账号 × 错误类型」聚合行。
 type ErrStat struct {
-	Account string `json:"account"`          // 打印用的账号标签（logfmt.Label 的「昵称(uid8)」）；空 = 非账号级
-	Kind    string `json:"kind"`             // 人话类型
-	Code    string `json:"code,omitempty"`   // 上游业务码（6004/11102/12153…）
-	Model   string `json:"model,omitempty"`  // 相关模型
-	Count   int    `json:"count"`            // 累计次数
-	Last    string `json:"last,omitempty"`   // 最近一次时刻 HH:MM:SS
-	Sev     string `json:"sev"`              // bad | warn | info
-	Until   string `json:"until,omitempty"`  // 模型级限流的解除时刻（上游文案里的重置时间）
-	Sample  string `json:"sample,omitempty"` // 表格正文样本（截断，供一眼认出类别）
+	Account string `json:"account"`         // 打印用的账号标签（logfmt.Label 的「昵称(uid8)」）；空 = 非账号级
+	Kind    string `json:"kind"`            // 人话类型
+	Code    string `json:"code,omitempty"`  // 上游业务码（6004/11102/12153…）
+	Model   string `json:"model,omitempty"` // 相关模型
+	Count   int    `json:"count"`           // 累计次数
+	Last    string `json:"last,omitempty"`  // 最近一次时刻 HH:MM:SS
+	// LastUnix 与 Last 同一时刻的 unix 秒：面板「标为已读」（issue #288）按它比较——
+	// HH:MM:SS 跨天不可比，前端只拿到时分秒就分不出「今天 09:00」与「昨天 09:00」。
+	LastUnix int64  `json:"last_unix,omitempty"`
+	Sev      string `json:"sev"`              // bad | warn | info
+	Until    string `json:"until,omitempty"`  // 模型级限流的解除时刻（上游文案里的重置时间）
+	Sample   string `json:"sample,omitempty"` // 表格正文样本（截断，供一眼认出类别）
 	// SampleFull 与 Sample 同一行原文，只放宽到 sampleFullBytes 供 title 悬停看全文。
 	// 分开两个字段：正文要短才不撑爆表格，而 160B 常把上游 body 的 msg 切掉一半
 	// （issue #61：悬停也看不到剩下的，因为 title 原先复用了已截断的 Sample）。
@@ -236,6 +239,7 @@ func AggregateErrors(lines []LogLine) []ErrStat {
 		}
 		if !ln.TS.IsZero() {
 			st.Last = ln.TS.Format("15:04:05")
+			st.LastUnix = ln.TS.Unix()
 		}
 	}
 
