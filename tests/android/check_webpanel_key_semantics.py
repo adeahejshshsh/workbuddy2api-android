@@ -97,22 +97,43 @@ check(re.search(r"if\s*\(!ok\)", verify) is not None,
 check(re.search(r"if\s*\(!ok\)[\s\S]{0,500}?return;", verify) is not None,
       "校验失败分支必须在注入前 return（失败关闭）")
 check("PanelTrust.message" in verify, "失败时要按原因提示用户（不能静默）")
-# 注入入口点必须是**受控的**：校验通过分支、用户显式确认分支、以及 injectKey
-# 内部的重试自调用。把这三个函数体剥掉后若还有 injectKey( 调用，就是绕过校验的后门。
+# 注入入口点必须是**受控的**：校验通过分支、用户显式确认分支（含它派生出的
+# 「填该实例密钥」子流程）、以及 injectKey 内部的重试自调用。把这些函数体剥掉后
+# 若还有 injectKey( 调用，就是绕过校验的后门。
 stripped = panel
 for sig in ("private void verifyThenInject(final WebView v)",
-            "private void confirmTrustAndInject()",
+            "private void confirmTrustAndInject(final String actualId)",
+            "private void askKeyOverride(final String actualId)",
             "private void injectKey(WebView v)",
             "private void injectKey(final WebView v, final int attempt)"):
     b = body(stripped, sig)
     if b:
         stripped = stripped.replace(sig + " " + b, "void removed_" + str(len(sig)) + "() {}", 1)
 check("injectKey(" not in stripped,
-      "injectKey 只允许在 verifyThenInject / confirmTrustAndInject / 自身重试里被调用")
-check("injectKey(" in body(panel, "private void confirmTrustAndInject()"),
+      "injectKey 只允许在 verifyThenInject / confirmTrustAndInject / askKeyOverride / 自身重试里被调用")
+trust_dialog = body(panel, "private void confirmTrustAndInject(final String actualId)")
+check("injectKey(" in trust_dialog,
       "手动放行必须走 confirmTrustAndInject（带确认对话框），而不是直接注入")
-check("AlertDialog.Builder" in body(panel, "private void confirmTrustAndInject()"),
+check("AlertDialog.Builder" in trust_dialog,
       "手动放行前必须弹确认框（把风险讲清楚，用户自己决定）")
+
+# 「每次都弹、只对本次会话有效」是本轮要修的用户可见问题：确认结果必须按
+# (端口, 实例标识) 持久化，且 id 一变自动失效（端口可能换主，id 换不了）。
+check("PanelTrust.rememberTrust" in trust_dialog,
+      "用户确认「信任这个实例」后必须持久化 (port, instance_id)，否则下次打开又弹一遍")
+check("PanelTrust.forgetTrust" in trust_dialog,
+      "选「取消」时必须清掉旧的信任标记（否则会一直沿用上一次的错误放行）")
+verify_src = body(panel, "private void verifyThenInject(final WebView v)")
+check("actualId" in verify_src,
+      "校验失败时要拿到对面报出的实例标识（区分「第三方占端口」与「另一个同类实例」）")
+
+# 两个实例的 admin_api_key 通常不同：注入了本应用那份只会 401。必须有覆盖入口，
+# 且覆盖值优先于 config.json。
+inj_src = body(panel, "private void injectKey(final WebView v, final int attempt)")
+check(inj_src.index("PanelTrust.keyOverride") < inj_src.index("PanelApi.key"),
+      "注入用的密钥必须先取 keyOverride（用户为该实例手输的那份），再回落 config.json")
+check("PanelTrust.rememberKey" in body(panel, "private void askKeyOverride(final String actualId)"),
+      "手输的密钥必须落盘记住（否则「填了也只对本次会话有效」）")
 
 # 写入必须**回读确认**：旧实现在写入前就置 injected=true，写失败与成功长得一样，
 # 表现就是「每次打开都要手输密钥」。

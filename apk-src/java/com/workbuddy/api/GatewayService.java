@@ -417,9 +417,12 @@ public class GatewayService extends Service {
                 boolean healthy = httpUp();
                 extStale = healthy ? 0 : extStale + 1;
                 setState(ST_EXTERNAL,
-                        healthy ? "端口 " + extPort + " 已被占用，复用现有实例"
+                        healthy ? "端口 " + extPort + " 上有另一个实例在服务（非本应用拉起）"
                                 : "端口 " + extPort + " 有进程但不应答 HTTP（疑似残留）",
-                        healthy ? extPort + " 上已有别的实例在服务，本服务不接管（不抢端口、不杀进程）"
+                        healthy ? extPort + " 上已有一个 workbuddy2api 实例在服务，本服务不接管"
+                                        + "（不抢端口、不杀进程）。它可能来自命令行/容器侧，"
+                                        + "也可能是本应用早先拉起后句柄丢失的进程；"
+                                        + "面板可以连它，但要用**它自己的** admin_api_key"
                                 : extPort + " 能连上但 /healthz 无响应：很可能是上次停止后残留的"
                                         + "网关进程（本服务不抢端口、不杀进程）；"
                                         + "杀掉本 App 的后台进程可释放它");
@@ -679,6 +682,15 @@ public class GatewayService extends Service {
             new File(gwDir, "auths").mkdirs();
             new File(gwDir, "data").mkdirs();
             ensureConfig(gwDir);
+            // 自举必须发生在**进程起来之前**，而且这条路径（看门狗自愈重拉、开机自启、
+            // 用户在通知栏点「重启」）不经过 MainActivity —— 此前只有 MainActivity /
+            // BootReceiver / Console / WebPanelActivity 调过 ensure。
+            // 少了这两行，网关可能先于 instance_id 存在而启动，由 Go 侧自己生成一份；
+            // 壳之后读到的那份与网关内存里缓存的（进程内缓存，不重读文件）不是同一个，
+            // 表现就是面板恒报「实例校验不过」、密钥怎么注都不生效。
+            // 两者都幂等：已有合法内容时原样返回，不会覆盖。
+            AdminKey.ensure(this);
+            InstanceId.ensure(this);
             File resolv = writeResolvConf(gwDir);
 
             String bin = getApplicationInfo().nativeLibraryDir + "/libwb2api.so";

@@ -168,12 +168,12 @@ public class WebPanelActivity extends Activity {
         if (verifying) return;
         verifying = true;
         PanelTrust.verify(this, new PanelTrust.Cb() {
-            public void done(boolean ok, String reason) {
+            public void done(boolean ok, String reason, String actualId) {
                 verifying = false;
                 if (!ok) {
                     injected = false;      // 允许用户点「刷新」重试（端口占用解除后即可）
                     toast(PanelTrust.message(reason));
-                    offerManualInject(reason);
+                    offerManualInject(reason, actualId);
                     return;
                 }
                 if (v != null) injectKey(v);
@@ -192,9 +192,19 @@ public class WebPanelActivity extends Activity {
      * 现在与 MainActivity 同一口径（bug-04）：回读 sessionStorage 命中才算成功，
      * 失败最多重试 3 次，未成功则保持 injected=false，下次页面加载还会再来。
      */
+    /** 实例标识的短指纹（前 8 位）：chip 与对话框里用来区分「哪个实例」。 */
+    private static String fp(String id) {
+        if (id == null || id.isEmpty()) return "—";
+        return id.length() <= 8 ? id : id.substring(0, 8);
+    }
+
     private void injectKey(final WebView v, final int attempt) {
         if (v == null) return;
-        String k = PanelApi.key(this);
+        // 密钥优先级：用户为「另一个实例」手输的那份 > 本 App config.json。
+        // 不这样排，「信任了这个实例」之后仍然每次 401 —— 因为两个实例的
+        // admin_api_key 本来就不同（见 PanelTrust.SAME_KIND）。
+        String k = PanelTrust.keyOverride(this);
+        if (k.isEmpty()) k = PanelApi.key(this);
         if (k.isEmpty()) {
             // config.json 里没有可用密钥：让面板自己生成一把（幂等），再读一次。
             try { AdminKey.ensure(this); } catch (Throwable ignored) {}
@@ -238,9 +248,12 @@ public class WebPanelActivity extends Activity {
                     return;
                 }
                 injected = false;   // 保持 false：下次 load 仍会自动重试
-                setChip("未自动登录 · 写入密钥被拒（点此强制注入）", 0xFFE0A030,
+                // 写入被拒与「实例校验没过」是两件事：这里 WebView 明确没接受写入
+                // （页面还没到可执行 JS 的状态、或被 CSP/策略拦下）。给同一个处置入口，
+                // 但文案要说清是「写入」这一步失败，别让用户以为是端口的问题。
+                setChip("未自动登录 · 写入密钥被拒（点此处理）", 0xFFE0A030,
                         new View.OnClickListener() {
-                            public void onClick(View x) { confirmTrustAndInject(); }
+                            public void onClick(View x) { confirmTrustAndInject(""); }
                         });
             }
         });
@@ -256,11 +269,16 @@ public class WebPanelActivity extends Activity {
                 getResources().getDisplayMetrics());
     }
 
-    /** 校验失败时把 chip 变成可点的「强制注入」入口（默认失败关闭，注入要用户确认一次）。 */
-    private void offerManualInject(String reason) {
-        setChip("未自动登录 · " + shortReason(reason) + "（点此强制注入）", 0xFFE0A030,
+    /**
+     * 校验失败时把 chip 变成可点的入口（默认失败关闭，注入要用户确认一次）。
+     *
+     * <p>chip 上带期望/实际实例的短指纹：原来只写「端口被其他应用占用」，用户完全
+     * 看不出到底是第三方占了端口、还是自己另开了一份网关 —— 这两种情况的处置相反。
+     */
+    private void offerManualInject(String reason, final String actualId) {
+        setChip("未自动登录 · " + shortReason(reason) + "（点此处理）", 0xFFE0A030,
                 new View.OnClickListener() {
-                    public void onClick(View x) { confirmTrustAndInject(); }
+                    public void onClick(View x) { confirmTrustAndInject(actualId); }
                 });
     }
 
@@ -283,30 +301,89 @@ public class WebPanelActivity extends Activity {
         if (PanelTrust.OLD_GATEWAY.equals(reason)) return "网关版本较旧";
         if (PanelTrust.NO_CONN.equals(reason)) return "连不上网关";
         if (PanelTrust.NO_ID.equals(reason)) return "读不到实例标识";
+        if (PanelTrust.SAME_KIND.equals(reason)) return "端口上是另一个同类实例";
         if (PanelTrust.MISMATCH.equals(reason)) return "端口被其他应用占用";
         return "未确认端口归属";
     }
 
     /**
-     * 实例校验没过、但用户明确确认「这就是本机网关」时的手动放行（默认 fail-closed）。
+     * 实例校验没过时的处置入口（默认 fail-closed，任何注入都要用户明确确认一次）。
      *
-     * 为什么给这个口子：W6-H-02 的校验是为了不把 admin_api_key 交给占位进程；但它的
-     * 失败模式（instance 文件丢失 / 网关是旧版本 / 端口刚被自家网关抢回）在真机上
-     * 都会发生，而后果是**每次打开面板都要手输 32 位密钥**。这里把选择权交给用户：
-     * 弹一次确认，确认后本次会话直接注入；不会写进配置、也不改 fail-closed 默认。
+     * <p>为什么给这个口子：校验的初衷是不把 admin_api_key 交给占位进程；但它的失败
+     * 模式在真机上很常见 —— 端口上跑着**同一项目的另一个实例**（命令行侧/容器里那份、
+     * 旧版本残留的孤儿、App 重装后换了 instance_id 而网关还是旧进程）。原来的处理是
+     * 每次打开面板都弹一次确认、且只在本次会话有效，用户感受就是「始终提示端口被占用、
+     * 永远要手输密钥」。
+     *
+     * <p>现在分成三档，按 (端口, 实例标识) 记忆：
+     * <ul>
+     *   <li><b>信任这个实例</b> —— 记下 (port, instance_id)，下次同实例直接注入；</li>
+     *   <li><b>填它自己的 admin_api_key</b> —— 存进 {@code data/panel_key}，优先级高于
+     *       config.json（两个实例的密钥不同，这是 401 的真因）；</li>
+     *   <li><b>取消</b> —— 保持不注入，并清掉旧的信任标记。</li>
+     * </ul>
      */
-    private void confirmTrustAndInject() {
+    private void confirmTrustAndInject(final String actualId) {
         final String port = String.valueOf(GwConfig.port(this));
+        final boolean sameKind = actualId != null && !actualId.isEmpty();
+        final String expect = InstanceId.read(this);
+        String msg = "实例校验没通过（端口 " + port + "）。\n\n"
+                + "本应用记录的实例：" + fp(expect) + "…\n"
+                + "该端口报出的实例：" + fp(actualId) + "…\n\n";
+        if (sameKind) {
+            msg += "对面确实是一个 workbuddy2api 网关，只是**不是本应用这次拉起的那个**"
+                    + "（实例标识不同）。这种情况常见于：命令行/容器里也跑了一份、"
+                    + "或旧版本网关进程还在跑。\n\n"
+                    + "· 选「信任这个实例」：以后这个实例不再校验，但仍要用**它自己的**"
+                    + " admin_api_key —— 两个实例的密钥通常不同，否则面板照样 401。\n"
+                    + "· 选「填它的密钥」：把那个实例的 admin_api_key 粘进来，会记住。";
+        } else {
+            msg += "对面没有按预期报出实例标识 —— 可能是别的应用占着这个端口。\n\n"
+                    + "如果你确认这就是本应用的网关（例如刚升级、网关刚被看门狗拉起），"
+                    + "可以强制注入；否则请点「取消」，注入等于把管理员密钥交给对方。";
+        }
         new android.app.AlertDialog.Builder(this)
-                .setTitle("确认这是本应用的网关？")
-                .setMessage("实例校验没通过（" + port + " 端口）。\n\n"
-                        + "如果你确认这个端口上跑的就是本应用的网关（例如刚升级、"
-                        + "或网关刚被看门狗拉起），可以强制注入管理密钥，之后就不必"
-                        + "每次手输。\n\n"
-                        + "如果这个端口可能被别的应用占用，请点「取消」——注入等于把"
-                        + "管理员密钥交给对方。")
-                .setPositiveButton("强制注入", new android.content.DialogInterface.OnClickListener() {
+                .setTitle(sameKind ? "端口上是另一个 workbuddy2api 实例" : "确认这是本应用的网关？")
+                .setMessage(msg)
+                .setPositiveButton("信任这个实例", new android.content.DialogInterface.OnClickListener() {
                     public void onClick(android.content.DialogInterface d, int w) {
+                        if (sameKind) PanelTrust.rememberTrust(WebPanelActivity.this,
+                                GwConfig.port(WebPanelActivity.this), actualId);
+                        if (web != null) injectKey(web);
+                    }
+                })
+                .setNeutralButton("填它的密钥", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        askKeyOverride(actualId);
+                    }
+                })
+                .setNegativeButton("取消", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        PanelTrust.forgetTrust(WebPanelActivity.this);
+                    }
+                })
+                .show();
+    }
+
+    /** 让用户粘贴「该实例自己的」admin_api_key：记住后立即重试注入。 */
+    private void askKeyOverride(final String actualId) {
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("该实例的 admin_api_key");
+        input.setTextSize(13f);
+        input.setSingleLine(true);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("填入该实例的 admin_api_key")
+                .setMessage("面板只认它自己那份管理员密钥。留空并确定 = 清掉已记住的密钥。")
+                .setView(input)
+                .setPositiveButton("保存并重试", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        String v = input.getText() == null ? "" : input.getText().toString().trim();
+                        if (v.isEmpty()) PanelTrust.forgetKey(WebPanelActivity.this);
+                        else PanelTrust.rememberKey(WebPanelActivity.this, v);
+                        if (actualId != null && !actualId.isEmpty()) {
+                            PanelTrust.rememberTrust(WebPanelActivity.this,
+                                    GwConfig.port(WebPanelActivity.this), actualId);
+                        }
                         if (web != null) injectKey(web);
                     }
                 })

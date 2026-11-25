@@ -795,10 +795,14 @@ public class MainActivity extends Activity {
             return;
         }
         PanelTrust.verify(this, new PanelTrust.Cb() {
-            public void done(boolean ok, String reason) {
+            public void done(boolean ok, String reason, String actualId) {
                 if (!ok) {
                     injected = false;
-                    logLine.setText(PanelTrust.message(reason));
+                    // 带上期望/实际实例的短指纹：只看「端口被占用」分不清是第三方占端口
+                    // 还是自己另开了一份网关，而这两种情况该做的事正好相反。
+                    logLine.setText(PanelTrust.message(reason)
+                            + "（本机 " + shortId(InstanceId.read(MainActivity.this))
+                            + " / 端口 " + shortId(actualId) + "）");
                     logLine.setTextColor(WARN);
                     return;
                 }
@@ -806,6 +810,12 @@ public class MainActivity extends Activity {
                 injectKey();
             }
         });
+    }
+
+    /** 实例标识短指纹（前 8 位）：状态行里用来区分「哪个实例」。 */
+    private static String shortId(String id) {
+        if (id == null || id.isEmpty()) return "—";
+        return id.length() <= 8 ? id : id.substring(0, 8);
     }
 
     void injectKey(final int attempt) {
